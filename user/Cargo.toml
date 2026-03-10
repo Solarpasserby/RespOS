@@ -1,0 +1,11 @@
+[package]
+name = "user_lib"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "user_lib"
+path = "src/lib.rs"
+
+[dependencies]
+# riscv = "0.10"

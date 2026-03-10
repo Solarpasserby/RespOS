@@ -1,0 +1,24 @@
+// src/sbi.rs
+
+//! ### SBI 函数库
+//! 
+//! 调用 SBI 的服务，实现一些更底层的操作，并封装成函数使用
+
+/// 向终端打印字符
+pub fn console_putchar(c: usize) {
+    #[allow(deprecated)] // TODO: 被弃用的接口，但是胜在简单，之后可以试着重写
+    sbi_rt::legacy::console_putchar(c);
+}
+
+/// 关闭机器
+/// 
+/// TODO: 这里的参数不太清楚用途
+pub fn shutdown(failure: bool) -> ! {
+    use sbi_rt::{system_reset, NoReason, Shutdown, SystemFailure};
+    if !failure {
+        system_reset(Shutdown, NoReason);
+    } else {
+        system_reset(Shutdown, SystemFailure);
+    }
+    unreachable!()
+}
