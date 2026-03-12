@@ -22,6 +22,6 @@ fn main() -> i32 {
             println!("{}^{}={}(MOD {})", P, i, pow[index], MOD);
         }
     }
-    println!("Test power OK!");
+    println!("main02: Test power OK!");
     0
 }

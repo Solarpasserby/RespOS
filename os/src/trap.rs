@@ -7,11 +7,10 @@ use riscv::register::{
 };
 use core::arch::global_asm;
 use crate::syscall::*;
-use crate::batch::*;
 
 pub use context::TrapContext;
 
-global_asm!(include_str!("trap.S"));
+global_asm!(include_str!("trap/trap.S"));
 
 pub fn init(){
     unsafe extern "C" {
@@ -39,11 +38,11 @@ pub fn trap_handler(context: &mut TrapContext) -> &mut TrapContext {
         Trap::Exception(Exception::StoreFault) |
         Trap::Exception(Exception::StorePageFault) => {
             println!("[kernel] PageFault in application, kernel killed it.");
-            run_next_app();
+            panic!("[kernel] Cannot continue!");
         }
         Trap::Exception(Exception::IllegalInstruction) => {
             println!("[kernel] IllegalInstruction in application, kernel killed it.");
-            run_next_app();
+            panic!("[kernel] Cannot continue!");
         }
         _ => {
             panic!("Unsupported trap {:?}, stval = {:?}!", scause.cause(), stval);

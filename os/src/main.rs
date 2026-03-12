@@ -5,10 +5,12 @@ use core::arch::global_asm;
 
 #[macro_use]
 mod console;
-pub mod batch;
 mod lang_item;
 mod sbi;
 mod sync;
+pub mod config;
+pub mod task;
+pub mod loader;
 pub mod syscall;
 pub mod trap;
 
@@ -20,8 +22,9 @@ pub fn rust_main() -> ! {
     clear_bss();
     println!("Hello, world!");
     trap::init();
-    batch::init();
-    batch::run_next_app();
+    loader::load_app();
+    task::start_running_tasks();
+    // panic!("unreachable!");
 }
 
 fn clear_bss() {

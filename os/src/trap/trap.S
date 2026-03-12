@@ -39,8 +39,12 @@ __alltraps:
 
 __restore:
     # case1: start running app by __restore
-    # case2: back to U after handling trap
-    mv sp, a0
+    # case2: back to U after handling 
+    
+    # __switch 执行后似乎无需修改 sp
+    # 调用 __restore 时已经处于内核栈上，因此无需修改 sp
+    # mv sp, a0
+
     # now sp->kernel stack(after allocated), sscratch->user stack
     # restore sstatus/sepc
     ld t0, 32*8(sp)
@@ -48,7 +52,7 @@ __restore:
     ld t2, 2*8(sp)
     csrw sstatus, t0
     csrw sepc, t1
-    csrw sscratch, t2
+    csrw sscratch, t2 # 设置用户栈栈指针
     # restore general-purpuse registers except sp/tp
     ld x1, 1*8(sp)
     ld x3, 3*8(sp)

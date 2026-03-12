@@ -59,8 +59,10 @@ QEMU_ARGS := -machine virt \
 
 QEMU_NAME := qemu-system-riscv64
 
-run: build
+quick-run:
 	@qemu-system-riscv64 $(QEMU_ARGS)
+
+run: build quick-run
 
 debug: build
 	@tmux new-session -d \
