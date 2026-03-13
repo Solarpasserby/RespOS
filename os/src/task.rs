@@ -1,4 +1,6 @@
-//! ~~线程~~任务模块
+// os/src/task.rs
+
+//! ### ~~线程~~任务模块
 //! 
 //! 主要实现任务调度，实现 CPU 时间资源分配
 
@@ -28,6 +30,9 @@ struct TaskControlBlock {
     pub task_context: TaskContext,
 }
 
+/// 任务调度管理器
+/// 
+/// TODO: 当前功能相当孱弱，之后需要使用更优秀的调度算法
 pub struct TaskManager {
     app_num: usize,
     inner: UPSafeCell<TaskManagerInner>,

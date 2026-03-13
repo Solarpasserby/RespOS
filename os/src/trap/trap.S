@@ -1,3 +1,5 @@
+# os/src/trap/trap.S
+
 .altmacro
 .macro SAVE_GP n
     sd x\n, \n*8(sp)
@@ -9,7 +11,7 @@
     .globl __alltraps
     .globl __restore
     .align 2
-__alltraps:
+__alltraps: 
     csrrw sp, sscratch, sp
     # now sp->kernel stack, sscratch->user stack
     # allocate a TrapContext on kernel stack

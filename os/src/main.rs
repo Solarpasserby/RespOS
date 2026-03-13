@@ -12,6 +12,7 @@ pub mod config;
 pub mod task;
 pub mod loader;
 pub mod syscall;
+pub mod timer;
 pub mod trap;
 
 global_asm!(include_str!("entry.asm"));
@@ -23,6 +24,9 @@ pub fn rust_main() -> ! {
     println!("Hello, world!");
     trap::init();
     loader::load_app();
+    
+    trap::enable_timer_interrupt();
+    timer::set_next_ti_trigger();
     task::start_running_tasks();
     // panic!("unreachable!");
 }

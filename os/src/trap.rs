@@ -1,12 +1,21 @@
+// os/src/trap.rs
+
+//! ### ~~中断~~异常模块
+//! 
+//! 注：应当注意到目前内核台下触发中断会被屏蔽
+//! 因此无需担心某些过程是否需要关闭中断
+
 mod context;
 
 use riscv::register::{
     mtvec::TrapMode,
-    stvec, stval,
-    scause::{self, Trap, Exception},
+    stvec, stval, sie,
+    scause::{self, Trap, Exception, Interrupt},
 };
 use core::arch::global_asm;
 use crate::syscall::*;
+use crate::task::suspend_current_and_run_next;
+use crate::timer::set_next_ti_trigger;
 
 pub use context::TrapContext;
 
@@ -44,9 +53,17 @@ pub fn trap_handler(context: &mut TrapContext) -> &mut TrapContext {
             println!("[kernel] IllegalInstruction in application, kernel killed it.");
             panic!("[kernel] Cannot continue!");
         }
+        Trap::Interrupt(Interrupt::SupervisorTimer) => {
+            set_next_ti_trigger();
+            suspend_current_and_run_next();
+        }
         _ => {
             panic!("Unsupported trap {:?}, stval = {:?}!", scause.cause(), stval);
         }
     };
     context
+}
+
+pub fn enable_timer_interrupt() {
+    unsafe { sie::set_stimer(); }
 }

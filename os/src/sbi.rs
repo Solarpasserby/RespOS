@@ -1,8 +1,14 @@
 // src/sbi.rs
 
-//! ### SBI 函数库
+//! ### SBI 模块
 //! 
 //! 调用 SBI 的服务，实现一些更底层的操作，并封装成函数使用
+
+
+/// 设置 mtimecmp ，使指定时钟周期产生时钟中断
+pub fn set_timer(time_value: usize) {
+    sbi_rt::set_timer(time_value as _);
+}
 
 /// 向终端打印字符
 pub fn console_putchar(c: usize) {

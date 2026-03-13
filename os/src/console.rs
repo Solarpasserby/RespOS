@@ -1,3 +1,7 @@
+// os/src/console.rs
+
+// 目前主要用于~~终端~~DEBUG输出
+
 use crate::sbi::console_putchar;
 use core::fmt::{Write, Result, Arguments};
 struct Stdout;

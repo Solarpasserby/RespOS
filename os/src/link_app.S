@@ -27,5 +27,5 @@ app_1_end:
     .global app_2_start
     .global app_2_end
 app_2_start:
-    .incbin "../user/target/riscv64gc-unknown-none-elf/release/store_fault.bin"
+    .incbin "../user/target/riscv64gc-unknown-none-elf/release/sleep.bin"
 app_2_end:

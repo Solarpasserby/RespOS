@@ -1,3 +1,7 @@
+// os/src/lang_item.rs
+
+// 主要处理 Rust 内部语言逻辑
+
 use crate::sbi::shutdown;
 use core::panic::PanicInfo;
 
