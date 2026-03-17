@@ -13,6 +13,6 @@ fn main() -> i32 {
     while time_get() < wait_time {
         yield_();
     }
-    println!("I'm awake now!");
+    println!("main03: I'm awake now!");
     0
 }

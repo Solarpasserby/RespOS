@@ -14,6 +14,8 @@ pub fn set_timer(time_value: usize) {
 pub fn console_putchar(c: usize) {
     #[allow(deprecated)] // TODO: 被弃用的接口，但是胜在简单，之后可以试着重写
     sbi_rt::legacy::console_putchar(c);
+    // let temp = sbi_rt::console_write(bytes) // TODO: 新接口不知道怎么用
+    // if temp.error != 0 { panic!("omg") }
 }
 
 /// 关闭机器

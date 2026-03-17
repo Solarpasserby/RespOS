@@ -1,7 +1,11 @@
 #![no_std]
 #![no_main]
+#![feature(alloc_error_handler)]
 
-use core::arch::global_asm;
+extern crate alloc;
+
+// #[macro_use]
+extern crate bitflags;
 
 #[macro_use]
 mod console;
@@ -14,6 +18,9 @@ pub mod loader;
 pub mod syscall;
 pub mod timer;
 pub mod trap;
+pub mod mm;
+
+use core::arch::global_asm;
 
 global_asm!(include_str!("entry.asm"));
 global_asm!(include_str!("link_app.S"));
@@ -21,20 +28,24 @@ global_asm!(include_str!("link_app.S"));
 #[unsafe(no_mangle)]
 pub fn rust_main() -> ! {
     clear_bss();
-    println!("Hello, world!");
     trap::init();
     loader::load_app();
     
     trap::enable_timer_interrupt();
-    timer::set_next_ti_trigger();
-    task::start_running_tasks();
+
+    mm::init();
+    
+    panic!("unreachable!");
+
+    // timer::set_next_ti_trigger();
+    // task::start_running_tasks();
     // panic!("unreachable!");
 }
 
 fn clear_bss() {
     unsafe extern "C" {
-        safe fn sbss();
-        safe fn ebss();
+        unsafe fn sbss();
+        unsafe fn ebss();
     }
 
     (sbss as *const() as usize..ebss as *const() as usize).for_each(|a| {

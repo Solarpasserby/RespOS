@@ -2,9 +2,19 @@
 
 //! ### 内核主要配置模块
 
+// 内核终止地址
+pub const KERNEL_MEM_END: usize = 0x80800000;
+
 // 栈大小
 pub const USER_STACK_SIZE: usize = 4096 * 2;
 pub const KERNEL_STACK_SIZE: usize = 4096 * 2;
+
+// 内核堆大小
+pub const KERNEL_HEAP_SIZE: usize = 1_000_000;
+
+// 页大小
+pub const PAGE_SIZE: usize = 4096;
+pub const PAGE_SIZE_BITS: usize = 12;
 
 // 用户程序地址设置
 pub const APP_BASE_ADDRESS: usize = 0x80400000;

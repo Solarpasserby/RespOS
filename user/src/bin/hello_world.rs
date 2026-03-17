@@ -12,6 +12,7 @@ fn main() -> i32 {
     yield_();
     println!("main01: THAT'S WHAT HAPPENED AFTER YIELDING!");
     yield_();
+    // panic!("test tracing.");
     println!("main01: Try again!");
     0
 }
