@@ -4,7 +4,6 @@ use alloc::vec::Vec;
 use lazy_static::lazy_static;
 use crate::config::KERNEL_MEM_END;
 use crate::sync::UPSafeCell;
-use super::page_table::PageTableEntry;
 use super::address::{ PhysAddr, PhysPageNum };
 
 type FrameAllocatorImpl = StackFrameAllocator;
@@ -46,7 +45,7 @@ pub struct FrameTracker { // 感觉非常机智，需多利用类似的 Rust 提
 /// 重写对于物理页内部数据的访问接口，现在内部数据生命周期与 [`FrameTracker`] 绑定，更加安全
 impl FrameTracker {
     pub fn new(ppn: PhysPageNum) -> Self {
-        let frame = Self { ppn };
+        let mut frame = Self { ppn };
         // 清空页帧，避免数据泄露
         frame.clear();
         frame
@@ -56,30 +55,31 @@ impl FrameTracker {
         self.ppn
     }
 
-    /// 获取页表页内的页表项数组
-    pub fn pte_array(&self) -> &mut [PageTableEntry] {
-        let pa = PhysAddr::from(self.ppn);
-        unsafe {
-            core::slice::from_raw_parts_mut(
-                pa.0 as *mut PageTableEntry,
-                crate::config::PAGE_SIZE / core::mem::size_of::<PageTableEntry>(),
-            )
-        }
-    }
+    // TOFIX: 可能被优化了
+    // /// 获取页表页内的页表项数组
+    // pub fn pte_array(&self) -> &mut [PageTableEntry] {
+    //     let pa = PhysAddr::from(self.ppn);
+    //     unsafe {
+    //         core::slice::from_raw_parts_mut(
+    //             pa.0 as *mut PageTableEntry,
+    //             crate::config::PAGE_SIZE / core::mem::size_of::<PageTableEntry>(),
+    //         )
+    //     }
+    // }
 
     /// 获取页帧内的字节数组
-    pub fn bytes_array(&self) -> &mut [u8] {
+    pub fn bytes_array(&mut self) -> &mut [u8] {
         let pa = PhysAddr::from(self.ppn);
         unsafe { core::slice::from_raw_parts_mut(pa.0 as *mut u8, crate::config::PAGE_SIZE) }
     }
 
     /// 获取页帧头部的任意类型数据
-    pub fn get_head_mut<T>(&self) -> &mut T {
+    pub fn get_head_mut<T>(&mut self) -> &mut T {
         let pa = PhysAddr::from(self.ppn);
         unsafe { &mut *(pa.0 as *mut T) }
     }
 
-    fn clear(&self) {
+    fn clear(&mut self) {
         for byte in self.bytes_array() {
             *byte = 0;
         }
