@@ -117,9 +117,9 @@ impl VirtAddr {
 impl VirtPageNum {
     pub fn indexes(&self) -> [usize; 3] {
         [
-            (self.0 >> 30) & 0x1FF, // VPN[0]
-            (self.0 >> 21) & 0x1FF, // VPN[1]
-            (self.0 >> 12) & 0x1FF, // VPN[2]
+            (self.0 >> 18) & 0x1FF, // VPN[0]
+            (self.0 >> 9) & 0x1FF,  // VPN[1]
+            self.0 & 0x1FF,         // VPN[2]
         ]
     }
 }

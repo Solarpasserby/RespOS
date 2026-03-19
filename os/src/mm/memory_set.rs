@@ -1,12 +1,17 @@
 // os/src/mm/memory_set.rs
 
+use riscv::register::satp;
+use lazy_static::lazy_static;
 use bitflags::bitflags;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+use alloc::sync::Arc;
+use core::arch::asm;
 use crate::config::{ PAGE_SIZE, KERNEL_MEM_END, USER_STACK_SIZE };
+use crate::sync::UPSafeCell;
 use super::address::{ PhysPageNum, VirtAddr, VirtPageNum, VPNRange, StepByOne };
 use super::frame_allocator::{ frame_alloc, FrameTracker };
-use super::page_table::{ PageTable, PTEFlags };
+use super::page_table::{ PageTable, PTEFlags, PageTableEntry };
 
 unsafe extern "C" {
     fn stext();
@@ -19,6 +24,18 @@ unsafe extern "C" {
     fn ebss();
     fn ekernel();
     fn trampoline();
+}
+
+
+lazy_static! {
+    /// 内核地址空间，内核地址空间在内核初始化后创建
+    /// 
+    /// 内核采用恒等映射，因而开启虚拟地址后访问内核空间的地址不变
+    /// 
+    /// 由于内核空间被所有用户空间共享，所以使用 [`Arc`] 来实现共享，使用 [`UPSafeCell`] 来实现内部可变性
+    pub static ref KERNEL_SPACE: Arc<UPSafeCell<MemorySet>> = Arc::new(unsafe {
+        UPSafeCell::new(MemorySet::new_kernel())
+    });
 }
 
 
@@ -45,6 +62,29 @@ impl MemorySet {
             map_area.copy_data(&self.page_table, data);
         }
         self.areas.push(map_area); // 转移所有权
+    }
+
+    /// 激活地址空间，即修改 `stap` ，切换页表
+    pub fn activate(&self) {
+        let stap = self.page_table.token();
+        let vpn = VirtAddr::from(stext as *const () as usize).floor();
+        let pte = self.page_table.translate(vpn).unwrap();
+        assert!(pte.is_valid());
+        assert!(pte.readable() || pte.executable() || pte.writable());
+
+        unsafe {
+            satp::write(stap);
+            asm!("sfence.vma"); // 屏障，可认为是刷新 TLB，确保页表修改生效
+        }
+    }
+
+    /// 生成页表对应 `stap` 寄存器值
+    pub fn token(&self) -> usize {
+        self.page_table.token()
+    }
+    /// 转译虚拟页号为物理页号
+    pub fn translate(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
+        self.page_table.translate(vpn)
     }
 }
 
@@ -112,11 +152,14 @@ impl MemorySet {
     /// 根据 elf 格式的用户程序文件数据，创建用户程序内核空间
     /// 
     /// 内部完成对elf文件的解析，当前内核对堆栈地址的处理能力不完善
+    /// 
+    /// TODO: 返回值为三元组，为规范之后将改用结构体返回
     pub fn from_elf_data(elf_data: &[u8]) -> (Self, usize, usize) {
         let mut memory_set = Self::new();
         // TODO: 使用跳板，目前还未实现!!!!!!!!!!!!!!!!!!!!!!!!
         // 由于传入的是 elf 格式的数据，所以需要读取文件头来得到各段的地址，之后再做分配映射
         // TODO: 此处对于 elf 格式的解析仍依赖于外部库，鉴于读取头文件信息的功能相对简单，建议考虑之后自己实现
+        // 也正是因为是外部库，我对这部分的细节不是非常了解
         let elf = xmas_elf::ElfFile::new(elf_data).unwrap();
         let elf_header = elf.header;
         let magic = elf_header.pt1.magic;
@@ -166,9 +209,9 @@ impl MemorySet {
         // 映射堆栈段？
         // TODO: 映射异常上下文——不懂
         (
-            memory_set, 
-            user_stack_top, 
-            elf.header.pt2.entry_point() as usize
+            memory_set, // 用户程序地址空间
+            user_stack_top, // 用户程序栈顶地址
+            elf.header.pt2.entry_point() as usize // 用户程序入口地址
         )
     }
 }
@@ -228,12 +271,12 @@ impl MapArea {
         // 数据长度不超过逻辑段长度
         assert!(
             len <= PAGE_SIZE * (self.vpn_range.get_end().0 - current_vpn.0),
-            "[OS]MapArea Panic: Copy data is out of vpn range!"
+            "[kernel] MapArea Panic: Copy data is out of vpn range!"
         );
         loop {
             let src = &data[start..len.min(start + PAGE_SIZE)];
             let dst = &mut self.data_frames
-                .get_mut(&current_vpn)
+                .get_mut(&current_vpn) // FIXME: 由于 BTreeMap 查询效率较低，可能会被优化掉
                 .unwrap()
                 .bytes_array()[..src.len()];
             dst.copy_from_slice(src);

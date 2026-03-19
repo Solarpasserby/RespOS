@@ -14,6 +14,7 @@ lazy_static! {
 }
 
 
+/// 初始化物理页帧分配器
 pub fn init_frame_allocator() {
     unsafe extern "C" {
         unsafe fn ekernel();
@@ -55,7 +56,7 @@ impl FrameTracker {
         self.ppn
     }
 
-    // TOFIX: 可能被优化了
+    // FIXME: 可能被优化了
     // /// 获取页表页内的页表项数组
     // pub fn pte_array(&self) -> &mut [PageTableEntry] {
     //     let pa = PhysAddr::from(self.ppn);

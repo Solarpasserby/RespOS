@@ -24,6 +24,15 @@ impl PageTable {
             frames: vec![frame],
         }
     }
+
+    /// 生成页表对应 `stap` 寄存器值
+    pub fn token(&self) -> usize {
+        8usize << 60 | self.root_ppn.0
+    }
+    /// 转译虚拟页号为物理页号
+    pub fn translate(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
+        self.find_pte(vpn).map(|pte| *pte)
+    }
 }
 
 /// 页表设置页表项接口
@@ -83,7 +92,7 @@ impl PageTable {
     pub fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) {
         let pte = self.find_pte_create(vpn).unwrap();
         assert!(!pte.is_valid(), "vpn {:?} is mapped before mapping", vpn); // 页表项应当没有被创建
-        *pte = PageTableEntry::new(ppn, flags);
+        *pte = PageTableEntry::new(ppn, flags | PTEFlags::VALID); // 被映射的物理页帧必定有效，这里需要统一配置
     }
     /// 在页表中消除物理地址和虚拟地址的映射关系
     pub fn unmap(&mut self, vpn: VirtPageNum) {
@@ -142,17 +151,17 @@ impl PageTableEntry {
     pub fn is_valid(&self) -> bool {
         self.flags().contains(PTEFlags::VALID)
     }
-}
-
-/// 手动查询页表接口
-impl PageTable {
-    /// 创建页表对应 `stap` 寄存器值
-    pub fn token(&self) -> usize {
-        8usize << 60 | self.root_ppn.0
+    /// 判断指定页是否可读
+    pub fn readable(&self) -> bool {
+        self.flags().contains(PTEFlags::READ)
     }
-    /// 转译虚拟页号为物理页号
-    pub fn translate(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
-        self.find_pte(vpn).map(|pte| *pte)
+    /// 判断指定页是否可写
+    pub fn writable(&self) -> bool {
+        self.flags().contains(PTEFlags::WRITE)
+    }
+    /// 判断指定页是否可执行
+    pub fn executable(&self) -> bool {
+        self.flags().contains(PTEFlags::EXECUTE)
     }
 }
 

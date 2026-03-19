@@ -17,10 +17,12 @@ use frame_allocator::init_frame_allocator;
 pub use address::*;
 pub use frame_allocator::{ FrameTracker, frame_alloc };
 pub use page_table::{ PageTableEntry, PageTable };
-pub use memory_set::{ MemorySet, MapArea };
+pub use memory_set::{ KERNEL_SPACE, MemorySet, MapArea, remap_test };
 
-/// 初始化内存管理
+/// 初始化内存管理，启用虚拟地址
 pub fn init() {
     init_heap();
     init_frame_allocator();
+    KERNEL_SPACE.exclusive_access().activate();
+    // 注意此时已经启用了虚拟地址
 }

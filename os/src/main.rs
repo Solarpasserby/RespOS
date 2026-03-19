@@ -34,6 +34,7 @@ pub fn rust_main() -> ! {
     trap::enable_timer_interrupt();
 
     mm::init();
+    mm::remap_test();
     
     panic!("unreachable!");
 

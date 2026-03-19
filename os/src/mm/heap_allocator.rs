@@ -9,6 +9,7 @@ static HEAP_ALLOCATOR: LockedHeap = LockedHeap::empty();
 // .bss 段上存放内核堆
 static mut HEAP_SPACE: [u8; KERNEL_HEAP_SIZE] = [0; KERNEL_HEAP_SIZE];
 
+/// 初始化全局堆分配器
 pub fn init_heap() {
     unsafe {
         HEAP_ALLOCATOR
