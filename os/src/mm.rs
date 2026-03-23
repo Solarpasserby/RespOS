@@ -17,7 +17,7 @@ use frame_allocator::init_frame_allocator;
 pub use address::*;
 pub use frame_allocator::{ FrameTracker, frame_alloc };
 pub use page_table::{ PageTableEntry, PageTable };
-pub use memory_set::{ KERNEL_SPACE, MemorySet, MapArea, remap_test };
+pub use memory_set::{ KERNEL_SPACE, MemorySet };
 
 /// 初始化内存管理，启用虚拟地址
 pub fn init() {

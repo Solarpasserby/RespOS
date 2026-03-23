@@ -1,3 +1,5 @@
+// os/src/main.rs
+
 #![no_std]
 #![no_main]
 #![feature(alloc_error_handler)]
@@ -29,12 +31,10 @@ global_asm!(include_str!("link_app.S"));
 pub fn rust_main() -> ! {
     clear_bss();
     trap::init();
-    loader::load_app();
     
     trap::enable_timer_interrupt();
 
     mm::init();
-    mm::remap_test();
     
     panic!("unreachable!");
 

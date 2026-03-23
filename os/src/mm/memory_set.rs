@@ -7,9 +7,9 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use alloc::sync::Arc;
 use core::arch::asm;
-use crate::config::{ PAGE_SIZE, KERNEL_MEM_END, USER_STACK_SIZE };
+use crate::config::{ PAGE_SIZE, KERNEL_MEM_END, USER_STACK_SIZE, TRAMPOLINE, TRAP_CONTEXT };
 use crate::sync::UPSafeCell;
-use super::address::{ PhysPageNum, VirtAddr, VirtPageNum, VPNRange, StepByOne };
+use super::address::{ PhysAddr, PhysPageNum, VirtAddr, VirtPageNum, VPNRange, StepByOne };
 use super::frame_allocator::{ frame_alloc, FrameTracker };
 use super::page_table::{ PageTable, PTEFlags, PageTableEntry };
 
@@ -23,7 +23,7 @@ unsafe extern "C" {
     fn sbss_with_stack();
     fn ebss();
     fn ekernel();
-    fn trampoline();
+    fn strampoline();
 }
 
 
@@ -55,8 +55,20 @@ impl MemorySet {
             areas: Vec::new(),
         }
     }
+    /// 对外暴露的添加逻辑段的接口，只支持添加内核栈段
+    pub fn insert_stack_area(&mut self, start_va: VirtAddr, end_va: VirtAddr) {
+        self.push_empty_map_area (
+            MapArea::new(
+                start_va,
+                end_va,
+                MapType::Framed,
+                MapPermission::READ | MapPermission::WRITE,
+            ),
+            None
+        )
+    }
     /// 将一段空的逻辑段加入地址空间，在内部完成映射关系的建立
-    pub fn push_empty_map_area(&mut self, mut map_area: MapArea, data: Option<&[u8]>) {
+    fn push_empty_map_area(&mut self, mut map_area: MapArea, data: Option<&[u8]>) {
         map_area.map(&mut self.page_table);
         if let Some(data) = data {
             map_area.copy_data(&self.page_table, data);
@@ -89,12 +101,28 @@ impl MemorySet {
 }
 
 impl MemorySet {
+    /// 映射跳板空间
+    /// 
+    /// 跳板是一个特殊的区域，位于虚拟地址空间的最高端，大小为一页
+    /// 跳板提供一段用户和内核空间都能访问的内存区域
+    /// 在用户程序发生异常时，内核能够通过跳板访问用户程序的上下文信息
+    /// 
+    /// 鉴于其特殊性，跳板不作为一个逻辑段加入地址空间，而是单独映射
+    pub fn map_trampoline(&mut self) {
+        self.page_table.map(
+            VirtAddr::from(TRAMPOLINE).into(),
+            PhysAddr::from(strampoline as *const() as usize).into(),
+            PTEFlags::READ | PTEFlags::EXECUTE,
+        );
+    }
+
     /// 创建内核地址空间
     /// 
     /// 为内核地址建立虚拟地址，使其在虚拟地址开启时仍能正常访问内核空间，内核采用恒等映射
     pub fn new_kernel() -> Self {
         let mut memory_set = Self::new();
-        // TODO: 使用跳板，目前还未实现!!!!!!!!!!!!!!!!!!!!!!!!
+        // 映射跳板
+        memory_set.map_trampoline();
         // 内核各段作为逻辑段加入地址空间
         // .text段
         memory_set.push_empty_map_area(
@@ -126,7 +154,7 @@ impl MemorySet {
             ),
             None
         );
-        // .bss段和栈段
+        // .bss段和栈段（该栈段指的是初始分配的栈空间，初始化在.bss段）
         memory_set.push_empty_map_area(
             MapArea::new(
                 VirtAddr::from(sbss_with_stack as *const () as usize),
@@ -156,7 +184,8 @@ impl MemorySet {
     /// TODO: 返回值为三元组，为规范之后将改用结构体返回
     pub fn from_elf_data(elf_data: &[u8]) -> (Self, usize, usize) {
         let mut memory_set = Self::new();
-        // TODO: 使用跳板，目前还未实现!!!!!!!!!!!!!!!!!!!!!!!!
+        // 映射跳板
+        memory_set.map_trampoline();
         // 由于传入的是 elf 格式的数据，所以需要读取文件头来得到各段的地址，之后再做分配映射
         // TODO: 此处对于 elf 格式的解析仍依赖于外部库，鉴于读取头文件信息的功能相对简单，建议考虑之后自己实现
         // 也正是因为是外部库，我对这部分的细节不是非常了解
@@ -206,8 +235,19 @@ impl MemorySet {
             ), 
             None,
         );
-        // 映射堆栈段？
-        // TODO: 映射异常上下文——不懂
+        // 映射堆段，当前没有堆段，暂时不映射
+        // 映射异常上下文，位于次高地址
+        // 注：在创建用户任务时，地址空间中已经完成了异常上下文分配，要修改内部数据可通过固定虚拟地址实现
+        memory_set.push_empty_map_area(
+            MapArea::new(
+                VirtAddr::from(TRAP_CONTEXT),
+                VirtAddr::from(TRAMPOLINE),
+                MapType::Framed,
+                MapPermission::READ | MapPermission::WRITE,
+            ),
+            None
+        );
+
         (
             memory_set, // 用户程序地址空间
             user_stack_top, // 用户程序栈顶地址
@@ -220,7 +260,7 @@ impl MemorySet {
 /// 逻辑段
 /// 
 /// 一段连续地址 [`VPNRange`] 的虚拟内存
-pub struct MapArea {
+struct MapArea {
     vpn_range: VPNRange,
     data_frames: BTreeMap<VirtPageNum, FrameTracker>,
     map_type: MapType,
@@ -256,6 +296,7 @@ impl MapArea {
         }
     }
     /// 为逻辑段上所有虚拟页销毁物理页帧并消除映射
+    #[allow(unused)]
     pub fn unmap(&mut self, page_table: &mut PageTable) {
         for vpn in self.vpn_range {
             self.unmap_one(page_table, vpn);
@@ -302,6 +343,8 @@ impl MapArea {
         let pte_flags = PTEFlags::from_bits(self.map_perm.bits).unwrap();
         page_table.map(vpn, ppn, pte_flags);
     }
+
+    #[allow(unused)]
     /// 消除虚拟页与物理页帧的映射关系，自动销毁失去连接的物理页帧
     pub fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
         match self.map_type {

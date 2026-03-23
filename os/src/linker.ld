@@ -11,7 +11,7 @@ SECTIONS
     .text : {
         *(.text.entry)
         . = ALIGN(4K);
-        trampoline = .;
+        strampoline = .;
         *(.text.trampoline);
         . = ALIGN(4K);
         *(.text .text.*)

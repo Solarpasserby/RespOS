@@ -1,6 +1,3 @@
-// 这个 build.rs 文件的作用是告诉 cargo 在构建过程中需要监视哪些文件的变化
-// 以便在这些文件发生变化时重新构建项目
-
 use std::fs::{File, read_dir};
 use std::io::{Result, Write};
 
@@ -49,8 +46,9 @@ _num_app:
     .section .data
     .global app_{0}_start
     .global app_{0}_end
+    .align 3
 app_{0}_start:
-    .incbin "{2}{1}.bin"
+    .incbin "{2}{1}"
 app_{0}_end:"#,
             idx, app, TARGET_PATH
         )?;

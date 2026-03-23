@@ -67,17 +67,16 @@ impl FrameTracker {
     //         )
     //     }
     // }
+    // /// 获取页帧头部的任意类型数据
+    // pub fn get_head_mut<T>(&mut self) -> &mut T {
+    //     let pa = PhysAddr::from(self.ppn);
+    //     unsafe { &mut *(pa.0 as *mut T) }
+    // }
 
     /// 获取页帧内的字节数组
     pub fn bytes_array(&mut self) -> &mut [u8] {
         let pa = PhysAddr::from(self.ppn);
         unsafe { core::slice::from_raw_parts_mut(pa.0 as *mut u8, crate::config::PAGE_SIZE) }
-    }
-
-    /// 获取页帧头部的任意类型数据
-    pub fn get_head_mut<T>(&mut self) -> &mut T {
-        let pa = PhysAddr::from(self.ppn);
-        unsafe { &mut *(pa.0 as *mut T) }
     }
 
     fn clear(&mut self) {
