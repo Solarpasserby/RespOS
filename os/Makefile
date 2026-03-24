@@ -1,14 +1,25 @@
 # 目标平台和构建模式
 TARGET := riscv64gc-unknown-none-elf
-MODE := release
-KERNEL_ELF := target/$(TARGET)/$(MODE)/os
-KERNEL_BIN := $(KERNEL_ELF).bin
-DISASM_TMP := target/$(TARGET)/$(MODE)/asm
+MODE ?= debug
 
-# 构建参数
-ifeq ($(MODE), release)
-	MODE_ARG := --release
+GDB ?= riscv64-unknown-elf-gdb
+
+ifeq ($(MODE),debug)
+	CARGO_BUILD_ARG :=
+	CARGO_TARGET_DIR := debug
+else ifeq ($(MODE),release)
+	CARGO_BUILD_ARG := --release
+	CARGO_TARGET_DIR := release
+else ifeq ($(MODE),release-debug)
+	CARGO_BUILD_ARG := --profile release-debug
+	CARGO_TARGET_DIR := release-debug
+else
+	$(error Unsupported MODE '$(MODE)'. Use MODE=debug, MODE=release, or MODE=release-debug)
 endif
+
+KERNEL_ELF := target/$(TARGET)/$(CARGO_TARGET_DIR)/os
+KERNEL_BIN := $(KERNEL_ELF).bin
+DISASM_TMP := target/$(TARGET)/$(CARGO_TARGET_DIR)/asm
 
 # 底层开发环境
 BOARD := qemu
@@ -21,11 +32,21 @@ KERNEL_ENTRY_PA := 0x80200000
 # 工具链
 OBJDUMP := rust-objdump --arch-name=riscv64
 OBJCOPY := rust-objcopy --binary-architecture=riscv64
+QEMU_NAME := qemu-system-riscv64
 
 # # 反汇编？
 # DISASM ?= -x
 
 build: $(KERNEL_BIN)
+
+build-debug:
+	@$(MAKE) build MODE=debug
+
+build-release:
+	@$(MAKE) build MODE=release
+
+build-release-debug:
+	@$(MAKE) build MODE=release-debug
 
 # 检查编译环境
 env:
@@ -33,13 +54,14 @@ env:
 	cargo install cargo-binutils
 	rustup component add rust-src
 	rustup component add llvm-tools-preview
+	@command -v $(GDB) >/dev/null || (echo "Missing GDB command: $(GDB)" && exit 1)
 
 $(KERNEL_BIN): kernel
 	@$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $@
 
 kernel:
-	@cd ../user && make build
-	@cargo build $(MODE_ARG)
+	@cd ../user && make build MODE=$(MODE)
+	@cargo build $(CARGO_BUILD_ARG)
 
 clean:
 	@cargo clean
@@ -57,21 +79,43 @@ QEMU_ARGS := -machine virt \
 			 -bios $(BOOTLOADER) \
 			 -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA)
 
-QEMU_NAME := qemu-system-riscv64
-
 quick-run:
-	@qemu-system-riscv64 $(QEMU_ARGS)
+	@$(QEMU_NAME) $(QEMU_ARGS)
 
 run: build quick-run
 
+run-debug:
+	@$(MAKE) run MODE=debug
+
+run-release:
+	@$(MAKE) run MODE=release
+
+run-release-debug:
+	@$(MAKE) run MODE=release-debug
+
 debug: build
 	@tmux new-session -d \
-		"qemu-system-riscv64 $(QEMU_ARGS) -s -S" && \
-		tmux split-window -h "riscv64-unknown-elf-gdb -ex 'file $(KERNEL_ELF)' -ex 'set arch riscv:rv64' -ex 'target remote localhost:1234'" && \
+		"$(QEMU_NAME) $(QEMU_ARGS) -s -S" && \
+		tmux split-window -h "$(GDB) -ex 'file $(KERNEL_ELF)' -ex 'set arch riscv:rv64' -ex 'target remote localhost:1234'" && \
 		tmux -2 attach-session -d
 
+debug-release:
+	@$(MAKE) debug MODE=release
+
+debug-release-debug:
+	@$(MAKE) debug MODE=release-debug
+
 gdbserver: build
-	@qemu-system-riscv64 $(QEMU_ARGS) -s -S
+	@$(QEMU_NAME) $(QEMU_ARGS) -s -S
+
+gdbserver-debug:
+	@$(MAKE) gdbserver MODE=debug
+
+gdbserver-release:
+	@$(MAKE) gdbserver MODE=release
+
+gdbserver-release-debug:
+	@$(MAKE) gdbserver MODE=release-debug
 
 gdbclient:
-	@riscv64-unknown-elf-gdb -ex 'file $(KERNEL_ELF)' -ex 'set arch riscv:rv64' -ex 'target remote localhost:1234
+	@$(GDB) -ex 'file $(KERNEL_ELF)' -ex 'set arch riscv:rv64' -ex 'target remote localhost:1234'

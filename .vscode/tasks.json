@@ -1,0 +1,63 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "os: qemu gdbserver (debug)",
+      "type": "shell",
+      "command": "printf '__QEMU_GDB_READY__\\n'; make gdbserver-debug",
+      "options": {
+        "cwd": "${workspaceFolder}/os"
+      },
+      "isBackground": true,
+      "problemMatcher": {
+        "owner": "custom",
+        "fileLocation": [
+          "relative",
+          "${workspaceFolder}"
+        ],
+        "pattern": {
+          "regexp": ".*"
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": ".*",
+          "endsPattern": "__QEMU_GDB_READY__"
+        }
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "focus": false
+      }
+    },
+    {
+      "label": "os: qemu gdbserver (release-debug)",
+      "type": "shell",
+      "command": "printf '__QEMU_GDB_READY__\\n'; make gdbserver-release-debug",
+      "options": {
+        "cwd": "${workspaceFolder}/os"
+      },
+      "isBackground": true,
+      "problemMatcher": {
+        "owner": "custom",
+        "fileLocation": [
+          "relative",
+          "${workspaceFolder}"
+        ],
+        "pattern": {
+          "regexp": ".*"
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": ".*",
+          "endsPattern": "__QEMU_GDB_READY__"
+        }
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "focus": false
+      }
+    }
+  ]
+}

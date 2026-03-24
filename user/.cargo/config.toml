@@ -5,3 +5,14 @@ target = "riscv64gc-unknown-none-elf"
 rustflags = [
     "-Clink-arg=-Tsrc/linker.ld", "-Cforce-frame-pointers=yes"
 ]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+debug = false
+panic = "abort"
+
+[profile.release-debug]
+inherits = "release"
+debug = true

@@ -14,7 +14,7 @@ _num_app:
     .global app_0_end
     .align 3
 app_0_start:
-    .incbin "../user/target/riscv64gc-unknown-none-elf/release/hello_world"
+    .incbin "../user/target/riscv64gc-unknown-none-elf/debug/hello_world"
 app_0_end:
 
     .section .data
@@ -22,7 +22,7 @@ app_0_end:
     .global app_1_end
     .align 3
 app_1_start:
-    .incbin "../user/target/riscv64gc-unknown-none-elf/release/power"
+    .incbin "../user/target/riscv64gc-unknown-none-elf/debug/power"
 app_1_end:
 
     .section .data
@@ -30,5 +30,5 @@ app_1_end:
     .global app_2_end
     .align 3
 app_2_start:
-    .incbin "../user/target/riscv64gc-unknown-none-elf/release/sleep"
+    .incbin "../user/target/riscv64gc-unknown-none-elf/debug/sleep"
 app_2_end:

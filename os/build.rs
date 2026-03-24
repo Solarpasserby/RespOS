@@ -1,16 +1,22 @@
+use std::env;
 use std::fs::{File, read_dir};
 use std::io::{Result, Write};
 
 fn main() {
     println!("cargo:rerun-if-changed=../user/src/");
-    println!("cargo:rerun-if-changed={}", TARGET_PATH);
+    println!("cargo:rerun-if-env-changed=PROFILE");
     insert_app_data().unwrap();
 }
 
-static TARGET_PATH: &str = "../user/target/riscv64gc-unknown-none-elf/release/";
+fn target_path() -> String {
+    let profile = env::var("PROFILE").expect("PROFILE is not set by Cargo");
+    format!("../user/target/riscv64gc-unknown-none-elf/{profile}/")
+}
 
 fn insert_app_data() -> Result<()> {
     let mut f = File::create("src/link_app.S").unwrap();
+    let target_path = target_path();
+    println!("cargo:rerun-if-changed={}", target_path);
     let mut apps: Vec<_> = read_dir("../user/src/bin")
         .unwrap()
         .into_iter()
@@ -50,7 +56,7 @@ _num_app:
 app_{0}_start:
     .incbin "{2}{1}"
 app_{0}_end:"#,
-            idx, app, TARGET_PATH
+            idx, app, target_path
         )?;
     }
     Ok(())
