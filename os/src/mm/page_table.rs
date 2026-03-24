@@ -3,6 +3,7 @@
 use bitflags::*;
 use alloc::{ vec, vec::Vec };
 use crate::config::PAGE_SIZE;
+use crate::mm::{StepByOne, VirtAddr, get_bytes_array};
 use super::address::{ PPN_WIDTH_SV39, PhysAddr, PhysPageNum, VirtPageNum };
 use super::frame_allocator::{ FrameTracker, frame_alloc };
 
@@ -22,6 +23,13 @@ impl PageTable {
         Self {
             root_ppn: frame.ppn(),
             frames: vec![frame],
+        }
+    }
+    /// 临时页表无数据，仅用于查询用户程序的数据
+    pub fn from_token(satp: usize) -> Self {
+        Self {
+            root_ppn: PhysPageNum::from(satp & ((1usize << 44) - 1)),
+            frames: Vec::new(),
         }
     }
 
@@ -175,4 +183,26 @@ impl PageTableEntry {
 fn get_pte_array(ppn: &PhysPageNum) -> &'static mut [PageTableEntry] {
     let pa = PhysAddr::from(*ppn);
     unsafe { core::slice::from_raw_parts_mut(pa.0 as *mut PageTableEntry, PAGE_SIZE / core::mem::size_of::<PageTableEntry>()) }
+}
+
+pub fn translate_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&'static mut [u8]> {
+    let page_table = PageTable::from_token(token);
+    let mut start = ptr as usize;
+    let end = start + len;
+    let mut v = Vec::new();
+    while start < end {
+        let start_va = VirtAddr::from(start);
+        let mut vpn = start_va.floor();
+        let ppn = page_table.translate(vpn).unwrap().ppn();
+        vpn.step();
+        let mut end_va = VirtAddr::from(vpn);
+        end_va = end_va.min(VirtAddr::from(end));
+        if end_va.page_offset() == 0 {
+            v.push(&mut get_bytes_array(ppn)[start_va.page_offset()..]);
+        } else {
+            v.push(&mut get_bytes_array(ppn)[start_va.page_offset()..end_va.page_offset()])
+        }
+        start = end_va.into();
+    }
+    v
 }

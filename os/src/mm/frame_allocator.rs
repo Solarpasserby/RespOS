@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 use lazy_static::lazy_static;
 use crate::config::KERNEL_MEM_END;
 use crate::sync::UPSafeCell;
-use super::address::{ PhysAddr, PhysPageNum };
+use super::address::{ PhysAddr, PhysPageNum, get_bytes_array };
 
 type FrameAllocatorImpl = StackFrameAllocator;
 lazy_static! {
@@ -56,7 +56,7 @@ impl FrameTracker {
         self.ppn
     }
 
-    // FIXME: 可能被优化了
+    // FIXME: 目前先使用最简单的实现，直接借助物理页表
     // /// 获取页表页内的页表项数组
     // pub fn pte_array(&self) -> &mut [PageTableEntry] {
     //     let pa = PhysAddr::from(self.ppn);
@@ -72,15 +72,14 @@ impl FrameTracker {
     //     let pa = PhysAddr::from(self.ppn);
     //     unsafe { &mut *(pa.0 as *mut T) }
     // }
-
-    /// 获取页帧内的字节数组
-    pub fn bytes_array(&mut self) -> &mut [u8] {
-        let pa = PhysAddr::from(self.ppn);
-        unsafe { core::slice::from_raw_parts_mut(pa.0 as *mut u8, crate::config::PAGE_SIZE) }
-    }
+    // /// 获取页帧内的字节数组
+    // pub fn bytes_array(&mut self) -> &mut [u8] {
+    //     let pa = PhysAddr::from(self.ppn);
+    //     unsafe { core::slice::from_raw_parts_mut(pa.0 as *mut u8, crate::config::PAGE_SIZE) }
+    // }
 
     fn clear(&mut self) {
-        for byte in self.bytes_array() {
+        for byte in get_bytes_array(self.ppn) {
             *byte = 0;
         }
     }

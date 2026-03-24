@@ -210,3 +210,9 @@ where
 /// 主要用于描述一段连续的虚拟页表
 pub type VPNRange = SimpleRange<VirtPageNum>;
 
+pub fn get_bytes_array(ppn: PhysPageNum) -> &'static mut [u8] {
+    let pa = PhysAddr::from(ppn);
+    unsafe { core::slice::from_raw_parts_mut(pa.0 as *mut u8, crate::config::PAGE_SIZE) }
+
+}
+

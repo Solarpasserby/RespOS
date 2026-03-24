@@ -9,7 +9,7 @@ use alloc::sync::Arc;
 use core::arch::asm;
 use crate::config::{ PAGE_SIZE, KERNEL_MEM_END, USER_STACK_SIZE, TRAMPOLINE, TRAP_CONTEXT };
 use crate::sync::UPSafeCell;
-use super::address::{ PhysAddr, PhysPageNum, VirtAddr, VirtPageNum, VPNRange, StepByOne };
+use super::address::{ PhysAddr, PhysPageNum, VirtAddr, VirtPageNum, VPNRange, StepByOne, get_bytes_array };
 use super::frame_allocator::{ frame_alloc, FrameTracker };
 use super::page_table::{ PageTable, PTEFlags, PageTableEntry };
 
@@ -304,7 +304,7 @@ impl MapArea {
     }
 
     /// 复制数据到逻辑段的实际物理页帧上
-    pub fn copy_data(&mut self, _page_table: &PageTable, data: &[u8]) {
+    pub fn copy_data(&mut self, page_table: &PageTable, data: &[u8]) {
         assert_eq!(self.map_type, MapType::Framed);
         let mut start: usize = 0;
         let mut current_vpn = self.vpn_range.get_start();
@@ -316,10 +316,7 @@ impl MapArea {
         );
         loop {
             let src = &data[start..len.min(start + PAGE_SIZE)];
-            let dst = &mut self.data_frames
-                .get_mut(&current_vpn) // FIXME: 由于 BTreeMap 查询效率较低，可能会被优化掉
-                .unwrap()
-                .bytes_array()[..src.len()];
+            let dst = &mut get_bytes_array(page_table.translate(current_vpn).unwrap().ppn())[..src.len()];
             dst.copy_from_slice(src);
             start += PAGE_SIZE;
             if start >= len { break; }
