@@ -19,7 +19,7 @@ pub fn get_app_data(app_id: usize) -> &'static [u8] {
     let app_start = unsafe {
         core::slice::from_raw_parts(app_ptr.add(1), app_num + 1)
     };
-    assert!(app_id < app_num, "Failed to get app data due to bad app id!");
+    assert!(app_id < app_num, "[kernel] Failed to get app data due to bad app id!");
     unsafe {
         core::slice::from_raw_parts(
             app_start[app_id] as *const u8,

@@ -17,7 +17,7 @@ use crate::syscall::*;
 use crate::task::{ suspend_current_and_run_next, exit_current_and_run_next };
 use crate::timer::set_next_ti_trigger;
 use crate::config::{ TRAMPOLINE, TRAP_CONTEXT };
-use crate::task::{ current_user_token, with_current_trap_cx };
+use crate::task::{ current_user_token, get_current_trap_cx };
 
 pub use context::TrapContext;
 
@@ -43,10 +43,9 @@ pub fn trap_handler() {
     let stval = stval::read();
     match scause.cause() {
         Trap::Exception(Exception::UserEnvCall) => {
-            with_current_trap_cx(|trap_cx| {
-                trap_cx.sepc += 4; // 异常处理完成后直接执行后续指令
-                trap_cx.x[10] = syscall(trap_cx.x[17], [trap_cx.x[10], trap_cx.x[11], trap_cx.x[12]]) as usize;
-            });
+            let trap_cx = get_current_trap_cx();
+            trap_cx.sepc += 4; // 异常处理完成后直接执行后续指令
+            trap_cx.x[10] = syscall(trap_cx.x[17], [trap_cx.x[10], trap_cx.x[11], trap_cx.x[12]]) as usize;
         }
         Trap::Exception(Exception::StoreFault) |
         Trap::Exception(Exception::StorePageFault) | 
@@ -75,10 +74,15 @@ pub fn trap_from_kernel() -> ! {
     panic!("[kernel] Trap is not defined in kernel!");
 }
 
+/// 异常返回
+/// 
+/// 主要是调用 `__restore` 函数，该函数会恢复 [`TrapContext`]
+/// 
+/// 调用 `__restore` 时需额外修改两个寄存器，它们会被使用
 #[unsafe(no_mangle)]
 pub fn trap_return() -> ! {
     set_user_trap_entry();
-    let trap_cx_ptr = TRAP_CONTEXT;
+    let trap_cx_ptr = TRAP_CONTEXT; // 用户异常上下文的地址固定为次高地址
     let user_satp = current_user_token();
     unsafe extern "C" {
         fn __alltraps();

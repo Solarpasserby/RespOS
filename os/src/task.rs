@@ -119,11 +119,11 @@ impl TaskManager {
         inner.tasks[current].get_user_token()
     }
 
-    fn with_current_trap_cx(&self, f: impl FnOnce(&mut TrapContext)) {
+    fn get_current_trap_cx(&self) -> &'static mut TrapContext {
         let inner = self.inner.exclusive_access();
         let current = inner.current_task;
-        f(inner.tasks[current].get_trap_cx())
-    }
+        inner.tasks[current].get_trap_cx()
+    } // 又是向 rCore 教程~~妥协~~膜拜的一天
 }
 
 
@@ -180,7 +180,7 @@ impl TaskControlBlock {
     }
 
     /// 获取内核栈上用户程序异常上下文中的头部数据
-    fn get_trap_cx(&self) -> &mut TrapContext {
+    fn get_trap_cx(&self) -> &'static mut TrapContext {
         let trap_cx_ppn: PhysAddr = self
             .memory_set
             .translate(VirtAddr::from(TRAP_CONTEXT).into())
@@ -232,6 +232,6 @@ pub fn current_user_token() -> usize {
     TASK_MANAGER.get_current_token()
 }
 
-pub fn with_current_trap_cx(f: impl FnOnce(&mut TrapContext)) {
-    TASK_MANAGER.with_current_trap_cx(f)
+pub fn get_current_trap_cx() -> &'static mut TrapContext {
+    TASK_MANAGER.get_current_trap_cx()
 }
