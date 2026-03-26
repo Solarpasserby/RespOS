@@ -27,7 +27,7 @@ pub const CLOCK_FREQ: usize = 12500000;
 
 
 /// 返回内核空间中用户程序内核栈段顶地址
-pub fn get_kernel_stack_top(app_id: usize) -> usize {
+pub fn get_kernel_stack_top(pid: usize) -> usize {
     // 额外增加一个守护页，发生栈溢出时触发异常
-    TRAMPOLINE - app_id * (KERNEL_STACK_SIZE + PAGE_SIZE)
+    TRAMPOLINE - pid * (KERNEL_STACK_SIZE + PAGE_SIZE)
 }     

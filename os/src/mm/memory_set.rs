@@ -7,7 +7,7 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use alloc::sync::Arc;
 use core::arch::asm;
-use crate::config::{ PAGE_SIZE, KERNEL_MEM_END, USER_STACK_SIZE, TRAMPOLINE, TRAP_CONTEXT };
+use crate::config::{ KERNEL_MEM_END, KERNEL_STACK_SIZE, PAGE_SIZE, TRAMPOLINE, TRAP_CONTEXT, USER_STACK_SIZE };
 use crate::sync::UPSafeCell;
 use super::address::{ PhysAddr, PhysPageNum, VirtAddr, VirtPageNum, VPNRange, StepByOne, get_bytes_array };
 use super::frame_allocator::{ frame_alloc, FrameTracker };
@@ -55,18 +55,6 @@ impl MemorySet {
             areas: Vec::new(),
         }
     }
-    /// 对外暴露的添加逻辑段的接口，只支持添加内核栈段
-    pub fn insert_stack_area(&mut self, start_va: VirtAddr, end_va: VirtAddr) {
-        self.push_empty_map_area (
-            MapArea::new(
-                start_va,
-                end_va,
-                MapType::Framed,
-                MapPermission::READ | MapPermission::WRITE,
-            ),
-            None
-        )
-    }
     /// 将一段空的逻辑段加入地址空间，在内部完成映射关系的建立
     fn push_empty_map_area(&mut self, mut map_area: MapArea, data: Option<&[u8]>) {
         map_area.map(&mut self.page_table);
@@ -74,6 +62,32 @@ impl MemorySet {
             map_area.copy_data(&self.page_table, data);
         }
         self.areas.push(map_area); // 转移所有权
+    }
+    /// 对外暴露的添加逻辑段的接口，只支持添加内核栈段
+    pub fn insert_stack_area(&mut self, stack_top: usize) {
+        self.push_empty_map_area (
+            MapArea::new(
+                (stack_top - KERNEL_STACK_SIZE).into(),
+                stack_top.into(),
+                MapType::Framed,
+                MapPermission::READ | MapPermission::WRITE,
+            ),
+            None
+        )
+    }
+    /// 对外暴露的删除逻辑段的接口，只支持删除内核栈段
+    pub fn remove_stack_area(&mut self, stack_top: usize) {
+        let stack_bottom_va = VirtAddr::from(stack_top - KERNEL_STACK_SIZE);
+        let stack_bottom_vpn = VirtPageNum::from(stack_bottom_va);
+        if let Some((idx, area)) = self
+            .areas
+            .iter_mut()
+            .enumerate()
+            .find(|(_, area)| area.vpn_range.get_start() == stack_bottom_vpn)
+        {
+            area.unmap(&mut self.page_table);
+            self.areas.remove(idx);
+        }
     }
 
     /// 激活地址空间，即修改 `stap` ，切换页表

@@ -24,6 +24,8 @@ pub mod mm;
 
 use core::arch::global_asm;
 
+use crate::loader::list_apps;
+
 global_asm!(include_str!("entry.asm"));
 global_asm!(include_str!("link_app.S"));
 
@@ -34,6 +36,8 @@ pub fn rust_main() -> ! {
     trap::init();
     trap::enable_timer_interrupt();
     timer::set_next_ti_trigger();
+
+    list_apps();
 
     task::start_running_tasks();
     // panic!("unreachable!");

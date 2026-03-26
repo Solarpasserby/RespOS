@@ -6,10 +6,11 @@
 
 mod context;
 mod switch;
+mod pid;
 
 use alloc::vec::Vec;
 use lazy_static::lazy_static;
-use crate::config::{ KERNEL_STACK_SIZE, TRAP_CONTEXT, get_kernel_stack_top };
+use crate::config::{ TRAP_CONTEXT, get_kernel_stack_top };
 use crate::sync::UPSafeCell;
 use crate::loader::{ get_app_data, get_app_num };
 use crate::trap::{ TrapContext, trap_handler };
@@ -17,6 +18,7 @@ use crate::mm::{ KERNEL_SPACE, MemorySet, VirtAddr, PhysAddr };
 use crate::sbi::shutdown;
 use switch::__switch;
 use context::TaskContext;
+pub use pid::*;
 
 
 lazy_static! {
@@ -152,10 +154,7 @@ impl TaskControlBlock {
         // 在内核空间额外为用户程序分配并映射一个内核栈
         KERNEL_SPACE
             .exclusive_access()
-            .insert_stack_area(
-                VirtAddr::from(kernel_stack_top - KERNEL_STACK_SIZE),
-                VirtAddr::from(kernel_stack_top),
-            );
+            .insert_stack_area(kernel_stack_top);
         let task_ctrl_block = Self {
             task_status: TaskStatus::Ready,
             task_context: TaskContext::create_for_kstack_restore(kernel_stack_top),
