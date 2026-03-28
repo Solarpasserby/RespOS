@@ -10,9 +10,14 @@
     .section .text
     .global __switch
 __switch:
+    # 注意：
+    # 区别于异常处理汇编 (trap.S) 中将数据保存栈上
+    # 此处任务上下文作为 TaskControlBlock 或是 Processor 的一个字段
+    # 从传参的角度也可以发现——这里传入的是裸指针
+    # 实际上对于 TaskContext 的读写直接作用于包含它的变量中
     # fn __switch(
-    # current_task_context_ptr 0(a0): *mut TaskContext
-    # next_task_context_ptr 8(a0): *const TaskContext
+    # current_task_context_ptr (a0): *mut TaskContext
+    # next_task_context_ptr (a1): *const TaskContext
     # )
     # 保存当前任务的上下文
     sd sp, 8(a0)

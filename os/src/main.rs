@@ -39,8 +39,7 @@ pub fn rust_main() -> ! {
 
     list_apps();
 
-    task::start_running_tasks();
-    // panic!("unreachable!");
+    panic!("unreachable!");
 }
 
 fn clear_bss() {

@@ -4,7 +4,7 @@ use crate::trap::trap_return;
 
 /// 任务上下文
 /// 
-/// - 功能：TODO 可能是内核异常控制流的上下文
+/// - 功能：存储任务的运行状态，然而由于切换任务使用函数调用实现，因此上下文内容更贴近被调用者运行时的内容
 /// - 参数
 ///     - `ra` 返回地址
 ///     - `sp` 栈指针
@@ -14,7 +14,9 @@ use crate::trap::trap_return;
 pub struct TaskContext {
     ra: usize,
     sp: usize,
-    s: [usize; 12], // 调用约定被调用者保存的寄存器
+    // 调用约定被调用者保存的寄存器
+    // 由于切换上下文总是以函数调用的形式实现，因而只作部分保存
+    s: [usize; 12],
 }
 
 impl TaskContext {
