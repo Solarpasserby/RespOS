@@ -14,7 +14,7 @@ _app_num:
     .global _app_names
 _app_names:
     .string "hello_world"
-    .string "init_proc"
+    .string "initproc"
     .string "power"
     .string "sleep"
     .string "user_shell"
@@ -32,7 +32,7 @@ app_0_end:
     .global app_1_end
     .align 3
 app_1_start:
-    .incbin "../user/target/riscv64gc-unknown-none-elf/debug/init_proc"
+    .incbin "../user/target/riscv64gc-unknown-none-elf/debug/initproc"
 app_1_end:
 
     .section .data

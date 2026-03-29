@@ -18,6 +18,12 @@ pub fn console_putchar(c: usize) {
     // if temp.error != 0 { panic!("omg") }
 }
 
+/// 向终端打印字符
+pub fn console_getchar() -> usize {
+    #[allow(deprecated)]
+    sbi_rt::legacy::console_getchar()
+}
+
 /// 关闭机器
 /// 
 /// TODO: 这里的参数不太清楚用途

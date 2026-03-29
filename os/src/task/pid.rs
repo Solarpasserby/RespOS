@@ -14,6 +14,13 @@ lazy_static! {
 
 pub struct PidHandle(pub usize);
 
+impl Drop for PidHandle {
+    fn drop(&mut self) {
+        PID_ALLOCATOR.exclusive_access().dealloc(self.0);
+    }
+}
+
+/// ~~进程~~任务号分配器
 struct PidAllocatr {
     current: usize,
     recycled: Vec<usize>,

@@ -2,9 +2,9 @@
 
 use bitflags::*;
 use alloc::{ vec, vec::Vec };
+use alloc::string::String;
 use crate::config::PAGE_SIZE;
-use crate::mm::{StepByOne, VirtAddr, get_bytes_array};
-use super::address::{ PPN_WIDTH_SV39, PhysAddr, PhysPageNum, VirtPageNum };
+use super::address::{ PPN_WIDTH_SV39, PhysAddr, PhysPageNum, VirtAddr, VirtPageNum, StepByOne, get_bytes_array};
 use super::frame_allocator::{ FrameTracker, frame_alloc };
 
 /// 页表
@@ -41,11 +41,20 @@ impl PageTable {
     pub fn translate(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
         self.find_pte(vpn).map(|pte| *pte)
     }
+    /// 转译虚拟地址为物理地址
+    pub fn translate_va(&self, va: VirtAddr) -> Option<PhysAddr> {
+        self.find_pte(va.clone().floor()).map(|pte| {
+            let aligned_pa: PhysAddr = pte.ppn().into();
+            let offset = va.page_offset();
+            let aligned_pa_usize: usize = aligned_pa.into();
+            (aligned_pa_usize + offset).into()
+        })
+    }
 }
 
 /// 页表设置页表项接口
 /// 
-/// 均返回页表项的可变引用，用于修改或读取页表项
+/// 均返回页表项的可变借用，用于修改或读取页表项
 impl PageTable {
     /// 根据虚拟地址寻找目标页表项，若发现多级页表不存在则创建
     fn find_pte_create(&mut self, vpn: VirtPageNum) -> Option<&mut PageTableEntry> {
@@ -185,6 +194,15 @@ fn get_pte_array(ppn: &PhysPageNum) -> &'static mut [PageTableEntry] {
     unsafe { core::slice::from_raw_parts_mut(pa.0 as *mut PageTableEntry, PAGE_SIZE / core::mem::size_of::<PageTableEntry>()) }
 }
 
+fn get_data_mut<T>(pa: &PhysAddr) -> &'static mut T {
+    unsafe { (pa.0 as *mut T).as_mut().unwrap() }
+}
+
+// TODO: 这里解引用应该使用的是虚拟地址，具体机制我还没理解透彻
+
+/// 转译虚拟地址，得到内核虚拟地址上的一段数据的可变借用
+/// 
+/// 以向量返回，其内部的每个数据代表单个内存页上的数据的可变借用
 pub fn translate_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&'static mut [u8]> {
     let page_table = PageTable::from_token(token);
     let mut start = ptr as usize;
@@ -205,4 +223,27 @@ pub fn translate_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&'
         start = end_va.into();
     }
     v
+}
+
+/// 转译虚拟地址，得到内核虚拟地址上以此为始的一个字符串
+pub fn translate_str(token: usize, ptr: *const u8) -> String {
+    let page_table = PageTable::from_token(token);
+    let mut string = String::new();
+    let mut va = ptr as usize;
+    loop {
+        let ch: u8 = *get_data_mut(&page_table.translate_va(VirtAddr::from(va)).unwrap());
+        if ch == 0 { break; }
+        else {
+            string.push(ch as char);
+            va += 1;
+        }
+    }
+    string
+}
+
+/// 转译虚拟地址，得到内核虚拟地址上对应数据的可变引用
+pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> &'static mut T {
+    let page_table = PageTable::from_token(token);
+    let va = ptr as usize;
+    get_data_mut(&page_table.translate_va(VirtAddr::from(va)).unwrap())
 }

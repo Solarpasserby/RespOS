@@ -57,6 +57,54 @@ impl TaskControlBlock {
         task_ctrl_block
     }
 
+    /// 以父~~进程~~任务创建子~~进程~~任务
+    pub fn fork(self: &Arc<Self>) -> Arc<Self> {
+        let mut parent_inner = self.inner_exclusive_access();
+        let pid = pid_alloc();
+        let kernel_stack = KernelStack::new(&pid);
+        let kernel_stack_top = kernel_stack.get_top();
+        let task_ctrl_block = Arc::new(TaskControlBlock {
+            pid,
+            kernel_stack,
+            inner: unsafe {
+                UPSafeCell::new(TaskControlBlockInner {
+                    task_status: TaskStatus::Ready,
+                    task_context: TaskContext::create_for_kstack_restore(kernel_stack_top),
+                    memory_set: MemorySet::from_existed_user(&parent_inner.memory_set),
+                    parent: Some(Arc::downgrade(self)),
+                    children: Vec::new(),
+                    base_size: parent_inner.base_size,
+                    exit_code: 0,
+                })
+            },
+        });
+
+        // 同时更新父任务状态
+        parent_inner.children.push(task_ctrl_block.clone());
+
+        // 异常上下文中的 `kernel_sp` 字段需修改
+        let trap_cx = task_ctrl_block.inner_exclusive_access().get_trap_cx();
+        trap_cx.kernel_sp = kernel_stack_top;
+
+        task_ctrl_block
+    }
+
+    // 为任务载入可执行程序
+    pub fn exec(&self, elf_data: &[u8]) {
+        // 主要修改任务的地址空间和异常上下文
+        let (memory_set, user_sp, entry_point) = MemorySet::from_elf_data(elf_data);
+        let mut inner = self.inner_exclusive_access();
+        inner.memory_set = memory_set;
+        let trap_cx = inner.get_trap_cx();
+        *trap_cx = TrapContext::init_app_context(
+            entry_point,
+            user_sp,
+            KERNEL_SPACE.exclusive_access().token(),
+            self.kernel_stack.get_top(),
+            trap_handler as *const() as usize
+        );
+    }
+
     pub fn inner_exclusive_access(&self) -> RefMut<'_, TaskControlBlockInner> {
         self.inner.exclusive_access()
     }

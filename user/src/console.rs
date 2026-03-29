@@ -3,7 +3,7 @@ use core::fmt::{self, Write};
 
 struct Stdout;
 
-const STDIN: usize  = 1;
+const STDIN: usize  = 0;
 const STDOUT: usize = 1;
 
 pub fn getchar() -> u8 {

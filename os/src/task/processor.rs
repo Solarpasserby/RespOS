@@ -48,7 +48,7 @@ impl Processor {
         self.current.as_ref().map(|task| Arc::clone(task))
     }
 
-    /// 获取空闲任务上下文的可变引用
+    /// 获取空闲任务上下文的可变借用
     pub fn get_idle_task_cx(&mut self) -> *mut TaskContext {
         &mut self.idle_task_cx as *mut TaskContext
     }
@@ -73,7 +73,7 @@ pub fn current_user_token() -> usize {
 
 /// 获取当前执行的任务的异常上下文
 /// 
-/// 生命周期警告，可变引用
+/// 生命周期警告，可变借用
 pub fn current_trap_cx() -> &'static mut TrapContext {
     current_task().unwrap().inner_exclusive_access().get_trap_cx()
 }

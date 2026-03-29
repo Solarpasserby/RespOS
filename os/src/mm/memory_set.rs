@@ -48,13 +48,6 @@ pub struct MemorySet {
 }
 
 impl MemorySet {
-    /// 创建一个新的地址空间，内部没有逻辑段
-    pub fn new() -> Self {
-        Self {
-            page_table: PageTable::new(),
-            areas: Vec::new(),
-        }
-    }
     /// 将一段空的逻辑段加入地址空间，在内部完成映射关系的建立
     fn push_empty_map_area(&mut self, mut map_area: MapArea, data: Option<&[u8]>) {
         map_area.map(&mut self.page_table);
@@ -112,6 +105,11 @@ impl MemorySet {
     pub fn translate(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
         self.page_table.translate(vpn)
     }
+
+    /// 回收内部地址空间
+    pub fn recycle_data_pages(&mut self) {
+        self.areas.clear();
+    }
 }
 
 impl MemorySet {
@@ -128,6 +126,14 @@ impl MemorySet {
             PhysAddr::from(strampoline as *const() as usize).into(),
             PTEFlags::READ | PTEFlags::EXECUTE,
         );
+    }
+
+    /// 创建一个新的地址空间，内部没有逻辑段
+    pub fn new() -> Self {
+        Self {
+            page_table: PageTable::new(),
+            areas: Vec::new(),
+        }
     }
 
     /// 创建内核地址空间
@@ -269,6 +275,23 @@ impl MemorySet {
             elf.header.pt2.entry_point() as usize // 用户程序入口地址
         )
     }
+
+    pub fn from_existed_user(user_space: &MemorySet) -> Self {
+        let mut memory_set = Self::new();
+        memory_set.map_trampoline(); // 映射跳板段
+
+        // 映射其余段
+        for area in user_space.areas.iter() {
+            let new_area = MapArea::from_another(area);
+            memory_set.push_empty_map_area(new_area, None);
+            for vpn in area.vpn_range { // 两个逻辑段的虚拟地址一致
+                let src = get_bytes_array(user_space.translate(vpn).unwrap().ppn());
+                let dst = get_bytes_array(memory_set.translate(vpn).unwrap().ppn());
+                dst.copy_from_slice(src);
+            }
+        }
+        memory_set
+    }
 }
 
 
@@ -301,10 +324,24 @@ impl MapArea {
             map_perm,
         }
     }
+    /// 复制构造空逻辑段
+    /// 
+    /// 只指定了一段与传入逻辑段一致的虚拟内存，内部没有实际的映射的页帧
+    pub fn from_another(another: &MapArea) -> Self {
+        Self {
+            vpn_range: VPNRange::new(
+                another.vpn_range.get_start(),
+                another.vpn_range.get_end()
+            ),
+            data_frames: BTreeMap::new(),
+            map_type: another.map_type,
+            map_perm: another.map_perm,
+        }
+    }
 
     /// 为逻辑段上所有虚拟页创建物理页帧并建立映射
     /// 
-    /// 传入页表的可变引用，以修改传入页表的内容
+    /// 传入页表的可变借用，以修改传入页表的内容
     pub fn map(&mut self, page_table: &mut PageTable) {
         for vpn in self.vpn_range {
             self.map_one(page_table, vpn);

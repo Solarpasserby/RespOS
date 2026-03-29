@@ -16,7 +16,7 @@ use heap_allocator::init_heap;
 use frame_allocator::init_frame_allocator;
 pub use address::*;
 pub use frame_allocator::{ FrameTracker, frame_alloc };
-pub use page_table::{ PageTableEntry, PageTable, translate_byte_buffer };
+pub use page_table::{ PageTableEntry, PageTable, translate_byte_buffer, translate_str, translated_refmut };
 pub use memory_set::{ KERNEL_SPACE, MemorySet };
 
 /// 初始化内存管理，启用虚拟地址

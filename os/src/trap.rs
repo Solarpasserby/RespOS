@@ -17,7 +17,7 @@ use crate::syscall::*;
 use crate::task::{ suspend_current_and_run_next, exit_current_and_run_next };
 use crate::timer::set_next_ti_trigger;
 use crate::config::{ TRAMPOLINE, TRAP_CONTEXT };
-use crate::task::{ current_user_token, get_current_trap_cx };
+use crate::task::{ current_user_token, current_trap_cx };
 
 pub use context::TrapContext;
 
@@ -43,20 +43,28 @@ pub fn trap_handler() {
     let stval = stval::read();
     match scause.cause() {
         Trap::Exception(Exception::UserEnvCall) => {
-            let trap_cx = get_current_trap_cx();
+            let mut trap_cx = current_trap_cx();
             trap_cx.sepc += 4; // 异常处理完成后直接执行后续指令
-            trap_cx.x[10] = syscall(trap_cx.x[17], [trap_cx.x[10], trap_cx.x[11], trap_cx.x[12]]) as usize;
+            let result = syscall(trap_cx.x[17], [trap_cx.x[10], trap_cx.x[11], trap_cx.x[12]]) as usize;
+
+            // 执行 sys_exec 会修改 trap_cx，因此再获取一次
+            trap_cx = current_trap_cx();
+            trap_cx.x[10] = result as usize;
         }
         Trap::Exception(Exception::StoreFault) |
-        Trap::Exception(Exception::StorePageFault) | 
+        Trap::Exception(Exception::StorePageFault) |
+        Trap::Exception(Exception::InstructionFault) |
+        Trap::Exception(Exception::InstructionPageFault) |
         Trap::Exception(Exception::LoadFault) |
         Trap::Exception(Exception::LoadPageFault) => {
             println!("[kernel] PageFault in application, bad addr = {:#x}, kernel killed it.", stval);
-            exit_current_and_run_next();
+            // 页错误退出码
+            exit_current_and_run_next(-2);
         }
         Trap::Exception(Exception::IllegalInstruction) => {
             println!("[kernel] IllegalInstruction in application, kernel killed it.");
-            exit_current_and_run_next();
+            // 非法指令退出码
+            exit_current_and_run_next(-3);
         }
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
             set_next_ti_trigger();

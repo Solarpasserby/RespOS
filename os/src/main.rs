@@ -33,9 +33,13 @@ global_asm!(include_str!("link_app.S"));
 pub fn rust_main() -> ! {
     clear_bss(); // 手动清理 .bss
     mm::init();
+    task::add_initproc();
     trap::init();
     trap::enable_timer_interrupt();
     timer::set_next_ti_trigger();
+
+    loader::list_apps();
+    task::run_tasks();
 
     list_apps();
 
