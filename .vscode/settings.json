@@ -1,5 +1,6 @@
 {
     // Rust-Analyzer
     "rust-analyzer.cargo.target": "riscv64gc-unknown-none-elf",
-    "rust-analyzer.cargo.allTargets": false
+    "rust-analyzer.cargo.allTargets": false,
+    "json.schemaDownload.enable": false
 }

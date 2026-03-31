@@ -51,10 +51,12 @@ build-release-debug:
 # 检查编译环境
 env:
 	(rustup target list | grep "riscv64gc-unknown-none-elf (installed)") || rustup target add $(TARGET)
-	cargo install cargo-binutils
+	@command -v rust-objcopy >/dev/null || command -v rust-objdump >/dev/null || \
+		(echo "Missing rust binutils; installing cargo-binutils..." && cargo install cargo-binutils)
 	rustup component add rust-src
 	rustup component add llvm-tools-preview
 	@command -v $(GDB) >/dev/null || (echo "Missing GDB command: $(GDB)" && exit 1)
+	@test -x "$$(command -v $(GDB))" || (echo "GDB is not executable: $$(command -v $(GDB))" && exit 1)
 
 $(KERNEL_BIN): kernel
 	@$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $@

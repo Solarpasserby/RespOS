@@ -5,6 +5,7 @@
       "name": "Kernel: CodeLLDB attach (debug)",
       "type": "lldb",
       "request": "launch",
+      // Pre-launch task builds the kernel if needed, then starts QEMU with its GDB stub on port 1234.
       "targetCreateCommands": [
         "target create ${workspaceFolder}/os/target/riscv64gc-unknown-none-elf/debug/os"
       ],
@@ -24,6 +25,7 @@
       "name": "Kernel: CodeLLDB attach (release-debug)",
       "type": "lldb",
       "request": "launch",
+      // Pre-launch task builds the kernel if needed, then starts QEMU with its GDB stub on port 1234.
       "targetCreateCommands": [
         "target create ${workspaceFolder}/os/target/riscv64gc-unknown-none-elf/release-debug/os"
       ],
