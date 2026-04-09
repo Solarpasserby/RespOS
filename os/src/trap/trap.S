@@ -51,10 +51,8 @@ __alltraps:
     ld t1, 36*8(sp)
     # 读取 kernel_sp 
     ld sp, 35*8(sp)
-    # 切换到内核空间
-    csrw satp, t0
-    # 屏障
-    sfence.vma
+    # 用户页表映射内核后无需切换页表
+    # csrw satp, t0
     # 跳转到异常处理函数，由于异常处理部分的代码不是与内核代码一样使用恒等映射，所以不能使用call指令调用
     jr t1
 
@@ -63,9 +61,8 @@ __restore:
     # a0: 用户程序次高地址（异常上下文）
     # a1: 用户地址空间 token
     
-    # 切换用户空间
-    csrw satp, a1
-    sfence.vma
+    # 用户页表映射内核后无需切换页表
+    # csrw satp, a1
     # 写入 sscratch 用户程序次高地址指针（异常上下文）
     csrw sscratch, a0
     mv sp, a0

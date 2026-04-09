@@ -11,6 +11,7 @@ mod task;
 mod manager;
 mod switch;
 mod pid;
+mod kstack;
 mod processor;
 
 use lazy_static::lazy_static;

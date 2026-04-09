@@ -1,16 +1,14 @@
 // os/src/task/manager.rs
 
 use lazy_static::lazy_static;
+use spin::Mutex;
 use alloc::collections::vec_deque::VecDeque;
 use alloc::sync::Arc;
-use crate::sync::UPSafeCell;
 use super::task::TaskControlBlock;
 
 lazy_static! {
     /// 任务管理器
-    pub static ref TASK_MANAGER: UPSafeCell<TaskManager> = unsafe {
-        UPSafeCell::new(TaskManager::new())
-    };
+    pub static ref TASK_MANAGER: Mutex<TaskManager> = Mutex::new(TaskManager::new());
 }
 
 /// 任务调度管理器
@@ -37,9 +35,9 @@ impl TaskManager {
 
 /// 添加任务
 pub fn add_task(task: Arc<TaskControlBlock>) {
-    TASK_MANAGER.exclusive_access().add(task);
+    TASK_MANAGER.lock().add(task);
 }
 /// 获取任务
 pub fn fetch_task() -> Option<Arc<TaskControlBlock>> {
-    TASK_MANAGER.exclusive_access().fetch()
+    TASK_MANAGER.lock().fetch()
 }

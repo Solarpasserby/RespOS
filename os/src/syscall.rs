@@ -2,6 +2,7 @@
 
 //! ### 系统调用模块
 
+// const SYSCALL_OPEN: usize     = 56;
 const SYSCALL_READ: usize     = 63;
 const SYSCALL_WRITE: usize    = 64;
 const SYSCALL_EXIT: usize     = 93;
@@ -30,5 +31,5 @@ pub fn syscall(syscall_id: usize, args: [usize; 3]) -> isize {
         SYSCALL_EXEC     => sys_exec(args[0] as *const u8),
         SYSCALL_WAITPID  => sys_waitpid(args[0] as isize, args[1] as *mut i32),
         _                => panic!("Unsupported syscall_id: {}", syscall_id),
-    }
+    } 
 }

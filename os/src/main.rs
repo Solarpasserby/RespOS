@@ -13,14 +13,15 @@ extern crate bitflags;
 mod console;
 mod lang_item;
 mod sbi;
-mod sync;
 pub mod config;
+// pub mod drivers;
 pub mod task;
 pub mod loader;
 pub mod syscall;
 pub mod timer;
 pub mod trap;
 pub mod mm;
+pub mod utils;
 
 use core::arch::global_asm;
 

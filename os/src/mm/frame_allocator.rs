@@ -2,35 +2,15 @@
 
 use alloc::vec::Vec;
 use lazy_static::lazy_static;
-use crate::config::KERNEL_MEM_END;
-use crate::sync::UPSafeCell;
-use super::address::{ PhysAddr, PhysPageNum, get_bytes_array };
+use spin::Mutex;
+use crate::config::{KERNEL_BASE, MEMORY_END};
+use super::address::{PhysAddr, PhysPageNum};
 
 type FrameAllocatorImpl = StackFrameAllocator;
 lazy_static! {
-    pub static ref FRAME_ALLOCATOR: UPSafeCell<FrameAllocatorImpl> = unsafe {
-        UPSafeCell::new(FrameAllocatorImpl::new())
-    };
+    pub static ref FRAME_ALLOCATOR: Mutex<FrameAllocatorImpl> =
+        Mutex::new(FrameAllocatorImpl::new());
 }
-
-
-/// 初始化物理页帧分配器
-pub fn init_frame_allocator() {
-    unsafe extern "C" {
-        unsafe fn ekernel();
-    }
-    FRAME_ALLOCATOR
-        .exclusive_access()
-        .init(PhysAddr::from(ekernel as *const() as usize).ceil(), PhysAddr::from(KERNEL_MEM_END).floor());
-}
-
-pub fn frame_alloc() -> Option<FrameTracker> {
-    FRAME_ALLOCATOR
-        .exclusive_access()
-        .alloc()
-        .map(|ppn| FrameTracker::new(ppn))
-}
-
 
 /// 物理页帧追踪器
 /// 
@@ -56,30 +36,8 @@ impl FrameTracker {
         self.ppn
     }
 
-    // FIXME: 目前先使用最简单的实现，直接借助物理页表
-    // /// 获取页表页内的页表项数组
-    // pub fn pte_array(&self) -> &mut [PageTableEntry] {
-    //     let pa = PhysAddr::from(self.ppn);
-    //     unsafe {
-    //         core::slice::from_raw_parts_mut(
-    //             pa.0 as *mut PageTableEntry,
-    //             crate::config::PAGE_SIZE / core::mem::size_of::<PageTableEntry>(),
-    //         )
-    //     }
-    // }
-    // /// 获取页帧头部的任意类型数据
-    // pub fn get_head_mut<T>(&mut self) -> &mut T {
-    //     let pa = PhysAddr::from(self.ppn);
-    //     unsafe { &mut *(pa.0 as *mut T) }
-    // }
-    // /// 获取页帧内的字节数组
-    // pub fn bytes_array(&mut self) -> &mut [u8] {
-    //     let pa = PhysAddr::from(self.ppn);
-    //     unsafe { core::slice::from_raw_parts_mut(pa.0 as *mut u8, crate::config::PAGE_SIZE) }
-    // }
-
     fn clear(&mut self) {
-        for byte in get_bytes_array(self.ppn) {
+        for byte in self.ppn.get_bytes_array() {
             *byte = 0;
         }
     }
@@ -88,7 +46,7 @@ impl FrameTracker {
 impl Drop for FrameTracker {
     fn drop(&mut self) {
         FRAME_ALLOCATOR
-            .exclusive_access()
+            .lock()
             .dealloc(self.ppn());
     }
 }
@@ -149,4 +107,42 @@ impl StackFrameAllocator {
         self.current = l.0;
         self.end = r.0;
     }
+}
+
+/// 初始化物理页帧分配器
+/// 
+/// 分配的是 qemu 中真实的物理地址
+pub fn init_frame_allocator() {
+    unsafe extern "C" {
+        unsafe fn ekernel();
+    }
+    FRAME_ALLOCATOR.lock().init(
+        PhysAddr::from(ekernel as *const() as usize - KERNEL_BASE).ceil(), 
+        PhysAddr::from(MEMORY_END).floor(),
+    );
+}
+
+pub fn frame_alloc() -> Option<FrameTracker> {
+    FRAME_ALLOCATOR
+        .lock()
+        .alloc()
+        .map(|ppn| FrameTracker::new(ppn))
+}
+
+#[allow(unused)]
+pub fn frame_allocator_test() {
+    let mut v: Vec<FrameTracker> = Vec::new();
+    for i in 0..5 {
+        let frame = frame_alloc().unwrap();
+        println!("{:?}", frame);
+        v.push(frame);
+    }
+    v.clear();
+    for i in 0..5 {
+        let frame = frame_alloc().unwrap();
+        println!("{:?}", frame);
+        v.push(frame);
+    }
+    drop(v);
+    println!("frame_allocator_test passed!");
 }

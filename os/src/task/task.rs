@@ -1,14 +1,14 @@
 // os/src/task/task.rs
 
+use spin::{Mutex, MutexGuard};
 use alloc::vec::Vec;
-use alloc::sync::{ Arc, Weak };
-use core::cell::RefMut;
-use crate::config::TRAP_CONTEXT;
-use crate::sync::UPSafeCell;
-use crate::trap::{ TrapContext, trap_handler };
-use crate::mm::{ KERNEL_SPACE, MemorySet, VirtAddr, PhysAddr };
+use alloc::sync::{Arc, Weak};
+use crate::config::{PAGE_SIZE, USER_MAX};
+use crate::trap::{TrapContext, trap_handler };
+use crate::mm::{KERNEL_SPACE, MemorySet, VirtAddr, PhysAddr};
 use super::context::TaskContext;
-use super::pid::{ KernelStack, PidHandle, pid_alloc };
+use super::pid::{PidHandle, pid_alloc};
+use super::kstack::KernelStack;
 
 
 /// 任务控制块——此处的任务是对一定资源和某个程序的抽象表述
@@ -23,7 +23,7 @@ pub struct TaskControlBlock {
     pub pid: PidHandle,
     pub kernel_stack: KernelStack,
     // 可变
-    inner: UPSafeCell<TaskControlBlockInner>,
+    inner: Mutex<TaskControlBlockInner>,
 }
 
 impl TaskControlBlock {
@@ -35,7 +35,7 @@ impl TaskControlBlock {
         let task_ctrl_block = Self {
             pid,
             kernel_stack,
-            inner: unsafe { UPSafeCell::new(TaskControlBlockInner{
+            inner: Mutex::new(TaskControlBlockInner{
                 task_status: TaskStatus::Ready,
                 task_context: TaskContext::create_for_kstack_restore(kernel_stack_top),
                 memory_set,
@@ -43,13 +43,13 @@ impl TaskControlBlock {
                 children: Vec::new(),
                 base_size: user_sp,
                 exit_code: 0,
-            }) }
+            }),
         };
         let trap_cx = task_ctrl_block.inner_exclusive_access().get_trap_cx();
         *trap_cx = TrapContext::init_app_context(
             entry_point,
             user_sp,
-            KERNEL_SPACE.exclusive_access().token(),
+            KERNEL_SPACE.lock().token(),
             kernel_stack_top,
             trap_handler as *const() as usize
         );
@@ -66,8 +66,7 @@ impl TaskControlBlock {
         let task_ctrl_block = Arc::new(TaskControlBlock {
             pid,
             kernel_stack,
-            inner: unsafe {
-                UPSafeCell::new(TaskControlBlockInner {
+            inner: Mutex::new(TaskControlBlockInner {
                     task_status: TaskStatus::Ready,
                     task_context: TaskContext::create_for_kstack_restore(kernel_stack_top),
                     memory_set: MemorySet::from_existed_user(&parent_inner.memory_set),
@@ -76,7 +75,7 @@ impl TaskControlBlock {
                     base_size: parent_inner.base_size,
                     exit_code: 0,
                 })
-            },
+            ,
         });
 
         // 同时更新父任务状态
@@ -99,14 +98,14 @@ impl TaskControlBlock {
         *trap_cx = TrapContext::init_app_context(
             entry_point,
             user_sp,
-            KERNEL_SPACE.exclusive_access().token(),
+            KERNEL_SPACE.lock().token(),
             self.kernel_stack.get_top(),
             trap_handler as *const() as usize
         );
     }
 
-    pub fn inner_exclusive_access(&self) -> RefMut<'_, TaskControlBlockInner> {
-        self.inner.exclusive_access()
+    pub fn inner_exclusive_access(&self) -> MutexGuard<'_, TaskControlBlockInner> {
+        self.inner.lock()
     }
 
     pub fn getpid(&self) -> usize {
@@ -141,7 +140,7 @@ impl TaskControlBlockInner {
     pub fn get_trap_cx(&self) -> &'static mut TrapContext {
         let trap_cx_ppn: PhysAddr = self
             .memory_set
-            .translate(VirtAddr::from(TRAP_CONTEXT).into())
+            .translate(VirtAddr::from(USER_MAX - PAGE_SIZE).into())
             .unwrap()
             .ppn()
             .into();

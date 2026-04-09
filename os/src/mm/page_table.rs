@@ -3,9 +3,10 @@
 use bitflags::*;
 use alloc::{ vec, vec::Vec };
 use alloc::string::String;
-use crate::config::PAGE_SIZE;
-use super::address::{ PPN_WIDTH_SV39, PhysAddr, PhysPageNum, VirtAddr, VirtPageNum, StepByOne, get_bytes_array};
+use crate::config::KERNEL_BASE;
+use super::address::{ PPN_WIDTH_SV39, PhysAddr, PhysPageNum, VirtAddr, VirtPageNum, StepByOne};
 use super::frame_allocator::{ FrameTracker, frame_alloc };
+use super::memory_set::KERNEL_SPACE;
 
 /// 页表
 /// 
@@ -25,6 +26,19 @@ impl PageTable {
             frames: vec![frame],
         }
     }
+    /// 依据内核空间页表创建新页表
+    pub fn from_kernel() -> Self {
+        let frame = frame_alloc().unwrap();
+        let kernel_page_table = &KERNEL_SPACE.lock().page_table;
+        let kernel_root_ppn = kernel_page_table.root_ppn;
+        // 拷贝内核空间的根页表页
+        let index = VirtPageNum::from(KERNEL_BASE).indexes()[0];
+        frame.ppn().get_pte_array()[index..].copy_from_slice(&kernel_root_ppn.get_pte_array()[index..]);
+        PageTable {
+            root_ppn: frame.ppn(),
+            frames: vec![frame],
+        }
+    }
     /// 临时页表无数据，仅用于查询用户程序的数据
     pub fn from_token(satp: usize) -> Self {
         Self {
@@ -37,7 +51,7 @@ impl PageTable {
     pub fn token(&self) -> usize {
         8usize << 60 | self.root_ppn.0
     }
-    /// 转译虚拟页号为物理页号
+    /// 转译虚拟页号为对应页表项
     pub fn translate(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
         self.find_pte(vpn).map(|pte| *pte)
     }
@@ -62,7 +76,7 @@ impl PageTable {
         let mut ppn = self.root_ppn;
         let mut result: Option<&mut PageTableEntry> = None;
         for i in 0..3 {
-            let pte = &mut get_pte_array(&ppn)[idxs[i]];
+            let pte = &mut ppn.get_pte_array()[idxs[i]];
             if i == 2 {
                 // 直接返回目标的页表项，
                 result = Some(pte);
@@ -88,7 +102,7 @@ impl PageTable {
         let mut ppn = self.root_ppn;
         let mut result: Option<&mut PageTableEntry> = None;
         for i in 0..3 {
-            let pte = &mut get_pte_array(&ppn)[idxs[i]];
+            let pte = &mut ppn.get_pte_array()[idxs[i]];
             if i == 2 {
                 result = Some(pte);
                 break;
@@ -109,7 +123,7 @@ impl PageTable {
     pub fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) {
         let pte = self.find_pte_create(vpn).unwrap();
         assert!(!pte.is_valid(), "vpn {:?} is mapped before mapping", vpn); // 页表项应当没有被创建
-        *pte = PageTableEntry::new(ppn, flags | PTEFlags::VALID); // 被映射的物理页帧必定有效，这里需要统一配置
+        *pte = PageTableEntry::new(ppn, flags | PTEFlags::VALID | PTEFlags::ACCESSED | PTEFlags::DIRTY); // 被映射的物理页帧必定有效，这里需要统一配置
     }
     /// 在页表中消除物理地址和虚拟地址的映射关系
     pub fn unmap(&mut self, vpn: VirtPageNum) {
@@ -142,6 +156,38 @@ bitflags! {
         const GLOBAL   = 1 << 5;
         const ACCESSED = 1 << 6;
         const DIRTY    = 1 << 7;
+    }
+}
+
+#[allow(unused)]
+impl PTEFlags {
+    pub fn readable_flags(&self) -> String {
+        let mut ret = String::new();
+        if self.contains(PTEFlags::VALID) {
+            ret.push_str("V");
+        }
+        if self.contains(PTEFlags::READ) {
+            ret.push_str("R");
+        }
+        if self.contains(PTEFlags::WRITE) {
+            ret.push_str("W");
+        }
+        if self.contains(PTEFlags::EXECUTE) {
+            ret.push_str("X");
+        }
+        if self.contains(PTEFlags::USER) {
+            ret.push_str("U");
+        }
+        if self.contains(PTEFlags::GLOBAL) {
+            ret.push_str("G");
+        }
+        if self.contains(PTEFlags::ACCESSED) {
+            ret.push_str("A");
+        }
+        if self.contains(PTEFlags::DIRTY) {
+            ret.push_str("D");
+        }
+        ret
     }
 }
 
@@ -183,23 +229,6 @@ impl PageTableEntry {
 }
 
 
-/// 获取页表项数组（依赖物理页表）
-/// 
-/// 由于页表项是一段 `usize` 的数据，因此实际上只是返回一段可变数组切片
-/// 
-/// 由于需要递归查询页表，不得不实现该功能
-/// 现在又将其从 [`PhysPageNum`] 的方法中转移出来限制其使用
-fn get_pte_array(ppn: &PhysPageNum) -> &'static mut [PageTableEntry] {
-    let pa = PhysAddr::from(*ppn);
-    unsafe { core::slice::from_raw_parts_mut(pa.0 as *mut PageTableEntry, PAGE_SIZE / core::mem::size_of::<PageTableEntry>()) }
-}
-
-fn get_data_mut<T>(pa: &PhysAddr) -> &'static mut T {
-    unsafe { (pa.0 as *mut T).as_mut().unwrap() }
-}
-
-// TODO: 这里解引用应该使用的是虚拟地址，具体机制我还没理解透彻
-
 /// 转译虚拟地址，得到内核虚拟地址上的一段数据的可变借用
 /// 
 /// 以向量返回，其内部的每个数据代表单个内存页上的数据的可变借用
@@ -216,9 +245,9 @@ pub fn translate_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&'
         let mut end_va = VirtAddr::from(vpn);
         end_va = end_va.min(VirtAddr::from(end));
         if end_va.page_offset() == 0 {
-            v.push(&mut get_bytes_array(ppn)[start_va.page_offset()..]);
+            v.push(&mut ppn.get_bytes_array()[start_va.page_offset()..]);
         } else {
-            v.push(&mut get_bytes_array(ppn)[start_va.page_offset()..end_va.page_offset()])
+            v.push(&mut ppn.get_bytes_array()[start_va.page_offset()..end_va.page_offset()])
         }
         start = end_va.into();
     }
@@ -231,7 +260,7 @@ pub fn translate_str(token: usize, ptr: *const u8) -> String {
     let mut string = String::new();
     let mut va = ptr as usize;
     loop {
-        let ch: u8 = *get_data_mut(&page_table.translate_va(VirtAddr::from(va)).unwrap());
+        let ch: u8 = *page_table.translate_va(VirtAddr::from(va)).unwrap().get_mut();
         if ch == 0 { break; }
         else {
             string.push(ch as char);
@@ -245,5 +274,5 @@ pub fn translate_str(token: usize, ptr: *const u8) -> String {
 pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> &'static mut T {
     let page_table = PageTable::from_token(token);
     let va = ptr as usize;
-    get_data_mut(&page_table.translate_va(VirtAddr::from(va)).unwrap())
+    page_table.translate_va(VirtAddr::from(va)).unwrap().get_mut()
 }
