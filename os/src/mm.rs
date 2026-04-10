@@ -23,6 +23,6 @@ pub use memory_set::{ KERNEL_SPACE, MemorySet };
 pub fn init() {
     init_heap();
     init_frame_allocator();
-    KERNEL_SPACE.exclusive_access().activate();
+    KERNEL_SPACE.lock().activate();
     // 注意此时已经启用了虚拟地址
 }

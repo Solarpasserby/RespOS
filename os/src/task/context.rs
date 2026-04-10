@@ -1,6 +1,6 @@
 // os/src/task/context.rs
 
-use crate::trap::trap_return;
+use crate::trap::__restore;
 
 /// 任务上下文
 /// 
@@ -26,7 +26,7 @@ impl TaskContext {
     /// 创建用于恢复指定内核栈上用户异常上下文的任务上下文
     pub fn app_init_task_context(kernel_stack_ptr: usize, satp: usize) -> Self {
         Self {
-            ra: trap_return as *const() as usize,
+            ra: __restore as *const() as usize,
             sp: kernel_stack_ptr,
             s: [0; 12],
             satp: satp,

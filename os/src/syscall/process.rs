@@ -33,7 +33,7 @@ pub fn sys_fork() -> isize {
     let new_task = current_task.fork();
     let new_pid = new_task.pid();
     // 修改新任务的异常上下文，将其 sys_fork 的返回值设为 0
-    let new_task_cx = new_task.inner_exclusive_access().get_trap_cx();
+    let new_task_cx = new_task.get_trap_cx();
     new_task_cx.x[10] = 0;
     // 添加新任务
     add_task(new_task);
