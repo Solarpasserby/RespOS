@@ -32,7 +32,7 @@ impl Processor {
     pub fn new() -> Self {
         Self {
             current: None,
-            idle_task_cx: TaskContext::init_zero(),
+            idle_task_cx: TaskContext::app_init_task_context(0,0),
         }
     }
 
@@ -73,7 +73,7 @@ pub fn current_user_token() -> usize {
 /// 
 /// 生命周期警告，可变借用
 pub fn current_trap_cx() -> &'static mut TrapContext {
-    current_task().unwrap().inner_exclusive_access().get_trap_cx()
+    current_task().unwrap().get_trap_cx()
 }
 
 /// 运行任务

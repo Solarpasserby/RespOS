@@ -46,6 +46,11 @@ impl Drop for KernelStack {
 }
 
 /// 获取内核栈顶地址，保留守卫页面
-pub fn get_kernel_stack_top(app_id: usize) -> usize {
+fn get_kernel_stack_top(app_id: usize) -> usize {
     KERNEL_STACK_TOP - app_id * (KERNEL_STACK_SIZE + PAGE_SIZE)
+}
+
+pub fn get_kernel_stack_top_by_sp(sp: usize) -> usize {
+    let kernel_stack_id = (KERNEL_STACK_TOP - sp) / (KERNEL_STACK_SIZE + PAGE_SIZE);
+    get_kernel_stack_top(kernel_stack_id)
 }

@@ -9,6 +9,7 @@ use crate::trap::trap_return;
 ///     - `ra` 返回地址
 ///     - `sp` 栈指针
 ///     - `s` 临时寄存器组
+///     - `satp` 页表状态寄存器
 #[derive(Copy, Clone)]
 #[repr(C)]
 pub struct TaskContext {
@@ -17,24 +18,25 @@ pub struct TaskContext {
     // 调用约定被调用者保存的寄存器
     // 由于切换上下文总是以函数调用的形式实现，因而只作部分保存
     s: [usize; 12],
+    // 现在页表切换不在异常处理后进行，而是切换任务（进程）后进行
+    satp: usize,
 }
 
 impl TaskContext {
-    /// 全零初始化
-    pub fn init_zero() -> Self {
-        Self {
-            ra: 0,
-            sp: 0,
-            s: [0; 12],
-        }
-    }
-
     /// 创建用于恢复指定内核栈上用户异常上下文的任务上下文
-    pub fn create_for_kstack_restore(kernel_stack_ptr: usize) -> Self {
+    pub fn app_init_task_context(kernel_stack_ptr: usize, satp: usize) -> Self {
         Self {
             ra: trap_return as *const() as usize,
             sp: kernel_stack_ptr,
             s: [0; 12],
+            satp: satp,
         }
     }
+
+    pub fn set_sp(&mut self, sp: usize) {
+        self.sp = sp;
+    }
+    pub fn set_satp(&mut self, satp: usize) {
+        self.satp = satp;
+    } 
 }

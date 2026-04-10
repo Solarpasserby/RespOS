@@ -17,3 +17,12 @@ lorenash:
 这边发现 RocketOS 实现的无中断自旋锁 SpinNoIrq 值得借鉴，我现在使用 spin::Mutex 代替
 今天主要补完昨天的工作，把内核迁移到高地址，同时修改了 task 相关内容
 和老师聊了一下，目前工作方向应该没有问题，之后会重构中断，实现 ext4 文件系统
+
+### 04-10
+lorenash:
+在修改中断处理，发现对于异常上下文的存放也需要修改，现在不在用户空间中映射异常上下文段，而是把异常上下文存入内核栈，因此涉及到相当多的 Task 模块的修改
+注意到 RocketOS 的 TaskContext 使用了 tp 来记录内核栈上 Task 结构体的位置（我目前是这么理解的），没有使用 sp 来记录任务的内核栈。我目前保留 sp 的实现，之后可以考虑修改
+此外，RocketOS 的 KStack 与 pid 不再相关，而是直接存放内核栈指针，但是现在我保留原来的 KernelStack 的实现
+
+现在 TrapContext 不再映射到高地址，而是存放到内核栈管理
+现在 TaskContext 仍然保存在 TaskControlBlockInner 中，而非内核栈中。重构了相关的代码，应该可以实现任务切换

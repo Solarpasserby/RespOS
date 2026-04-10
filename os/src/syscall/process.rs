@@ -31,7 +31,7 @@ pub fn sys_fork() -> isize {
     let current_task = current_task().unwrap();
     // 此处发生任务复制
     let new_task = current_task.fork();
-    let new_pid = new_task.getpid();
+    let new_pid = new_task.pid();
     // 修改新任务的异常上下文，将其 sys_fork 的返回值设为 0
     let new_task_cx = new_task.inner_exclusive_access().get_trap_cx();
     new_task_cx.x[10] = 0;
@@ -64,7 +64,7 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
 
     // 无法找到目标子任务则返回
     if task_inner.children.iter()
-        .find(|p| pid == -1 || pid as usize == p.getpid())
+        .find(|p| pid == -1 || pid as usize == p.pid())
         .is_none() {
         return -1
     }
@@ -72,14 +72,14 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
     let pair = task_inner.children.iter()
         .enumerate()
         .find(|(_, p)| {
-            p.inner_exclusive_access().is_zombie() && (pid == -1 || pid as usize == p.getpid())
+            p.inner_exclusive_access().is_zombie() && (pid == -1 || pid as usize == p.pid())
         });
 
     if let Some((idx, _)) = pair {
         let child = task_inner.children.remove(idx);
         // 子任务已经结束，应当已被回收，此时仅有其父任务拥有其原子引用
         assert_eq!(Arc::strong_count(&child), 1);
-        let child_pid = child.getpid();
+        let child_pid = child.pid();
         let exit_code = child.inner_exclusive_access().exit_code;
         *translated_refmut(task_inner.get_user_token(), exit_code_ptr) = exit_code;
 

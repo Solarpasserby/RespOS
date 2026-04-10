@@ -3,9 +3,8 @@
 use spin::{Mutex, MutexGuard};
 use alloc::vec::Vec;
 use alloc::sync::{Arc, Weak};
-use crate::config::{PAGE_SIZE, USER_MAX};
-use crate::trap::{TrapContext, trap_handler };
-use crate::mm::{KERNEL_SPACE, MemorySet, VirtAddr, PhysAddr};
+use crate::trap::TrapContext;
+use crate::mm::MemorySet;
 use super::context::TaskContext;
 use super::pid::{PidHandle, pid_alloc};
 use super::kstack::KernelStack;
@@ -28,16 +27,22 @@ pub struct TaskControlBlock {
 
 impl TaskControlBlock {
     pub fn new(elf_data: &[u8]) -> Self {
-        let (memory_set, user_sp, entry_point) = MemorySet::from_elf_data(elf_data);
+        let (memory_set, token, user_sp, entry_point) = MemorySet::from_elf_data(elf_data);
         let pid = pid_alloc();
         let kernel_stack = KernelStack::new(&pid);
-        let kernel_stack_top = kernel_stack.get_top();
+        let mut kernel_stack_top = kernel_stack.get_top();
+        // 初始化内核栈上的异常上下文，并移动栈顶指针
+        let trap_context = TrapContext::init_app_context(entry_point, user_sp);
+        kernel_stack_top -= core::mem::size_of::<TrapContext>();
+        let trap_cx_ptr = kernel_stack_top as *mut TrapContext;
+        
+        // 创建进程控制块
         let task_ctrl_block = Self {
             pid,
             kernel_stack,
             inner: Mutex::new(TaskControlBlockInner{
                 task_status: TaskStatus::Ready,
-                task_context: TaskContext::create_for_kstack_restore(kernel_stack_top),
+                task_context: TaskContext::app_init_task_context(kernel_stack_top, token),
                 memory_set,
                 parent: None,
                 children: Vec::new(),
@@ -45,15 +50,8 @@ impl TaskControlBlock {
                 exit_code: 0,
             }),
         };
-        let trap_cx = task_ctrl_block.inner_exclusive_access().get_trap_cx();
-        *trap_cx = TrapContext::init_app_context(
-            entry_point,
-            user_sp,
-            KERNEL_SPACE.lock().token(),
-            kernel_stack_top,
-            trap_handler as *const() as usize
-        );
-
+        unsafe { trap_cx_ptr.write(trap_context); }
+    
         task_ctrl_block
     }
 
@@ -62,28 +60,29 @@ impl TaskControlBlock {
         let mut parent_inner = self.inner_exclusive_access();
         let pid = pid_alloc();
         let kernel_stack = KernelStack::new(&pid);
-        let kernel_stack_top = kernel_stack.get_top();
+        let mut kernel_stack_top = kernel_stack.get_top();
+        // 克隆内核栈上的异常上下文
+        self.clone_trap_cx(kernel_stack_top);
+        kernel_stack_top -= core::mem::size_of::<TrapContext>();
+
         let task_ctrl_block = Arc::new(TaskControlBlock {
             pid,
             kernel_stack,
             inner: Mutex::new(TaskControlBlockInner {
-                    task_status: TaskStatus::Ready,
-                    task_context: TaskContext::create_for_kstack_restore(kernel_stack_top),
-                    memory_set: MemorySet::from_existed_user(&parent_inner.memory_set),
-                    parent: Some(Arc::downgrade(self)),
-                    children: Vec::new(),
-                    base_size: parent_inner.base_size,
-                    exit_code: 0,
-                })
-            ,
+                task_status: TaskStatus::Ready,
+                // 全零初始化任务上下文，之后会修改
+                task_context: TaskContext::app_init_task_context(0,0),
+                memory_set: MemorySet::from_existed_user(&parent_inner.memory_set),
+                parent: Some(Arc::downgrade(self)),
+                children: Vec::new(),
+                base_size: parent_inner.base_size,
+                exit_code: 0,
+            }),
         });
+        task_ctrl_block.write_task_cx(kernel_stack_top);
 
         // 同时更新父任务状态
         parent_inner.children.push(task_ctrl_block.clone());
-
-        // 异常上下文中的 `kernel_sp` 字段需修改
-        let trap_cx = task_ctrl_block.inner_exclusive_access().get_trap_cx();
-        trap_cx.kernel_sp = kernel_stack_top;
 
         task_ctrl_block
     }
@@ -91,16 +90,13 @@ impl TaskControlBlock {
     // 为任务载入可执行程序
     pub fn exec(&self, elf_data: &[u8]) {
         // 主要修改任务的地址空间和异常上下文
-        let (memory_set, user_sp, entry_point) = MemorySet::from_elf_data(elf_data);
+        let (memory_set, _token, user_sp, entry_point) = MemorySet::from_elf_data(elf_data);
         let mut inner = self.inner_exclusive_access();
         inner.memory_set = memory_set;
-        let trap_cx = inner.get_trap_cx();
+        let trap_cx = self.get_trap_cx();
         *trap_cx = TrapContext::init_app_context(
             entry_point,
             user_sp,
-            KERNEL_SPACE.lock().token(),
-            self.kernel_stack.get_top(),
-            trap_handler as *const() as usize
         );
     }
 
@@ -108,7 +104,28 @@ impl TaskControlBlock {
         self.inner.lock()
     }
 
-    pub fn getpid(&self) -> usize {
+    pub fn get_trap_cx(&self) -> &'static mut TrapContext {
+        let trap_cx_ptr = self.kernel_stack.get_top() - core::mem::size_of::<TrapContext>();
+        unsafe { &mut *(trap_cx_ptr as *mut TrapContext) }
+    }
+
+    fn clone_trap_cx(&self, dst_kstack_top: usize) {
+        let src_trap_cx_ptr =
+            (self.kernel_stack.get_top() - core::mem::size_of::<TrapContext>()) as *const TrapContext;
+        let dst_trap_cx_ptr = 
+            (dst_kstack_top - core::mem::size_of::<TrapContext>()) as *mut TrapContext;
+        unsafe { dst_trap_cx_ptr.write(src_trap_cx_ptr.read()); }
+    }
+
+    fn write_task_cx(&self, kernel_stack_ptr: usize) {
+        let mut inner = self.inner_exclusive_access();
+        let token = inner.get_user_token();
+        let task_context = &mut inner.task_context;
+        task_context.set_sp(kernel_stack_ptr);
+        task_context.set_satp(token);
+    }
+
+    pub fn pid(&self) -> usize {
         self.pid.0
     }
 }
@@ -136,18 +153,6 @@ pub struct TaskControlBlockInner {
 }
 
 impl TaskControlBlockInner {
-    /// 获取内核栈上的用户程序异常上下文
-    pub fn get_trap_cx(&self) -> &'static mut TrapContext {
-        let trap_cx_ppn: PhysAddr = self
-            .memory_set
-            .translate(VirtAddr::from(USER_MAX - PAGE_SIZE).into())
-            .unwrap()
-            .ppn()
-            .into();
-        unsafe {
-            &mut *(trap_cx_ppn.0 as *mut TrapContext)
-        }
-    }
     /// 获取用户任务页表的 `stap` 寄存器值
     pub fn get_user_token(&self) -> usize {
         self.memory_set.token()

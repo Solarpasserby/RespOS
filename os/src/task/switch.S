@@ -27,6 +27,10 @@ __switch:
         SAVE_SN %n
         .set n, n+1
     .endr
+    # 保存 satp
+    csrr t0, satp
+    sd t0, 14*8(sp)
+
     # 恢复下个任务的上下文
     ld ra, 0(a1)
     .set n, 0
@@ -34,6 +38,13 @@ __switch:
         LOAD_SN %n
         .set n, n+1
     .endr
+    # 恢复 stap
+    ld t0, 14*8(a1)
+    csrw satp, t0
+    # 刷新 TLB
+    sfence.vma
+    
+    # 切换内核栈指针
     ld sp, 8(a1)
     # 返回
     ret

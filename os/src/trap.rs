@@ -86,6 +86,8 @@ pub fn trap_from_kernel() -> ! {
 /// 主要是调用 `__restore` 函数，该函数会恢复 [`TrapContext`]
 /// 
 /// 调用 `__restore` 时需额外修改两个寄存器，它们会被使用
+/// 
+/// TODO: 这里需要再做修改
 #[unsafe(no_mangle)]
 pub fn trap_return() -> ! {
     set_user_trap_entry();
@@ -95,11 +97,10 @@ pub fn trap_return() -> ! {
         fn __alltraps();
         fn __restore();
     }
-    let restore_va = __restore as *const() as usize - __alltraps as *const() as usize + TRAMPOLINE;
     unsafe {
         asm!(
             "fence.i",
-            "jr {restore_va}",
+            "call __restore",
             restore_va = in(reg) restore_va,
             in("a0") trap_cx_ptr,
             in("a1") user_satp,

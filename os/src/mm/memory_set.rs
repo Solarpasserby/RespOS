@@ -8,7 +8,7 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use alloc::sync::Arc;
 use core::arch::asm;
-use crate::config::{MEMORY_END, KERNEL_BASE, KERNEL_PN_OFFSET, KERNEL_STACK_SIZE, PAGE_SIZE, USER_MAX, USER_STACK_SIZE};
+use crate::config::{MEMORY_END, KERNEL_BASE, KERNEL_PN_OFFSET, KERNEL_STACK_SIZE, PAGE_SIZE, USER_STACK_SIZE};
 use super::address::{PhysPageNum, VirtAddr, VirtPageNum, VPNRange, StepByOne};
 use super::frame_allocator::{frame_alloc, FrameTracker};
 use super::page_table::{PageTable, PTEFlags, PageTableEntry};
@@ -118,6 +118,13 @@ impl MemorySet {
             areas: Vec::new(),
         }
     }
+    /// 创建一个拥有内核空间根页表页信息的地址空间，主要用于用户进程
+    pub fn from_kernel_page_table() -> Self {
+        Self {
+            page_table: PageTable::from_kernel(),
+            areas: Vec::new(),
+        }
+    }
 
     /// 创建内核地址空间
     /// 
@@ -180,17 +187,10 @@ impl MemorySet {
         memory_set
     }
 
-    /// 创建一个拥有内核空间根页表页信息的地址空间，主要用于用户进程
-    pub fn from_kernel_page_table() -> Self {
-        Self {
-            page_table: PageTable::from_kernel(),
-            areas: Vec::new(),
-        }
-    }
     /// 根据 elf 格式的用户程序文件数据，创建用户程序内核空间
     /// 
     /// 内部完成对elf文件的解析，当前内核对堆栈地址的处理能力不完善
-    pub fn from_elf_data(elf_data: &[u8]) -> (Self, usize, usize) {
+    pub fn from_elf_data(elf_data: &[u8]) -> (Self, usize, usize, usize) {
         let mut memory_set = Self::from_kernel_page_table();
         // 尝试移除跳板映射
         // memory_set.map_trampoline();
@@ -242,29 +242,22 @@ impl MemorySet {
             ), 
             None,
         );
-        // 映射堆段，当前没有堆段，暂时不映射
+        // TODO: 映射堆段，当前没有堆段，暂时不映射
         //
-        // 映射异常上下文，位于用户空间高地址
-        // 注：在创建用户任务时，地址空间中已经完成了异常上下文分配，要修改内部数据可通过固定虚拟地址实现
-        memory_set.push_empty_map_area(
-            MapArea::new(
-                VirtAddr::from(USER_MAX - PAGE_SIZE),
-                VirtAddr::from(USER_MAX),
-                MapType::Framed,
-                MapPermission::READ | MapPermission::WRITE,
-            ),
-            None
-        );
 
+        // 不再映射异常上下文到用户空间，发生异常时，切换到内核将用户上下文存入内核栈
+
+        let token = memory_set.page_table.token();
         (
             memory_set, // 用户程序地址空间
+            token,
             user_stack_top, // 用户程序栈顶地址
-            elf.header.pt2.entry_point() as usize // 用户程序入口地址
+            elf.header.pt2.entry_point() as usize, // 用户程序入口地址
         )
     }
 
     pub fn from_existed_user(user_space: &MemorySet) -> Self {
-        let mut memory_set = Self::new();
+        let mut memory_set = Self::from_kernel_page_table();
 
         // 映射其余段
         for area in user_space.areas.iter() {
