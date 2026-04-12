@@ -14,7 +14,7 @@ mod console;
 mod lang_item;
 mod sbi;
 pub mod config;
-// pub mod drivers;
+pub mod drivers;
 pub mod task;
 pub mod loader;
 pub mod syscall;
