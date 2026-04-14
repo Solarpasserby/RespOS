@@ -13,3 +13,4 @@ xmas-elf = "0.7.0"
 lwext4_rust = { git = "https://github.com/elliott10/lwext4_rust", default-features = false }
 virtio-drivers = "0.11.0"
 spin = "0.9.8"
+hashbrown = "0.16.1"

@@ -3,6 +3,8 @@
 #![no_std]
 #![no_main]
 #![feature(alloc_error_handler)]
+// TODO: 实现内核内部锁机制后立刻移除
+#![feature(sync_unsafe_cell)]
 
 extern crate alloc;
 
@@ -21,6 +23,7 @@ pub mod syscall;
 pub mod timer;
 pub mod trap;
 pub mod mm;
+pub mod fs;
 pub mod utils;
 
 use core::arch::global_asm;

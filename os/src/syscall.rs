@@ -14,11 +14,13 @@ const SYSCALL_WAITPID: usize  = 260;
 
 mod fs;
 mod process;
+mod errno;
 
 // 个人认为系统调用是提供给上层软件使用的
 // 因此不对外暴露内部子函数
 use fs::*;
 use process::*;
+pub use errno::*;
 
 pub fn syscall(syscall_id: usize, args: [usize; 3]) -> isize {
     match syscall_id {

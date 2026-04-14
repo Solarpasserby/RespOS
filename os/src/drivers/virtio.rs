@@ -30,13 +30,13 @@ pub struct VirtIoHalImpl;
 
 unsafe impl Hal for VirtIoHalImpl {
     fn dma_alloc(pages: usize, _direction: BufferDirection) -> (PhysAddr, NonNull<u8>) {
-        assert!(pages > 0, "dma_alloc: pages must be non-zero");
+        assert!(pages > 0, "[kernel] dma_alloc: pages must be non-zero");
 
         let mut ppn_base = KernelPPN(0);
         let mut frames = Vec::new();
 
         for i in 0..pages {
-            let frame = frame_alloc().expect("dma_alloc: frame allocation failed");
+            let frame = frame_alloc().expect("[kernel] dma_alloc: frame allocation failed");
             let ppn = frame.ppn();
 
             if i == 0 {
@@ -46,7 +46,7 @@ unsafe impl Hal for VirtIoHalImpl {
             assert_eq!(
                 ppn.0,
                 ppn_base.0 + i,
-                "dma_alloc: allocated frames are not contiguous"
+                "[kernel] dma_alloc: allocated frames are not contiguous"
             );
 
             frames.push(frame);
@@ -64,7 +64,7 @@ unsafe impl Hal for VirtIoHalImpl {
 
     unsafe fn dma_dealloc(pa: PhysAddr, _va: NonNull<u8>, pages: usize) -> i32 {
         let pa = KernelPA::from(pa);
-        let ppn_base: KernelPPN = pa.into();
+        let ppn_base = KernelPPN::from(pa);
 
         let frames = {
             let mut allocations = DMA_ALLOCATIONS.lock();

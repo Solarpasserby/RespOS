@@ -1,3 +1,5 @@
+// os/src/drivers/device.rs
+
 /// All supported device types.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum DeviceType {

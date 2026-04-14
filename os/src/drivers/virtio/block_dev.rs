@@ -1,8 +1,10 @@
+// os/src/drivers/virtio/block_dev.rs
+
 use spin::Mutex;
-use virtio_drivers::transport::Transport;
 use virtio_drivers::{
     Hal, 
-    device::blk::VirtIOBlk, 
+    device::blk::VirtIOBlk,
+    transport::Transport, 
     // transport::mmio::VirtIOHeader
 };
 use crate::drivers::{Device, BlockDevice, DevResult, DevError, DeviceType};
@@ -59,7 +61,7 @@ impl<H: Hal + 'static, T: Transport + 'static> BlockDevice for VirtIoBlkDev<H, T
     }
 
     fn flush(&self) -> DevResult {
-        Ok(())
+        self.inner.lock().flush().map_err(as_dev_err)
     }    
 }
 

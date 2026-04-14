@@ -1,5 +1,6 @@
 // os/src/drivers/disk.rs
 
+use lwext4_rust::KernelDevOp;
 use alloc::sync::Arc;
 use crate::config::BLOCK_SIZE;
 use super::{BlockDevice, DevResult};
@@ -114,5 +115,72 @@ impl Disk {
         let block_id = offset / BLOCK_SIZE;
         self.dev.write_block(block_id, buf).unwrap();
         Ok(buf.len())
+    }
+}
+
+impl KernelDevOp for Disk {
+    type DevType = Disk;
+
+    /// 从块设备读取数据
+    fn read(dev: &mut Self::DevType, mut buf: &mut [u8]) -> Result<usize, i32> {
+        let mut total_len = 0;
+        while !buf.is_empty() {
+            if let Ok(len) = dev.read_one(buf) {
+                if len == 0 { break; }
+                let tmp = buf;
+                buf = &mut tmp[len..]; // 推进指针（借用）
+                total_len += len;
+            } else {
+                return Err(-1)
+            }
+        }
+        Ok(total_len)
+    }
+
+    /// 向块设备写入数据
+    fn write(dev: &mut Self::DevType, mut buf: &[u8]) -> Result<usize, i32> {
+        let mut total_len = 0;
+        while !buf.is_empty() {
+            if let Ok(len) = dev.write_one(buf) {
+                if len == 0 { break; }
+                buf = &buf[len..]; // 推进指针（借用）
+                total_len += len;
+            } else {
+                return Err(-1)
+            }
+        }
+        Ok(total_len)
+    }
+
+    fn flush(dev: &mut Self::DevType) -> Result<usize, i32> {
+        dev.dev.flush().map_err(|_| -1)?;
+        Ok(0)
+    }
+
+    fn seek(dev: &mut Self::DevType, off: i64, whence: i32) -> Result<i64, i32> {
+        let size = dev.size();
+        let new_pos = match whence as u32 {
+            lwext4_rust::bindings::SEEK_SET => Some(off),
+            lwext4_rust::bindings::SEEK_CUR => dev
+                .position()
+                .checked_add_signed(off as isize)
+                .map(|v| v as i64),
+            lwext4_rust::bindings::SEEK_END => size
+                .checked_add_signed(off as isize)
+                .map(|v| v as i64),
+            _ => return Err(-1),
+        }
+        .ok_or(-1)?;
+
+        if new_pos < 0 {
+            return Err(-1);
+        }
+
+        if new_pos as usize > size {
+            println!("[kernel] WARNING: Seek beyond the end of the block device!!!");
+        }
+
+        dev.set_position(new_pos as usize);
+        Ok(new_pos)
     }
 }
