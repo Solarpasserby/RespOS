@@ -9,8 +9,8 @@ pub trait InodeOp: Any + Send + Sync {
     fn node_type(&self) -> InodeTypes;
     fn read_at(&self, off: usize, buf: &mut [u8]) -> usize;
     fn write_at(&self, off: usize, buf: &[u8]) -> usize;
-    fn create(&self, name: &str, type_: InodeTypes) -> Arc<dyn InodeOp>;
-    fn lookup(&self, name: &str) -> Arc<dyn InodeOp>;
+    fn create(&self, path: &str, type_: InodeTypes) -> Option<Arc<dyn InodeOp>>;
+    fn lookup(&self, path: &str) -> Arc<dyn InodeOp>;
 }
 
 #[repr(u8)]
