@@ -23,10 +23,16 @@
 // ├── preload.S           预加载 initproc
 // └── inode.rs            旧 FAT32 路线代码，目前没有被 mod.rs 引入
 
-mod ext4;
-mod vfs;
+pub mod ext4;
+pub mod vfs;
 mod kstat;
+mod mount;
+mod page_cache;
+mod path;
+mod stdio;
+mod pipe;
 
-use vfs::*;
-use ext4::*;
-use kstat::*;
+pub use kstat::*;
+pub use path::*;
+
+// pub fn open()

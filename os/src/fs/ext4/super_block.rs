@@ -3,7 +3,7 @@
 use lwext4_rust::{Ext4BlockWrapper, InodeTypes as Ext4InodeTypes};
 use alloc::sync::Arc;
 use crate::drivers::Disk;
-use super::super::{InodeOp, SuperBlockOp};
+use crate::fs::vfs::{InodeOp, SuperBlockOp};
 use super::Ext4Inode;
 
 unsafe impl Send for Ext4SuperBlock {}

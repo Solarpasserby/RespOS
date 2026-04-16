@@ -6,8 +6,7 @@ mod super_block;
 use lazy_static::lazy_static;
 use alloc::sync::Arc;
 use crate::drivers::{BlockDeviceImpl, Disk};
-use crate::fs::SuperBlockOp;
-use super::InodeOp;
+use super::vfs::{InodeOp, SuperBlockOp};
 
 pub use inode::*;
 pub use super_block::*;
