@@ -29,10 +29,12 @@ mod kstat;
 mod mount;
 mod page_cache;
 mod path;
+mod fdtable;
 mod stdio;
 mod pipe;
 
 pub use kstat::*;
 pub use path::*;
+use stdio::*;
 
 // pub fn open()

@@ -4,7 +4,9 @@
 mod board;
 mod driver;
 mod mm;
+mod fs;
 
 pub use board::*;
 pub use driver::*;
 pub use mm::*;
+pub use fs::*;
