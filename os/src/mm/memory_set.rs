@@ -221,7 +221,7 @@ impl MemorySet {
                 );
                 max_vpn_end = map_area.vpn_range.get_end();
                 memory_set.push_empty_map_area(
-                    map_area, 
+                    map_area,
                     Some(&elf.input[ph.offset() as usize..(ph.offset() + ph.file_size()) as usize])
                 );
             }

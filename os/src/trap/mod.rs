@@ -21,7 +21,7 @@ use crate::timer::set_next_ti_trigger;
 pub use context::TrapContext;
 
 
-global_asm!(include_str!("trap/trap.S"));
+global_asm!(include_str!("trap.S"));
 
 unsafe extern "C" {
     fn __trap_from_user();
