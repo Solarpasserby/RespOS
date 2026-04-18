@@ -53,7 +53,10 @@ pub fn trap_handler(cx: &mut TrapContext) {
     match scause.cause() {
         Trap::Exception(Exception::UserEnvCall) => {
             cx.sepc += 4; // 异常处理完成后直接执行后续指令
-            cx.x[10] = syscall(cx.x[17], [cx.x[10], cx.x[11], cx.x[12]]) as usize;
+            cx.x[10] = match syscall(cx.x[17], [cx.x[10], cx.x[11], cx.x[12]]) {
+                Ok(ret) => ret,
+                Err(err) => err.as_ret() as usize,
+            };
         }
         Trap::Exception(Exception::StoreFault) |
         Trap::Exception(Exception::StorePageFault) |

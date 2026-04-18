@@ -36,5 +36,6 @@ mod pipe;
 pub use kstat::*;
 pub use path::*;
 use stdio::*;
+pub use fdtable::*;
 
 // pub fn open()

@@ -63,7 +63,7 @@ pub fn exec(path: &str) -> isize { sys_exec(path) }
 pub fn wait(exit_code: &mut i32) -> isize {
     loop { // 等待任意进程
         match sys_waitpid(-1, exit_code as *mut _) {
-            -2 => { yield_(); } // 子进程未结束则让出资源
+            -11 => { yield_(); } // 子进程未结束则让出资源
             exit_pid => return exit_pid,
         }
     }
@@ -71,7 +71,7 @@ pub fn wait(exit_code: &mut i32) -> isize {
 pub fn waitpid(pid: usize, exit_code: &mut i32) -> isize {
     loop { // 等待指定进程
         match sys_waitpid(pid as isize, exit_code as *mut _) {
-            -2 => { yield_(); } // 子进程未结束则让出资源
+            -11 => { yield_(); } // 子进程未结束则让出资源
             exit_pid => return exit_pid,
         }
     }

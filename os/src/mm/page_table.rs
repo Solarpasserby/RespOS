@@ -1,10 +1,10 @@
 // os/src/mm/page_table.rs
 
 use bitflags::*;
-use alloc::{ vec, vec::Vec };
+use alloc::{vec, vec::Vec};
 use alloc::string::String;
 use crate::config::KERNEL_BASE;
-use super::address::{ PPN_WIDTH_SV39, PhysAddr, PhysPageNum, VirtAddr, VirtPageNum, StepByOne};
+use super::address::{PPN_WIDTH_SV39, PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
 use super::frame_allocator::{ FrameTracker, frame_alloc };
 use super::memory_set::KERNEL_SPACE;
 
@@ -228,51 +228,52 @@ impl PageTableEntry {
     }
 }
 
+// 重构地址空间后内核可以直接访问用户空间中的数据，无需再额外转译
 
-/// 转译虚拟地址，得到内核虚拟地址上的一段数据的可变借用
-/// 
-/// 以向量返回，其内部的每个数据代表单个内存页上的数据的可变借用
-pub fn translate_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&'static mut [u8]> {
-    let page_table = PageTable::from_token(token);
-    let mut start = ptr as usize;
-    let end = start + len;
-    let mut v = Vec::new();
-    while start < end {
-        let start_va = VirtAddr::from(start);
-        let mut vpn = start_va.floor();
-        let ppn = page_table.translate(vpn).unwrap().ppn();
-        vpn.step();
-        let mut end_va = VirtAddr::from(vpn);
-        end_va = end_va.min(VirtAddr::from(end));
-        if end_va.page_offset() == 0 {
-            v.push(&mut ppn.get_bytes_array()[start_va.page_offset()..]);
-        } else {
-            v.push(&mut ppn.get_bytes_array()[start_va.page_offset()..end_va.page_offset()])
-        }
-        start = end_va.into();
-    }
-    v
-}
+// /// 转译虚拟地址，得到内核虚拟地址上的一段数据的可变借用
+// /// 
+// /// 以向量返回，其内部的每个数据代表单个内存页上的数据的可变借用
+// pub fn translate_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&'static mut [u8]> {
+//     let page_table = PageTable::from_token(token);
+//     let mut start = ptr as usize;
+//     let end = start + len;
+//     let mut v = Vec::new();
+//     while start < end {
+//         let start_va = VirtAddr::from(start);
+//         let mut vpn = start_va.floor();
+//         let ppn = page_table.translate(vpn).unwrap().ppn();
+//         vpn.step();
+//         let mut end_va = VirtAddr::from(vpn);
+//         end_va = end_va.min(VirtAddr::from(end));
+//         if end_va.page_offset() == 0 {
+//             v.push(&mut ppn.get_bytes_array()[start_va.page_offset()..]);
+//         } else {
+//             v.push(&mut ppn.get_bytes_array()[start_va.page_offset()..end_va.page_offset()])
+//         }
+//         start = end_va.into();
+//     }
+//     v
+// }
 
-/// 转译虚拟地址，得到内核虚拟地址上以此为始的一个字符串
-pub fn translate_str(token: usize, ptr: *const u8) -> String {
-    let page_table = PageTable::from_token(token);
-    let mut string = String::new();
-    let mut va = ptr as usize;
-    loop {
-        let ch: u8 = *page_table.translate_va(VirtAddr::from(va)).unwrap().get_mut();
-        if ch == 0 { break; }
-        else {
-            string.push(ch as char);
-            va += 1;
-        }
-    }
-    string
-}
+// /// 转译虚拟地址，得到内核虚拟地址上以此为始的一个字符串
+// pub fn translate_str(token: usize, ptr: *const u8) -> String {
+//     let page_table = PageTable::from_token(token);
+//     let mut string = String::new();
+//     let mut va = ptr as usize;
+//     loop {
+//         let ch: u8 = *page_table.translate_va(VirtAddr::from(va)).unwrap().get_mut();
+//         if ch == 0 { break; }
+//         else {
+//             string.push(ch as char);
+//             va += 1;
+//         }
+//     }
+//     string
+// }
 
-/// 转译虚拟地址，得到内核虚拟地址上对应数据的可变引用
-pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> &'static mut T {
-    let page_table = PageTable::from_token(token);
-    let va = ptr as usize;
-    page_table.translate_va(VirtAddr::from(va)).unwrap().get_mut()
-}
+// /// 转译虚拟地址，得到内核虚拟地址上对应数据的可变引用
+// pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> &'static mut T {
+//     let page_table = PageTable::from_token(token);
+//     let va = ptr as usize;
+//     page_table.translate_va(VirtAddr::from(va)).unwrap().get_mut()
+// }

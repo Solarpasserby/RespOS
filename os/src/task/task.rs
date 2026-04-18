@@ -5,6 +5,8 @@ use alloc::vec::Vec;
 use alloc::sync::{Arc, Weak};
 use crate::trap::TrapContext;
 use crate::mm::MemorySet;
+use crate::fs::{FdTable, vfs::FileOp};
+use crate::syscall::SysResult;
 use super::context::TaskContext;
 use super::pid::{PidHandle, pid_alloc};
 use super::kstack::KernelStack;
@@ -44,6 +46,7 @@ impl TaskControlBlock {
                 task_status: TaskStatus::Ready,
                 task_context: TaskContext::app_init_task_context(kernel_stack_top, token),
                 memory_set,
+                fd_table: FdTable::new(),
                 parent: None,
                 children: Vec::new(),
                 base_size: user_sp,
@@ -73,6 +76,7 @@ impl TaskControlBlock {
                 // 全零初始化任务上下文，之后会修改
                 task_context: TaskContext::app_init_task_context(0,0),
                 memory_set: MemorySet::from_existed_user(&parent_inner.memory_set),
+                fd_table: FdTable::from_existed_user(&parent_inner.fd_table),
                 parent: Some(Arc::downgrade(self)),
                 children: Vec::new(),
                 base_size: parent_inner.base_size,
@@ -108,7 +112,6 @@ impl TaskControlBlock {
         let trap_cx_ptr = self.kernel_stack.get_top() - core::mem::size_of::<TrapContext>();
         unsafe { &mut *(trap_cx_ptr as *mut TrapContext) }
     }
-
     fn clone_trap_cx(&self, dst_kstack_top: usize) {
         let src_trap_cx_ptr =
             (self.kernel_stack.get_top() - core::mem::size_of::<TrapContext>()) as *const TrapContext;
@@ -116,7 +119,6 @@ impl TaskControlBlock {
             (dst_kstack_top - core::mem::size_of::<TrapContext>()) as *mut TrapContext;
         unsafe { dst_trap_cx_ptr.write(src_trap_cx_ptr.read()); }
     }
-
     fn write_task_cx(&self, kernel_stack_ptr: usize) {
         let mut inner = self.inner_exclusive_access();
         let token = inner.get_user_token();
@@ -127,6 +129,10 @@ impl TaskControlBlock {
 
     pub fn pid(&self) -> usize {
         self.pid.0
+    }
+
+    pub fn get_file(&self, fd: usize) -> SysResult<Arc<dyn FileOp>> {
+        self.inner_exclusive_access().fd_table.get_file(fd)
     }
 }
 
@@ -146,6 +152,7 @@ pub struct TaskControlBlockInner {
     pub task_status: TaskStatus,
     pub task_context: TaskContext,
     pub memory_set: MemorySet,
+    pub fd_table: FdTable,
     pub parent: Option<Weak<TaskControlBlock>>,
     pub children: Vec<Arc<TaskControlBlock>>,
     pub base_size: usize,
