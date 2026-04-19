@@ -1,7 +1,8 @@
 // os/src/mm/address.rs
 
 use core::fmt::{Debug, Formatter, self};
-use crate::config::{PAGE_SIZE, PAGE_SIZE_BITS};
+use crate::config::{KERNEL_BASE, PAGE_SIZE, PAGE_SIZE_BITS};
+use super::PageTableEntry;
 
 // 使用 sv39 页表模式
 pub(super) const PA_WIDTH_SV39: usize = 56;
@@ -61,20 +62,43 @@ impl From<usize> for VirtPageNum {
     fn from(value: usize) -> Self { Self(value & ((1 << VPN_WIDTH_SV39) - 1)) }
 }
 
+// 另一种地址表达，在转换时就检查地址有效性
+// impl From<usize> for PhysAddr {
+//     fn from(value: usize) -> Self {
+//         assert!(value < (1 << PA_WIDTH_SV39));
+//         Self(value) 
+//     }
+// }
+// impl From<usize> for PhysPageNum {
+//     fn from(value: usize) -> Self {
+//         assert!(value < (1 << PPN_WIDTH_SV39));
+//         Self(value) 
+//     }
+// }
+// impl From<usize> for VirtAddr {
+//     fn from(value: usize) -> Self {
+//         let upper = (value as isize) >> VA_WIDTH_SV39;
+//         assert!(upper == 0 || upper == -1, "[kernel] invalid sv39 virtual address: {:#x}", value);
+//         Self(value)
+//     }
+// }
+// impl From<usize> for VirtPageNum {
+//     fn from(value: usize) -> Self {
+//         assert!(value < (1 << VPN_WIDTH_SV39));
+//         Self(value) 
+//     }
+// }
+
 impl From<PhysAddr> for usize {
     fn from(value: PhysAddr) -> Self { value.0 }
 }
 impl From<PhysPageNum> for usize {
     fn from(value: PhysPageNum) -> Self { value.0 }
 }
+// TODO: 此处做了修改，之后某些地址越界的问题可能是这里导致的
 impl From<VirtAddr> for usize {
-    fn from(v: VirtAddr) -> Self {
-        // 实现符号拓展
-        if v.0 >= (1 << (VA_WIDTH_SV39 - 1)) {
-            v.0 | (!((1 << VA_WIDTH_SV39) - 1))
-        } else {
-            v.0
-        }
+    fn from(v: VirtAddr) -> Self { // 符号拓展
+        (((v.0 << 25) as isize) >> 25) as usize
     }
 }
 impl From<VirtPageNum> for usize {
@@ -101,6 +125,17 @@ impl From<VirtAddr> for VirtPageNum {
     }
 }
 
+impl StepByOne for PhysPageNum {
+    fn step(&mut self) {
+        self.0 += 1;
+    }
+}
+impl StepByOne for VirtPageNum {
+    fn step(&mut self) {
+        self.0 += 1;
+    }
+}
+
 impl PhysAddr {
     pub fn page_offset(self) -> usize { self.0 & (PAGE_SIZE - 1) }
 
@@ -114,6 +149,40 @@ impl VirtAddr {
     pub fn ceil(&self) -> VirtPageNum { VirtPageNum((self.0 + PAGE_SIZE - 1) >> PAGE_SIZE_BITS) }
 }
 
+impl PhysAddr {
+    pub fn get_mut<T>(&self) -> &'static mut T {
+        let ptr = (self.0 + KERNEL_BASE) as *mut T;
+        unsafe { ptr.as_mut().unwrap() }
+    }
+    pub fn get_ref<T>(&self) -> &'static T {
+        let ptr = (self.0 + KERNEL_BASE) as *const T;
+        unsafe { ptr.as_ref().unwrap() }
+    }
+}
+// 注意：通过 ppn 获取数据的方法仅限于数据存储于内核（待确认）；
+//      裸指针指向的是虚拟地址，因此由于内核线性映射偏移的存在地址还需作额外转换
+impl PhysPageNum {
+    pub fn get_pte_array(&self) -> &'static mut [PageTableEntry] {
+        let pa = PhysAddr::from(*self);
+        let va = VirtAddr::from(pa.0 + KERNEL_BASE);
+        let ptr = usize::from(va) as *mut PageTableEntry;
+        unsafe { core::slice::from_raw_parts_mut(ptr, 512) }
+    }
+    pub fn get_bytes_array(&self) -> &'static mut [u8] {
+        let pa = PhysAddr::from(*self);
+        let va = VirtAddr::from(pa.0 + KERNEL_BASE);
+        let ptr = usize::from(va) as *mut u8;
+        unsafe { core::slice::from_raw_parts_mut(ptr, 4096) }
+    }
+    /// Get mutable reference to T on `PhysPageNum`
+    pub fn get_mut<T>(&self) -> &'static mut T {
+        let pa = PhysAddr::from(*self);
+        let va = VirtAddr::from(pa.0 + KERNEL_BASE);
+        let ptr = usize::from(va) as *mut T;
+        unsafe { &mut *ptr }
+    }
+}
+
 impl VirtPageNum {
     pub fn indexes(&self) -> [usize; 3] {
         [
@@ -121,13 +190,6 @@ impl VirtPageNum {
             (self.0 >> 9) & 0x1FF,  // VPN[1]
             self.0 & 0x1FF,         // VPN[2]
         ]
-    }
-}
-
-
-impl StepByOne for VirtPageNum {
-    fn step(&mut self) {
-        self.0 += 1;
     }
 }
 
@@ -209,8 +271,3 @@ where
 /// 
 /// 主要用于描述一段连续的虚拟页表
 pub type VPNRange = SimpleRange<VirtPageNum>;
-
-pub fn get_bytes_array(ppn: PhysPageNum) -> &'static mut [u8] {
-    let pa = PhysAddr::from(ppn);
-    unsafe { core::slice::from_raw_parts_mut(pa.0 as *mut u8, crate::config::PAGE_SIZE) }
-}

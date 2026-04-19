@@ -9,6 +9,15 @@ use crate::sbi::set_timer;
 const TICKS_PER_SEC: usize = 100; // 每秒触发时钟中断的次数
 const MSEC_PER_SEC: usize = 1000; // 微秒
 
+#[derive(Clone, Copy, Debug, Default)]
+#[repr(C)]
+pub struct TimeSpec {
+    // 秒数
+    pub sec: usize,
+    // 纳秒数
+    pub nsec: usize,
+}
+
 /// 获取 `mtime` 的值
 pub fn get_time() -> usize {
     time::read()

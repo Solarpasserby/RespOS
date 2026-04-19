@@ -11,6 +11,7 @@ mod task;
 mod manager;
 mod switch;
 mod pid;
+mod kstack;
 mod processor;
 
 use lazy_static::lazy_static;
@@ -19,6 +20,7 @@ use crate::loader::get_app_data_by_name;
 use context::TaskContext;
 use task::{ TaskControlBlock, TaskStatus };
 pub use manager::add_task;
+pub use kstack::get_kernel_stack_top_by_sp;
 pub use processor::{
     current_task,
     current_user_token,
@@ -58,8 +60,9 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     task_inner.memory_set.recycle_data_pages();
     drop(task_inner);
     drop(task); // 该函数不会正常结束，手动删除引用
+    // 到此为止应当仅有其父任务有其原子引用，父任务将其回收后，资源将会回收
 
-    let mut _unused_task_cx = TaskContext::init_zero();
+    let mut _unused_task_cx = TaskContext::app_init_task_context(0,0);
     // 切换到空闲任务，实际上永远不会切换回来，这片内核栈也会被回收
     schedule(&mut _unused_task_cx as *mut _);
 }

@@ -3,15 +3,15 @@
 use riscv::register::satp;
 use lazy_static::lazy_static;
 use bitflags::bitflags;
+use spin::Mutex;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use alloc::sync::Arc;
 use core::arch::asm;
-use crate::config::{ KERNEL_MEM_END, KERNEL_STACK_SIZE, PAGE_SIZE, TRAMPOLINE, TRAP_CONTEXT, USER_STACK_SIZE };
-use crate::sync::UPSafeCell;
-use super::address::{ PhysAddr, PhysPageNum, VirtAddr, VirtPageNum, VPNRange, StepByOne, get_bytes_array };
-use super::frame_allocator::{ frame_alloc, FrameTracker };
-use super::page_table::{ PageTable, PTEFlags, PageTableEntry };
+use crate::config::{MEMORY_END, KERNEL_BASE, KERNEL_PN_OFFSET, KERNEL_STACK_SIZE, PAGE_SIZE, USER_STACK_SIZE};
+use super::address::{PhysPageNum, VirtAddr, VirtPageNum, VPNRange, StepByOne};
+use super::frame_allocator::{frame_alloc, FrameTracker};
+use super::page_table::{PageTable, PTEFlags, PageTableEntry};
 
 unsafe extern "C" {
     fn stext();
@@ -23,7 +23,6 @@ unsafe extern "C" {
     fn sbss_with_stack();
     fn ebss();
     fn ekernel();
-    fn strampoline();
 }
 
 
@@ -32,10 +31,9 @@ lazy_static! {
     /// 
     /// 内核采用恒等映射，因而开启虚拟地址后访问内核空间的地址不变
     /// 
-    /// 由于内核空间被所有用户空间共享，所以使用 [`Arc`] 来实现共享，使用 [`UPSafeCell`] 来实现内部可变性
-    pub static ref KERNEL_SPACE: Arc<UPSafeCell<MemorySet>> = Arc::new(unsafe {
-        UPSafeCell::new(MemorySet::new_kernel())
-    });
+    /// 由于内核空间被所有用户空间共享，所以使用 `Arc` 来实现共享，使用 `Mutex` 来实现内部可变性
+    pub static ref KERNEL_SPACE: Arc<Mutex<MemorySet>> = 
+        Arc::new(Mutex::new(MemorySet::new_kernel()));
 }
 
 
@@ -43,7 +41,7 @@ lazy_static! {
 /// 
 /// 一系列有关联的逻辑段 [`MapArea`]，地址不一定连续
 pub struct MemorySet {
-    page_table: PageTable,
+    pub page_table: PageTable,
     areas: Vec<MapArea>,
 }
 
@@ -113,25 +111,17 @@ impl MemorySet {
 }
 
 impl MemorySet {
-    /// 映射跳板空间
-    /// 
-    /// 跳板是一个特殊的区域，位于虚拟地址空间的最高端，大小为一页
-    /// 跳板提供一段用户和内核空间都能访问的内存区域
-    /// 在用户程序发生异常时，内核能够通过跳板访问用户程序的上下文信息
-    /// 
-    /// 鉴于其特殊性，跳板不作为一个逻辑段加入地址空间，而是单独映射
-    pub fn map_trampoline(&mut self) {
-        self.page_table.map(
-            VirtAddr::from(TRAMPOLINE).into(),
-            PhysAddr::from(strampoline as *const() as usize).into(),
-            PTEFlags::READ | PTEFlags::EXECUTE,
-        );
-    }
-
     /// 创建一个新的地址空间，内部没有逻辑段
     pub fn new() -> Self {
         Self {
             page_table: PageTable::new(),
+            areas: Vec::new(),
+        }
+    }
+    /// 创建一个拥有内核空间根页表页信息的地址空间，主要用于用户进程
+    pub fn from_kernel_page_table() -> Self {
+        Self {
+            page_table: PageTable::from_kernel(),
             areas: Vec::new(),
         }
     }
@@ -141,15 +131,15 @@ impl MemorySet {
     /// 为内核地址建立虚拟地址，使其在虚拟地址开启时仍能正常访问内核空间，内核采用恒等映射
     pub fn new_kernel() -> Self {
         let mut memory_set = Self::new();
-        // 映射跳板
-        memory_set.map_trampoline();
+        // 尝试移除跳板映射
+        // memory_set.map_trampoline();
         // 内核各段作为逻辑段加入地址空间
         // .text段
         memory_set.push_empty_map_area(
             MapArea::new(
                 VirtAddr::from(stext as *const () as usize),
                 VirtAddr::from(etext as *const () as usize),
-                MapType::Identical,
+                MapType::Direct,
                 MapPermission::READ | MapPermission::EXECUTE
             ),
             None
@@ -159,7 +149,7 @@ impl MemorySet {
             MapArea::new(
                 VirtAddr::from(srodata as *const () as usize),
                 VirtAddr::from(erodata as *const () as usize),
-                MapType::Identical,
+                MapType::Direct,
                 MapPermission::READ
             ),
             None
@@ -169,7 +159,7 @@ impl MemorySet {
             MapArea::new(
                 VirtAddr::from(sdata as *const () as usize),
                 VirtAddr::from(edata as *const () as usize),
-                MapType::Identical,
+                MapType::Direct,
                 MapPermission::READ | MapPermission::WRITE
             ),
             None
@@ -179,7 +169,7 @@ impl MemorySet {
             MapArea::new(
                 VirtAddr::from(sbss_with_stack as *const () as usize),
                 VirtAddr::from(ebss as *const () as usize),
-                MapType::Identical,
+                MapType::Direct,
                 MapPermission::READ | MapPermission::WRITE
             ),
             None
@@ -188,8 +178,8 @@ impl MemorySet {
         memory_set.push_empty_map_area(
             MapArea::new(
                 VirtAddr::from(ekernel as *const () as usize),
-                VirtAddr::from(KERNEL_MEM_END),
-                MapType::Identical,
+                VirtAddr::from(KERNEL_BASE + MEMORY_END),
+                MapType::Direct,
                 MapPermission::READ | MapPermission::WRITE
             ),
             None
@@ -200,14 +190,11 @@ impl MemorySet {
     /// 根据 elf 格式的用户程序文件数据，创建用户程序内核空间
     /// 
     /// 内部完成对elf文件的解析，当前内核对堆栈地址的处理能力不完善
-    /// 
-    /// TODO: 返回值为三元组，为规范之后将改用结构体返回
-    pub fn from_elf_data(elf_data: &[u8]) -> (Self, usize, usize) {
-        let mut memory_set = Self::new();
-        // 映射跳板
-        memory_set.map_trampoline();
+    pub fn from_elf_data(elf_data: &[u8]) -> (Self, usize, usize, usize) {
+        let mut memory_set = Self::from_kernel_page_table();
+        // 尝试移除跳板映射
+        // memory_set.map_trampoline();
         // 由于传入的是 elf 格式的数据，所以需要读取文件头来得到各段的地址，之后再做分配映射
-        // TODO: 此处对于 elf 格式的解析仍依赖于外部库，鉴于读取头文件信息的功能相对简单，建议考虑之后自己实现
         // 也正是因为是外部库，我对这部分的细节不是非常了解
         let elf = xmas_elf::ElfFile::new(elf_data).unwrap();
         let elf_header = elf.header;
@@ -234,7 +221,7 @@ impl MemorySet {
                 );
                 max_vpn_end = map_area.vpn_range.get_end();
                 memory_set.push_empty_map_area(
-                    map_area, 
+                    map_area,
                     Some(&elf.input[ph.offset() as usize..(ph.offset() + ph.file_size()) as usize])
                 );
             }
@@ -255,38 +242,30 @@ impl MemorySet {
             ), 
             None,
         );
-        // 映射堆段，当前没有堆段，暂时不映射
+        // TODO: 映射堆段，当前没有堆段，暂时不映射
         //
-        // 映射异常上下文，位于次高地址
-        // 注：在创建用户任务时，地址空间中已经完成了异常上下文分配，要修改内部数据可通过固定虚拟地址实现
-        memory_set.push_empty_map_area(
-            MapArea::new(
-                VirtAddr::from(TRAP_CONTEXT),
-                VirtAddr::from(TRAMPOLINE),
-                MapType::Framed,
-                MapPermission::READ | MapPermission::WRITE,
-            ),
-            None
-        );
 
+        // 不再映射异常上下文到用户空间，发生异常时，切换到内核将用户上下文存入内核栈
+
+        let token = memory_set.page_table.token();
         (
             memory_set, // 用户程序地址空间
+            token,
             user_stack_top, // 用户程序栈顶地址
-            elf.header.pt2.entry_point() as usize // 用户程序入口地址
+            elf.header.pt2.entry_point() as usize, // 用户程序入口地址
         )
     }
 
     pub fn from_existed_user(user_space: &MemorySet) -> Self {
-        let mut memory_set = Self::new();
-        memory_set.map_trampoline(); // 映射跳板段
+        let mut memory_set = Self::from_kernel_page_table();
 
         // 映射其余段
         for area in user_space.areas.iter() {
             let new_area = MapArea::from_another(area);
             memory_set.push_empty_map_area(new_area, None);
             for vpn in area.vpn_range { // 两个逻辑段的虚拟地址一致
-                let src = get_bytes_array(user_space.translate(vpn).unwrap().ppn());
-                let dst = get_bytes_array(memory_set.translate(vpn).unwrap().ppn());
+                let src = user_space.translate(vpn).unwrap().ppn().get_bytes_array();
+                let dst = memory_set.translate(vpn).unwrap().ppn().get_bytes_array();
                 dst.copy_from_slice(src);
             }
         }
@@ -368,7 +347,7 @@ impl MapArea {
         );
         loop {
             let src = &data[start..len.min(start + PAGE_SIZE)];
-            let dst = &mut get_bytes_array(page_table.translate(current_vpn).unwrap().ppn())[..src.len()];
+            let dst = &mut page_table.translate(current_vpn).unwrap().ppn().get_bytes_array()[..src.len()];
             dst.copy_from_slice(src);
             start += PAGE_SIZE;
             if start >= len { break; }
@@ -380,9 +359,9 @@ impl MapArea {
     pub fn map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
         let ppn: PhysPageNum;
         match self.map_type {
-            // 恒等映射，物理页号和虚拟页号一致，一般用于内核，无需分配页帧管理，因为内存地址固定
-            MapType::Identical => { ppn = PhysPageNum(vpn.0); }
-            // 随机映射？物理页号和虚拟页号无关，用于用户程序，分配页帧统一管理
+            // 直接映射，物理页号和虚拟页号存在线性偏移，一般用于内核，无需分配页帧管理，因为内存地址固定
+            MapType::Direct => { ppn = PhysPageNum(vpn.0 - KERNEL_PN_OFFSET); }
+            // 随机映射，物理页号和虚拟页号无关，用于用户程序，分配页帧统一管理
             MapType::Framed => {
                 let frame = frame_alloc().unwrap();
                 ppn = frame.ppn();
@@ -406,8 +385,8 @@ impl MapArea {
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub enum MapType {
-    Identical, // 恒等映射
-    Framed,    // 随机映射
+    Direct, // 直接映射——线性偏移
+    Framed, // 随机映射
 }
 
 bitflags! {

@@ -8,8 +8,8 @@
 //!     - 上下文切换的关键是 [`__switch`] 函数，该函数保存和恢复
 
 use lazy_static::lazy_static;
+use spin::Mutex;
 use alloc::sync::Arc;
-use crate::sync::UPSafeCell;
 use crate::trap::TrapContext;
 use super::task::{ TaskControlBlock, TaskStatus };
 use super::manager::fetch_task;
@@ -17,9 +17,7 @@ use super::switch::__switch;
 use super::context::TaskContext;
 
 lazy_static! {
-    pub static ref PROCESSOR: UPSafeCell<Processor> = unsafe {
-        UPSafeCell::new(Processor::new())
-    };
+    pub static ref PROCESSOR: Mutex<Processor> = Mutex::new(Processor::new());
 }
 
 /// 处理器管理
@@ -34,7 +32,7 @@ impl Processor {
     pub fn new() -> Self {
         Self {
             current: None,
-            idle_task_cx: TaskContext::init_zero(),
+            idle_task_cx: TaskContext::app_init_task_context(0,0),
         }
     }
 
@@ -56,12 +54,12 @@ impl Processor {
 
 /// 取出当前执行的任务
 pub fn take_current_task() -> Option<Arc<TaskControlBlock>> {
-    PROCESSOR.exclusive_access().take_current()
+    PROCESSOR.lock().take_current()
 }
 
 /// 获取当前执行的任务的一份拷贝
 pub fn current_task() -> Option<Arc<TaskControlBlock>> {
-    PROCESSOR.exclusive_access().current()
+    PROCESSOR.lock().current()
 }
 
 /// 获取当前执行的任务的 `stap` 寄存器值
@@ -75,7 +73,7 @@ pub fn current_user_token() -> usize {
 /// 
 /// 生命周期警告，可变借用
 pub fn current_trap_cx() -> &'static mut TrapContext {
-    current_task().unwrap().inner_exclusive_access().get_trap_cx()
+    current_task().unwrap().get_trap_cx()
 }
 
 /// 运行任务
@@ -85,7 +83,7 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// 该函数仅被空闲任务调用，因此任务调度的内容只会出现在初始栈上
 pub fn run_tasks() {
     loop {
-        let mut processor = PROCESSOR.exclusive_access();
+        let mut processor = PROCESSOR.lock();
         if let Some(task) = fetch_task() {
             let idle_task_cx_ptr = processor.get_idle_task_cx();
             let mut task_inner = task.inner_exclusive_access();
@@ -112,7 +110,7 @@ pub fn run_tasks() {
 /// > 它在决定换出的时候只需调用 schedule 而无需操心调度的事情，
 /// > 从而各执行流的分工更加明确了，虽然带来了更大的开销
 pub fn schedule(switched_task_cx_ptr: *mut TaskContext) {
-    let mut processor = PROCESSOR.exclusive_access();
+    let mut processor = PROCESSOR.lock();
     let idle_task_cx_ptr = processor.get_idle_task_cx();
     drop(processor);
     unsafe {
