@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use alloc::sync::{Arc, Weak};
 use crate::trap::TrapContext;
 use crate::mm::MemorySet;
-use crate::fs::{FdTable, vfs::FileOp};
+use crate::fs::{FdTable, FdEntry, Path};
 use crate::syscall::SysResult;
 use super::context::TaskContext;
 use super::pid::{PidHandle, pid_alloc};
@@ -73,7 +73,7 @@ impl TaskControlBlock {
             kernel_stack,
             inner: Mutex::new(TaskControlBlockInner {
                 task_status: TaskStatus::Ready,
-                // 全零初始化任务上下文，之后会修改
+                // 全零初始化任务上下文
                 task_context: TaskContext::app_init_task_context(0,0),
                 memory_set: MemorySet::from_existed_user(&parent_inner.memory_set),
                 fd_table: FdTable::from_existed_user(&parent_inner.fd_table),
@@ -83,6 +83,7 @@ impl TaskControlBlock {
                 exit_code: 0,
             }),
         });
+        // 修改任务异常上下文
         task_ctrl_block.write_task_cx(kernel_stack_top);
 
         // 同时更新父任务状态
@@ -131,8 +132,20 @@ impl TaskControlBlock {
         self.pid.0
     }
 
-    pub fn get_file(&self, fd: usize) -> SysResult<Arc<dyn FileOp>> {
-        self.inner_exclusive_access().fd_table.get_file(fd)
+    // 文件描述符相关操作
+    pub fn alloc_fd(&self, fd_entry: FdEntry) -> SysResult<usize> {
+        self.inner_exclusive_access().fd_table.alloc_fd(fd_entry)
+    }
+    pub fn set_fd(&self, fd: usize, fd_entry: FdEntry) -> SysResult<Option<FdEntry>> {
+        self.inner_exclusive_access().fd_table.set_fd(fd, fd_entry)
+    }
+    pub fn get_fd_entry(&self, fd: usize) -> SysResult<FdEntry> {
+        self.inner_exclusive_access().fd_table.get_fd_entry(fd)
+    }
+
+    // 获取当前工作路径
+    pub fn cwd(&self) -> Arc<Path> {
+        self.inner_exclusive_access().cwd.clone()
     }
 }
 
@@ -143,6 +156,8 @@ impl TaskControlBlock {
 ///     - `task_status`   任务状态
 ///     - `task_context`  任务上下文
 ///     - `memory_set`    任务的地址空间
+///     - `fd_table`      任务的文件描述符表，记录了当前任务使用的文件描述符
+///     - `cwd`           任务的当前工作目录
 ///     - ~~`trap_cx_ppn` 任务的异常上下文所在物理页号~~ 原字段只是为了获取页帧上的数据，现在使用更~~安全~~高效的方法获取
 ///     - `parent`        任务的父任务（进程），使用弱引用避免环形引用
 ///     - `children`      任务的子任务（进程），使用原子计数引用
@@ -153,6 +168,7 @@ pub struct TaskControlBlockInner {
     pub task_context: TaskContext,
     pub memory_set: MemorySet,
     pub fd_table: FdTable,
+    pub cwd: Arc<Path>,
     pub parent: Option<Weak<TaskControlBlock>>,
     pub children: Vec<Arc<TaskControlBlock>>,
     pub base_size: usize,

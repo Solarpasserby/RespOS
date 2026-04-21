@@ -1,4 +1,4 @@
-// os/src/fs/vfs.rs
+// os/src/fs/vfs/mod.rs
 
 mod dentry;
 mod inode;

@@ -24,20 +24,33 @@ impl FdTable {
 
     // 找到一个空位分配 FdEntry，返回 FdTable 中 Fd 的下标
     pub fn alloc_fd(&mut self, fd_entry: FdEntry) -> SysResult<usize> {
-        if self.table.len() >= FTB_RLIMIT {
-            return Err(Errno::EMFILE) 
-        } 
-
-        if let Some((fd, _fd_entry)) = self.table.iter()
+        if let Some((fd, it)) = self
+            .table
+            .iter_mut()
             .enumerate()
-            .find(|(_fd, it)| it.is_none()) {
-            self.table[fd] = Some(fd_entry);
-            Ok(fd)
-        } else {
-            let fd = self.table.len();
-            self.table.push(Some(fd_entry));
-            Ok(fd)
+            .find(|(_, it)| it.is_none())
+        {
+            *it = Some(fd_entry);
+            return Ok(fd);
         }
+        if self.table.len() >= FTB_RLIMIT {
+            return Err(Errno::EMFILE);
+        }
+
+        let fd = self.table.len();
+        self.table.push(Some(fd_entry));
+        Ok(fd)
+    }
+
+    pub fn set_fd(&mut self, fd: usize, fd_entry: FdEntry) -> SysResult<Option<FdEntry>> {
+        if fd >= FTB_RLIMIT {
+            return Err(Errno::EBADF);
+        }       
+        if fd >= self.table.len() {
+            self.table.resize_with(fd + 1, || None);
+        }
+        let old = self.table[fd].replace(fd_entry);
+        Ok(old)
     }
 
     pub fn close(&mut self, fd: usize) -> SysResult {
@@ -48,12 +61,13 @@ impl FdTable {
         Ok(())
     }
 
-    pub fn get_file(&self, fd: usize) -> SysResult<Arc<dyn FileOp>> {
+    /// 根据文件描述符找到对应的文件描述项
+    pub fn get_fd_entry(&self, fd: usize) -> SysResult<FdEntry> {
         if fd >= self.table.len() {
             return  Err(Errno::EBADF);
         }
         if let Some(fd_entry) = &self.table[fd] {
-            Ok(fd_entry.file.clone())
+            Ok(fd_entry.clone())
         } else {
             Err(Errno::EBADF)
         }
@@ -68,6 +82,7 @@ impl FdTable {
     }
 }
 
+/// 文件描述项
 #[derive(Clone)]
 pub struct FdEntry {
     pub file: Arc<dyn FileOp>,

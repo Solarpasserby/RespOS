@@ -2,6 +2,7 @@
 
 use spin::Mutex;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::any::Any;
 use crate::syscall::SysResult;
 use crate::fs::KStat;
@@ -68,7 +69,7 @@ impl File {
         self.inner.lock().offset
     }
 
-    pub fn readdir(&self) -> SysResult<alloc::vec::Vec<DirEntry>> {
+    pub fn readdir(&self) -> SysResult<Vec<DirEntry>> {
         self.inode.readdir()
     }
 
