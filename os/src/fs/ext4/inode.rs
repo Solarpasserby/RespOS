@@ -135,14 +135,12 @@ impl InodeOp for Ext4Inode {
         Ok(write_size)
     }
 
+    /// 查找与 name 匹配的子索引节点，约定 name 为常规文件名
     fn lookup(&self, name: &str) -> SysResult<Arc<dyn InodeOp>> {
         self.check_type(InodeType::Directory)?;
 
-        if name.is_empty() || name == "." {
-            return Ok(Arc::new(Self::new(&self.abs_path, self.ty.clone())));
-        }
-        if name == ".." {
-            return Err(Errno::ENOSYS);
+        if name.is_empty() || name == "." || name == ".." || name.contains('/') {
+            return Err(Errno::EINVAL);
         }
 
         let child_path = self.child_path(name);

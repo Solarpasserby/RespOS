@@ -94,3 +94,14 @@ bitflags::bitflags! {
         const O_DIRECTORY = 1 << 16;
     }
 }
+
+impl From<usize> for OpenFlags {
+    fn from(bits: usize) -> Self {
+        Self::from_bits_truncate(bits as u32)
+    }
+}
+impl From<OpenFlags> for usize {
+    fn from(flags: OpenFlags) -> Self {
+        flags.bits() as usize
+    }
+}

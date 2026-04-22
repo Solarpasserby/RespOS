@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use alloc::sync::{Arc, Weak};
 use crate::trap::TrapContext;
 use crate::mm::MemorySet;
-use crate::fs::{FdTable, FdEntry, Path};
+use crate::fs::{FdTable, FdEntry, Path, vfs::ROOT_DENTRY};
 use crate::syscall::SysResult;
 use super::context::TaskContext;
 use super::pid::{PidHandle, pid_alloc};
@@ -28,6 +28,9 @@ pub struct TaskControlBlock {
 }
 
 impl TaskControlBlock {
+    /// 新建任务
+    /// 
+    /// 事实上只有初始任务会借由这个方法产生
     pub fn new(elf_data: &[u8]) -> Self {
         let (memory_set, token, user_sp, entry_point) = MemorySet::from_elf_data(elf_data);
         let pid = pid_alloc();
@@ -47,6 +50,7 @@ impl TaskControlBlock {
                 task_context: TaskContext::app_init_task_context(kernel_stack_top, token),
                 memory_set,
                 fd_table: FdTable::new(),
+                cwd: Path::new(ROOT_DENTRY.clone()),
                 parent: None,
                 children: Vec::new(),
                 base_size: user_sp,
@@ -77,6 +81,7 @@ impl TaskControlBlock {
                 task_context: TaskContext::app_init_task_context(0,0),
                 memory_set: MemorySet::from_existed_user(&parent_inner.memory_set),
                 fd_table: FdTable::from_existed_user(&parent_inner.fd_table),
+                cwd: Path::from_existed_user(&parent_inner.cwd),
                 parent: Some(Arc::downgrade(self)),
                 children: Vec::new(),
                 base_size: parent_inner.base_size,

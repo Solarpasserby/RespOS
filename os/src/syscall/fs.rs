@@ -1,6 +1,6 @@
 // os/src/syscall/fs.rs
 
-use crate::fs::Stat;
+use crate::fs::{FdEntry, Stat, path_open};
 use crate::task::{current_task};
 use crate::utils::c_str_to_string;
 use super::{SysResult, Errno};
@@ -36,8 +36,10 @@ pub fn sys_write(fd: usize, buf: *mut u8, len: usize) -> SysResult<usize> {
 /// 系统调用 sys-open
 pub fn sys_open(path: *const u8, flags: usize, mode: usize) -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
-    let path = c_str_to_string(path);
-    Err(Errno::ENOSYS)
+    let path = c_str_to_string(path).as_str();
+    let file = path_open(path, flags, mode)?;
+    let fd = task.alloc_fd(FdEntry::new(file, flags.into()))?;
+    Ok(fd)
 }
 
 /// 系统调用 sys-close

@@ -15,5 +15,6 @@ pub use kstat::*;
 pub use path::*;
 use stdio::*;
 pub use fdtable::*;
+pub use namei::*;
 
 // pub fn open()

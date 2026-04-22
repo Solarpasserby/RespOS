@@ -2,7 +2,7 @@
 
 use lazy_static::lazy_static;
 use alloc::sync::{Arc, Weak};
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use spin::Mutex;
 use hashbrown::HashMap;
 use crate::fs::ext4::root_inode;
@@ -22,26 +22,49 @@ pub struct Dentry {
 }
 
 impl Dentry {
-    pub fn get_inode(&self) -> Option<Arc<dyn InodeOp>> {
+    // 获取内部数据
+    pub fn try_get_inode(&self) -> Option<Arc<dyn InodeOp>> {
         self.inner.lock().inode.clone()
+    }
+    pub fn get_inode(&self) -> Arc<dyn InodeOp> {
+        self.try_get_inode().expect("[kernel] func:get_inode() the inode is negative!")
     }
     pub fn get_parent(&self) -> Option<Arc<Dentry>> {
         self.inner
             .lock()
             .parent
             .clone()
-            .map(|p| p.upgrade().unwrap())
     }
     pub fn set_parent(&self, parent: Arc<Dentry>) {
-        self.inner.lock().parent = Some(Arc::downgrade(&parent));
+        self.inner.lock().parent = Some(parent);
         // self.inner.lock().parent = Some(parent);
     }
     pub fn get_child(self: &Arc<Dentry>, name: &str) -> Option<Arc<Dentry>> {
-        let inner = self.inner.lock();
-        if let Some(child) = inner.children.get(name) {
-            return Some(child.clone());
+        let mut inner = self.inner.lock();
+        let child = match inner.children.get(name) {
+            Some(child) => child.upgrade(),
+            None => None,
+        };
+
+        // 当 child 为空将其移除
+        if child.is_none() {
+            inner.children.remove(name);
         }
-        None
+
+        child
+    }
+
+    /// 插入孩子，仅更新自身状态，孩子的父亲需自己设置（好奇怪的描述）
+    pub fn insert_child(self: &Arc<Self>, name: &str, child: Arc<Dentry>) {
+        // child.set_parent(self.clone());
+        self.inner
+            .lock()
+            .children
+            .insert(name.to_string(), Arc::downgrade(&child));
+    }
+    /// 删除孩子，仅更新自身状态
+    pub fn remove_child(&self, name: &str) {
+        self.inner.lock().children.remove(name);
     }
 
     /// 用于处理路径解析时根目录没有父目录的问题
@@ -73,17 +96,21 @@ impl Dentry {
     }
 }
 
+/// 目录项内部数据
+/// 
+/// 将 parent 变为强引用，将 child 变为弱引用
+/// 主要是考虑到前者难以查找，而后者可以查找
 pub struct DentryInner {
     pub inode: Option<Arc<dyn InodeOp>>,
-    pub parent: Option<Weak<Dentry>>,
-    pub children: HashMap<String, Arc<Dentry>>,
+    pub parent: Option<Arc<Dentry>>,
+    pub children: HashMap<String, Weak<Dentry>>,
 }
 
 impl DentryInner {
     pub fn new(parent: Option<Arc<Dentry>>, inode: Arc<dyn InodeOp>) -> Self {
         Self {
             inode: Some(inode),
-            parent: parent.map(|p| Arc::downgrade(&p)),
+            parent: parent,
             children: HashMap::new(),
         }
     }
@@ -91,7 +118,7 @@ impl DentryInner {
     pub fn negative(parent: Option<Arc<Dentry>>) -> Self {
         Self {
             inode: None,
-            parent: parent.map(|p| Arc::downgrade(&p)),
+            parent: parent,
             children: HashMap::new(),
         }
     }
