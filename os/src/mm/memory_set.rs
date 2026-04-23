@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 use alloc::sync::Arc;
 use core::arch::asm;
 use crate::config::{MEMORY_END, KERNEL_BASE, KERNEL_PN_OFFSET, KERNEL_STACK_SIZE, PAGE_SIZE, USER_STACK_SIZE};
+use crate::syscall::{SysResult, Errno};
 use super::address::{PhysPageNum, VirtAddr, VirtPageNum, VPNRange, StepByOne};
 use super::frame_allocator::{frame_alloc, FrameTracker};
 use super::page_table::{PageTable, PTEFlags, PageTableEntry};
@@ -270,6 +271,49 @@ impl MemorySet {
             }
         }
         memory_set
+    }
+}
+
+impl MemorySet {
+    /// 检查用户传进来的虚拟地址的合法性
+    /// 
+    /// 使用 `MapArea` 做检查，而不是查页表
+    /// 要保证 `MapArea` 与页表的一致性，也就是说，页表中的映射都在MapArea中
+    pub fn check_valid_user_vpn(
+        &self,
+        vpn: VirtPageNum,
+        wanted_map_perm: MapPermission,
+    ) -> SysResult<VPNRange> {
+        let wanted = wanted_map_perm | MapPermission::USER;
+
+        for area in self.areas.iter().rev() {
+            if area.vpn_range.contain(&vpn) {
+                if area.map_perm.contains(wanted) {
+                    return Ok(area.vpn_range.clone());
+                } else {
+                    return Err(Errno::EFAULT);
+                }
+            }
+        }
+        Err(Errno::EFAULT)
+    }
+    pub fn check_valid_user_vpn_range(
+        &self,
+        vpn_range: VPNRange,
+        wanted_map_perm: MapPermission,
+    ) -> SysResult<VPNRange> {
+        let wanted = wanted_map_perm | MapPermission::USER;
+
+        for area in self.areas.iter().rev() {
+            if area.vpn_range.contain_range(&vpn_range) {
+                if area.map_perm.contains(wanted) {
+                    return Ok(area.vpn_range.clone());
+                } else {
+                    return Err(Errno::EFAULT);
+                }
+            }
+        }
+        Err(Errno::EFAULT)
     }
 }
 

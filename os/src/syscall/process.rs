@@ -9,7 +9,7 @@ use crate::task::{
 };
 use crate::loader::get_app_data_by_name;
 use crate::timer::get_time_ms;
-use crate::utils::c_str_to_string;
+use crate::mm::copy_cstr_from_user;
 use super::{SysResult, Errno};
 
 pub fn sys_exit(exit_code: i32) -> ! {
@@ -42,7 +42,7 @@ pub fn sys_fork() -> SysResult<usize> {
 }
 
 pub fn sys_exec(path: *const u8) -> SysResult<usize> {
-    let path = c_str_to_string(path);
+    let path = copy_cstr_from_user(path)?;
     if let Some(data) = get_app_data_by_name(path.as_str()) {
         let task = current_task().unwrap();
         task.exec(data);

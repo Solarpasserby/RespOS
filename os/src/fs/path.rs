@@ -1,6 +1,7 @@
 // os/src/fs/pipe.rs
 
 use alloc::sync::Arc;
+use alloc::string::String;
 use super::vfs::Dentry;
 
 pub struct Path {
@@ -8,7 +9,7 @@ pub struct Path {
 }
 
 impl Path {
-        pub fn new(/* mnt: Arc<VfsMount> ,*/dentry: Arc<Dentry>) -> Arc<Self> {
+    pub fn new(/* mnt: Arc<VfsMount> ,*/dentry: Arc<Dentry>) -> Arc<Self> {
         Arc::new(Path {
             // mnt,
             dentry,
@@ -25,5 +26,9 @@ impl Path {
             // mnt: path.mnt.clone(),
             dentry: path.dentry.clone(),
         })
+    }
+
+    pub fn abs_path(&self) -> String {
+        self.dentry.abs_path.clone()
     }
 }
