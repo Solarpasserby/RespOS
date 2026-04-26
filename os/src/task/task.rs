@@ -152,6 +152,9 @@ impl TaskControlBlock {
     pub fn cwd(&self) -> Arc<Path> {
         self.inner_exclusive_access().cwd.clone()
     }
+    pub fn set_cwd(&self, path: Arc<Path>) {
+        self.inner_exclusive_access().cwd = path; 
+    }
 }
 
 /// 任务控制块内部数据

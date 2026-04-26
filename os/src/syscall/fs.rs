@@ -1,8 +1,8 @@
 // os/src/syscall/fs.rs
 
-use crate::fs::{FdEntry, Stat, path_open};
+use crate::fs::{FdEntry, Stat, path_open, filename_create};
 use crate::task::{current_task};
-use crate::mm::copy_cstr_from_user;
+use crate::mm::{copy_cstr_from_user, copy_to_user};
 use super::{SysResult, Errno};
 
 /// 系统调用 sys-read
@@ -81,9 +81,10 @@ pub fn sys_dup2(fd_src: usize, fd_dst: usize) -> SysResult<usize> {
 }
 
 /// 系统调用 sys-mkdir
-pub fn sys_mkdir(path: *const u8, mode: u32) -> SysResult<usize> {
-    let _ = (path, mode);
-    Err(Errno::ENOSYS)
+pub fn sys_mkdir(path: *const u8, mode: usize) -> SysResult<usize> {
+    let path = copy_cstr_from_user(path)?;
+    filename_create(path.as_str(), 0, mode)?;
+    Ok(0)
 }
 
 /// 系统调用 sys-unlink
@@ -102,11 +103,13 @@ pub fn sys_chdir(path: *const u8) -> SysResult<usize> {
 pub fn sys_getcwd(buf: *mut u8, len: usize) -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
     let cwd = task.cwd().abs_path();
-    // if cwd.len() > len {
-    //     return Err(Errno::?);
-    // }
-
-    Err(Errno::ENOSYS)
+    if cwd.len() > len {
+        return Err(Errno::ERANGE);
+    }
+    let src = cwd.as_bytes().as_ptr();
+    copy_to_user(buf, src, len)?;
+    // 返回 buf 指针
+    Ok(buf as usize)
 }
 
 /// 系统调用 sys-pipe

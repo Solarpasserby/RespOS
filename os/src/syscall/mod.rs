@@ -36,7 +36,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 3]) -> SysResult<usize> {
     match syscall_id {
         SYSCALL_GETCWD   => sys_getcwd(args[0] as *mut u8, args[1]),
         SYSCALL_DUP      => sys_dup(args[0]),
-        SYSCALL_MKDIR    => sys_mkdir(args[0] as *const u8, args[1] as u32),
+        SYSCALL_MKDIR    => sys_mkdir(args[0] as *const u8, args[1] as usize),
         SYSCALL_UNLINK   => sys_unlink(args[0] as *const u8),
         SYSCALL_CHDIR    => sys_chdir(args[0] as *const u8),
         SYSCALL_OPEN     => sys_open(args[0] as *const u8, args[1], args[2]),

@@ -148,6 +148,34 @@ pub fn path_open(path: &str, flags: usize, mode: usize) -> SysResult<Arc<File>> 
     open_last_lookups(&mut nd, flags, mode)
 }
 
+pub fn filename_create(path: &str, flags: usize, mode: usize) -> SysResult<Arc<Dentry>> {
+    let mut nd = Nameidata::new(path);
+    // TDOD: 未处理符号连接，连续解析路径的情况
+    link_path_walk(&mut nd)?;
+
+    let name = nd.path_segments[nd.depth];
+    if name == "." || name == ".." {
+        Err(Errno::EEXIST)
+    } else {
+        let _dentry = lookup_dentry(&mut nd)?;
+        // TODO: 标准实现需要引入负目录项，这里先不实现
+        Err(Errno::EEXIST)
+    }
+}
+
+pub fn filename_lookup(path: &str, flags: usize, mode: usize) -> SysResult<usize> {
+    let mut nd = Nameidata::new(path);
+    link_path_walk(&mut nd)?;
+    let name = nd.path_segments[nd.depth];
+    if name == "." || name == ".." {
+        Err(Errno::EEXIST)
+    } else {
+        let _dentry = lookup_dentry(&mut nd)?;
+        // TODO: 标准实现需要引入负目录项，这里先不实现
+        Err(Errno::EEXIST)
+    }
+}
+
 pub fn link_path_walk(nd: &mut Nameidata) -> SysResult {
     println!("[kernel] func:link_path_walk path: {:?}", nd.path_segments);
     if nd.path_segments.is_empty() {

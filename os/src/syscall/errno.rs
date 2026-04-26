@@ -51,6 +51,8 @@ pub enum Errno {
     EROFS = 30,
     /// 管道破裂，例如向没有读端的 pipe 写入。
     EPIPE = 32,
+    /// 结果过大，常用于用户缓冲区太小。
+    ERANGE = 34,
     /// 文件名过长。
     ENAMETOOLONG = 36,
     /// 系统调用或功能尚未实现。
@@ -96,6 +98,7 @@ impl Errno {
             Errno::ENOTTY => "Not a typewriter", // 历史遗留术语，指代 TTY 设备，现在指代终端
             Errno::ENOSPC => "No space left on device",
             Errno::ESPIPE => "Illegal seek",
+            Errno::ERANGE => "Result out of range",
             Errno::EROFS => "Read-only file system",
             Errno::EPIPE => "Broken pipe",
             Errno::ENAMETOOLONG => "File name too long",
