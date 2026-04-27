@@ -32,7 +32,7 @@ impl PageTable {
         let kernel_page_table = &KERNEL_SPACE.lock().page_table;
         let kernel_root_ppn = kernel_page_table.root_ppn;
         // 拷贝内核空间的根页表页
-        let index = VirtPageNum::from(KERNEL_BASE).indexes()[0];
+        let index = VirtAddr::from(KERNEL_BASE).floor().indexes()[0];
         frame.ppn().get_pte_array()[index..].copy_from_slice(&kernel_root_ppn.get_pte_array()[index..]);
         PageTable {
             root_ppn: frame.ppn(),

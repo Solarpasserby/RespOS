@@ -48,6 +48,10 @@ pub fn enable_timer_interrupt() {
 /// 该函数根据 `CSR` 区分不同异常类型，对不同类型异常做不同处理
 #[unsafe(no_mangle)]
 pub fn trap_handler(cx: &mut TrapContext) {
+    // 设置状态寄存器，使内核可以访问用户数据
+    unsafe {
+        sstatus::set_sum();
+    }
     let scause = scause::read();
     let stval = stval::read();
     match scause.cause() {
@@ -64,7 +68,12 @@ pub fn trap_handler(cx: &mut TrapContext) {
         Trap::Exception(Exception::InstructionPageFault) |
         Trap::Exception(Exception::LoadFault) |
         Trap::Exception(Exception::LoadPageFault) => {
-            println!("[kernel] PageFault in application, bad addr = {:#x}, kernel killed it.", stval);
+            println!(
+                "[kernel] PageFault in application, cause = {:?}, sepc = {:#x}, bad addr = {:#x}, kernel killed it.",
+                scause.cause(),
+                cx.sepc,
+                stval
+            );
             // 页错误退出码
             exit_current_and_run_next(-2);
         }
@@ -86,5 +95,10 @@ pub fn trap_handler(cx: &mut TrapContext) {
 
 #[unsafe(no_mangle)]
 pub fn trap_from_kernel() -> ! {
-    panic!("[kernel] Trap is not defined in kernel!");
+    panic!(
+        "[kernel] Trap is not defined in kernel: cause = {:?}, sepc = {:#x}, stval = {:#x}",
+        scause::read().cause(),
+        riscv::register::sepc::read(),
+        stval::read()
+    );
 }
