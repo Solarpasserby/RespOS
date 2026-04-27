@@ -1,8 +1,10 @@
-/// 导入工具，打印和拼接字符串
+// os/src/console.rs
+
+//! 导入工具，打印和拼接字符串
 use crate::sbi::console_putchar;
 use core::fmt::{self, Write, Arguments};
 
-///  日志等级：定义 5 种消息级别
+/// 日志等级：定义 5 种消息级别
 #[derive(PartialEq, PartialOrd, Copy, Clone)]
 pub enum LogLevel {
     Error = 1,
@@ -12,7 +14,7 @@ pub enum LogLevel {
     Trace,
 }
 
-/// 只显示指定级别(Info)以上的日志
+/// 只显示指定级别 `Info` 以上的日志
 const LOG_LEVEL: LogLevel = LogLevel::Info;
 
 struct Stdout;
@@ -40,7 +42,7 @@ fn print_color(color: u8, args: Arguments) {
     print(format_args!("\x1b[0m\n"));
 }
 
-/// 够级别则按级别打印颜色，否则直接return;
+/// 够级别则按级别打印颜色，否则直接 return
 pub fn log(level: LogLevel, args: Arguments) {
     if level > LOG_LEVEL {
         return;
@@ -55,7 +57,7 @@ pub fn log(level: LogLevel, args: Arguments) {
     }
 }
 
-/// 定义宏简化以后的任务
+// 定义宏简化以后的任务
 
 #[macro_export]
 macro_rules! error {
@@ -66,7 +68,6 @@ macro_rules! error {
         );
     }
 }
-
 #[macro_export]
 macro_rules! warn {
     ($fmt: literal $(, $($arg: tt)+)?) => {
@@ -76,7 +77,6 @@ macro_rules! warn {
         );
     }
 }
-
 #[macro_export]
 macro_rules! info {
     ($fmt: literal $(, $($arg: tt)+)?) => {
@@ -86,7 +86,6 @@ macro_rules! info {
         );
     }
 }
-
 #[macro_export]
 macro_rules! debug {
     ($fmt: literal $(, $($arg: tt)+)?) => {
@@ -96,7 +95,6 @@ macro_rules! debug {
         );
     }
 }
-
 #[macro_export]
 macro_rules! trace {
     ($fmt: literal $(, $($arg: tt)+)?) => {
@@ -106,13 +104,13 @@ macro_rules! trace {
         );
     }
 }
+
 #[macro_export]
 macro_rules! print {
     ($fmt: literal $(, $($arg: tt)+)?) => {
         $crate::console::print(format_args!($fmt $(, $($arg)+)?));
     }
 }
-
 #[macro_export]
 macro_rules! println {
     ($fmt: literal $(, $($arg: tt)+)?) => {

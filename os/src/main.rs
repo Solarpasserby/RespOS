@@ -39,7 +39,7 @@ pub fn rust_main() -> ! {
     error!("this is error");
     warn!("this is warn");
     info!("this is info");
-    /// 级别不够不会展示
+    // 级别不够不会展示
     debug!("this is debug");
     trace!("this is trace");
 
