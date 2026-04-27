@@ -1,6 +1,7 @@
 // os/src/mm/address.rs
 
 use core::fmt::{Debug, Formatter, self};
+use core::ops::Sub;
 use crate::config::{KERNEL_BASE, PAGE_SIZE, PAGE_SIZE_BITS};
 use super::PageTableEntry;
 
@@ -192,6 +193,25 @@ impl VirtPageNum {
         ]
     }
 }
+
+impl Sub for VirtPageNum {
+    type Output = usize;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        let sign_bit = 1usize << (VPN_WIDTH_SV39 - 1);
+        assert_eq!(
+            self.0 & sign_bit,
+            rhs.0 & sign_bit,
+            "[kernel] virtual page subtraction requires pages in the same Sv39 half: {:?}, {:?}",
+            self,
+            rhs,
+        );
+        self.0
+            .checked_sub(rhs.0)
+            .expect("[kernel] virtual page subtraction underflow")
+    }
+}
+
 
 /// 步进特征
 pub trait StepByOne {

@@ -29,7 +29,7 @@ __switch:
     .endr
     # 保存 satp
     csrr t0, satp
-    sd t0, 14*8(sp)
+    sd t0, 14*8(a0)
 
     # 恢复下个任务的上下文
     ld ra, 0(a1)

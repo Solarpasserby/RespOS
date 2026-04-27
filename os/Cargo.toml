@@ -3,6 +3,10 @@ name = "RespOS"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "os"
+path = "src/main.rs"
+
 [dependencies]
 riscv = { git = "https://github.com/rcore-os/riscv", features = ["inline-asm"] }
 sbi-rt = { version = "0.0.3", features = ["legacy"] }

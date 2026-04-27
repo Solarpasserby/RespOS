@@ -8,7 +8,7 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use alloc::sync::Arc;
 use core::arch::asm;
-use crate::config::{MEMORY_END, KERNEL_BASE, KERNEL_PN_OFFSET, KERNEL_STACK_SIZE, PAGE_SIZE, USER_STACK_SIZE};
+use crate::config::{MEMORY_END, KERNEL_BASE, KERNEL_STACK_SIZE, PAGE_SIZE, USER_STACK_SIZE};
 use super::address::{PhysPageNum, VirtAddr, VirtPageNum, VPNRange, StepByOne};
 use super::frame_allocator::{frame_alloc, FrameTracker};
 use super::page_table::{PageTable, PTEFlags, PageTableEntry};
@@ -342,7 +342,7 @@ impl MapArea {
         let len = data.len();
         // 数据长度不超过逻辑段长度
         assert!(
-            len <= PAGE_SIZE * (self.vpn_range.get_end().0 - current_vpn.0),
+            len <= PAGE_SIZE * (self.vpn_range.get_end() - current_vpn),
             "[kernel] MapArea Panic: Copy data is out of vpn range!"
         );
         loop {
@@ -360,7 +360,9 @@ impl MapArea {
         let ppn: PhysPageNum;
         match self.map_type {
             // 直接映射，物理页号和虚拟页号存在线性偏移，一般用于内核，无需分配页帧管理，因为内存地址固定
-            MapType::Direct => { ppn = PhysPageNum(vpn.0 - KERNEL_PN_OFFSET); }
+            MapType::Direct => {
+                ppn = PhysPageNum(vpn - VirtAddr::from(KERNEL_BASE).floor());
+            }
             // 随机映射，物理页号和虚拟页号无关，用于用户程序，分配页帧统一管理
             MapType::Framed => {
                 let frame = frame_alloc().unwrap();
