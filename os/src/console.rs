@@ -1,7 +1,8 @@
+/// 导入工具，打印和拼接字符串
 use crate::sbi::console_putchar;
 use core::fmt::{self, Write, Arguments};
 
-/// ===== 日志等级 =====
+///  日志等级：定义 5 种消息级别
 #[derive(PartialEq, PartialOrd, Copy, Clone)]
 pub enum LogLevel {
     Error = 1,
@@ -11,13 +12,11 @@ pub enum LogLevel {
     Trace,
 }
 
-/// ===== 当前日志等级（可以调） =====
-/// 以后可以做成从 Makefile 传参
+/// 只显示指定级别(Info)以上的日志
 const LOG_LEVEL: LogLevel = LogLevel::Info;
 
-/// ===== 输出结构 =====
 struct Stdout;
-
+/// 封装底层打印，把文字写到屏幕上
 impl Write for Stdout {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         for c in s.chars() {
@@ -27,12 +26,11 @@ impl Write for Stdout {
     }
 }
 
-/// ===== 基础打印 =====
 pub fn print(args: Arguments) {
     Stdout.write_fmt(args).unwrap();
 }
 
-/// ===== 彩色打印核心 =====
+/// 利用终端颜色码给日志加颜色
 fn print_color(color: u8, args: Arguments) {
     // 开始颜色
     print(format_args!("\x1b[{}m", color));
@@ -42,7 +40,7 @@ fn print_color(color: u8, args: Arguments) {
     print(format_args!("\x1b[0m\n"));
 }
 
-/// ===== 日志打印（带等级控制） =====
+/// 够级别则按级别打印颜色，否则直接return;
 pub fn log(level: LogLevel, args: Arguments) {
     if level > LOG_LEVEL {
         return;
@@ -57,7 +55,7 @@ pub fn log(level: LogLevel, args: Arguments) {
     }
 }
 
-/// ===== 宏系统 =====
+/// 定义宏简化以后的任务
 
 #[macro_export]
 macro_rules! error {
