@@ -28,14 +28,21 @@ pub mod utils;
 
 use core::arch::global_asm;
 
-use crate::loader::list_apps;
 
 global_asm!(include_str!("entry.asm"));
 global_asm!(include_str!("link_app.S"));
 
 #[unsafe(no_mangle)]
 pub fn rust_main() -> ! {
-    clear_bss(); // 手动清理 .bss
+    clear_bss();
+    info!("=== KERNEL START ===");
+    error!("this is error");
+    warn!("this is warn");
+    info!("this is info");
+    /// 级别不够不会展示
+    debug!("this is debug");
+    trace!("this is trace");
+
     mm::init();
     task::add_initproc();
     trap::init();
@@ -44,8 +51,6 @@ pub fn rust_main() -> ! {
 
     loader::list_apps();
     task::run_tasks();
-
-    list_apps();
 
     panic!("unreachable!");
 }
