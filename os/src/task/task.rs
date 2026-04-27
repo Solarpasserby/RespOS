@@ -32,9 +32,10 @@ impl TaskControlBlock {
     /// 
     /// 事实上只有初始任务会借由这个方法产生
     pub fn new(elf_data: &[u8]) -> Self {
-        let (memory_set, token, user_sp, entry_point) = MemorySet::from_elf_data(elf_data);
         let pid = pid_alloc();
+        // 创建地址空间会拷贝内核页表，先创建内核栈生成页表映射，以保证任务切换后能正确访问内核栈
         let kernel_stack = KernelStack::new(&pid);
+        let (memory_set, token, user_sp, entry_point) = MemorySet::from_elf_data(elf_data);
         let mut kernel_stack_top = kernel_stack.get_top();
         // 初始化内核栈上的异常上下文，并移动栈顶指针
         let trap_context = TrapContext::init_app_context(entry_point, user_sp);
@@ -100,9 +101,12 @@ impl TaskControlBlock {
     // 为任务载入可执行程序
     pub fn exec(&self, elf_data: &[u8]) {
         // 主要修改任务的地址空间和异常上下文
-        let (memory_set, _token, user_sp, entry_point) = MemorySet::from_elf_data(elf_data);
+        let (memory_set, token, user_sp, entry_point) = MemorySet::from_elf_data(elf_data);
         let mut inner = self.inner_exclusive_access();
-        inner.memory_set = memory_set;
+        let old_memory_set = core::mem::replace(&mut inner.memory_set, memory_set);
+        inner.task_context.set_satp(token);
+        inner.memory_set.activate();
+        drop(old_memory_set);
         let trap_cx = self.get_trap_cx();
         *trap_cx = TrapContext::init_app_context(
             entry_point,

@@ -66,11 +66,8 @@ __restore:
     # 恢复 sstatus, sepc
     ld t0, 32*8(sp)
     ld t1, 33*8(sp)
-    ld t2, 2*8(sp)
     csrw sstatus, t0
     csrw sepc, t1
-    # 现在 sscratch 指向用户栈
-    csrw sscratch, t2
     # 恢复通用寄存器
     ld x1, 1*8(sp)
     ld x3, 3*8(sp)
@@ -81,8 +78,9 @@ __restore:
     .endr
     # 异常上下文出内核栈
     addi sp, sp, 34*8
-    # 现在 sp 指向用户栈, sscratch指向内核栈
-    csrrw sp, sscratch, sp
+    # sscratch 指向内核栈顶，sp 恢复为用户栈
+    csrw sscratch, sp
+    ld sp, -32*8(sp)
     # 设置 sstatus 的 SPP 位为 0，表示返回用户态
     csrc sstatus, 8 
     # 返回到用户态

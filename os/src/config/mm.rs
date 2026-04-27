@@ -4,7 +4,7 @@
 
 // 内核基地址——内核线性映射到高地址
 pub const KERNEL_BASE: usize = 0xffff_ffc0_0000_0000;
-pub const KERNEL_PN_OFFSET: usize = KERNEL_BASE >> PAGE_SIZE_BITS;
+// pub const KERNEL_PN_OFFSET: usize = KERNEL_BASE >> PAGE_SIZE_BITS;
 // 用户程序地址上界
 // pub const USER_MAX: usize = 0x0000_003f_ffff_ffff;
 
