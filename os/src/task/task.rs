@@ -148,6 +148,9 @@ impl TaskControlBlock {
     pub fn set_fd(&self, fd: usize, fd_entry: FdEntry) -> SysResult<Option<FdEntry>> {
         self.inner_exclusive_access().fd_table.set_fd(fd, fd_entry)
     }
+    pub fn close(&self, fd: usize) -> SysResult {
+        self.inner_exclusive_access().fd_table.close(fd)
+    }
     pub fn get_fd_entry(&self, fd: usize) -> SysResult<FdEntry> {
         self.inner_exclusive_access().fd_table.get_fd_entry(fd)
     }

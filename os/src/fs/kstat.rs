@@ -1,8 +1,12 @@
 // os/src/fs/kstat.rs
 
+use crate::config::BLOCK_SIZE;
 use crate::timer::TimeSpec;
 use super::vfs::InodeType;
 
+/// 内核对文件状态的描述
+/// 
+/// 当前实现相当简陋
 #[derive(Clone, Debug)]
 pub struct KStat {
     pub size: usize,
@@ -57,25 +61,39 @@ pub struct Stat {
     pub unused: u64,        //
 }
 
-// impl From<Kstat> for Stat {
-//     fn from(kstat: Kstat) -> Self {
-//         Self {
-//             st_dev: kstat.dev,
-//             st_ino: kstat.ino,
-//             st_mode: kstat.mode as u32,
-//             st_nlink: kstat.nlink,
-//             st_uid: kstat.uid,
-//             st_gid: kstat.gid,
-//             st_rdev: kstat.rdev,
-//             __pad: 0,
-//             st_size: kstat.size,
-//             st_blksize: kstat.blksize,
-//             __pad2: 0,
-//             st_blocks: kstat.blocks,
-//             st_atime: kstat.atime,
-//             st_mtime: kstat.mtime,
-//             st_ctime: kstat.ctime,
-//             unused: 0,
-//         }
-//     }
-// }
+/// 简单实现 [`KStat`] 到 [`Stat`] 的转换
+impl From<KStat> for Stat {
+    fn from(kstat: KStat) -> Self {
+        let st_mode = ((kstat.ty as u32) << 12) | default_perm(kstat.ty);
+        let st_size = kstat.size as u64;
+        let st_blksize = BLOCK_SIZE as u32;
+        let st_blocks = st_size.div_ceil(BLOCK_SIZE as u64);
+
+        Self {
+            st_dev: 0,
+            st_ino: 0,
+            st_mode,
+            st_nlink: 1,
+            st_uid: 0,
+            st_gid: 0,
+            st_rdev: 0,
+            __pad: 0,
+            st_size,
+            st_blksize,
+            __pad2: 0,
+            st_blocks,
+            st_atime: TimeSpec::default(),
+            st_mtime: TimeSpec::default(),
+            st_ctime: TimeSpec::default(),
+            unused: 0,
+        }
+    }
+}
+
+fn default_perm(ty: InodeType) -> u32 {
+    match ty {
+        InodeType::Directory => 0o755,
+        InodeType::Regular => 0o644,
+        _ => 0o666,
+    }
+}

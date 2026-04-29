@@ -32,6 +32,7 @@ pub trait FileOp: Any + Send + Sync {
     fn get_offset(&self) -> usize;
     // 获得文件打开标志
     fn get_flags(&self) -> OpenFlags;
+    fn get_stat(&self) -> SysResult<KStat>;
     fn readable(&self) -> bool;
     fn writable(&self) -> bool;
 }
@@ -107,6 +108,10 @@ impl FileOp for File {
 
     fn get_flags(&self) -> OpenFlags {
         self.inner.lock().flags
+    }
+
+    fn get_stat(&self) -> SysResult<KStat> {
+        self.stat()
     }
 
     fn readable(&self) -> bool {

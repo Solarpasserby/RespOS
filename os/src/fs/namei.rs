@@ -36,7 +36,9 @@ impl<'a> Nameidata<'a> {
     }
 }
 
-/// 查找目录项，首先查找 Dentry 的孩子，然后查找 DentryCache，最后查找 Inode 的子节点
+/// 根据当前 `Nameidate` 查找下一级目录项
+/// 
+/// 首先查找 Dentry 的孩子，然后查找 DentryCache，最后查找 Inode 的子节点
 pub fn lookup_dentry(nd: &mut Nameidata) -> SysResult<Arc<Dentry>> {
     let name = nd.path_segments[nd.depth];
 
@@ -92,8 +94,9 @@ fn install_child_dentry(
 pub fn open_last_lookups(
     nd: &mut Nameidata,
     flags: usize,
-    _mode: usize, // TODO: ode 变量未被使用
+    _mode: usize, // TODO: mode 变量未被使用
 ) -> SysResult<Arc<File>> {
+    // 目标为根目录或工作目录
     if nd.path_segments.is_empty() {
         return Ok(Arc::new(File::new(nd.dentry.get_inode(), OpenFlags::from(flags))));
     }
@@ -108,9 +111,10 @@ pub fn open_last_lookups(
         parent_dentry.get_inode()
     } else {
         match lookup_dentry(nd) {
+            // 成功
             Ok(dentry) => {
                 let inode = dentry.get_inode();
-                // 目标文件的类型不是目录则返回错误
+                // 期望打开目录，但实际文件类型不是目录，返回错误
                 if flags.contains(OpenFlags::O_DIRECTORY) && inode.node_type() != InodeType::Directory {
                     return Err(Errno::ENOTDIR);
                 }
@@ -118,7 +122,7 @@ pub fn open_last_lookups(
                 inode
             },
             Err(Errno::ENOENT) if flags.contains(OpenFlags::O_CREATE) => {
-                // 目标文件的类型不是目录则返回错误
+                // 期望打开目录，但目标不存在
                 if flags.contains(OpenFlags::O_DIRECTORY) {
                     return Err(Errno::ENOTDIR);
                 }
@@ -126,57 +130,81 @@ pub fn open_last_lookups(
                 let inode = current_dir_inode.create(name, InodeType::Regular)?;
                 install_child_dentry(&nd.dentry, name, inode.clone());
                 inode
-            }
+            },
             Err(err) => return Err(err),
         }
     };
 
-    if flags.contains(OpenFlags::O_DIRECTORY) && inode.node_type() != InodeType::Directory {
-        return Err(Errno::ENOTDIR);
-    }
-
     Ok(Arc::new(File::new(inode, flags)))
 }
 
+/// 根据路径打开文件
 pub fn path_open(path: &str, flags: usize, mode: usize) -> SysResult<Arc<File>> {
-    let mut nd = Nameidata::new(path);
     if path.is_empty() {
         return Err(Errno::ENOENT);
     }
-    // TDOD: 未处理符号连接，连续解析路径的情况
+    let mut nd = Nameidata::new(path);
     link_path_walk(&mut nd)?;
     open_last_lookups(&mut nd, flags, mode)
 }
 
-pub fn filename_create(path: &str, flags: usize, mode: usize) -> SysResult<Arc<Dentry>> {
+/// 根据路径创建文件
+pub fn filename_create(path: &str, ty: InodeType, _mode: usize) -> SysResult {
+    if path.is_empty() {
+        return Err(Errno::ENOENT);
+    }
     let mut nd = Nameidata::new(path);
-    // TDOD: 未处理符号连接，连续解析路径的情况
     link_path_walk(&mut nd)?;
 
+    // 目标为根目录或工作目录，返回错误
+    if nd.path_segments.is_empty() {
+        return Err(Errno::EEXIST);
+    }
     let name = nd.path_segments[nd.depth];
     if name == "." || name == ".." {
         Err(Errno::EEXIST)
     } else {
-        let _dentry = lookup_dentry(&mut nd)?;
-        // TODO: 标准实现需要引入负目录项，这里先不实现
-        Err(Errno::EEXIST)
+        // TODO: 引入负目录项需进行修改，这里先做简单实现
+        match lookup_dentry(&mut nd) {
+            Ok(_) => Err(Errno::EEXIST),
+            // 未找到目标文件，创建文件
+            Err(Errno::ENOENT) => {
+                let current_dir_inode = nd.dentry.get_inode();
+                let inode = current_dir_inode.create(name, ty)?;
+                install_child_dentry(&nd.dentry, name, inode);
+                Ok(())
+            },
+            Err(err) => Err(err),
+        }
     }
 }
 
-pub fn filename_lookup(path: &str, flags: usize, mode: usize) -> SysResult<usize> {
+/// 根据路径查询文件
+pub fn filename_lookup(path: &str, _mode: usize) -> SysResult<Arc<Dentry>> {
+    if path.is_empty() {
+        return Err(Errno::ENOENT);
+    }   
     let mut nd = Nameidata::new(path);
     link_path_walk(&mut nd)?;
+
+    // 目标为根目录或工作目录
+    if nd.path_segments.is_empty() {
+        return Ok(nd.dentry.clone());
+    }
     let name = nd.path_segments[nd.depth];
-    if name == "." || name == ".." {
-        Err(Errno::EEXIST)
+    if name == "." {
+        Ok(nd.dentry.clone())
+    } else if name == ".." {
+        let parent_dentry = nd.dentry.get_parent_or_self();
+        Ok(parent_dentry)
     } else {
-        let _dentry = lookup_dentry(&mut nd)?;
-        // TODO: 标准实现需要引入负目录项，这里先不实现
-        Err(Errno::EEXIST)
+        lookup_dentry(&mut nd)
     }
 }
 
+/// 路径解析主函数，循环解析每一层，定位到最后的目标
 pub fn link_path_walk(nd: &mut Nameidata) -> SysResult {
+    // TDOD: 未处理符号连接，连续解析路径的情况。主要这个函数被多次使用，我把未实现的提示搬到这里
     println!("[kernel] func:link_path_walk path: {:?}", nd.path_segments);
     if nd.path_segments.is_empty() {
         return Ok(());

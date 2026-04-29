@@ -1,35 +1,49 @@
 // os/src/syscall/fs.rs
 
-use crate::fs::{FdEntry, Stat, path_open, filename_create};
+use crate::fs::{FdEntry, Stat, Path, path_open, filename_create,  filename_lookup};
+use crate::fs::vfs::InodeType;
 use crate::task::{current_task};
-use crate::mm::{copy_cstr_from_user, copy_to_user};
+use crate::mm::{check_user_writable, copy_cstr_from_user, copy_from_user, copy_to_user};
 use super::{SysResult, Errno};
+
+// 使用 mm 实现的 `copy_cstr_from_user`, `copy_from_user`, `copy_to_user` 来访问用户空间的数据
+
+// TODO: write 和 read 借助堆上分配的空间中转数据，有额外开销，须优化
 
 /// 系统调用 sys-read
 pub fn sys_read(fd: usize, buf: *mut u8, len: usize) -> SysResult<usize> {
+    if len == 0 {
+        return Ok(0);
+    }
+    check_user_writable(buf, len)?;
+
     let task = current_task().expect("[kernel] current task is None.");
     let file = task.get_fd_entry(fd)?.file;
     if !file.readable() {
         return Err(Errno::EBADF);
     }
 
-    let ret = file.read(unsafe {
-        core::slice::from_raw_parts_mut(buf, len)
-    })?;
+    let mut kbuf = alloc::vec![0u8; len];
+    let ret = file.read(kbuf.as_mut_slice())?;
+    copy_to_user(buf, kbuf.as_ptr(), ret)?;
     Ok(ret)
 }
 
 /// 系统调用 sys-write
 pub fn sys_write(fd: usize, buf: *mut u8, len: usize) -> SysResult<usize> {
+    if len == 0 {
+        return Ok(0);
+    }
+
     let task = current_task().expect("[kernel] current task is None.");
     let file = task.get_fd_entry(fd)?.file;
     if !file.writable() {
         return Err(Errno::EBADF);
     }
 
-    let ret = file.write(unsafe {
-        core::slice::from_raw_parts_mut(buf, len)
-    })?;
+    let mut kbuf = alloc::vec![0u8; len];
+    copy_from_user(kbuf.as_mut_ptr(), buf, len)?;
+    let ret = file.write(kbuf.as_slice())?;
     Ok(ret)
 }
 
@@ -44,20 +58,27 @@ pub fn sys_open(path: *const u8, flags: usize, mode: usize) -> SysResult<usize> 
 
 /// 系统调用 sys-close
 pub fn sys_close(fd: usize) -> SysResult<usize> {
-    let _ = fd;
-    Err(Errno::ENOSYS)
+    let task = current_task().expect("[kernel] current task is None.");
+    task.close(fd)?;
+    Ok(0)
 }
 
 /// 系统调用 sys-stat
 pub fn sys_stat(path: *const u8, stat: *mut Stat) -> SysResult<usize> {
-    let _ = (path, stat);
-    Err(Errno::ENOSYS)
+    let path = copy_cstr_from_user(path)?;
+    let dentry = filename_lookup(path.as_str(), 0)?;
+    let stat_buf: Stat = dentry.get_inode().stat()?.into();
+    copy_to_user(stat, &stat_buf as *const Stat, 1)?;
+    Ok(0)
 }
 
 /// 系统调用 sys-fstat
 pub fn sys_fstat(fd: usize, stat: *mut Stat) -> SysResult<usize> {
-    let _ = (fd, stat);
-    Err(Errno::ENOSYS)
+    let task = current_task().expect("[kernel] current task is None.");
+    let file = task.get_fd_entry(fd)?.file;
+    let stat_buf: Stat = file.get_stat()?.into();
+    copy_to_user(stat, &stat_buf as *const Stat, 1)?;
+    Ok(0)
 }
 
 /// 系统调用 sys-lseek
@@ -73,6 +94,7 @@ pub fn sys_dup(fd: usize) -> SysResult<usize> {
     task.alloc_fd(fd_entry)
 }
 
+/// 系统调用 sys-dup2
 pub fn sys_dup2(fd_src: usize, fd_dst: usize) -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
     let fd_entry = task.get_fd_entry(fd_src)?;
@@ -83,7 +105,7 @@ pub fn sys_dup2(fd_src: usize, fd_dst: usize) -> SysResult<usize> {
 /// 系统调用 sys-mkdir
 pub fn sys_mkdir(path: *const u8, mode: usize) -> SysResult<usize> {
     let path = copy_cstr_from_user(path)?;
-    filename_create(path.as_str(), 0, mode)?;
+    filename_create(path.as_str(), InodeType::Directory, mode)?;
     Ok(0)
 }
 
@@ -95,8 +117,11 @@ pub fn sys_unlink(path: *const u8) -> SysResult<usize> {
 
 /// 系统调用 sys-chdir
 pub fn sys_chdir(path: *const u8) -> SysResult<usize> {
-    let _ = path;
-    Err(Errno::ENOSYS)
+    let task = current_task().expect("[kernel] current task is None.");
+    let path = copy_cstr_from_user(path)?;
+    let dentry = filename_lookup(path.as_str(), 0)?;
+    task.set_cwd(Path::new(dentry));
+    Ok(0)
 }
 
 /// 系统调用 sys-getcwd
@@ -117,5 +142,3 @@ pub fn sys_pipe(pipefd: *mut u32) -> SysResult<usize> {
     let _ = pipefd;
     Err(Errno::ENOSYS)
 }
-
-// TODO: 系统调用对于用户数据的直接读写不安全，需要改进
