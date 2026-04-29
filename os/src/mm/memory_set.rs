@@ -8,7 +8,7 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use alloc::sync::Arc;
 use core::arch::asm;
-use crate::config::{MEMORY_END, KERNEL_BASE, KERNEL_STACK_SIZE, PAGE_SIZE, USER_STACK_SIZE};
+use crate::config::{MEMORY_END, KERNEL_BASE, KERNEL_STACK_SIZE, PAGE_SIZE, USER_STACK_SIZE, MMIO};
 use crate::syscall::{SysResult, Errno};
 use super::address::{PhysPageNum, VirtAddr, VirtPageNum, VPNRange, StepByOne};
 use super::frame_allocator::{frame_alloc, FrameTracker};
@@ -185,6 +185,19 @@ impl MemorySet {
             ),
             None
         );
+        // MMIO 部分
+        for (start, len) in MMIO {
+            memory_set.push_empty_map_area(
+                MapArea::new(
+                    VirtAddr::from(KERNEL_BASE + start),
+                    VirtAddr::from(KERNEL_BASE + start + len),
+                    MapType::Direct,
+                    MapPermission::READ | MapPermission::WRITE,
+                ),
+                None,
+            );
+        }
+        
         memory_set
     }
 

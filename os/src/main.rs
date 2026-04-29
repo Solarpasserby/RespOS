@@ -36,6 +36,7 @@ global_asm!(include_str!("link_app.S"));
 #[unsafe(no_mangle)]
 pub fn rust_main() -> ! {
     clear_bss(); // 手动清理 .bss
+
     mm::init();
     task::add_initproc();
     trap::init();
