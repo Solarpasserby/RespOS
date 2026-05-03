@@ -128,11 +128,15 @@ pub fn sys_chdir(path: *const u8) -> SysResult<usize> {
 pub fn sys_getcwd(buf: *mut u8, len: usize) -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
     let cwd = task.cwd().abs_path();
-    if cwd.len() > len {
+    if cwd.len() >= len {
         return Err(Errno::ERANGE);
     }
     let src = cwd.as_bytes().as_ptr();
-    copy_to_user(buf, src, len)?;
+    copy_to_user(buf, src, cwd.len())?;
+    let nul = 0u8;
+    unsafe {
+        copy_to_user(buf.add(cwd.len()), &nul as *const u8, 1)?;
+    }
     // 返回 buf 指针
     Ok(buf as usize)
 }

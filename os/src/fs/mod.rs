@@ -17,4 +17,3 @@ use stdio::*;
 pub use fdtable::*;
 pub use namei::*;
 
-// pub fn open()

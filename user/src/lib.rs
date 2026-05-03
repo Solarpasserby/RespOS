@@ -53,8 +53,36 @@ fn clear_bss() {
 
 use syscall::*;
 
+pub use syscall::{Stat, TimeSpec};
+
+pub const O_RDONLY: usize = 0;
+pub const O_WRONLY: usize = 1 << 0;
+pub const O_RDWR: usize = 1 << 1;
+pub const O_CREATE: usize = 1 << 6;
+pub const O_TRUNC: usize = 1 << 9;
+pub const O_APPEND: usize = 1 << 10;
+pub const O_DIRECTORY: usize = 1 << 16;
+
+pub const SEEK_SET: usize = 0;
+pub const SEEK_CUR: usize = 1;
+pub const SEEK_END: usize = 2;
+
 pub fn read(fd: usize, buf: &mut [u8]) -> isize { sys_read(fd, buf) }
 pub fn write(fd: usize, buf: &[u8]) -> isize { sys_write(fd, buf) }
+pub fn getcwd(buf: &mut [u8]) -> isize { sys_getcwd(buf) }
+pub fn dup(fd: usize) -> isize { sys_dup(fd) }
+pub fn dup2(fd_src: usize, fd_dst: usize) -> isize { sys_dup2(fd_src, fd_dst) }
+pub fn mkdir(path: &str, mode: usize) -> isize { sys_mkdir(path, mode) }
+pub fn unlink(path: &str) -> isize { sys_unlink(path) }
+pub fn chdir(path: &str) -> isize { sys_chdir(path) }
+pub fn open(path: &str, flags: usize, mode: usize) -> isize { sys_open(path, flags, mode) }
+pub fn close(fd: usize) -> isize { sys_close(fd) }
+pub fn pipe(pipefd: &mut [u32; 2]) -> isize { sys_pipe(pipefd) }
+pub fn lseek(fd: usize, offset: isize, whence: usize) -> isize {
+    sys_lseek(fd, offset, whence)
+}
+pub fn stat(path: &str, stat: &mut Stat) -> isize { sys_stat(path, stat) }
+pub fn fstat(fd: usize, stat: &mut Stat) -> isize { sys_fstat(fd, stat) }
 pub fn exit(exit_code: i32) -> isize { sys_exit(exit_code) }
 pub fn yield_() -> isize { sys_yield() }
 pub fn time_get() -> isize { sys_get_time() }

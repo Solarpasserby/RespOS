@@ -41,6 +41,14 @@ impl Ext4Inode {
         }
     }
 
+    fn dirent_name_eq(raw_name: &[u8], expected: &str) -> bool {
+        let len = raw_name
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(raw_name.len());
+        raw_name[..len] == *expected.as_bytes()
+    }
+
     fn check_type(&self, expected: InodeType) -> SysResult<()> {
         let actual = self.node_type();
         if actual == expected {
@@ -143,27 +151,17 @@ impl InodeOp for Ext4Inode {
             return Err(Errno::EINVAL);
         }
 
-        let child_path = self.child_path(name);
         let file = self.inner();
+        let (names, types) = file.lwext4_dir_entries().map_err(Self::map_lwext4_err)?;
+        let child_ty = names
+            .iter()
+            .zip(types.into_iter())
+            .find_map(|(entry_name, entry_ty)| {
+                Self::dirent_name_eq(entry_name, name).then_some(entry_ty)
+            })
+            .ok_or(Errno::ENOENT)?;
 
-        let child_ty = if file.check_inode_exist(&child_path, Ext4InodeTypes::EXT4_DE_DIR) {
-            Ext4InodeTypes::EXT4_DE_DIR
-        } else if file.check_inode_exist(&child_path, Ext4InodeTypes::EXT4_DE_REG_FILE) {
-            Ext4InodeTypes::EXT4_DE_REG_FILE
-        } else if file.check_inode_exist(&child_path, Ext4InodeTypes::EXT4_DE_SYMLINK) {
-            Ext4InodeTypes::EXT4_DE_SYMLINK
-        } else if file.check_inode_exist(&child_path, Ext4InodeTypes::EXT4_DE_CHRDEV) {
-            Ext4InodeTypes::EXT4_DE_CHRDEV
-        } else if file.check_inode_exist(&child_path, Ext4InodeTypes::EXT4_DE_BLKDEV) {
-            Ext4InodeTypes::EXT4_DE_BLKDEV
-        } else if file.check_inode_exist(&child_path, Ext4InodeTypes::EXT4_DE_FIFO) {
-            Ext4InodeTypes::EXT4_DE_FIFO
-        } else if file.check_inode_exist(&child_path, Ext4InodeTypes::EXT4_DE_SOCK) {
-            Ext4InodeTypes::EXT4_DE_SOCK
-        } else {
-            return Err(Errno::ENOENT);
-        };
-
+        let child_path = self.child_path(name);
         Ok(Arc::new(Self::new(&child_path, child_ty)))
     }
 
