@@ -28,7 +28,6 @@ pub mod utils;
 
 use core::arch::global_asm;
 
-use crate::loader::list_apps;
 
 global_asm!(include_str!("entry.asm"));
 global_asm!(include_str!("link_app.S"));
@@ -45,8 +44,6 @@ pub fn rust_main() -> ! {
 
     loader::list_apps();
     task::run_tasks();
-
-    list_apps();
 
     panic!("unreachable!");
 }
