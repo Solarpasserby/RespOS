@@ -4,7 +4,8 @@ use core::any::Any;
 use crate::sbi::console_getchar;
 use crate::task::suspend_current_and_run_next;
 use crate::syscall::SysResult;
-use super::vfs::{FileOp, OpenFlags};
+use super::KStat;
+use super::vfs::{InodeType, FileOp, OpenFlags};
 
 const LF: usize = 0x0a;
 const CR: usize = 0x0d;
@@ -60,6 +61,12 @@ impl FileOp for Stdin {
     fn get_flags(&self) -> OpenFlags {
         OpenFlags::empty()
     }
+    fn get_stat(&self) -> SysResult<KStat> {
+        Ok(KStat {
+            size: 0,
+            ty: InodeType::CharDevice,
+        })
+    }
 }
 
 impl FileOp for Stdout {
@@ -89,5 +96,11 @@ impl FileOp for Stdout {
     }
     fn get_flags(&self) -> OpenFlags {
         OpenFlags::empty()
+    }
+    fn get_stat(&self) -> SysResult<KStat> {
+        Ok(KStat {
+            size: 0,
+            ty: InodeType::CharDevice,
+        })
     }
 }

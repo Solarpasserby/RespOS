@@ -2,8 +2,9 @@
 
 use spin::Mutex;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::any::Any;
-use crate::syscall::SysResult;
+use crate::syscall::{Errno, SysResult};
 use crate::fs::KStat;
 use super::{InodeOp, DirEntry};
 
@@ -31,6 +32,7 @@ pub trait FileOp: Any + Send + Sync {
     fn get_offset(&self) -> usize;
     // 获得文件打开标志
     fn get_flags(&self) -> OpenFlags;
+    fn get_stat(&self) -> SysResult<KStat>;
     fn readable(&self) -> bool;
     fn writable(&self) -> bool;
 }
@@ -68,7 +70,7 @@ impl File {
         self.inner.lock().offset
     }
 
-    pub fn readdir(&self) -> SysResult<alloc::vec::Vec<DirEntry>> {
+    pub fn readdir(&self) -> SysResult<Vec<DirEntry>> {
         self.inode.readdir()
     }
 
@@ -81,6 +83,46 @@ impl File {
     }
 }
 
+impl FileOp for File {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn read<'a>(&'a self, buf: &'a mut [u8]) -> SysResult<usize> {
+        self.read(buf)
+    }
+
+    fn write<'a>(&'a self, buf: &'a [u8]) -> SysResult<usize> {
+        self.write(buf)
+    }
+
+    fn seek(&self, offset: isize) -> SysResult<usize> {
+        let offset = usize::try_from(offset).map_err(|_| Errno::EINVAL)?;
+        self.seek(offset);
+        Ok(offset)
+    }
+
+    fn get_offset(&self) -> usize {
+        self.offset()
+    }
+
+    fn get_flags(&self) -> OpenFlags {
+        self.inner.lock().flags
+    }
+
+    fn get_stat(&self) -> SysResult<KStat> {
+        self.stat()
+    }
+
+    fn readable(&self) -> bool {
+        !self.get_flags().contains(OpenFlags::O_WRONLY)
+    }
+
+    fn writable(&self) -> bool {
+        self.get_flags()
+            .intersects(OpenFlags::O_WRONLY | OpenFlags::O_RDWR)
+    }
+}
 
 bitflags::bitflags! {
     pub struct OpenFlags: u32 {
@@ -91,5 +133,16 @@ bitflags::bitflags! {
         const O_TRUNC  = 1 << 9;
         const O_APPEND = 1 << 10;
         const O_DIRECTORY = 1 << 16;
+    }
+}
+
+impl From<usize> for OpenFlags {
+    fn from(bits: usize) -> Self {
+        Self::from_bits_truncate(bits as u32)
+    }
+}
+impl From<OpenFlags> for usize {
+    fn from(flags: OpenFlags) -> Self {
+        flags.bits() as usize
     }
 }

@@ -14,29 +14,65 @@ const DL: u8 = 0x7fu8;
 const BS: u8 = 0x08u8;
 
 use alloc::string::String;
-use user_lib::{fork, exec, waitpid };
+use core::str;
+use user_lib::{chdir, fork, exec, getcwd, waitpid};
 use user_lib::console::getchar;
+
+fn print_prompt() {
+    let mut cwd = [0u8; 128];
+    if getcwd(&mut cwd) < 0 {
+        print!("<?> ");
+        return;
+    }
+    let len = cwd.iter().position(|&ch| ch == 0).unwrap_or(cwd.len());
+    match str::from_utf8(&cwd[..len]) {
+        Ok(path) => print!("{}> ", path),
+        Err(_) => print!("<?> "),
+    }
+}
+
+fn run_builtin_cd(command: &str) -> bool {
+    let mut parts = command.split_whitespace();
+    if parts.next() != Some("cd") {
+        return false;
+    }
+
+    let target = parts.next().unwrap_or("/");
+    let mut path = String::new();
+    path.push_str(target);
+    path.push('\0');
+
+    if chdir(path.as_str()) < 0 {
+        println!("cd: failed to change directory");
+    }
+    true
+}
 
 #[unsafe(no_mangle)]
 pub fn main() -> i32 {
     println!("Rust user shell");
     let mut line: String = String::new();
-    print!(">> ");
+    print_prompt();
     loop {
         let c = getchar();
         match c {
             LF | CR => {
                 println!("");
-                if !line.is_empty() {
-                    line.push('\0');
+                let command = line.trim();
+                if !command.is_empty() && !run_builtin_cd(command) {
+                    let mut app = String::new();
+                    app.push_str(command);
+                    app.push('\0');
                     let pid = fork();
                     if pid == 0 {
                         // child process
-                        if exec(line.as_str()) == -1 {
-                            println!("Error when executing!");
-                            return -4;
+                        let ret = exec(app.as_str());
+                        if ret < 0 {
+                            println!("Error when executing! ret = {}", ret);
+                            return ret as i32;
                         }
-                        unreachable!();
+                        println!("exec returned unexpectedly with {}", ret);
+                        return -1;
                     } else {
                         let mut exit_code: i32 = 0;
                         let exit_pid = waitpid(pid as usize, &mut exit_code);
@@ -46,9 +82,9 @@ pub fn main() -> i32 {
                             pid, exit_code
                         );
                     }
-                    line.clear();
                 }
-                print!(">> ");
+                line.clear();
+                print_prompt();
             }
             BS | DL => {
                 if !line.is_empty() {

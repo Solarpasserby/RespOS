@@ -240,6 +240,13 @@ where
     }
     pub fn get_start(&self) -> T { self.start }
     pub fn get_end(&self) -> T { self.end }
+    
+    pub fn contain(&self, pos: &T) -> bool {
+        self.start <= *pos && *pos < self.end
+    }
+    pub fn contain_range(&self, other: &Self) -> bool {
+        self.start <= other.start && other.end <= self.end
+    }
 }
 
 impl<T> IntoIterator for SimpleRange<T> // TODO: 对迭代器的了解不足，不清楚为什么要转移变量的所有权

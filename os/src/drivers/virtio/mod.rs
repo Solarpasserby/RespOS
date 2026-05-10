@@ -7,13 +7,15 @@ pub use block_dev::VirtIoBlkDev;
 use alloc::vec::Vec;
 use core::ptr::NonNull;
 use lazy_static::*;
+use riscv::register::satp;
 use spin::Mutex;
 use virtio_drivers::{BufferDirection, Hal, PhysAddr};
 
-use crate::config::KERNEL_BASE;
+use crate::config::{KERNEL_BASE, MEMORY_END};
 use crate::mm::{
     frame_alloc,
     FrameTracker,
+    PageTable,
     PhysAddr as KernelPA,
     PhysPageNum as KernelPPN,
     VirtAddr,
@@ -27,6 +29,22 @@ lazy_static! {
 }
 
 pub struct VirtIoHalImpl;
+
+impl VirtIoHalImpl {
+    fn virt_to_phys(vaddr: usize) -> PhysAddr {
+        let direct_map_start = KERNEL_BASE;
+        let direct_map_end = KERNEL_BASE + MEMORY_END;
+        if (direct_map_start..direct_map_end).contains(&vaddr) {
+            vaddr - KERNEL_BASE
+        } else {
+            let page_table = PageTable::from_token(satp::read().bits());
+            let pa = page_table
+                .translate_va(VirtAddr::from(vaddr))
+                .expect("[kernel] virtio share: address is not mapped");
+            usize::from(pa)
+        }
+    }
+}
 
 unsafe impl Hal for VirtIoHalImpl {
     fn dma_alloc(pages: usize, _direction: BufferDirection) -> (PhysAddr, NonNull<u8>) {
@@ -43,6 +61,7 @@ unsafe impl Hal for VirtIoHalImpl {
                 ppn_base = ppn;
             }
 
+            // TODO: 当前栈式页帧分配器无法保证分配连续物理页帧
             assert_eq!(
                 ppn.0,
                 ppn_base.0 + i,
@@ -97,7 +116,7 @@ unsafe impl Hal for VirtIoHalImpl {
 
     unsafe fn share(buffer: NonNull<[u8]>, _direction: BufferDirection) -> PhysAddr {
         let vaddr = buffer.as_ptr() as *mut u8 as usize;
-        vaddr - KERNEL_BASE
+        Self::virt_to_phys(vaddr)
     }
 
     unsafe fn unshare(_paddr: PhysAddr, _buffer: NonNull<[u8]>, _direction: BufferDirection) {

@@ -34,14 +34,7 @@ global_asm!(include_str!("link_app.S"));
 
 #[unsafe(no_mangle)]
 pub fn rust_main() -> ! {
-    clear_bss();
-    info!("=== KERNEL START ===");
-    error!("this is error");
-    warn!("this is warn");
-    info!("this is info");
-    // 级别不够不会展示
-    debug!("this is debug");
-    trace!("this is trace");
+    clear_bss(); // 手动清理 .bss
 
     mm::init();
     task::add_initproc();

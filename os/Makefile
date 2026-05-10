@@ -34,6 +34,12 @@ OBJDUMP := rust-objdump --arch-name=riscv64
 OBJCOPY := rust-objcopy --binary-architecture=riscv64
 QEMU_NAME := qemu-system-riscv64
 
+# 内核配置
+MEM ?= 128M
+SMP ?= 1
+FS_IMG ?= ../img/sdcard-rv.img
+DISK_IMG ?= disk.img
+
 # # 反汇编？
 # DISASM ?= -x
 
@@ -76,10 +82,23 @@ clean:
 # 	@vim $(DISASM_TMP)
 # 	@rm $(DISASM_TMP)
 
+QEMU_BLOCK_ARGS := -drive file=$(FS_IMG),if=none,format=raw,id=x0 \
+				   -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
+
+ifneq ($(wildcard $(DISK_IMG)),)
+	QEMU_BLOCK_ARGS += -drive file=$(DISK_IMG),if=none,format=raw,id=x1 \
+					   -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1
+endif
+
 QEMU_ARGS := -machine virt \
+			 -m $(MEM) \
 			 -nographic \
+			 -smp $(SMP) \
 			 -bios $(BOOTLOADER) \
-			 -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA)
+			 -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
+			 $(QEMU_BLOCK_ARGS) \
+			 -no-reboot \
+			 -rtc base=utc
 
 quick-run:
 	@$(QEMU_NAME) $(QEMU_ARGS)
