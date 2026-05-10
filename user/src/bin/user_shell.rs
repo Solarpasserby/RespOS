@@ -71,7 +71,8 @@ pub fn main() -> i32 {
                             println!("Error when executing! ret = {}", ret);
                             return ret as i32;
                         }
-                        unreachable!();
+                        println!("exec returned unexpectedly with {}", ret);
+                        return -1;
                     } else {
                         let mut exit_code: i32 = 0;
                         let exit_pid = waitpid(pid as usize, &mut exit_code);
