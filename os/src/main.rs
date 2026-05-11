@@ -28,13 +28,19 @@ pub mod utils;
 
 use core::arch::global_asm;
 
-
 global_asm!(include_str!("entry.asm"));
 global_asm!(include_str!("link_app.S"));
 
 #[unsafe(no_mangle)]
 pub fn rust_main() -> ! {
     clear_bss(); // 手动清理 .bss
+
+    // TODO: 单纯是为消除警告，后续需要对这些宏做一定修改
+    error!("hello world");
+    warn!("hello world");
+    info!("hello world");
+    debug!("hello world");
+    trace!("hello world");
 
     mm::init();
     task::add_initproc();
