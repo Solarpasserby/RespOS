@@ -1,5 +1,7 @@
 // os/src/syscall/process.rs
 
+use alloc::vec::Vec;
+use alloc::string::String;
 use alloc::sync::Arc;
 use crate::task::{
     current_task,
@@ -9,7 +11,7 @@ use crate::task::{
 };
 use crate::loader::get_app_data_by_name;
 use crate::timer::get_time_ms;
-use crate::mm::copy_cstr_from_user;
+use crate::mm::{copy_cstr_from_user, copy_from_user};
 use super::{SysResult, Errno};
 
 pub fn sys_exit(exit_code: i32) -> ! {
@@ -41,12 +43,21 @@ pub fn sys_fork() -> SysResult<usize> {
     Ok(new_pid)
 }
 
-pub fn sys_exec(path: *const u8) -> SysResult<usize> {
+pub fn sys_exec(path: *const u8, mut args: *const *const u8) -> SysResult<usize> {
     let path = copy_cstr_from_user(path)?;
+    let mut args_vec: Vec<String> = Vec::new();
+    loop {
+        let mut arg_str_ptr: *const u8 = core::ptr::null();
+        copy_from_user(&mut arg_str_ptr as *mut *const u8, args, 1)?;
+        if arg_str_ptr.is_null() {
+            break;
+        }
+        args_vec.push(copy_cstr_from_user(arg_str_ptr)?);
+        unsafe { args = args.add(1); }
+    }
     if let Some(data) = get_app_data_by_name(path.as_str()) {
         let task = current_task().unwrap();
-        task.exec(data);
-        Ok(0)
+        Ok(task.exec(data, args_vec)?)
     } else {
         Err(Errno::ENOENT)
     }

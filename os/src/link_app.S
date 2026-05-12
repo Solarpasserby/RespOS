@@ -15,7 +15,7 @@ _app_num:
 
     .global _app_names
 _app_names:
-    .string "cd"
+    .string "cat"
     .string "hello_world"
     .string "initproc"
     .string "pipetest"
@@ -28,7 +28,7 @@ _app_names:
     .global app_0_end
     .align 3
 app_0_start:
-    .incbin "../user/target/riscv64gc-unknown-none-elf/debug/cd"
+    .incbin "../user/target/riscv64gc-unknown-none-elf/debug/cat"
 app_0_end:
 
     .section .data

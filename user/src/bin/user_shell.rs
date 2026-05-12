@@ -14,6 +14,7 @@ const DL: u8 = 0x7fu8;
 const BS: u8 = 0x08u8;
 
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::str;
 use user_lib::{chdir, fork, exec, getcwd, waitpid};
 use user_lib::console::getchar;
@@ -60,13 +61,23 @@ pub fn main() -> i32 {
                 println!("");
                 let command = line.trim();
                 if !command.is_empty() && !run_builtin_cd(command) {
-                    let mut app = String::new();
-                    app.push_str(command);
-                    app.push('\0');
+                    let args: Vec<String> = command
+                        .split_whitespace()
+                        .map(|arg| {
+                            let mut arg_buf = String::new();
+                            arg_buf.push_str(arg);
+                            arg_buf.push('\0');
+                            arg_buf
+                        })
+                        .collect();
+                    let mut argv: Vec<*const u8> = args.iter()
+                        .map(|arg| arg.as_ptr())
+                        .collect();
+                    argv.push(core::ptr::null());
                     let pid = fork();
                     if pid == 0 {
                         // child process
-                        let ret = exec(app.as_str());
+                        let ret = exec(args[0].as_str(), argv.as_slice());
                         if ret < 0 {
                             println!("Error when executing! ret = {}", ret);
                             return ret as i32;
