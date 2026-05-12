@@ -77,7 +77,7 @@ pub fn unlink(path: &str) -> isize { sys_unlink(path) }
 pub fn chdir(path: &str) -> isize { sys_chdir(path) }
 pub fn open(path: &str, flags: usize, mode: usize) -> isize { sys_open(path, flags, mode) }
 pub fn close(fd: usize) -> isize { sys_close(fd) }
-pub fn pipe(pipefd: &mut [u32; 2]) -> isize { sys_pipe(pipefd) }
+pub fn pipe(pipefd: &mut [usize; 2]) -> isize { sys_pipe(pipefd) }
 pub fn lseek(fd: usize, offset: isize, whence: usize) -> isize {
     sys_lseek(fd, offset, whence)
 }

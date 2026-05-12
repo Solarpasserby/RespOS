@@ -1,6 +1,6 @@
 // os/src/syscall/fs.rs
 
-use crate::fs::{FdEntry, Stat, Path, path_open, filename_create,  filename_lookup};
+use crate::fs::{FdEntry, Path, Stat, filename_create, filename_lookup, make_pipe, path_open};
 use crate::fs::vfs::InodeType;
 use crate::task::{current_task};
 use crate::mm::{check_user_writable, copy_cstr_from_user, copy_from_user, copy_to_user};
@@ -142,7 +142,28 @@ pub fn sys_getcwd(buf: *mut u8, len: usize) -> SysResult<usize> {
 }
 
 /// 系统调用 sys-pipe
-pub fn sys_pipe(pipefd: *mut u32) -> SysResult<usize> {
-    let _ = pipefd;
-    Err(Errno::ENOSYS)
+pub fn sys_pipe(pipefd: *mut [usize; 2]) -> SysResult<usize> {
+    let task = current_task().expect("[kernel] current task is None.");
+    let (pipe_read, pipe_write) = make_pipe();
+    let mut fds = [0usize; 2];
+
+    fds[0] = match task.alloc_fd(FdEntry::new(pipe_read, 0.into())) {
+        Ok(fd) => fd,
+        Err(e) => return Err(e),
+    };
+    fds[1] = match task.alloc_fd(FdEntry::new(pipe_write, 0.into())) {
+        Ok(fd) => fd,
+        Err(e) => {
+            task.close(fds[0])?;
+            return Err(e);
+        },
+    };
+
+    if let Err(e) = copy_to_user(pipefd, &fds as *const [usize; 2], 1) {
+        task.close(fds[0])?;
+        task.close(fds[1])?;
+        return Err(e);
+    }
+
+    Ok(0)
 }

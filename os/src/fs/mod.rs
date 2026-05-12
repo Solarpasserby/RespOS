@@ -16,4 +16,5 @@ pub use path::*;
 use stdio::*;
 pub use fdtable::*;
 pub use namei::*;
+pub use pipe::*;
 

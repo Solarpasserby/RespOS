@@ -76,6 +76,7 @@ impl FdTable {
 
 impl FdTable {
     pub fn from_existed_user(fd_table: &FdTable) -> Self {
+        // TODO: Pipe 对象在进程 fork 时的复制操作存在不同语义，需结合实际来实现
         Self {
             table: fd_table.table.clone(),
         }

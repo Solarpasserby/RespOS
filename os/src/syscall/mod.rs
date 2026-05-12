@@ -43,7 +43,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 3]) -> SysResult<usize> {
         SYSCALL_CHDIR    => sys_chdir(args[0] as *const u8),
         SYSCALL_OPEN     => sys_open(args[0] as *const u8, args[1], args[2]),
         SYSCALL_CLOSE    => sys_close(args[0]),
-        SYSCALL_PIPE     => sys_pipe(args[0] as *mut u32),
+        SYSCALL_PIPE     => sys_pipe(args[0] as *mut [usize; 2]),
         SYSCALL_LSEEK    => sys_lseek(args[0], args[1] as isize, args[2]),
         SYSCALL_READ     => sys_read(args[0], args[1] as *mut u8, args[2]),
         SYSCALL_WRITE    => sys_write(args[0], args[1] as *mut u8, args[2]),
