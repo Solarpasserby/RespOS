@@ -56,6 +56,9 @@ impl TaskControlBlock {
                 children: Vec::new(),
                 base_size: user_sp,
                 exit_code: 0,
+                signals: 0,
+                sig_mask: 0,
+                sig_action: [0; 32],
             }),
         };
         unsafe { trap_cx_ptr.write(trap_context); }
@@ -87,6 +90,9 @@ impl TaskControlBlock {
                 children: Vec::new(),
                 base_size: parent_inner.base_size,
                 exit_code: 0,
+                signals: 0,
+                sig_mask: 0,
+                sig_action: [0; 32],
             }),
         });
         // 修改任务异常上下文
@@ -188,6 +194,9 @@ pub struct TaskControlBlockInner {
     pub children: Vec<Arc<TaskControlBlock>>,
     pub base_size: usize,
     pub exit_code: i32,
+    pub signals: u32,      // 待处理信号
+    pub sig_mask: u32,     // 信号掩码
+    pub sig_action: [usize; 32], // 信号处理函数
 }
 
 impl TaskControlBlockInner {

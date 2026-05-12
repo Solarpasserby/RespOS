@@ -89,10 +89,13 @@ pub fn trap_handler(cx: &mut TrapContext) {
         _ => {
             panic!("Unsupported trap {:?}, stval = {:#?}!", scause.cause(), stval);
         }
+        // 信号处理框架
     };
+    handle_signals();
     return;
 }
-
+fn handle_signals() {
+}
 #[unsafe(no_mangle)]
 pub fn trap_from_kernel() -> ! {
     panic!(
