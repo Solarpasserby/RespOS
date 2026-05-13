@@ -53,7 +53,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 3]) -> SysResult<usize> {
         SYSCALL_YIELD    => sys_yield(),
         SYSCALL_GET_TIME => sys_get_time(),
         SYSCALL_FORK     => sys_fork(),
-        SYSCALL_EXEC     => sys_exec(args[0] as *const u8, args[1] as *const *const u8),
+        SYSCALL_EXEC     => sys_exec(args[0] as *const u8, args[1] as *const usize),
         SYSCALL_WAITPID  => sys_waitpid(args[0] as isize, args[1] as *mut i32),
         _                => panic!("Unsupported syscall_id: {}", syscall_id),
     } 

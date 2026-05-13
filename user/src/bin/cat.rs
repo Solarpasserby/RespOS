@@ -8,29 +8,49 @@ extern crate user_lib;
 extern crate alloc;
 
 use user_lib::{
-    open,
-    OpenFlags,
-    close,
-    read,
+    O_RDONLY, close, open, read, write
 };
-use alloc::string::String;
 
 #[unsafe(no_mangle)]
 pub fn main(argc: usize, argv: &[&str]) -> i32 {
-    assert!(argc == 2);
-    let fd = open(argv[1], OpenFlags::RDONLY);
-    if fd == -1 {
-        panic!("Error occurred when opening file");
+    if argc != 2 {
+        println!("usage: cat <file>");
+        return -1;
     }
-    let fd = fd as usize;
-    let mut buf = [0u8; 16];
-    let mut s = String::new();
+
+    let fd = open(argv[1], O_RDONLY, 0);
+    if fd < 0 {
+        println!("cat: cannot open {}: {}", argv[1], fd);
+        return fd as i32;
+    }
+
+    let fd: usize = fd as usize;
+    let mut buf = [0u8; 512];
     loop {
-        let size = read(fd, &mut buf) as usize;
-        if size == 0 { break; }
-        s.push_str(core::str::from_utf8(&buf[..size]).unwrap());
+        let size = read(fd, &mut buf);
+        if size < 0 {
+            println!("cat: read error: {}", size);
+            close(fd);
+            return size as i32;
+        }
+        if size == 0 {
+            break;
+        }
+        let mut written = 0;
+        let size = size as usize;
+        while written < size {
+            let ret = write(1, &buf[written..size]);
+            if ret < 0 {
+                close(fd);
+                return ret as i32;
+            }
+            written += ret as usize;
+        }
     }
-    println!("{}", s);
-    close(fd);
+
+    let ret = close(fd);
+    if ret < 0 {
+        return ret as i32;
+    }
     0
 }

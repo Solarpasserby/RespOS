@@ -13,16 +13,16 @@ mod page_table;
 mod memory_set;
 
 use alloc::string::String;
+use alloc::vec::Vec;
 use heap_allocator::init_heap;
 use frame_allocator::init_frame_allocator;
+use crate::config::{USER_CSTR_MAX_LEN, USER_ARG_MAX_COUNT}; // 该常量定义于 config/syscall.rs 中
 use crate::task::current_task;
 use crate::syscall::{SysResult, Errno};
 pub use address::*;
 pub use frame_allocator::{FrameTracker, frame_alloc};
 pub use page_table::{PageTableEntry, PageTable};
 pub use memory_set::{KERNEL_SPACE, MemorySet, MapPermission};
-
-const USER_CSTR_MAX_LEN: usize = 4096;
 
 
 /// 初始化内存管理，启用虚拟地址
@@ -66,6 +66,28 @@ pub fn copy_cstr_from_user(ptr: *const u8) -> SysResult<String> {
     }
 
     Err(Errno::EFAULT)
+}
+
+pub fn extract_cstrings_from_user(mut ptr: *const usize) -> SysResult<Vec<String>> {
+    let mut ret: Vec<String> = Vec::new();
+    let mut count = 0;
+    loop {
+        if count > USER_ARG_MAX_COUNT {
+            return Err(Errno::E2BIG); // 参数过多
+        }
+
+        let mut str_ptr: *const u8 = core::ptr::null();
+        copy_from_user(&mut str_ptr as *mut *const u8, ptr as *const *const u8, 1)?;
+        if str_ptr.is_null() {
+            break;
+        }
+        ret.push(copy_cstr_from_user(str_ptr)?);
+
+        count += 1;
+        unsafe { ptr = ptr.add(1); }
+    }
+
+    Ok(ret)
 }
 
 /// 从用户空间拷贝数据到内核空间

@@ -1,7 +1,7 @@
 // os/src/syscall/fs.rs
 
 use crate::fs::{FdEntry, Path, Stat, filename_create, filename_lookup, make_pipe, path_open};
-use crate::fs::vfs::InodeType;
+use crate::fs::vfs::{InodeType, OpenFlags};
 use crate::task::{current_task};
 use crate::mm::{check_user_writable, copy_cstr_from_user, copy_from_user, copy_to_user};
 use super::{SysResult, Errno};
@@ -147,11 +147,11 @@ pub fn sys_pipe(pipefd: *mut [usize; 2]) -> SysResult<usize> {
     let (pipe_read, pipe_write) = make_pipe();
     let mut fds = [0usize; 2];
 
-    fds[0] = match task.alloc_fd(FdEntry::new(pipe_read, 0.into())) {
+    fds[0] = match task.alloc_fd(FdEntry::new(pipe_read, OpenFlags::O_RDONLY)) {
         Ok(fd) => fd,
         Err(e) => return Err(e),
     };
-    fds[1] = match task.alloc_fd(FdEntry::new(pipe_write, 0.into())) {
+    fds[1] = match task.alloc_fd(FdEntry::new(pipe_write, OpenFlags::O_WRONLY)) {
         Ok(fd) => fd,
         Err(e) => {
             task.close(fds[0])?;

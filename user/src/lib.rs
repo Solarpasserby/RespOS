@@ -10,9 +10,9 @@ mod syscall;
 extern crate alloc;
 
 use buddy_system_allocator::LockedHeap;
-use alloc::vec::Vec;
 
 const USER_HEAP_SIZE: usize = 8 * 4096;
+const USER_ARG_MAX_COUNT: usize = 32;
 
 static mut USER_SPACE: [u8; USER_HEAP_SIZE] = [0; USER_HEAP_SIZE];
 
@@ -34,7 +34,7 @@ pub extern "C" fn _start(argc: usize, argv: usize) -> ! {
             .init((&raw mut USER_SPACE) as usize, USER_HEAP_SIZE);
     }
 
-    let mut v: Vec<&'static str> = Vec::new();
+    let mut argv_ref: [&str; USER_ARG_MAX_COUNT] = [""; USER_ARG_MAX_COUNT];
     for i in 0..argc {
         let str_start = unsafe {
             ((argv + i * core::mem::size_of::<usize>()) as *const usize).read_volatile()
@@ -42,13 +42,12 @@ pub extern "C" fn _start(argc: usize, argv: usize) -> ! {
         let len = (0usize..).find(|i| unsafe {
             ((str_start + *i) as *const u8).read_volatile() == 0
         }).unwrap();
-        v.push(
-            core::str::from_utf8(unsafe {
-                core::slice::from_raw_parts(str_start as *const u8, len)
-            }).unwrap()
-        );
+        argv_ref[i] = core::str::from_utf8(unsafe {
+            core::slice::from_raw_parts(str_start as *const u8, len)
+        }).unwrap();
     }
-    exit(main(argc, v.as_slice()));
+    
+    exit(main(argc, &argv_ref[..argc]));
     panic!("unreachable after sys_exit!");
 }
 

@@ -83,6 +83,27 @@ impl File {
     }
 }
 
+impl File {
+    pub fn read_all(&self) -> SysResult<Vec<u8>> {
+        let stat = self.stat()?;
+        let size = stat.size;
+
+        let mut data = alloc::vec![0u8; size];
+        let mut offset = 0;
+
+        while offset < size {
+            let n = self.inode.read_at(offset, &mut data[offset..])?;
+            if n == 0 {
+                break;
+            }
+            offset += n;
+        }
+
+        data.truncate(offset);
+        Ok(data)
+    }
+}
+
 impl FileOp for File {
     fn as_any(&self) -> &dyn Any {
         self
