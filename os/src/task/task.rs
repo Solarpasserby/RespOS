@@ -90,6 +90,7 @@ impl TaskControlBlock {
                 children: Vec::new(),
                 base_size: parent_inner.base_size,
                 exit_code: 0,
+                // FIXME: fork 语义是克隆父任务的内容，而非初始化
                 signals: 0,
                 sig_mask: 0,
                 sig_action: [0; 32],
