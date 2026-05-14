@@ -91,15 +91,9 @@ pub fn trap_handler(cx: &mut TrapContext) {
         }
         // 信号处理框架
     };
-    handle_signals();
     return;
 }
 
-// FIXME: 适当的换行是必要的，函数不要挨那么近，这样代码结构更加清晰
-// 我认为这个函数不应该放在 trap 模块中，之后再改改
-// rCore 中有说明放在哪个文件，你可以创建新文件，相关的修改和 mod 倒入需要你自己做
-fn handle_signals() {
-}
 
 #[unsafe(no_mangle)]
 pub fn trap_from_kernel() -> ! {

@@ -89,16 +89,8 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> SysResult<usize> {
     }
 }
 
-pub fn sys_kill(_pid: usize, signo: i32) -> SysResult<usize> {
-    if signo < 1 || signo > 31 {
-        return Err(Errno::EINVAL);
-    }
-    Ok(0)
-}
-
-pub fn sys_sigaction(signo: i32, _handler: usize) -> SysResult<usize> {
-    if signo < 1 || signo > 31 {
-        return Err(Errno::EINVAL);
-    }
-    Ok(0)
-}
+pub fn sys_sigaction(
+    signum: i32,
+    action: *const Signalaction,
+    old_action: *mut Signalaction,
+) -> isize;

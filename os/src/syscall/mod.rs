@@ -25,11 +25,6 @@ const SYSCALL_WAITPID: usize  = 260;
 // FIXME: 把系统调用号按大小排布
 const SYSCALL_KILL: usize     = 129;
 const SYSCALL_SIGACTION: usize= 134;
-// FIXME: 常量定义可以放到 config.rs 中，当然如果你的常量和核心代码的关系比较紧密可以定义在本文件
-// 当前常量和系统调用关系不大，考虑换个位置，而不是放在这个文件中
-// 看了一下，rCore 中有写放在哪个文件
-const SIGMIN: i32 = 1;
-const SIGMAX: i32 = 31;
 
 mod fs;
 mod process;
@@ -64,8 +59,6 @@ pub fn syscall(syscall_id: usize, args: [usize; 3]) -> SysResult<usize> {
         SYSCALL_EXEC     => sys_exec(args[0] as *const u8),
         SYSCALL_WAITPID  => sys_waitpid(args[0] as isize, args[1] as *mut i32),
         // FIXME: 这里同样按顺序排列
-        SYSCALL_KILL     => sys_kill(args[0], args[1] as i32),
-        SYSCALL_SIGACTION=> sys_sigaction(args[1] as i32, args[2] as usize),
         _                => panic!("Unsupported syscall_id: {}", syscall_id),
     } 
 }

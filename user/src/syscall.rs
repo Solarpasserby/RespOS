@@ -3,6 +3,7 @@ use core::arch::asm;
 const SYSCALL_GETCWD: usize   = 17;
 const SYSCALL_DUP: usize      = 23;
 const SYSCALL_DUP2: usize     = 24;
+const STSCALL_CONNECT: usize  = 29;
 const SYSCALL_MKDIR: usize    = 34;
 const SYSCALL_UNLINK: usize   = 35;
 const SYSCALL_CHDIR: usize    = 49;
@@ -16,6 +17,9 @@ const SYSCALL_STAT: usize     = 79;
 const SYSCALL_FSTAT: usize    = 80;
 const SYSCALL_EXIT: usize     = 93;
 const SYSCALL_YIELD: usize    = 124;
+const SYSCALL_KILL: usize     = 129;
+const SYSCALL_SIGPROCMASK: usize = 135;
+const SYSCALL_SIGRETURN: usize = 139;
 const SYSCALL_GET_TIME: usize = 169;
 const SYSCALL_FORK: usize     = 220;
 const SYSCALL_EXEC: usize     = 221;
@@ -142,4 +146,16 @@ pub fn sys_exec(path: &str) -> isize {
 
 pub fn sys_waitpid(pid: isize, exit_code: *mut i32) -> isize {
     syscall(SYSCALL_WAITPID, [pid as usize, exit_code as usize, 0])
+}
+
+pub fn sys_kill(pid: usize, signum: isize) -> isize {
+    syscall(SYSCALL_KILL, [pid, signum as usize, 0])
+}
+
+pub fn sys_sigprocmask(mask: u32) -> isize {
+    syscall(SYSCALL_SIGPROCMASK, [mask as usize, 0, 0])
+}
+
+pub fn sys_sigreturn() -> isize {
+    syscall(SYSCALL_SIGRETURN, [0, 0, 0])
 }
