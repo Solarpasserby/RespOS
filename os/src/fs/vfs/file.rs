@@ -39,10 +39,20 @@ pub trait FileOp: Any + Send + Sync {
 
 impl File {
     pub fn new(inode: Arc<dyn InodeOp>, flags: OpenFlags) -> Self {
+        if flags.contains(OpenFlags::O_TRUNC)
+            && flags.intersects(OpenFlags::O_WRONLY | OpenFlags::O_RDWR)
+        {
+            let _ = inode.truncate(0);
+        }
+        let offset = if flags.contains(OpenFlags::O_APPEND) {
+            inode.stat().map(|stat| stat.size).unwrap_or(0)
+        } else {
+            0
+        };
         Self {
             inode,
             inner: Mutex::new(FileInner {
-                offset: 0,
+                offset,
                 flags,
             }),
         }
@@ -57,6 +67,9 @@ impl File {
 
     pub fn write(&self, buf: &[u8]) -> SysResult<usize> {
         let mut inner = self.inner.lock();
+        if inner.flags.contains(OpenFlags::O_APPEND) {
+            inner.offset = self.inode.stat()?.size;
+        }
         let n = self.inode.write_at(inner.offset, buf)?;
         inner.offset += n;
         Ok(n)

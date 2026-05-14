@@ -15,6 +15,7 @@ pub trait InodeOp: Any + Send + Sync {
 
     fn read_at(&self, off: usize, buf: &mut [u8]) -> SysResult<usize>;
     fn write_at(&self, off: usize, buf: &[u8]) -> SysResult<usize>;
+    fn truncate(&self, size: usize) -> SysResult<usize>;
 
     fn lookup(&self, name: &str) -> SysResult<Arc<dyn InodeOp>>;
     fn readdir(&self) -> SysResult<Vec<DirEntry>>;

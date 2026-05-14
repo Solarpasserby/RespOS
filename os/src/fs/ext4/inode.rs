@@ -143,6 +143,22 @@ impl InodeOp for Ext4Inode {
         Ok(write_size)
     }
 
+    fn truncate(&self, size: usize) -> SysResult<usize> {
+        self.check_type(InodeType::Regular)?;
+
+        let file = self.inner();
+        let path = file.get_path();
+        let path = path.to_str().map_err(|_| Errno::EINVAL)?;
+
+        file.file_open(path, bindings::O_RDWR)
+            .map_err(Self::map_lwext4_err)?;
+        file.file_truncate(size as u64)
+            .map_err(Self::map_lwext4_err)?;
+        file.file_close().map_err(Self::map_lwext4_err)?;
+
+        Ok(0)
+    }
+
     /// 查找与 name 匹配的子索引节点，约定 name 为常规文件名
     fn lookup(&self, name: &str) -> SysResult<Arc<dyn InodeOp>> {
         self.check_type(InodeType::Directory)?;
