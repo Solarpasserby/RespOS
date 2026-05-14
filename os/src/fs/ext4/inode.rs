@@ -1,5 +1,6 @@
 // os/src/ext4/inode.rs
 
+use alloc::ffi::CString;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -8,7 +9,7 @@ use core::cell::SyncUnsafeCell;
 use lwext4_rust::{bindings, Ext4File, InodeTypes as Ext4InodeTypes};
 
 use crate::fs::KStat;
-use crate::fs::vfs::{DirEntry, InodeOp, InodeType};
+use crate::fs::vfs::{InodeOp, InodeType, LinuxDirent64};
 use crate::syscall::{Errno, SysResult};
 
 pub struct Ext4Inode {
@@ -87,6 +88,13 @@ impl Ext4Inode {
         let size = file.file_size() as usize;
         file.file_close().map_err(Self::map_lwext4_err)?;
         Ok(size)
+    }
+
+    fn dirent64_reclen(name_len: usize) -> usize {
+        // 目录项固定字段大小
+        const DIRENT64_HEADER_SIZE: usize = 8 + 8 + 2 + 1;
+        // 变长文件名字段大小
+        ((DIRENT64_HEADER_SIZE + name_len + 1) + 7) & !7 // 对齐 8 字节
     }
 }
 
@@ -181,20 +189,48 @@ impl InodeOp for Ext4Inode {
         Ok(Arc::new(Self::new(&child_path, child_ty)))
     }
 
-    fn readdir(&self) -> SysResult<Vec<DirEntry>> {
+    fn readdir(&self) -> SysResult<Vec<LinuxDirent64>> {
         self.check_type(InodeType::Directory)?;
 
-        let file = self.inner();
-        let (names, types) = file.lwext4_dir_entries().map_err(Self::map_lwext4_err)?;
-        let mut entries = Vec::with_capacity(names.len());
+        let c_path = CString::new(self.abs_path.as_str()).map_err(|_| Errno::EINVAL)?;
+        let c_path = c_path.into_raw();
+        let mut dir: bindings::ext4_dir = unsafe { core::mem::zeroed() };
+        let ret = unsafe { bindings::ext4_dir_open(&mut dir, c_path) };
+        unsafe {
+            drop(CString::from_raw(c_path));
+        }
+        if ret != 0 {
+            return Err(Self::map_lwext4_err(ret));
+        }
 
-        for (name, ty) in names.into_iter().zip(types.into_iter()) {
-            let len = name.iter().position(|&b| b == 0).unwrap_or(name.len());
-            let name = core::str::from_utf8(&name[..len]).map_err(|_| Errno::EINVAL)?;
-            entries.push(DirEntry {
-                name: name.to_string(),
-                ty: InodeType::from(ty),
+        let mut entries = Vec::new();
+        let mut next_off = 0usize;
+
+        loop {
+            let dirent = unsafe { bindings::ext4_dir_entry_next(&mut dir) };
+            if dirent.is_null() {
+                break;
+            }
+
+            let dirent = unsafe { &*dirent };
+            let name_len = dirent.name_length as usize;
+            let reclen = Self::dirent64_reclen(name_len);
+            next_off += reclen;
+
+            let mut d_name = dirent.name[..name_len].to_vec();
+            d_name.push(0);
+            entries.push(LinuxDirent64 {
+                d_ino: dirent.inode as u64,
+                d_off: next_off as i64,
+                d_reclen: reclen as u16,
+                d_type: InodeType::from(Ext4InodeTypes::from(dirent.inode_type as usize)) as u8,
+                d_name,
             });
+        }
+
+        let ret = unsafe { bindings::ext4_dir_close(&mut dir) };
+        if ret != 0 {
+            return Err(Self::map_lwext4_err(ret));
         }
 
         Ok(entries)

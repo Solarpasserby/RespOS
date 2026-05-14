@@ -94,6 +94,9 @@ pub fn chdir(path: &str) -> isize { sys_chdir(path) }
 pub fn open(path: &str, flags: usize, mode: usize) -> isize { sys_open(path, flags, mode) }
 pub fn close(fd: usize) -> isize { sys_close(fd) }
 pub fn pipe(pipefd: &mut [usize; 2]) -> isize { sys_pipe(pipefd) }
+pub fn getdents64(fd: usize, buf: &mut [u8]) -> isize {
+    sys_getdents64(fd, buf.as_mut_ptr(), buf.len())
+}
 pub fn lseek(fd: usize, offset: isize, whence: usize) -> isize {
     sys_lseek(fd, offset, whence)
 }
