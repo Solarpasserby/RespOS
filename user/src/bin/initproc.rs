@@ -16,7 +16,11 @@ use user_lib::{
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     if fork() == 0 {
-        exec("user_shell\0");
+        let argv = [
+            "user_shell\0".as_ptr(),
+            core::ptr::null(),
+        ];
+        exec("user_shell\0", &argv);
     } else {
         loop {
             let mut exit_code: i32 = 0;

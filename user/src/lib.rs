@@ -7,9 +7,12 @@ pub mod console;
 mod lang_item;
 mod syscall;
 
+extern crate alloc;
+
 use buddy_system_allocator::LockedHeap;
 
-const USER_HEAP_SIZE: usize = 4 * 4096;
+const USER_HEAP_SIZE: usize = 8 * 4096;
+const USER_ARG_MAX_COUNT: usize = 32;
 
 static mut USER_SPACE: [u8; USER_HEAP_SIZE] = [0; USER_HEAP_SIZE];
 
@@ -23,7 +26,7 @@ pub fn handle_alloc_error(layout: core::alloc::Layout) -> ! {
 
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.entry")]
-pub extern "C" fn _start() -> ! {
+pub extern "C" fn _start(argc: usize, argv: usize) -> ! {
     clear_bss();
     unsafe {
         HEAP
@@ -31,13 +34,26 @@ pub extern "C" fn _start() -> ! {
             .init((&raw mut USER_SPACE) as usize, USER_HEAP_SIZE);
     }
 
-    exit(main());
+    let mut argv_ref: [&str; USER_ARG_MAX_COUNT] = [""; USER_ARG_MAX_COUNT];
+    for i in 0..argc {
+        let str_start = unsafe {
+            ((argv + i * core::mem::size_of::<usize>()) as *const usize).read_volatile()
+        };
+        let len = (0usize..).find(|i| unsafe {
+            ((str_start + *i) as *const u8).read_volatile() == 0
+        }).unwrap();
+        argv_ref[i] = core::str::from_utf8(unsafe {
+            core::slice::from_raw_parts(str_start as *const u8, len)
+        }).unwrap();
+    }
+    
+    exit(main(argc, &argv_ref[..argc]));
     panic!("unreachable after sys_exit!");
 }
 
 #[linkage = "weak"]
 #[unsafe(no_mangle)]
-fn main() -> i32 {
+fn main(_argc: usize, _argv: &[&str]) -> i32 {
     panic!("Cannot find main!");
 }
 
@@ -77,7 +93,10 @@ pub fn unlink(path: &str) -> isize { sys_unlink(path) }
 pub fn chdir(path: &str) -> isize { sys_chdir(path) }
 pub fn open(path: &str, flags: usize, mode: usize) -> isize { sys_open(path, flags, mode) }
 pub fn close(fd: usize) -> isize { sys_close(fd) }
-pub fn pipe(pipefd: &mut [u32; 2]) -> isize { sys_pipe(pipefd) }
+pub fn pipe(pipefd: &mut [usize; 2]) -> isize { sys_pipe(pipefd) }
+pub fn getdents64(fd: usize, buf: &mut [u8]) -> isize {
+    sys_getdents64(fd, buf.as_mut_ptr(), buf.len())
+}
 pub fn lseek(fd: usize, offset: isize, whence: usize) -> isize {
     sys_lseek(fd, offset, whence)
 }
@@ -87,7 +106,7 @@ pub fn exit(exit_code: i32) -> isize { sys_exit(exit_code) }
 pub fn yield_() -> isize { sys_yield() }
 pub fn time_get() -> isize { sys_get_time() }
 pub fn fork() -> isize { sys_fork() }
-pub fn exec(path: &str) -> isize { sys_exec(path) }
+pub fn exec(path: &str, args: &[*const u8]) -> isize { sys_exec(path, args) }
 pub fn wait(exit_code: &mut i32) -> isize {
     loop { // 等待任意进程
         match sys_waitpid(-1, exit_code as *mut _) {

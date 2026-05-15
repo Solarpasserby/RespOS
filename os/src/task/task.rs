@@ -2,6 +2,7 @@
 
 use spin::{Mutex, MutexGuard};
 use alloc::vec::Vec;
+use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use crate::trap::TrapContext;
 use crate::mm::MemorySet;
@@ -98,20 +99,36 @@ impl TaskControlBlock {
         task_ctrl_block
     }
 
-    // 为任务载入可执行程序
-    pub fn exec(&self, elf_data: &[u8]) {
-        // 主要修改任务的地址空间和异常上下文
-        let (memory_set, token, user_sp, entry_point) = MemorySet::from_elf_data(elf_data);
+    /// 载入可执行程序，主要修改地址空间、用户栈、异常上下文等数据
+    ///
+    /// 将命令行参数个数 `argc` 作为返回值，考虑到系统调用异常时会统一修改 `a0` 寄存器
+    pub fn exec(&self, elf_data: &[u8], args: Vec<String>) -> SysResult<usize> {
+        let (memory_set, token, mut user_sp, entry_point) = MemorySet::from_elf_data(elf_data);
+
+        /* ===== 修改地址空间 ===== */
         let mut inner = self.inner_exclusive_access();
         let old_memory_set = core::mem::replace(&mut inner.memory_set, memory_set);
+        // 设置任务上下文的 satp 值，使得之后切换任务到自身时能正确刷新页表
         inner.task_context.set_satp(token);
+        // 刷新页表，由于应用程序通过异常进入，在异常返回时不会刷新页表
+        // 为了程序返回后看到的地址空间为自身而非父任务的地址空间，需要主动刷新页表
         inner.memory_set.activate();
         drop(old_memory_set);
+
+        /* ===== 修改用户栈数据 ===== */
+        // 需保证页表已刷新，函数内部直接访存高度依赖
+        let argv_base = init_user_stack(args.as_slice(), &mut user_sp);
+
+        /* ===== 修改异常上下文 ===== */
         let trap_cx = self.get_trap_cx();
         *trap_cx = TrapContext::init_app_context(
             entry_point,
             user_sp,
         );
+
+        trap_cx.x[10] = args.len(); // 实际上没用
+        trap_cx.x[11] = argv_base;
+        Ok(args.len())
     }
 
     pub fn inner_exclusive_access(&self) -> MutexGuard<'_, TaskControlBlockInner> {
@@ -209,4 +226,35 @@ pub enum TaskStatus {
     Ready,   // 已就绪
     Running, // 正在运行
     Exited,  // 已退出
+}
+
+// 将命令行参数压入用户栈
+fn init_user_stack(
+    args_vec: &[String],
+    user_sp: &mut usize,
+) -> usize {
+    fn push_strings_to_stack(strings: &[String], stack_ptr: &mut usize) -> usize {
+        // 字符串首地址数组
+        *stack_ptr -= (strings.len() + 1) * core::mem::size_of::<usize>();
+        let string_ptr_base = *stack_ptr;
+
+        for (i, string) in strings.iter().enumerate() {
+            *stack_ptr -= string.len() + 1;
+            let ptr = *stack_ptr as *mut u8;
+            unsafe {
+                ptr.copy_from_nonoverlapping(string.as_ptr(), string.len());
+                ptr.add(string.len()).write(0);
+                *(string_ptr_base as *mut usize).add(i) = *stack_ptr;
+            }
+        }
+        unsafe { *(string_ptr_base as *mut usize).add(strings.len()) = 0; }
+        *stack_ptr -= *stack_ptr % core::mem::size_of::<usize>();
+
+        string_ptr_base
+    }
+
+    // 将命令行参数压栈
+    let argv_base = push_strings_to_stack(args_vec, user_sp);
+
+    argv_base
 }

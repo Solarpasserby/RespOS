@@ -9,7 +9,7 @@ pub const KERNEL_BASE: usize = 0xffff_ffc0_0000_0000;
 // pub const USER_MAX: usize = 0x0000_003f_ffff_ffff;
 
 // 栈大小，当前每个用户程序都有对应的内核栈
-pub const USER_STACK_SIZE: usize = PAGE_SIZE * 2;
+pub const USER_STACK_SIZE: usize = PAGE_SIZE * 8;
 
 // 内核栈设置
 pub const KERNEL_STACK_TOP: usize = 0xffff_ffff_ffff_f000;

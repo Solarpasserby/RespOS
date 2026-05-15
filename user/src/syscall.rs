@@ -1,25 +1,26 @@
 use core::arch::asm;
 
-const SYSCALL_GETCWD: usize   = 17;
-const SYSCALL_DUP: usize      = 23;
-const SYSCALL_DUP2: usize     = 24;
-const SYSCALL_MKDIR: usize    = 34;
-const SYSCALL_UNLINK: usize   = 35;
-const SYSCALL_CHDIR: usize    = 49;
-const SYSCALL_OPEN: usize     = 56;
-const SYSCALL_CLOSE: usize    = 57;
-const SYSCALL_PIPE: usize     = 59;
-const SYSCALL_LSEEK: usize    = 62;
-const SYSCALL_READ: usize     = 63;
-const SYSCALL_WRITE: usize    = 64;
-const SYSCALL_STAT: usize     = 79;
-const SYSCALL_FSTAT: usize    = 80;
-const SYSCALL_EXIT: usize     = 93;
-const SYSCALL_YIELD: usize    = 124;
-const SYSCALL_GET_TIME: usize = 169;
-const SYSCALL_FORK: usize     = 220;
-const SYSCALL_EXEC: usize     = 221;
-const SYSCALL_WAITPID: usize  = 260;
+const SYSCALL_GETCWD: usize     = 17;
+const SYSCALL_DUP: usize        = 23;
+const SYSCALL_DUP2: usize       = 24;
+const SYSCALL_MKDIR: usize      = 34;
+const SYSCALL_UNLINK: usize     = 35;
+const SYSCALL_CHDIR: usize      = 49;
+const SYSCALL_OPEN: usize       = 56;
+const SYSCALL_CLOSE: usize      = 57;
+const SYSCALL_PIPE: usize       = 59;
+const SYSCALL_GETDENTS64: usize = 61;
+const SYSCALL_LSEEK: usize      = 62;
+const SYSCALL_READ: usize       = 63;
+const SYSCALL_WRITE: usize      = 64;
+const SYSCALL_STAT: usize       = 79;
+const SYSCALL_FSTAT: usize      = 80;
+const SYSCALL_EXIT: usize       = 93;
+const SYSCALL_YIELD: usize      = 124;
+const SYSCALL_GET_TIME: usize   = 169;
+const SYSCALL_FORK: usize       = 220;
+const SYSCALL_EXEC: usize       = 221;
+const SYSCALL_WAITPID: usize    = 260;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default)]
@@ -103,8 +104,12 @@ pub fn sys_close(fd: usize) -> isize {
     syscall(SYSCALL_CLOSE, [fd, 0, 0])
 }
 
-pub fn sys_pipe(pipefd: &mut [u32; 2]) -> isize {
+pub fn sys_pipe(pipefd: &mut [usize; 2]) -> isize {
     syscall(SYSCALL_PIPE, [pipefd.as_mut_ptr() as usize, 0, 0])
+}
+
+pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> isize {
+    syscall(SYSCALL_GETDENTS64, [fd, dirp as usize, count])
 }
 
 pub fn sys_lseek(fd: usize, offset: isize, whence: usize) -> isize {
@@ -136,8 +141,8 @@ pub fn sys_fork() -> isize {
     syscall(SYSCALL_FORK, [0, 0, 0])
 }
 
-pub fn sys_exec(path: &str) -> isize {
-    syscall(SYSCALL_EXEC, [path.as_ptr() as usize, 0, 0])
+pub fn sys_exec(path: &str, args: &[*const u8]) -> isize {
+    syscall(SYSCALL_EXEC, [path.as_ptr() as usize, args.as_ptr() as usize, 0])
 }
 
 pub fn sys_waitpid(pid: isize, exit_code: *mut i32) -> isize {

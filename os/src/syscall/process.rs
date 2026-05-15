@@ -9,7 +9,8 @@ use crate::task::{
 };
 use crate::loader::get_app_data_by_name;
 use crate::timer::get_time_ms;
-use crate::mm::copy_cstr_from_user;
+use crate::mm::{copy_cstr_from_user, extract_cstrings_from_user};
+use crate::fs::path_open;
 use super::{SysResult, Errno};
 
 pub fn sys_exit(exit_code: i32) -> ! {
@@ -41,12 +42,22 @@ pub fn sys_fork() -> SysResult<usize> {
     Ok(new_pid)
 }
 
-pub fn sys_exec(path: *const u8) -> SysResult<usize> {
+pub fn sys_exec(path: *const u8, args: *const usize) -> SysResult<usize> {
     let path = copy_cstr_from_user(path)?;
-    if let Some(data) = get_app_data_by_name(path.as_str()) {
-        let task = current_task().unwrap();
-        task.exec(data);
-        Ok(0)
+    let args_vec = extract_cstrings_from_user(args)?;
+    let task = current_task().unwrap();
+
+    if let Ok(file) = path_open(&path, 0, 0) {
+        info!("[kernel] execute file in fs");
+        let all_data = file.read_all()?;
+        Ok(task.exec(all_data.as_slice(), args_vec)?)
+    } else if !path.starts_with("/") {
+        // 从内核中加载的应用程序
+        if let Some(data) = get_app_data_by_name(path.as_str()) {
+            Ok(task.exec(data, args_vec)?)
+        } else {
+            Err(Errno::ENOENT)
+        }
     } else {
         Err(Errno::ENOENT)
     }
