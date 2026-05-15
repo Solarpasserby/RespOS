@@ -139,31 +139,14 @@ pub fn waitpid(pid: usize, exit_code: &mut i32) -> isize {
     }
 }
 
-pub fn kill(pid: usize, signum: i32) -> isize;
-
-pub fn sigaction(
-    signum: i32,
-    action: Option<&SignalAction>,
-    old_action: Option<&mut SignalAction>,
-) -> isize {
-    sys_sigaction(
-        signum,
-        action.map_or(core::ptr::null(), |a| a),
-        old_action.map_or(core::ptr::null_mut(), |a: &mut SignalAction| a)
-    )
+pub fn kill(pid: usize, signum: i32) -> isize{
+    sys_kill(pid, signum)
 }
+
 
 pub struct SignalAction {
     pub handler: usize,
     pub mask : SignalFlags,
-}
-
-pub fn sigreturn() -> isize{
-    sys_sigreturn()
-}
-
-pub fn sigprocmask(make: u32) -> isize{
-    sys_sigprocmask
 }
 
 bitflags!{

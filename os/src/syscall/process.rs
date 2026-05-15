@@ -1,9 +1,10 @@
 // os/src/syscall/process.rs
-
 use alloc::sync::Arc;
 use crate::task::{
     current_task,
     add_task,
+    SignalFlags,
+    pid2task,
     exit_current_and_run_next,
     suspend_current_and_run_next,
 };
@@ -89,8 +90,20 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> SysResult<usize> {
     }
 }
 
-pub fn sys_sigaction(
-    signum: i32,
-    action: *const Signalaction,
-    old_action: *mut Signalaction,
-) -> isize;
+pub fn _sys_kill(pid: usize, signum: i32) -> isize {
+    if let Some(task) = pid2task(pid) {
+        if let Some(flag) = SignalFlags::from_bits(1 << signum) {
+            // insert the signal if legal
+            let mut task_ref = task.inner_exclusive_access();
+            if task_ref.signals.contains(flag) {
+                return -1;
+            }
+            task_ref.signals.insert(flag);
+            0
+        } else {
+            -1
+        }
+    } else {
+        -1
+    }
+}

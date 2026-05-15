@@ -13,13 +13,14 @@ mod switch;
 mod pid;
 mod kstack;
 mod processor;
+mod signal;
 
 use lazy_static::lazy_static;
 use alloc::sync::Arc;
 use crate::loader::get_app_data_by_name;
 use context::TaskContext;
 use task::{ TaskControlBlock, TaskStatus };
-pub use manager::add_task;
+pub use manager::{add_task, pid2task};
 pub use kstack::get_kernel_stack_top_by_sp;
 pub use processor::{
     current_task,
@@ -28,6 +29,7 @@ pub use processor::{
     take_current_task,
     run_tasks ,schedule
 };
+pub use signal::SignalFlags;
 
 lazy_static! {
     pub static ref INITPROC: Arc<TaskControlBlock> = Arc::new(
