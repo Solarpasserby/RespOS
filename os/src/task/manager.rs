@@ -11,7 +11,6 @@ lazy_static! {
     /// 任务管理器
     pub static ref TASK_MANAGER: Mutex<TaskManager> = Mutex::new(TaskManager::new());
     pub static ref PID2TCB: Mutex<BTreeMap<usize, Arc<TaskControlBlock>>> = Mutex::new(BTreeMap::new());
-
 }
 
 /// 任务调度管理器

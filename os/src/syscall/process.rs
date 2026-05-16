@@ -90,9 +90,12 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> SysResult<usize> {
     }
 }
 
-pub fn _sys_kill(pid: usize, signum: i32) -> isize {
+// FIXME: 这个函数就不要加下划线取消没使用的警告了，这玩意你忘了我们的代码就会多一个 dead_code 这是很不好的习惯
+// 另外我说过我们系统调用的返回值是 SysResult<usize> 吧，不要只会照搬
+pub fn sys_kill(pid: usize, signum: i32) -> isize {
     if let Some(task) = pid2task(pid) {
         if let Some(flag) = SignalFlags::from_bits(1 << signum) {
+            // FIXME: 复制粘贴就算了，注释改一下中文吧，虽然只是我的个人要求
             // insert the signal if legal
             let mut task_ref = task.inner_exclusive_access();
             if task_ref.signals.contains(flag) {
