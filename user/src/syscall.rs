@@ -1,4 +1,5 @@
 use core::arch::asm;
+use crate::SignalAction;
 
 const SYSCALL_GETCWD: usize   = 17;
 const SYSCALL_DUP: usize      = 23;
@@ -17,6 +18,7 @@ const SYSCALL_FSTAT: usize    = 80;
 const SYSCALL_EXIT: usize     = 93;
 const SYSCALL_YIELD: usize    = 124;
 const SYSCALL_KILL: usize     = 129;
+const SYSCALL_SIGACTION: usize = 134;
 const SYSCALL_GET_TIME: usize = 169;
 const SYSCALL_FORK: usize     = 220;
 const SYSCALL_EXEC: usize     = 221;
@@ -149,3 +151,23 @@ pub fn sys_kill(pid: usize, signum: i32) -> isize {
     syscall(SYSCALL_KILL, [pid, signum as usize, 0])
 }     
 
+pub fn sys_sigaction(
+    signum: i32,
+    action: *const SignalAction,
+    old_action: *mut SignalAction,
+) -> isize {
+    syscall(
+        SYSCALL_SIGACTION,
+        [signum as usize, action as usize, old_action as usize],
+    )
+    /*
+    syscall(
+        SYSCALL_SIGACTION,
+        [
+            signum as usize,
+            action.map_or(0, |r| r as *const _ as usize),
+            old_action.map_or(0, |r| r as *mut _ as usize),
+        ],
+    )
+    */
+}

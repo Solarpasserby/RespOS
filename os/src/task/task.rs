@@ -11,6 +11,7 @@ use crate::syscall::SysResult;
 use super::context::TaskContext;
 use super::pid::{PidHandle, pid_alloc};
 use super::kstack::KernelStack;
+use super::{SignalActions};
 
 
 /// 任务控制块——此处的任务是对一定资源和某个程序的抽象表述
@@ -27,6 +28,7 @@ pub struct TaskControlBlock {
     // 可变
     inner: Mutex<TaskControlBlockInner>,
 }
+
 
 impl TaskControlBlock {
     /// 新建任务
@@ -58,6 +60,7 @@ impl TaskControlBlock {
                 base_size: user_sp,
                 exit_code: 0,
                 signals: SignalFlags::empty(),
+                signal_actions: SignalActions::default(),
             }),
         };
         unsafe { trap_cx_ptr.write(trap_context); }
@@ -90,6 +93,7 @@ impl TaskControlBlock {
                 base_size: parent_inner.base_size,
                 exit_code: 0,
                 signals: SignalFlags::empty(),
+                signal_actions: parent_inner.signal_actions.clone(),
             }),
         });
         // 修改任务异常上下文
@@ -192,6 +196,7 @@ pub struct TaskControlBlockInner {
     pub base_size: usize,
     pub exit_code: i32,
     pub signals: SignalFlags,
+    pub signal_actions: SignalActions,
 }
 
 impl TaskControlBlockInner {

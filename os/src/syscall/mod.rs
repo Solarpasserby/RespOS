@@ -18,13 +18,13 @@ const SYSCALL_STAT: usize     = 79;
 const SYSCALL_FSTAT: usize    = 80;
 const SYSCALL_EXIT: usize     = 93;
 const SYSCALL_YIELD: usize    = 124;
+const SYSCALL_KILL: usize     = 129;
+const SYSCALL_SIGACTION: usize= 134;
 const SYSCALL_GET_TIME: usize = 169;
 const SYSCALL_FORK: usize     = 220;
 const SYSCALL_EXEC: usize     = 221;
 const SYSCALL_WAITPID: usize  = 260;
 // FIXME: 把系统调用号按大小排布
-const SYSCALL_KILL: usize     = 129;
-const SYSCALL_SIGACTION: usize= 134;
 
 mod fs;
 mod process;
@@ -35,6 +35,7 @@ mod errno;
 use fs::*;
 use process::*;
 pub use errno::*;
+use crate::task::SignalAction;
 
 pub fn syscall(syscall_id: usize, args: [usize; 3]) -> SysResult<usize> {
     match syscall_id {
@@ -57,6 +58,11 @@ pub fn syscall(syscall_id: usize, args: [usize; 3]) -> SysResult<usize> {
         SYSCALL_GET_TIME => sys_get_time(),
         SYSCALL_FORK     => sys_fork(),
         SYSCALL_EXEC     => sys_exec(args[0] as *const u8),
+        SYSCALL_SIGACTION => sys_sigaction(
+            args[0] as i32,
+            args[1] as *const SignalAction,
+            args[2] as *mut SignalAction,
+        ),
         SYSCALL_WAITPID  => sys_waitpid(args[0] as isize, args[1] as *mut i32),
         // FIXME: 这里同样按顺序排列
         _                => panic!("Unsupported syscall_id: {}", syscall_id),

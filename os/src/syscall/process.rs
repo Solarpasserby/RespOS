@@ -2,8 +2,11 @@
 use alloc::sync::Arc;
 use crate::task::{
     current_task,
+    current_user_token,
     add_task,
     SignalFlags,
+    SignalAction,
+    MAX_SIG,
     pid2task,
     exit_current_and_run_next,
     suspend_current_and_run_next,
@@ -11,8 +14,8 @@ use crate::task::{
 use crate::loader::get_app_data_by_name;
 use crate::timer::get_time_ms;
 use crate::mm::copy_cstr_from_user;
+use crate::mm::{translated_ref, translated_refmut};
 use super::{SysResult, Errno};
-
 pub fn sys_exit(exit_code: i32) -> ! {
     // println!("[kernel] Application exited with code {}", exit_code);
     exit_current_and_run_next(exit_code);
@@ -26,6 +29,18 @@ pub fn sys_yield() -> SysResult<usize> {
 
 pub fn sys_get_time() -> SysResult<usize> {
     Ok(get_time_ms())
+}
+
+fn check_sigaction_error(signal: SignalFlags, action: usize, old_action: usize) -> bool {
+    if action == 0
+        || old_action == 0
+        || signal == SignalFlags::SIGKILL
+        || signal == SignalFlags::SIGSTOP
+    {
+        true
+    } else {
+        false
+    }
 }
 
 pub fn sys_fork() -> SysResult<usize> {
@@ -90,23 +105,50 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> SysResult<usize> {
     }
 }
 
-// FIXME: 这个函数就不要加下划线取消没使用的警告了，这玩意你忘了我们的代码就会多一个 dead_code 这是很不好的习惯
-// 另外我说过我们系统调用的返回值是 SysResult<usize> 吧，不要只会照搬
-pub fn sys_kill(pid: usize, signum: i32) -> isize {
+pub fn sys_kill(pid: usize, signum: i32) -> SysResult<usize> {
     if let Some(task) = pid2task(pid) {
         if let Some(flag) = SignalFlags::from_bits(1 << signum) {
-            // FIXME: 复制粘贴就算了，注释改一下中文吧，虽然只是我的个人要求
-            // insert the signal if legal
             let mut task_ref = task.inner_exclusive_access();
             if task_ref.signals.contains(flag) {
-                return -1;
+                // 信号已存在，返回错误
+                return Err(Errno::EINVAL);
             }
             task_ref.signals.insert(flag);
-            0
+            Ok(0) // 成功返回 Ok(0)
         } else {
-            -1
+            // 信号不合法
+            Err(Errno::EINVAL)
         }
     } else {
-        -1
+        // 进程不存在
+        Err(Errno::ESRCH)
+    }
+}
+
+pub fn sys_sigaction(
+    signum: i32,
+    action: *const SignalAction,
+    old_action: *mut SignalAction,
+) -> SysResult<usize> {
+    let token = current_user_token();
+    let task = current_task().unwrap();
+    let mut inner = task.inner_exclusive_access();
+    // 检查信号号是否越界，非法参数 → 返回 EINVAL
+    if signum as usize > MAX_SIG {
+        return Err(Errno::EINVAL);
+    }
+    if let Some(flag) = SignalFlags::from_bits(1 << signum) {
+        if check_sigaction_error(flag, action as usize, old_action as usize) {
+            // 检查失败 → 返回 EINVAL
+            return Err(Errno::EINVAL);
+        }
+        let prev_action = inner.signal_actions.table[signum as usize];
+        *translated_refmut(token, old_action) = prev_action;
+        inner.signal_actions.table[signum as usize] = *translated_ref(token, action);
+        // 成功返回 Ok(0)
+        Ok(0) 
+    } else {
+        // 信号无效 → 返回 EINVAL
+        Err(Errno::EINVAL)
     }
 }

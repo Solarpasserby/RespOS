@@ -149,6 +149,27 @@ pub struct SignalAction {
     pub mask : SignalFlags,
 }
 
+impl Default for SignalAction {
+    fn default() -> Self {
+        Self {
+            handler: 0,
+            mask: SignalFlags::empty(),
+        }
+    }
+}
+
+pub fn sigaction(
+    signum: i32,
+    action: Option<&SignalAction>,
+    old_action: Option<&mut SignalAction>,
+) -> isize {
+    sys_sigaction(
+        signum,
+        action.map_or(core::ptr::null(), |a| a),
+        old_action.map_or(core::ptr::null_mut(), |a| a),
+    )
+}
+
 bitflags!{
     pub struct SignalFlags: i32{
         const SIGDEF    = 1 << 0;  // 0 号信号 → 1

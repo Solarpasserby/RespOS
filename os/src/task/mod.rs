@@ -14,6 +14,7 @@ mod pid;
 mod kstack;
 mod processor;
 mod signal;
+mod action;
 
 use lazy_static::lazy_static;
 use alloc::sync::Arc;
@@ -30,6 +31,8 @@ pub use processor::{
     run_tasks ,schedule
 };
 pub use signal::SignalFlags;
+pub use action::{SignalAction, SignalActions};
+pub use signal::MAX_SIG;
 
 lazy_static! {
     pub static ref INITPROC: Arc<TaskControlBlock> = Arc::new(

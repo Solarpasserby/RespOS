@@ -21,6 +21,7 @@ pub use address::*;
 pub use frame_allocator::{FrameTracker, frame_alloc};
 pub use page_table::{PageTableEntry, PageTable};
 pub use memory_set::{KERNEL_SPACE, MemorySet, MapPermission};
+pub use page_table::{translated_ref, translated_refmut};
 
 const USER_CSTR_MAX_LEN: usize = 4096;
 

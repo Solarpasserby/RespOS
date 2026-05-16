@@ -1,14 +1,12 @@
-// FIXME: 同样修改注释，另外对于新文件你可以在文件的第一行添加该文件的路径
-// 例如： // os/src/task/signal.rs
-// 当然这对程序运行没有什么用，但是为了项目的一致性你可以这么写
+// os/src/task/signal.rs
 
 use bitflags::*;
 
-pub const _MAX_SIG: usize = 31;
+pub const MAX_SIG: usize = 31;
 
 bitflags! {
     pub struct SignalFlags: u32 {
-        const SIGDEF    = 1; // Default signal handling
+        const SIGDEF    = 1; 
         const SIGHUP    = 1 << 1;
         const SIGINT    = 1 << 2;
         const SIGQUIT   = 1 << 3;
@@ -58,7 +56,6 @@ impl SignalFlags {
         } else if self.contains(Self::SIGSEGV) {
             Some((-11, "Segmentation Fault, SIGSEGV=11"))
         } else {
-            //println!("[K] signalflags check_error  {:?}", self);
             None
         }
     }
