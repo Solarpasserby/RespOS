@@ -67,5 +67,4 @@ pub fn list_apps() {
         println!("{}", app);
     }
     println!("**************/");
-    ()
 }

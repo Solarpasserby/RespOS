@@ -108,18 +108,18 @@ pub struct DentryInner {
 }
 
 impl DentryInner {
-    pub fn new(parent: Option<Arc<Dentry>>, inode: Arc<dyn InodeOp>) -> Self {
+    pub fn new(parent_dentry: Option<Arc<Dentry>>, inode: Arc<dyn InodeOp>) -> Self {
         Self {
             inode: Some(inode),
-            parent: parent,
+            parent: parent_dentry,
             children: HashMap::new(),
         }
     }
     // 负目录项
-    pub fn negative(parent: Option<Arc<Dentry>>) -> Self {
+    pub fn negative(parent_dentry: Option<Arc<Dentry>>) -> Self {
         Self {
             inode: None,
-            parent: parent,
+            parent: parent_dentry,
             children: HashMap::new(),
         }
     }

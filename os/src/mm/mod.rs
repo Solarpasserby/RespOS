@@ -84,7 +84,7 @@ pub fn extract_cstrings_from_user(mut ptr: *const usize) -> SysResult<Vec<String
         ret.push(copy_cstr_from_user(str_ptr)?);
 
         count += 1;
-        unsafe { ptr = ptr.add(1); }
+        ptr = unsafe { ptr.add(1) };
     }
 
     Ok(ret)

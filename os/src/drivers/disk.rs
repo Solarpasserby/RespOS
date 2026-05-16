@@ -37,7 +37,7 @@ impl Disk {
     /// 设置读写位置
     pub fn set_position(&mut self, pos: usize) {
         self.block_id = pos / BLOCK_SIZE;
-        self.offset = pos as usize % BLOCK_SIZE;
+        self.offset = pos % BLOCK_SIZE;
     }
 
     /// 读取单个块数据，返回读取的字节数

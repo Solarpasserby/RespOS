@@ -43,7 +43,7 @@ impl Processor {
 
     /// 返回当前执行的任务的一份拷贝
     pub fn current(&self) -> Option<Arc<TaskControlBlock>> {
-        self.current.as_ref().map(|task| Arc::clone(task))
+        self.current.as_ref().map(Arc::clone)
     }
 
     /// 获取空闲任务上下文的可变借用
