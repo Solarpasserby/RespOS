@@ -6,10 +6,10 @@ use crate::config::{KERNEL_BASE, PAGE_SIZE, PAGE_SIZE_BITS};
 use super::PageTableEntry;
 
 // 使用 sv39 页表模式
-pub(super) const PA_WIDTH_SV39: usize = 56;
-pub(super) const VA_WIDTH_SV39: usize = 39;
-pub(super) const PPN_WIDTH_SV39: usize = PA_WIDTH_SV39 - PAGE_SIZE_BITS;
-pub(super) const VPN_WIDTH_SV39: usize = VA_WIDTH_SV39 - PAGE_SIZE_BITS;
+pub const PA_WIDTH_SV39: usize = 56;
+pub const VA_WIDTH_SV39: usize = 39;
+pub const PPN_WIDTH_SV39: usize = PA_WIDTH_SV39 - PAGE_SIZE_BITS;
+pub const VPN_WIDTH_SV39: usize = VA_WIDTH_SV39 - PAGE_SIZE_BITS;
 
 /// 物理地址
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]

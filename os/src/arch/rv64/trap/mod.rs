@@ -16,7 +16,7 @@ use riscv::register::{
 use core::arch::global_asm;
 use crate::syscall::*;
 use crate::task::{suspend_current_and_run_next, exit_current_and_run_next};
-use crate::timer::set_next_ti_trigger;
+use super::timer::set_next_ti_trigger;
 
 pub use context::TrapContext;
 

@@ -1,7 +1,7 @@
-// os/src/utils/boot.rs
+// os/src/arch/rv64/entry/boot.rs
 
 use core::arch::asm;
-use crate::config::KERNEL_BASE;
+use crate::arch::config::KERNEL_BASE;
 
 #[unsafe(no_mangle)]
 pub fn enter_main() {
