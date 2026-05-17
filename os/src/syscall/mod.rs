@@ -34,7 +34,7 @@ use fs::*;
 use process::*;
 pub use errno::*;
 
-pub fn syscall(syscall_id: usize, args: [usize; 3]) -> SysResult<usize> {
+pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
     match syscall_id {
         SYSCALL_GETCWD     => sys_getcwd(args[0] as *mut u8, args[1]),
         SYSCALL_DUP        => sys_dup(args[0]),
