@@ -19,6 +19,8 @@ const SYSCALL_EXIT: usize     = 93;
 const SYSCALL_YIELD: usize    = 124;
 const SYSCALL_KILL: usize     = 129;
 const SYSCALL_SIGACTION: usize = 134;
+const SYSCALL_SIGPROCMASK: usize = 135;
+const SYSCALL_SIGRETURN: usize = 139;
 const SYSCALL_GET_TIME: usize = 169;
 const SYSCALL_FORK: usize     = 220;
 const SYSCALL_EXEC: usize     = 221;
@@ -170,4 +172,12 @@ pub fn sys_sigaction(
         ],
     )
     */
+}
+
+pub fn sys_sigprocmask(mask: u32) -> isize {
+    syscall(SYSCALL_SIGPROCMASK, [mask as usize, 0, 0])
+}
+
+pub fn sys_sigreturn() -> isize {
+    syscall(SYSCALL_SIGRETURN, [0, 0, 0])
 }

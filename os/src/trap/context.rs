@@ -15,6 +15,7 @@ use riscv::register::sstatus::{self, Sstatus};
 /// 
 /// - 注意：这里的设计将用程序上下文存放于用户空间中，与之前不太一致。我还不太懂
 #[repr(C)]
+#[derive(Debug, Clone, Copy)]
 pub struct TrapContext {
     pub x: [usize; 32],
     pub sstatus: Sstatus,

@@ -2,7 +2,6 @@
 use alloc::sync::Arc;
 use crate::task::{
     current_task,
-    current_user_token,
     add_task,
     SignalFlags,
     SignalAction,
@@ -13,8 +12,8 @@ use crate::task::{
 };
 use crate::loader::get_app_data_by_name;
 use crate::timer::get_time_ms;
+use crate::mm::{copy_from_user, copy_to_user};
 use crate::mm::copy_cstr_from_user;
-use crate::mm::{translated_ref, translated_refmut};
 use super::{SysResult, Errno};
 pub fn sys_exit(exit_code: i32) -> ! {
     // println!("[kernel] Application exited with code {}", exit_code);
@@ -130,25 +129,71 @@ pub fn sys_sigaction(
     action: *const SignalAction,
     old_action: *mut SignalAction,
 ) -> SysResult<usize> {
-    let token = current_user_token();
     let task = current_task().unwrap();
     let mut inner = task.inner_exclusive_access();
+
     // 检查信号号是否越界，非法参数 → 返回 EINVAL
     if signum as usize > MAX_SIG {
         return Err(Errno::EINVAL);
     }
+
     if let Some(flag) = SignalFlags::from_bits(1 << signum) {
         if check_sigaction_error(flag, action as usize, old_action as usize) {
             // 检查失败 → 返回 EINVAL
             return Err(Errno::EINVAL);
         }
+
         let prev_action = inner.signal_actions.table[signum as usize];
-        *translated_refmut(token, old_action) = prev_action;
-        inner.signal_actions.table[signum as usize] = *translated_ref(token, action);
+
+        // 将旧规则拷贝到用户空间
+        copy_to_user(
+            old_action,
+            &prev_action as *const SignalAction,
+            1,
+        )?;
+
+        // 从用户空间读取新规则
+        let mut new_action = SignalAction::default();
+        copy_from_user(
+            &mut new_action as *mut SignalAction,
+            action,
+            1,
+        )?;
+
+        // 更新当前信号的处理规则
+        inner.signal_actions.table[signum as usize] = new_action;
+
         // 成功返回 Ok(0)
-        Ok(0) 
+        Ok(0)
     } else {
         // 信号无效 → 返回 EINVAL
         Err(Errno::EINVAL)
+    }
+}
+
+pub fn sys_sigprocmask(mask: u32) -> SysResult<usize> {
+    if let Some(task) = current_task() {
+        let mut inner = task.inner_exclusive_access();
+        let old_mask = inner.signal_mask;
+        if let Some(flag) = SignalFlags::from_bits(mask) {
+            inner.signal_mask = flag;
+            Ok(old_mask.bits() as usize)
+        } else {
+            Err(Errno::EINVAL)
+        }
+    } else {
+        Err(Errno::ESRCH)
+    }
+}
+
+pub fn sys_sigreturn() -> SysResult<usize> {
+    if let Some(task) = current_task() {
+        let mut inner = task.inner_exclusive_access();
+        inner.handling_sig = -1;
+        let trap_ctx = task.get_trap_cx();
+        *trap_ctx = inner.trap_ctx_backup.take().unwrap();
+        Ok(trap_ctx.x[10] as usize)
+    } else {
+        Err(Errno::ESRCH)
     }
 }

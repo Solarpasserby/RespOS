@@ -61,6 +61,11 @@ impl TaskControlBlock {
                 exit_code: 0,
                 signals: SignalFlags::empty(),
                 signal_actions: SignalActions::default(),
+                signal_mask: SignalFlags::empty(),
+                handling_sig: -1,
+                trap_ctx_backup: None,
+                frozen: false,
+                killed: false,
             }),
         };
         unsafe { trap_cx_ptr.write(trap_context); }
@@ -94,6 +99,11 @@ impl TaskControlBlock {
                 exit_code: 0,
                 signals: SignalFlags::empty(),
                 signal_actions: parent_inner.signal_actions.clone(),
+                signal_mask: SignalFlags::empty(),
+                handling_sig: -1,
+                trap_ctx_backup: None,
+                frozen: false,
+                killed: false,
             }),
         });
         // 修改任务异常上下文
@@ -197,6 +207,11 @@ pub struct TaskControlBlockInner {
     pub exit_code: i32,
     pub signals: SignalFlags,
     pub signal_actions: SignalActions,
+    pub signal_mask: SignalFlags,
+    pub handling_sig: isize,
+    pub trap_ctx_backup: Option<TrapContext>,
+    pub frozen: bool,
+    pub killed: bool,
 }
 
 impl TaskControlBlockInner {

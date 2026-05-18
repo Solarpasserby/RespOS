@@ -170,6 +170,15 @@ pub fn sigaction(
     )
 }
 
+
+pub fn sigprocmask(mask: u32) -> isize {
+    sys_sigprocmask(mask)
+}
+
+pub fn sigreturn() -> isize {
+    sys_sigreturn()
+}
+
 bitflags!{
     pub struct SignalFlags: i32{
         const SIGDEF    = 1 << 0;  // 0 号信号 → 1

@@ -13,7 +13,7 @@ fn func() {
     sigreturn();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub fn main() -> i32 {
     let mut new = SignalAction::default();
     let mut old = SignalAction::default();
@@ -24,7 +24,7 @@ pub fn main() -> i32 {
         panic!("Sigaction failed!");
     }
     println!("signal_simple: kill");
-    if kill(getpid() as usize, SIGUSR1) < 0 {
+    if kill(2usize, SIGUSR1) < 0 {
         println!("Kill failed!");
         exit(1);
     }
