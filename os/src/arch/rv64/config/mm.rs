@@ -1,4 +1,4 @@
-// os/src/config/driver.rs
+// os/src/arch/rv64/config/mm.rs
 
 //! 内存布局
 

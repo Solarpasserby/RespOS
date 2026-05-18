@@ -9,7 +9,6 @@
 mod heap_allocator;
 mod frame_allocator;
 mod address;
-mod page_table;
 mod memory_set;
 
 use alloc::string::String;
@@ -17,11 +16,11 @@ use alloc::vec::Vec;
 use heap_allocator::init_heap;
 use frame_allocator::init_frame_allocator;
 use crate::config::{USER_CSTR_MAX_LEN, USER_ARG_MAX_COUNT}; // 该常量定义于 config/syscall.rs 中
+use crate::arch::mm::{PageTableEntry, PageTable, PTEFlags};
 use crate::task::current_task;
 use crate::syscall::{SysResult, Errno};
 pub use address::*;
 pub use frame_allocator::{FrameTracker, frame_alloc};
-pub use page_table::{PageTableEntry, PageTable};
 pub use memory_set::{KERNEL_SPACE, MemorySet, MapPermission};
 
 

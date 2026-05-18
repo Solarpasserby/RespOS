@@ -1,7 +1,7 @@
 // os/src/task/switch.rs
 
 use core::arch::global_asm;
-use super::context::TaskContext;
+use crate::task::TaskContext;
 
 global_asm!(include_str!("switch.S"));
 

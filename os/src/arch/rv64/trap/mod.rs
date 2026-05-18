@@ -16,7 +16,7 @@ use riscv::register::{
 use core::arch::global_asm;
 use crate::syscall::*;
 use crate::task::{suspend_current_and_run_next, exit_current_and_run_next};
-use crate::timer::set_next_ti_trigger;
+use super::timer::set_next_ti_trigger;
 
 pub use context::TrapContext;
 
@@ -57,7 +57,10 @@ pub fn trap_handler(cx: &mut TrapContext) {
     match scause.cause() {
         Trap::Exception(Exception::UserEnvCall) => {
             cx.sepc += 4; // 异常处理完成后直接执行后续指令
-            cx.x[10] = match syscall(cx.x[17], [cx.x[10], cx.x[11], cx.x[12]]) {
+            cx.x[10] = match syscall(
+                cx.x[17],
+                [cx.x[10], cx.x[11], cx.x[12], cx.x[13], cx.x[14], cx.x[15]],
+            ) {
                 Ok(ret) => ret,
                 Err(err) => err.as_ret() as usize,
             };

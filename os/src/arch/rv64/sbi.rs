@@ -25,8 +25,6 @@ pub fn console_getchar() -> usize {
 }
 
 /// 关闭机器
-/// 
-/// TODO: 这里的参数不太清楚用途
 pub fn shutdown(failure: bool) -> ! {
     use sbi_rt::{system_reset, NoReason, Shutdown, SystemFailure};
     if !failure {

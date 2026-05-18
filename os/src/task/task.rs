@@ -208,7 +208,7 @@ pub struct TaskControlBlockInner {
 }
 
 impl TaskControlBlockInner {
-    /// 获取用户任务页表的 `stap` 寄存器值
+    /// 获取用户任务页表的页表基址寄存器值
     pub fn get_user_token(&self) -> usize {
         self.memory_set.token()
     }

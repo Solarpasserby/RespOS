@@ -12,10 +12,10 @@ use spin::Mutex;
 use virtio_drivers::{BufferDirection, Hal, PhysAddr};
 
 use crate::config::{KERNEL_BASE, MEMORY_END};
+use crate::arch::mm::PageTable;
 use crate::mm::{
     frame_alloc,
     FrameTracker,
-    PageTable,
     PhysAddr as KernelPA,
     PhysPageNum as KernelPPN,
     VirtAddr,
