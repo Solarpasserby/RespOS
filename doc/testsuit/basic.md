@@ -3,18 +3,18 @@
 | `brk` | `brk` | ☐ |
 | `chdir` | `chdir`, `mkdir` | ☐ |
 | `clone` | `clone` | ☐ |
-| `close` | `open`, `close` | ☐ |
+| `close` | `open`, `close` | ☑ |
 | `dup2` | `dup2` | ☑ |
 | `dup` | `dup` | ☑ |
 | `execve` | `execve` | ☐ |
-| `exit` | `exit` | ☐ |
+| `exit` | `exit` | ☑ |
 | `fork` | `fork`, `wait` | ☐ |
-| `fstat` | `open`, `fstat`, `close` | ☐ |
-| `getcwd` | `getcwd` | ☐ |
-| `getdents` | `open`, `getdents64`, `close` | ☐ |
-| `getpid` | `getpid` | ☐ |
-| `getppid` | `getppid` | ☐ |
-| `gettimeofday` | `gettimeofday` | ☐ |
+| `fstat` | `open`, `fstat`, `close` | ☑ |
+| `getcwd` | `getcwd` | ☑ |
+| `getdents` | `open`, `getdents64`, `close` | ☑ |
+| `getpid` | `getpid` | ☑ |
+| `getppid` | `getppid` | ☑ |
+| `gettimeofday` | `gettimeofday` | ☑ |
 | `mkdir_` | `mkdirat` / `mkdir` | ☐ |
 | `mmap` | `mmap` | ☐ |
 | `mount` | `mount`, `umount2` | ☐ |
@@ -22,11 +22,11 @@
 | `openat` | `openat`, `close` | ☐ |
 | `open` | `open`, `read`, `close` | ☐ |
 | `pipe` | `pipe2` / `pipe`, `read`, `write`, `close` | ☐ |
-| `read` | `open`, `read`, `close` | ☐ |
-| `sleep` | `nanosleep` | ☐ |
-| `times` | `times` | ☐ |
+| `read` | `open`, `read`, `close` | ☑ |
+| `sleep` | `nanosleep` | ☑ |
+| `times` | `times` | ☑ |
 | `umount` | `mount`, `umount2` | ☐ |
-| `uname` | `uname` | ☐ |
+| `uname` | `uname` | ☑ |
 | `unlink` | `unlinkat` / `unlink` | ☐ |
 | `wait` | `fork`, `wait4` / `wait` | ☐ |
 | `waitpid` | `fork`, `wait4` / `waitpid` | ☐ |
@@ -45,10 +45,6 @@
 
 | 系统调用 | 当前状态 | 为什么优先 |
 | --- | --- | --- |
-| `getpid` | `TODO[UNIMPLEMENTED]` | 依赖现有任务结构即可返回当前 pid，实现成本最低，直接对应 `getpid` 测试。 |
-| `getppid` | `TODO[UNIMPLEMENTED]` | 可复用父子任务关系，成本低，直接对应 `getppid` 测试。 |
-| `uname` | `TODO[UNIMPLEMENTED]` | 只需向用户缓冲区写固定字段，容易快速拿下一项测试。 |
-| `times` | `TODO[UNIMPLEMENTED]` | basic 通常只要求接口可用和结构体可写，适合先做一个最小正确实现。 |
 | `unlinkat` | `TODO[UNIMPLEMENTED]` | 已有文件系统框架，且直接对应 `unlink` 测试；补完后能继续验证路径删除能力。 |
 
 建议先从这一组开始。它们多数不需要改动核心架构，适合作为“先把 basic 往前推一截”的第一批目标。
@@ -57,7 +53,6 @@
 
 | 系统调用 / 语义缺口 | 当前状态 | 为什么排在第二梯队 |
 | --- | --- | --- |
-| `nanosleep` | `TODO[UNIMPLEMENTED]` | 直接对应 `sleep` 测试，需要和时钟/调度配合，但实现范围仍然可控。 |
 | `brk` | `TODO[UNIMPLEMENTED]` | 直接对应 `brk` 测试，也是后续用户堆的基础能力。 |
 | `mmap` / `munmap` | `TODO[UNIMPLEMENTED]` | 直接对应 `mmap`、`munmap` 测试，但会进入内存管理核心，复杂度明显高于 P0。 |
 | `openat` 的 `dirfd` 语义 | `TODO[ABI-COMPAT]` | 现在只兼容 `AT_FDCWD`；若 basic 测试出现相对目录 fd，这里会暴露问题。 |

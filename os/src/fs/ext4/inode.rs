@@ -9,7 +9,7 @@ use core::cell::SyncUnsafeCell;
 use lwext4_rust::{bindings, Ext4File, InodeTypes as Ext4InodeTypes};
 
 use crate::fs::KStat;
-use crate::fs::vfs::{InodeOp, InodeType, LinuxDirent64};
+use crate::fs::vfs::{InodeOp, InodeType, Dentry, LinuxDirent64};
 use crate::syscall::{Errno, SysResult};
 
 pub struct Ext4Inode {
@@ -196,9 +196,7 @@ impl InodeOp for Ext4Inode {
         let c_path = c_path.into_raw();
         let mut dir: bindings::ext4_dir = unsafe { core::mem::zeroed() };
         let ret = unsafe { bindings::ext4_dir_open(&mut dir, c_path) };
-        unsafe {
-            drop(CString::from_raw(c_path));
-        }
+        unsafe { drop(CString::from_raw(c_path)); }
         if ret != 0 {
             return Err(Self::map_lwext4_err(ret));
         }
@@ -264,6 +262,14 @@ impl InodeOp for Ext4Inode {
         }
 
         Ok(Arc::new(new_inode))
+    }
+
+    fn link(&self, bare_dentry: Arc<Dentry>) -> SysResult {
+        Err(Errno::EFAULT)
+    }
+
+    fn unlink(&self, valid_dentry: Arc<Dentry>) -> SysResult {
+        Err(Errno::EFAULT)
     }
 }
 

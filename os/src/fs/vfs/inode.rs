@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use core::any::Any;
 use crate::syscall::SysResult;
 use crate::fs::KStat;
-use super::LinuxDirent64;
+use super::{Dentry, LinuxDirent64};
 
 pub trait InodeOp: Any + Send + Sync {
     fn as_any(&self) -> &dyn Any;
@@ -21,6 +21,9 @@ pub trait InodeOp: Any + Send + Sync {
     fn readdir(&self) -> SysResult<Vec<LinuxDirent64>>;
 
     fn create(&self, name: &str, ty: InodeType) -> SysResult<Arc<dyn InodeOp>>;
+
+    fn link(&self, bare_dentry: Arc<Dentry>) -> SysResult;
+    fn unlink(&self, valid_dentry: Arc<Dentry>) -> SysResult;
 }
 
 #[repr(u8)]

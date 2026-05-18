@@ -40,11 +40,15 @@ mod errno;
 mod fs;
 mod process;
 mod mm;
+mod system;
+mod time;
 
 pub use errno::*;
 use fs::*;
 use process::*;
 use mm::*;
+use system::*;
+use time::*;
 
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
     match syscall_id {
@@ -67,12 +71,12 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         SYSCALL_STAT       => sys_stat(args[0] as *const u8, args[1] as *mut crate::fs::Stat),
         SYSCALL_FSTAT      => sys_fstat(args[0], args[1] as *mut crate::fs::Stat),
         SYSCALL_EXIT       => sys_exit(args[0] as i32),
-        SYSCALL_NANOSLEEP  => sys_nanosleep(args[0] as *const crate::syscall::process::TimeVal, args[1] as *mut crate::syscall::process::TimeVal),
+        SYSCALL_NANOSLEEP  => sys_nanosleep(args[0] as *const TimeVal, args[1] as *mut TimeVal),
         SYSCALL_SCHED_YIELD => sys_sched_yield(),
         SYSCALL_SETPRIORITY => sys_setpriority(args[0], args[1], args[2] as isize),
-        SYSCALL_TIMES      => sys_times(args[0] as *mut crate::syscall::process::Tms),
-        SYSCALL_UNAME      => sys_uname(args[0] as *mut crate::syscall::process::UtsName),
-        SYSCALL_GETTIMEOFDAY => sys_gettimeofday(args[0] as *mut crate::syscall::process::TimeVal, args[1]),
+        SYSCALL_TIMES      => sys_times(args[0] as *mut Tms),
+        SYSCALL_UNAME      => sys_uname(args[0] as *mut UtsName),
+        SYSCALL_GETTIMEOFDAY => sys_gettimeofday(args[0] as *mut TimeVal, args[1]),
         SYSCALL_GETPID     => sys_getpid(),
         SYSCALL_GETPPID    => sys_getppid(),
         SYSCALL_BRK        => sys_brk(args[0]),

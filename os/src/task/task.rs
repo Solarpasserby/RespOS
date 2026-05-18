@@ -157,6 +157,9 @@ impl TaskControlBlock {
     pub fn pid(&self) -> usize {
         self.pid.0
     }
+    pub fn ppid(&self) -> usize {
+        self.inner_exclusive_access().parent.as_ref().unwrap().upgrade().unwrap().pid()
+    }
 
     // 文件描述符相关操作
     pub fn alloc_fd(&self, fd_entry: FdEntry) -> SysResult<usize> {
