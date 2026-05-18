@@ -5,12 +5,14 @@ use std::io::{Result, Write};
 fn main() {
     println!("cargo:rerun-if-changed=../user/src/");
     println!("cargo:rerun-if-env-changed=PROFILE");
+    println!("cargo:rerun-if-env-changed=RESPOS_USER_PROFILE_DIR");
     insert_app_data().unwrap();
 }
 
 fn target_path() -> String {
     let profile = env::var("PROFILE").expect("PROFILE is not set by Cargo");
-    format!("../user/target/riscv64gc-unknown-none-elf/{profile}/")
+    let profile_dir = env::var("RESPOS_USER_PROFILE_DIR").unwrap_or(profile);
+    format!("../user/target/riscv64gc-unknown-none-elf/{profile_dir}/")
 }
 
 fn insert_app_data() -> Result<()> {
