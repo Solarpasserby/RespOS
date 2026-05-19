@@ -8,8 +8,8 @@ use core::any::Any;
 use core::cell::SyncUnsafeCell;
 use lwext4_rust::{bindings, Ext4File, InodeTypes as Ext4InodeTypes};
 
+use crate::fs::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
 use crate::fs::KStat;
-use crate::fs::vfs::{InodeOp, InodeType, Dentry, LinuxDirent64};
 use crate::syscall::{Errno, SysResult};
 
 pub struct Ext4Inode {
@@ -76,6 +76,16 @@ impl Ext4Inode {
             39 => Errno::ENOTEMPTY,
             _ => Errno::EIO,
         }
+    }
+
+    fn file_link(&self, hardlink_path: &str) -> SysResult {
+        let old_path = CString::new(self.abs_path.as_str()).map_err(|_| Errno::EINVAL)?;
+        let new_path = CString::new(hardlink_path).map_err(|_| Errno::EINVAL)?;
+        let ret = unsafe { bindings::ext4_flink(old_path.as_ptr(), new_path.as_ptr()) };
+        if ret != 0 {
+            return Err(Self::map_lwext4_err(ret));
+        }
+        Ok(())
     }
 
     fn file_size(&self) -> SysResult<usize> {
@@ -265,11 +275,41 @@ impl InodeOp for Ext4Inode {
     }
 
     fn link(&self, bare_dentry: Arc<Dentry>) -> SysResult {
-        Err(Errno::EFAULT)
+        // 调用者保证参数合法
+        // if self.node_type() == InodeType::Directory {
+        //     return Err(Errno::EPERM);
+        // }
+        // if bare_dentry.try_get_inode().is_some() {
+        //     return Err(Errno::EEXIST);
+        // }
+
+        self.file_link(&bare_dentry.abs_path)?;
+        // TODO: 这里语义是新建了一个 inode，在优化 Ext4Inode 类型后需做修改
+        bare_dentry.inner.lock().inode =
+            Some(Arc::new(Self::new(&bare_dentry.abs_path, self.ty.clone())));
+        Ok(())
     }
 
     fn unlink(&self, valid_dentry: Arc<Dentry>) -> SysResult {
-        Err(Errno::EFAULT)
+        // 调用者保证参数合法
+        // self.check_type(InodeType::Directory)?;
+
+        let file = self.inner();
+        info!("[kernel] unlink: {}", valid_dentry.abs_path);
+
+        let child_abs_path = &valid_dentry.abs_path;
+        let child_inode = valid_dentry.try_get_inode().ok_or(Errno::ENOENT)?;
+        if child_inode.node_type() == InodeType::Directory {
+            let entries = child_inode.readdir()?;
+            if !entries.is_empty() {
+                return Err(Errno::ENOTEMPTY);
+            }
+            file.dir_rm(child_abs_path).map_err(Self::map_lwext4_err)?;
+        } else {
+            // lwext4_rust 包中 `file_remove` 的语义是 unlink 而非删除文件
+            file.file_remove(child_abs_path).map_err(Self::map_lwext4_err)?;
+        };
+        Ok(())
     }
 }
 
@@ -298,27 +338,13 @@ impl From<Ext4InodeTypes> for InodeType {
     fn from(ty: Ext4InodeTypes) -> Self {
         match ty {
             Ext4InodeTypes::EXT4_DE_UNKNOWN => InodeType::Unknown,
-            Ext4InodeTypes::EXT4_DE_FIFO | Ext4InodeTypes::EXT4_INODE_MODE_FIFO => {
-                InodeType::Fifo
-            }
-            Ext4InodeTypes::EXT4_DE_CHRDEV | Ext4InodeTypes::EXT4_INODE_MODE_CHARDEV => {
-                InodeType::CharDevice
-            }
-            Ext4InodeTypes::EXT4_DE_DIR | Ext4InodeTypes::EXT4_INODE_MODE_DIRECTORY => {
-                InodeType::Directory
-            }
-            Ext4InodeTypes::EXT4_DE_BLKDEV | Ext4InodeTypes::EXT4_INODE_MODE_BLOCKDEV => {
-                InodeType::BlockDevice
-            }
-            Ext4InodeTypes::EXT4_DE_REG_FILE | Ext4InodeTypes::EXT4_INODE_MODE_FILE => {
-                InodeType::Regular
-            }
-            Ext4InodeTypes::EXT4_DE_SYMLINK | Ext4InodeTypes::EXT4_INODE_MODE_SOFTLINK => {
-                InodeType::SymLink
-            }
-            Ext4InodeTypes::EXT4_DE_SOCK | Ext4InodeTypes::EXT4_INODE_MODE_SOCKET => {
-                InodeType::Socket
-            }
+            Ext4InodeTypes::EXT4_DE_FIFO | Ext4InodeTypes::EXT4_INODE_MODE_FIFO => InodeType::Fifo,
+            Ext4InodeTypes::EXT4_DE_CHRDEV | Ext4InodeTypes::EXT4_INODE_MODE_CHARDEV => InodeType::CharDevice,
+            Ext4InodeTypes::EXT4_DE_DIR | Ext4InodeTypes::EXT4_INODE_MODE_DIRECTORY => InodeType::Directory,
+            Ext4InodeTypes::EXT4_DE_BLKDEV | Ext4InodeTypes::EXT4_INODE_MODE_BLOCKDEV => InodeType::BlockDevice,
+            Ext4InodeTypes::EXT4_DE_REG_FILE | Ext4InodeTypes::EXT4_INODE_MODE_FILE => InodeType::Regular,
+            Ext4InodeTypes::EXT4_DE_SYMLINK | Ext4InodeTypes::EXT4_INODE_MODE_SOFTLINK => InodeType::SymLink,
+            Ext4InodeTypes::EXT4_DE_SOCK | Ext4InodeTypes::EXT4_INODE_MODE_SOCKET => InodeType::Socket,
             _ => InodeType::Unknown,
         }
     }

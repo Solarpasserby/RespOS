@@ -74,6 +74,11 @@ impl Dentry {
     pub fn get_parent_or_self(self: &Arc<Self>) -> Arc<Dentry> {
         self.get_parent().unwrap_or_else(|| self.clone())
     }
+
+    /// 是否为根目录项
+    pub fn is_root(&self) -> bool {
+        self.abs_path == "/" && self.get_parent().is_none()
+    }
 }
 
 impl Dentry {

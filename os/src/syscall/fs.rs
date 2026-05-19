@@ -1,11 +1,14 @@
 // os/src/syscall/fs.rs
 
-use alloc::vec;
-use crate::fs::{FdEntry, Path, Stat, filename_create, filename_lookup, make_pipe, path_open};
-use crate::fs::vfs::{InodeType, OpenFlags, File};
-use crate::task::{current_task};
+use super::{Errno, SysResult};
+use crate::fs::vfs::{File, InodeType, OpenFlags};
+use crate::fs::{
+    filename_create, filename_link, filename_lookup, filename_unlink, make_pipe, path_open,
+    FdEntry, Path, Stat,
+};
 use crate::mm::{check_user_writable, copy_cstr_from_user, copy_from_user, copy_to_user};
-use super::{SysResult, Errno};
+use crate::task::current_task;
+use alloc::vec;
 
 // 使用 mm 实现的 `copy_cstr_from_user`, `copy_from_user`, `copy_to_user` 来访问用户空间的数据
 
@@ -116,11 +119,37 @@ pub fn sys_mkdirat(dirfd: isize, path: *const u8, mode: usize) -> SysResult<usiz
     Ok(0)
 }
 
+/// 系统调用 sys-linkat
+pub fn sys_linkat(
+    olddirfd: isize,
+    oldpath: *const u8,
+    newdirfd: isize,
+    newpath: *const u8,
+    flags: usize,
+) -> SysResult<usize> {
+    let _ = (olddirfd, newdirfd);
+    if flags != 0 {
+        return Err(Errno::EINVAL);
+    }
+
+    let oldpath = copy_cstr_from_user(oldpath)?;
+    let newpath = copy_cstr_from_user(newpath)?;
+    filename_link(oldpath.as_str(), newpath.as_str())?;
+    Ok(0)
+}
+
 /// 系统调用 sys-unlink
 pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: usize) -> SysResult<usize> {
-    // TODO[UNIMPLEMENTED]: 需要补完 unlinkat 逻辑，并处理 dirfd / flags 语义。
-    let _ = (dirfd, path, flags);
-    Err(Errno::ENOSYS)
+    // TODO[ABI-COMPAT]: 当前仅兼容 AT_FDCWD 语义，尚未真正支持相对 dirfd 删除。
+    let _ = dirfd;
+    const AT_REMOVEDIR: usize = 0x200;
+    if flags & !AT_REMOVEDIR != 0 {
+        return Err(Errno::EINVAL);
+    }
+
+    let path = copy_cstr_from_user(path)?;
+    filename_unlink(path.as_str(), flags & AT_REMOVEDIR != 0)?;
+    Ok(0)
 }
 
 /// 系统调用 sys-chdir
@@ -150,7 +179,7 @@ pub fn sys_getcwd(buf: *mut u8, len: usize) -> SysResult<usize> {
 }
 
 /// 系统调用 sys-pipe
-/// 
+///
 /// FIXME: 当前实现存在 BUG
 pub fn sys_pipe2(pipefd: *mut [usize; 2], flags: usize) -> SysResult<usize> {
     // TODO[ABI-COMPAT]: 当前忽略 flags，尚未完整实现 pipe2 语义。
@@ -168,7 +197,7 @@ pub fn sys_pipe2(pipefd: *mut [usize; 2], flags: usize) -> SysResult<usize> {
         Err(e) => {
             task.close(fds[0])?;
             return Err(e);
-        },
+        }
     };
 
     if let Err(e) = copy_to_user(pipefd, &fds as *const [usize; 2], 1) {
@@ -215,20 +244,6 @@ pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> SysResult<usize
     copy_to_user(dirp, buf.as_ptr(), offset)?;
 
     Ok(offset)
-}
-
-
-/// 系统调用 sys-linkat
-/// TODO[UNIMPLEMENTED]: 需要补完 linkat 逻辑。
-pub fn sys_linkat(
-    olddirfd: isize,
-    oldpath: *const u8,
-    newdirfd: isize,
-    newpath: *const u8,
-    flags: usize,
-) -> SysResult<usize> {
-    let _ = (olddirfd, oldpath, newdirfd, newpath, flags);
-    Err(Errno::ENOSYS)
 }
 
 /// 系统调用 sys-mount
