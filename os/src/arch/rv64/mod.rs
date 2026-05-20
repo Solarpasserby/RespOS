@@ -2,6 +2,7 @@
 
 pub mod config;
 mod entry;
+pub mod interrupt;
 pub mod mm;
 pub mod sbi;
 pub mod task;
