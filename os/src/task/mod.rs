@@ -1,37 +1,33 @@
 // os/src/task.rs
 
 //! ### ~~进程~~任务模块
-//! 
+//!
 //! 主要实现任务调度，实现 CPU 时间资源分配
-//! 
+//!
 //! 至少现在，这里你可以将“进程”和“任务”作为同一个概念
 
 mod context;
-mod task;
+mod kstack;
 mod manager;
 mod pid;
-mod kstack;
 mod processor;
+mod task;
 
-use lazy_static::lazy_static;
-use alloc::sync::Arc;
 use crate::loader::get_app_data_by_name;
-use task::{ TaskControlBlock, TaskStatus };
+use alloc::sync::Arc;
 pub use context::TaskContext;
-pub use manager::add_task;
 pub use kstack::get_kernel_stack_top_by_sp;
+use lazy_static::lazy_static;
+pub use manager::add_task;
 pub use processor::{
-    current_task,
-    current_user_token,
-    current_trap_cx,
-    take_current_task,
-    run_tasks ,schedule
+    current_task, current_trap_cx, current_user_token, run_tasks, schedule, take_current_task,
 };
+use task::{TaskControlBlock, TaskStatus};
 
 lazy_static! {
-    pub static ref INITPROC: Arc<TaskControlBlock> = Arc::new(
-        TaskControlBlock::new(get_app_data_by_name("initproc").unwrap())
-    );
+    pub static ref INITPROC: Arc<TaskControlBlock> = Arc::new(TaskControlBlock::new(
+        get_app_data_by_name("initproc").unwrap()
+    ));
 }
 
 pub fn add_initproc() {
@@ -61,7 +57,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     drop(task); // 该函数不会正常结束，手动删除引用
     // 到此为止应当仅有其父任务有其原子引用，父任务将其回收后，资源将会回收
 
-    let mut _unused_task_cx = TaskContext::app_init_task_context(0,0);
+    let mut _unused_task_cx = TaskContext::app_init_task_context(0, 0);
     // 切换到空闲任务，实际上永远不会切换回来，这片内核栈也会被回收
     schedule(&mut _unused_task_cx as *mut _);
 }

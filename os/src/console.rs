@@ -2,7 +2,7 @@
 
 //! 导入工具，打印和拼接字符串
 use crate::sbi::console_putchar;
-use core::fmt::{self, Write, Arguments};
+use core::fmt::{self, Arguments, Write};
 
 /// 日志等级：定义 5 种消息级别
 #[derive(PartialEq, PartialOrd, Copy, Clone)]
@@ -50,8 +50,8 @@ pub fn log(level: LogLevel, args: Arguments) {
 
     match level {
         LogLevel::Error => print_color(31, args), // 红
-        LogLevel::Warn  => print_color(93, args), // 黄
-        LogLevel::Info  => print_color(34, args), // 蓝
+        LogLevel::Warn => print_color(93, args),  // 黄
+        LogLevel::Info => print_color(34, args),  // 蓝
         LogLevel::Debug => print_color(32, args), // 绿
         LogLevel::Trace => print_color(90, args), // 灰
     }

@@ -1,8 +1,8 @@
 // os/src/syscall/time.rs
 
-use crate::timer::get_time_ms;
-use crate::mm::{copy_to_user, copy_from_user};
 use super::SysResult;
+use crate::mm::{copy_from_user, copy_to_user};
+use crate::timer::get_time_ms;
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -31,9 +31,8 @@ impl Default for Tms {
     }
 }
 
-
 /// 系统调用 sys-times
-/// 
+///
 /// TODO：目前只做固定实现
 pub fn sys_times(buf: *mut Tms) -> SysResult<usize> {
     let tms = Tms::default();
@@ -52,14 +51,14 @@ pub fn sys_gettimeofday(tv: *mut TimeVal, _tz: usize) -> SysResult<usize> {
 }
 
 /// 系统调用 sys-nanosleep
-/// 
+///
 /// TODO: 实现较简单，且未实现信号打断机制
 pub fn sys_nanosleep(req: *const TimeVal, _rem: *mut TimeVal) -> SysResult<usize> {
-    let mut time_val = TimeVal {sec: 0, usec: 0};
+    let mut time_val = TimeVal { sec: 0, usec: 0 };
     copy_from_user(&mut time_val as *mut TimeVal, req, 1)?;
     let time_ms = time_val.sec * 1000 + time_val.usec / 1000;
 
-    let start_time = get_time_ms();    
+    let start_time = get_time_ms();
     loop {
         let current_time = get_time_ms();
         if current_time - start_time >= time_ms {

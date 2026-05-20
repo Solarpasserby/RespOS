@@ -1,12 +1,12 @@
 // os/src/vfs/file.rs
 
-use spin::Mutex;
+use super::{InodeOp, LinuxDirent64};
+use crate::fs::KStat;
+use crate::syscall::{Errno, SysResult};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
-use crate::syscall::{Errno, SysResult};
-use crate::fs::KStat;
-use super::{InodeOp, LinuxDirent64};
+use spin::Mutex;
 
 // 常规文件
 pub struct File {
@@ -51,10 +51,7 @@ impl File {
         };
         Self {
             inode,
-            inner: Mutex::new(FileInner {
-                offset,
-                flags,
-            }),
+            inner: Mutex::new(FileInner { offset, flags }),
         }
     }
 

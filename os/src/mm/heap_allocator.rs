@@ -1,7 +1,7 @@
 // os/src/mm/heap_allocator.rs
 
-use buddy_system_allocator::LockedHeap;
 use crate::config::KERNEL_HEAP_SIZE;
+use buddy_system_allocator::LockedHeap;
 
 #[global_allocator]
 static HEAP_ALLOCATOR: LockedHeap<32> = LockedHeap::empty();

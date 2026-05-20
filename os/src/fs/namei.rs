@@ -120,7 +120,9 @@ pub fn open_last_lookups(
             Ok(dentry) => {
                 let inode = dentry.get_inode();
                 // 期望打开目录，但实际文件类型不是目录，返回错误
-                if flags.contains(OpenFlags::O_DIRECTORY) && inode.node_type() != InodeType::Directory {
+                if flags.contains(OpenFlags::O_DIRECTORY)
+                    && inode.node_type() != InodeType::Directory
+                {
                     return Err(Errno::ENOTDIR);
                 }
                 // TODO: 此处默认 dentry 不是负目录项，在引入缓存后需修改
@@ -168,7 +170,7 @@ pub fn filename_create(path: &str, ty: InodeType, _mode: usize) -> SysResult {
 
     let name = nd.path_segments[nd.depth];
     if name == "." || name == ".." {
-        return Err(Errno::EEXIST)
+        return Err(Errno::EEXIST);
     }
 
     // TODO: 引入负目录项需进行修改，这里先做简单实现

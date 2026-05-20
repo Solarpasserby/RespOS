@@ -17,6 +17,11 @@ pub const KERNEL_STACK_SIZE: usize = (PAGE_SIZE << 4) - PAGE_SIZE;
 // 内核堆大小
 pub const KERNEL_HEAP_SIZE: usize = 1_000_000;
 
+// 文件映射和匿名映射区域
+pub const MMAP_MIN_ADDR: usize = 0x0000_0020_0000_0000;
+pub const MMAP_MAX_ADDR: usize = 0x0000_0022_0000_0000;
+pub const MMAP_AREA_SIZE: usize = MMAP_MAX_ADDR - MMAP_MIN_ADDR; // 8G 大小
+
 // 页大小
 pub const PAGE_SIZE: usize = 0x1000;
 pub const PAGE_SIZE_BITS: usize = 12;

@@ -1,11 +1,12 @@
 // os/src/syscall/mm.rs
 
 use super::{Errno, SysResult};
+use crate::task::current_task;
 
 /// 系统调用 sys-brk
 /// TODO[UNIMPLEMENTED]: 需要补完 brk 逻辑。
 pub fn sys_brk(addr: usize) -> SysResult<usize> {
-    let _ = addr;
+    let task = current_task().expect("[kernel] current task is None.");
     Err(Errno::ENOSYS)
 }
 

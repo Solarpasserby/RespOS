@@ -1,11 +1,11 @@
 // os/src/fs/stdio.rs
 
-use core::any::Any;
-use crate::sbi::console_getchar;
-use crate::task::suspend_current_and_run_next;
-use crate::syscall::SysResult;
 use super::KStat;
-use super::vfs::{InodeType, FileOp, OpenFlags};
+use super::vfs::{FileOp, InodeType, OpenFlags};
+use crate::sbi::console_getchar;
+use crate::syscall::SysResult;
+use crate::task::suspend_current_and_run_next;
+use core::any::Any;
 
 const LF: usize = 0x0a;
 const CR: usize = 0x0d;

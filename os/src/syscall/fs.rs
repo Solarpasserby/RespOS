@@ -3,8 +3,8 @@
 use super::{Errno, SysResult};
 use crate::fs::vfs::{File, InodeType, OpenFlags};
 use crate::fs::{
-    filename_create, filename_link, filename_lookup, filename_unlink, make_pipe, path_open,
-    FdEntry, Path, Stat,
+    FdEntry, Path, Stat, filename_create, filename_link, filename_lookup, filename_unlink,
+    make_pipe, path_open,
 };
 use crate::mm::{check_user_writable, copy_cstr_from_user, copy_from_user, copy_to_user};
 use crate::task::current_task;

@@ -6,11 +6,11 @@ mod virtio;
 
 use core::ptr::NonNull;
 
-use virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader};
 use crate::arch::config::{KERNEL_BASE, MMIO};
 use device::*;
-use virtio::*;
 pub use disk::Disk;
+use virtio::*;
+use virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader};
 
 // 先支持单一的块设备
 pub type BlockDeviceImpl = VirtIoBlkDev<VirtIoHalImpl, MmioTransport<'static>>;

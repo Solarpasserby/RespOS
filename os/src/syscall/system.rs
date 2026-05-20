@@ -1,7 +1,7 @@
 // os/src/syscall/utils.rs
 
-use crate::mm::copy_to_user;
 use super::SysResult;
+use crate::mm::copy_to_user;
 
 #[repr(C)]
 #[derive(Copy, Clone)]

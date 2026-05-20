@@ -3,12 +3,12 @@
 //! ### 内核配置模块
 mod board;
 mod driver;
-mod mm;
 mod fs;
+mod mm;
 mod syscall;
 
 pub use board::*;
 pub use driver::*;
-pub use mm::*;
 pub use fs::*;
+pub use mm::*;
 pub use syscall::*;

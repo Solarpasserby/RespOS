@@ -1,15 +1,15 @@
 // os/src/fs/pipe.rs
 
-use alloc::sync::Arc;
-use alloc::string::String;
 use super::vfs::Dentry;
+use alloc::string::String;
+use alloc::sync::Arc;
 
 pub struct Path {
     pub dentry: Arc<Dentry>,
 }
 
 impl Path {
-    pub fn new(/* mnt: Arc<VfsMount> ,*/dentry: Arc<Dentry>) -> Arc<Self> {
+    pub fn new(/* mnt: Arc<VfsMount> ,*/ dentry: Arc<Dentry>) -> Arc<Self> {
         Arc::new(Path {
             // mnt,
             dentry,

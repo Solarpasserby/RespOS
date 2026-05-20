@@ -1,10 +1,10 @@
 // os/src/ext4/super_block.rs
 
-use lwext4_rust::{Ext4BlockWrapper, InodeTypes as Ext4InodeTypes};
-use alloc::sync::Arc;
+use super::Ext4Inode;
 use crate::drivers::Disk;
 use crate::fs::vfs::{InodeOp, SuperBlockOp};
-use super::Ext4Inode;
+use alloc::sync::Arc;
+use lwext4_rust::{Ext4BlockWrapper, InodeTypes as Ext4InodeTypes};
 
 unsafe impl Send for Ext4SuperBlock {}
 unsafe impl Sync for Ext4SuperBlock {}

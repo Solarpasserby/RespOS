@@ -1,7 +1,7 @@
 // os/src/vfs/super_block.rs
 
-use alloc::sync::Arc;
 use super::InodeOp;
+use alloc::sync::Arc;
 
 pub trait SuperBlockOp: Send + Sync {
     /// 获取根节点
