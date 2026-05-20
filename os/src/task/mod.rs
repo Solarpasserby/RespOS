@@ -15,13 +15,12 @@ mod kstack;
 mod processor;
 mod signal;
 mod action;
-
 use lazy_static::lazy_static;
 use alloc::sync::Arc;
 use crate::loader::get_app_data_by_name;
 use context::TaskContext;
 use task::{ TaskControlBlock, TaskStatus };
-pub use manager::{add_task, pid2task};
+pub use manager::{add_task, pid2task, PID2TCB};
 pub use kstack::get_kernel_stack_top_by_sp;
 pub use processor::{
     current_task,
@@ -35,9 +34,17 @@ pub use action::{SignalAction, SignalActions};
 pub use signal::MAX_SIG;
 
 lazy_static! {
-    pub static ref INITPROC: Arc<TaskControlBlock> = Arc::new(
-        TaskControlBlock::new(get_app_data_by_name("initproc").unwrap())
-    );
+    pub static ref INITPROC: Arc<TaskControlBlock> = {
+        let initproc = Arc::new(
+            TaskControlBlock::new(get_app_data_by_name("initproc").unwrap())
+        );
+
+        { &*PID2TCB }
+            .lock()
+            .insert(initproc.pid(), initproc.clone());
+
+        initproc
+    };
 }
 
 pub fn add_initproc() {

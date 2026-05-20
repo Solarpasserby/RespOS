@@ -12,7 +12,7 @@ use super::context::TaskContext;
 use super::pid::{PidHandle, pid_alloc};
 use super::kstack::KernelStack;
 use super::{SignalActions};
-
+use crate::task::manager::PID2TCB;
 
 /// 任务控制块——此处的任务是对一定资源和某个程序的抽象表述
 /// 
@@ -74,46 +74,52 @@ impl TaskControlBlock {
     }
 
     /// 以父~~进程~~任务创建子~~进程~~任务
-    pub fn fork(self: &Arc<Self>) -> Arc<Self> {
-        let mut parent_inner = self.inner_exclusive_access();
-        let pid = pid_alloc();
-        let kernel_stack = KernelStack::new(&pid);
-        let mut kernel_stack_top = kernel_stack.get_top();
-        // 克隆内核栈上的异常上下文
-        self.clone_trap_cx(kernel_stack_top);
-        kernel_stack_top -= core::mem::size_of::<TrapContext>();
+pub fn fork(self: &Arc<Self>) -> Arc<Self> {
+    let mut parent_inner = self.inner_exclusive_access();
+    let pid = pid_alloc();
+    let kernel_stack = KernelStack::new(&pid);
+    let mut kernel_stack_top = kernel_stack.get_top();
+    // 克隆内核栈上的异常上下文
+    self.clone_trap_cx(kernel_stack_top);
+    kernel_stack_top -= core::mem::size_of::<TrapContext>();
 
-        let task_ctrl_block = Arc::new(TaskControlBlock {
-            pid,
-            kernel_stack,
-            inner: Mutex::new(TaskControlBlockInner {
-                task_status: TaskStatus::Ready,
-                // 全零初始化任务上下文
-                task_context: TaskContext::app_init_task_context(0,0),
-                memory_set: MemorySet::from_existed_user(&parent_inner.memory_set),
-                fd_table: FdTable::from_existed_user(&parent_inner.fd_table),
-                cwd: Path::from_existed_user(&parent_inner.cwd),
-                parent: Some(Arc::downgrade(self)),
-                children: Vec::new(),
-                base_size: parent_inner.base_size,
-                exit_code: 0,
-                signals: SignalFlags::empty(),
-                signal_actions: parent_inner.signal_actions.clone(),
-                signal_mask: SignalFlags::empty(),
-                handling_sig: -1,
-                trap_ctx_backup: None,
-                frozen: false,
-                killed: false,
-            }),
-        });
-        // 修改任务异常上下文
-        task_ctrl_block.write_task_cx(kernel_stack_top);
+    let task_ctrl_block = Arc::new(TaskControlBlock {
+        pid,
+        kernel_stack,
+        inner: Mutex::new(TaskControlBlockInner {
+            task_status: TaskStatus::Ready,
+            // 全零初始化任务上下文
+            task_context: TaskContext::app_init_task_context(0, 0),
+            memory_set: MemorySet::from_existed_user(&parent_inner.memory_set),
+            fd_table: FdTable::from_existed_user(&parent_inner.fd_table),
+            cwd: Path::from_existed_user(&parent_inner.cwd),
+            parent: Some(Arc::downgrade(self)),
+            children: Vec::new(),
+            base_size: parent_inner.base_size,
+            exit_code: 0,
+            signals: SignalFlags::empty(),
+            signal_actions: parent_inner.signal_actions.clone(),
+            signal_mask: SignalFlags::empty(),
+            handling_sig: -1,
+            trap_ctx_backup: None,
+            frozen: false,
+            killed: false,
+        }),
+    });
 
-        // 同时更新父任务状态
-        parent_inner.children.push(task_ctrl_block.clone());
+    // 初始化任务上下文
+    task_ctrl_block.write_task_cx(kernel_stack_top);
 
-        task_ctrl_block
-    }
+    // 同时更新父任务状态
+    parent_inner.children.push(task_ctrl_block.clone());
+
+    // 插入到全局 PID -> Task 映射表
+    { &*PID2TCB }
+        .lock()
+        .insert(task_ctrl_block.pid(), task_ctrl_block.clone());
+
+    task_ctrl_block
+}
 
     // 为任务载入可执行程序
     pub fn exec(&self, elf_data: &[u8]) {
