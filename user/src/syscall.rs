@@ -1,4 +1,5 @@
 use core::arch::asm;
+use crate::SignalAction;
 
 const SYSCALL_GETCWD: usize     = 17;
 const SYSCALL_DUP: usize        = 23;
@@ -24,6 +25,10 @@ const SYSCALL_SCHED_YIELD: usize = 124;
 const SYSCALL_SETPRIORITY: usize = 140;
 const SYSCALL_TIMES: usize      = 153;
 const SYSCALL_UNAME: usize      = 160;
+const SYSCALL_KILL: usize     = 129;
+const SYSCALL_SIGACTION: usize = 134;
+const SYSCALL_SIGPROCMASK: usize = 135;
+const SYSCALL_SIGRETURN: usize = 139;
 const SYSCALL_GETTIMEOFDAY: usize = 169;
 const SYSCALL_GETPID: usize     = 172;
 const SYSCALL_GETPPID: usize    = 173;
@@ -187,88 +192,39 @@ pub fn sys_execve(path: &str, args: &[*const u8], envp: &[*const u8]) -> isize {
     syscall(SYSCALL_EXECVE, [path.as_ptr() as usize, args.as_ptr() as usize, envp.as_ptr() as usize, 0, 0, 0])
 }
 
-pub fn sys_wait4(pid: isize, exit_code: *mut i32, options: usize, rusage: usize) -> isize {
-    syscall(SYSCALL_WAIT4, [pid as usize, exit_code as usize, options, rusage, 0, 0])
+pub fn sys_wait4(pid: isize, exit_code: *mut i32) -> isize {
+    syscall(SYSCALL_WAIT4, [pid as usize, exit_code as usize, 0, 0, 0, 0])
 }
 
+pub fn sys_kill(pid: usize, signum: i32) -> isize {
+    syscall(SYSCALL_KILL, [pid, signum as usize, 0, 0, 0, 0])
+}     
 
-pub fn sys_linkat(
-    olddirfd: isize,
-    oldpath: &str,
-    newdirfd: isize,
-    newpath: &str,
-    flags: usize,
+pub fn sys_sigaction(
+    signum: i32,
+    action: *const SignalAction,
+    old_action: *mut SignalAction,
 ) -> isize {
-    syscall(SYSCALL_LINKAT, [
-        olddirfd as usize,
-        oldpath.as_ptr() as usize,
-        newdirfd as usize,
-        newpath.as_ptr() as usize,
-        flags,
-        0,
-    ])
+    syscall(
+        SYSCALL_SIGACTION,
+        [signum as usize, action as usize, old_action as usize, 0, 0, 0],
+    )
+    /*
+    syscall(
+        SYSCALL_SIGACTION,
+        [
+            signum as usize,
+            action.map_or(0, |r| r as *const _ as usize),
+            old_action.map_or(0, |r| r as *mut _ as usize),
+        ],
+    )
+    */
 }
 
-pub fn sys_mount(
-    source: &str,
-    target: &str,
-    fstype: &str,
-    flags: usize,
-    data: usize,
-) -> isize {
-    syscall(SYSCALL_MOUNT, [
-        source.as_ptr() as usize,
-        target.as_ptr() as usize,
-        fstype.as_ptr() as usize,
-        flags,
-        data,
-        0,
-    ])
+pub fn sys_sigprocmask(mask: u32) -> isize {
+    syscall(SYSCALL_SIGPROCMASK, [mask as usize, 0, 0, 0, 0, 0])
 }
 
-pub fn sys_umount2(target: &str, flags: usize) -> isize {
-    syscall(SYSCALL_UMOUNT2, [target.as_ptr() as usize, flags, 0, 0, 0, 0])
-}
-
-pub fn sys_nanosleep(req: &TimeVal, rem: &mut TimeVal) -> isize {
-    syscall(SYSCALL_NANOSLEEP, [req as *const _ as usize, rem as *mut _ as usize, 0, 0, 0, 0])
-}
-
-pub fn sys_setpriority(which: usize, who: usize, prio: isize) -> isize {
-    syscall(SYSCALL_SETPRIORITY, [which, who, prio as usize, 0, 0, 0])
-}
-
-pub fn sys_times(tms: &mut Tms) -> isize {
-    syscall(SYSCALL_TIMES, [tms as *mut _ as usize, 0, 0, 0, 0, 0])
-}
-
-pub fn sys_uname(buf: &mut UtsName) -> isize {
-    syscall(SYSCALL_UNAME, [buf as *mut _ as usize, 0, 0, 0, 0, 0])
-}
-
-pub fn sys_getpid() -> isize {
-    syscall(SYSCALL_GETPID, [0, 0, 0, 0, 0, 0])
-}
-
-pub fn sys_getppid() -> isize {
-    syscall(SYSCALL_GETPPID, [0, 0, 0, 0, 0, 0])
-}
-
-pub fn sys_brk(addr: usize) -> isize {
-    syscall(SYSCALL_BRK, [addr, 0, 0, 0, 0, 0])
-}
-
-pub fn sys_munmap(addr: usize, len: usize) -> isize {
-    syscall(SYSCALL_MUNMAP, [addr, len, 0, 0, 0, 0])
-}
-
-pub fn sys_mmap(
-    addr: usize,
-    len: usize,
-    prot: usize,
-    flags: usize,
-    fd: isize,
-    offset: usize,
-) -> isize {
-    syscall(SYSCALL_MMAP, [addr, len, prot, flags, fd as usize, offset])
+pub fn sys_sigreturn() -> isize {
+    syscall(SYSCALL_SIGRETURN, [0, 0, 0, 0, 0, 0])
 }

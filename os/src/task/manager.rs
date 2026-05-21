@@ -5,10 +5,12 @@ use spin::Mutex;
 use alloc::collections::vec_deque::VecDeque;
 use alloc::sync::Arc;
 use super::task::TaskControlBlock;
+use alloc::collections::BTreeMap;
 
 lazy_static! {
     /// 任务管理器
     pub static ref TASK_MANAGER: Mutex<TaskManager> = Mutex::new(TaskManager::new());
+    pub static ref PID2TCB: Mutex<BTreeMap<usize, Arc<TaskControlBlock>>> = Mutex::new(BTreeMap::new());
 }
 
 /// 任务调度管理器
@@ -41,3 +43,10 @@ pub fn add_task(task: Arc<TaskControlBlock>) {
 pub fn fetch_task() -> Option<Arc<TaskControlBlock>> {
     TASK_MANAGER.lock().fetch()
 }
+/// 根据进程id查找进程
+pub fn pid2task(pid: usize) -> Option<Arc<TaskControlBlock>> {
+    // 关键：用 &*PID2TCB 来拿到内部的 Mutex 引用
+    let map_guard = { &*PID2TCB }.lock();
+    map_guard.get(&pid).map(Arc::clone)
+}
+

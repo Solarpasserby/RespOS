@@ -6,12 +6,14 @@ use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use crate::trap::TrapContext;
 use crate::mm::MemorySet;
+use crate::task::SignalFlags;
 use crate::fs::{FdTable, FdEntry, Path, vfs::ROOT_DENTRY};
 use crate::syscall::SysResult;
 use super::context::TaskContext;
 use super::pid::{PidHandle, pid_alloc};
 use super::kstack::KernelStack;
-
+use super::{SignalActions};
+use crate::task::manager::PID2TCB;
 
 /// 任务控制块——此处的任务是对一定资源和某个程序的抽象表述
 /// 
@@ -27,6 +29,7 @@ pub struct TaskControlBlock {
     // 可变
     inner: Mutex<TaskControlBlockInner>,
 }
+
 
 impl TaskControlBlock {
     /// 新建任务
@@ -57,6 +60,13 @@ impl TaskControlBlock {
                 children: Vec::new(),
                 base_size: user_sp,
                 exit_code: 0,
+                signals: SignalFlags::empty(),
+                signal_actions: SignalActions::default(),
+                signal_mask: SignalFlags::empty(),
+                handling_sig: -1,
+                trap_ctx_backup: None,
+                frozen: false,
+                killed: false,
             }),
         };
         unsafe { trap_cx_ptr.write(trap_context); }
@@ -65,39 +75,52 @@ impl TaskControlBlock {
     }
 
     /// 以父~~进程~~任务创建子~~进程~~任务
-    pub fn fork(self: &Arc<Self>) -> Arc<Self> {
-        let mut parent_inner = self.inner_exclusive_access();
-        let pid = pid_alloc();
-        let kernel_stack = KernelStack::new(&pid);
-        let mut kernel_stack_top = kernel_stack.get_top();
-        // 克隆内核栈上的异常上下文
-        self.clone_trap_cx(kernel_stack_top);
-        kernel_stack_top -= core::mem::size_of::<TrapContext>();
+pub fn fork(self: &Arc<Self>) -> Arc<Self> {
+    let mut parent_inner = self.inner_exclusive_access();
+    let pid = pid_alloc();
+    let kernel_stack = KernelStack::new(&pid);
+    let mut kernel_stack_top = kernel_stack.get_top();
+    // 克隆内核栈上的异常上下文
+    self.clone_trap_cx(kernel_stack_top);
+    kernel_stack_top -= core::mem::size_of::<TrapContext>();
 
-        let task_ctrl_block = Arc::new(TaskControlBlock {
-            pid,
-            kernel_stack,
-            inner: Mutex::new(TaskControlBlockInner {
-                task_status: TaskStatus::Ready,
-                // 全零初始化任务上下文
-                task_context: TaskContext::app_init_task_context(0,0),
-                memory_set: MemorySet::from_existed_user(&parent_inner.memory_set),
-                fd_table: FdTable::from_existed_user(&parent_inner.fd_table),
-                cwd: Path::from_existed_user(&parent_inner.cwd),
-                parent: Some(Arc::downgrade(self)),
-                children: Vec::new(),
-                base_size: parent_inner.base_size,
-                exit_code: 0,
-            }),
-        });
-        // 修改任务异常上下文
-        task_ctrl_block.write_task_cx(kernel_stack_top);
+    let task_ctrl_block = Arc::new(TaskControlBlock {
+        pid,
+        kernel_stack,
+        inner: Mutex::new(TaskControlBlockInner {
+            task_status: TaskStatus::Ready,
+            // 全零初始化任务上下文
+            task_context: TaskContext::app_init_task_context(0, 0),
+            memory_set: MemorySet::from_existed_user(&parent_inner.memory_set),
+            fd_table: FdTable::from_existed_user(&parent_inner.fd_table),
+            cwd: Path::from_existed_user(&parent_inner.cwd),
+            parent: Some(Arc::downgrade(self)),
+            children: Vec::new(),
+            base_size: parent_inner.base_size,
+            exit_code: 0,
+            signals: SignalFlags::empty(),
+            signal_actions: parent_inner.signal_actions.clone(),
+            signal_mask: SignalFlags::empty(),
+            handling_sig: -1,
+            trap_ctx_backup: None,
+            frozen: false,
+            killed: false,
+        }),
+    });
 
-        // 同时更新父任务状态
-        parent_inner.children.push(task_ctrl_block.clone());
+    // 初始化任务上下文
+    task_ctrl_block.write_task_cx(kernel_stack_top);
 
-        task_ctrl_block
-    }
+    // 同时更新父任务状态
+    parent_inner.children.push(task_ctrl_block.clone());
+
+    // 插入到全局 PID -> Task 映射表
+    { &*PID2TCB }
+        .lock()
+        .insert(task_ctrl_block.pid(), task_ctrl_block.clone());
+
+    task_ctrl_block
+}
 
     /// 载入可执行程序，主要修改地址空间、用户栈、异常上下文等数据
     ///
@@ -205,6 +228,13 @@ pub struct TaskControlBlockInner {
     pub children: Vec<Arc<TaskControlBlock>>,
     pub base_size: usize,
     pub exit_code: i32,
+    pub signals: SignalFlags,
+    pub signal_actions: SignalActions,
+    pub signal_mask: SignalFlags,
+    pub handling_sig: isize,
+    pub trap_ctx_backup: Option<TrapContext>,
+    pub frozen: bool,
+    pub killed: bool,
 }
 
 impl TaskControlBlockInner {

@@ -9,4 +9,5 @@ path = "src/lib.rs"
 
 [dependencies]
 # riscv = "0.10"
+bitflags = "1.2.1"
 buddy_system_allocator = "0.10.0"

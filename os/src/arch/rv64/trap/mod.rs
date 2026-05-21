@@ -15,8 +15,8 @@ use riscv::register::{
 };
 use core::arch::global_asm;
 use crate::syscall::*;
-use crate::task::{suspend_current_and_run_next, exit_current_and_run_next};
-use super::timer::set_next_ti_trigger;
+use crate::task::{suspend_current_and_run_next, exit_current_and_run_next, handle_signals};
+use crate::timer::set_next_ti_trigger;
 
 pub use context::TrapContext;
 
@@ -93,8 +93,10 @@ pub fn trap_handler(cx: &mut TrapContext) {
             panic!("Unsupported trap {:?}, stval = {:#?}!", scause.cause(), stval);
         }
     };
+    handle_signals();
     return;
 }
+
 
 #[unsafe(no_mangle)]
 pub fn trap_from_kernel() -> ! {

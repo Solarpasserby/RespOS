@@ -23,6 +23,10 @@ const SYSCALL_FSTAT: usize          = 80;
 const SYSCALL_EXIT: usize           = 93;
 const SYSCALL_NANOSLEEP: usize      = 101;
 const SYSCALL_SCHED_YIELD: usize    = 124;
+const SYSCALL_KILL: usize     = 129;
+const SYSCALL_SIGACTION: usize= 134;
+const SYSCALL_SIGPROCMASK: usize = 135;
+const SYSCALL_SIGRETURN: usize = 139;
 const SYSCALL_SETPRIORITY: usize    = 140;
 const SYSCALL_TIMES: usize          = 153;
 const SYSCALL_UNAME: usize          = 160;
@@ -35,6 +39,7 @@ const SYSCALL_CLONE: usize          = 220;
 const SYSCALL_EXECVE: usize         = 221;
 const SYSCALL_MMAP: usize           = 222;
 const SYSCALL_WAIT4: usize          = 260;
+// FIXME: 把系统调用号按大小排布
 
 mod errno;
 mod fs;
@@ -45,6 +50,8 @@ pub use errno::*;
 use fs::*;
 use process::*;
 use mm::*;
+
+use crate::task::SignalAction;
 
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
     match syscall_id {
@@ -72,6 +79,16 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         SYSCALL_SETPRIORITY => sys_setpriority(args[0], args[1], args[2] as isize),
         SYSCALL_TIMES      => sys_times(args[0] as *mut crate::syscall::process::Tms),
         SYSCALL_UNAME      => sys_uname(args[0] as *mut crate::syscall::process::UtsName),
+        SYSCALL_KILL => sys_kill(args[0], args[1] as i32),
+        SYSCALL_SIGACTION => sys_sigaction(
+            args[0] as i32,
+            args[1] as *const SignalAction,
+            args[2] as *mut SignalAction,
+        ),
+
+        SYSCALL_SIGPROCMASK => sys_sigprocmask(args[0] as u32),
+
+        SYSCALL_SIGRETURN => sys_sigreturn(),
         SYSCALL_GETTIMEOFDAY => sys_gettimeofday(args[0] as *mut crate::syscall::process::TimeVal, args[1]),
         SYSCALL_GETPID     => sys_getpid(),
         SYSCALL_GETPPID    => sys_getppid(),
