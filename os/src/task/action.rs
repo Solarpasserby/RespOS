@@ -1,5 +1,5 @@
-/// os>src>task>action.rs
-/// 
+// os/src/task/action.rs
+
 use crate::task::{MAX_SIG, SignalFlags};
 
 /// Action for a signal

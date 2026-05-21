@@ -126,9 +126,7 @@ pub fn dup(fd: usize) -> isize { sys_dup(fd) }
 pub fn dup2(fd_src: usize, fd_dst: usize) -> isize { sys_dup3(fd_src, fd_dst, 0) }
 pub fn mkdir(path: &str, mode: usize) -> isize { sys_mkdirat(AT_FDCWD, path, mode) }
 pub fn unlink(path: &str) -> isize { sys_unlinkat(AT_FDCWD, path, 0) }
-pub fn link(oldpath: &str, newpath: &str) -> isize {
-    sys_linkat(AT_FDCWD, oldpath, AT_FDCWD, newpath, 0)
-}
+pub fn link(oldpath: &str, newpath: &str) -> isize { sys_linkat(AT_FDCWD, oldpath, AT_FDCWD, newpath, 0) }
 pub fn chdir(path: &str) -> isize { sys_chdir(path) }
 pub fn open(path: &str, flags: usize, mode: usize) -> isize { sys_openat(AT_FDCWD, path, flags, mode) }
 pub fn close(fd: usize) -> isize { sys_close(fd) }

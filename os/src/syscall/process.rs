@@ -1,31 +1,21 @@
 // os/src/syscall/process.rs
-use alloc::sync::Arc;
+
+use super::{SysResult, Errno};
 use crate::task::{
-    current_task,
-    add_task,
     SignalFlags,
     SignalAction,
     MAX_SIG,
+    PID2TCB,
     pid2task,
+    current_task,
+    add_task,
     exit_current_and_run_next,
     suspend_current_and_run_next,
 };
-use alloc::sync::Arc;
-
-#[repr(C)]
-pub struct UtsName {
-    pub sysname: [u8; 65],
-    pub nodename: [u8; 65],
-    pub release: [u8; 65],
-    pub version: [u8; 65],
-    pub machine: [u8; 65],
-    pub domainname: [u8; 65],
-}
 use crate::mm::{copy_cstr_from_user, copy_to_user, copy_from_user, extract_cstrings_from_user};
-use crate::fs::path_open;
-use super::{SysResult, Errno};
-use crate::task::PID2TCB;
-
+use crate::fs::{AT_FDCWD, path_open};
+use crate::loader::get_app_data_by_name;
+use alloc::sync::Arc;
 
 pub fn sys_exit(exit_code: i32) -> ! {
     exit_current_and_run_next(exit_code);
@@ -153,7 +143,6 @@ pub fn sys_getpid() -> SysResult<usize> {
 }
 
 /// 系统调用 sys-getppid
-/// TODO[UNIMPLEMENTED]: 需要补完 getppid 逻辑。
 pub fn sys_getppid() -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
     Ok(task.ppid())

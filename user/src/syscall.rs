@@ -228,3 +228,84 @@ pub fn sys_sigprocmask(mask: u32) -> isize {
 pub fn sys_sigreturn() -> isize {
     syscall(SYSCALL_SIGRETURN, [0, 0, 0, 0, 0, 0])
 }
+
+pub fn sys_linkat(
+    olddirfd: isize,
+    oldpath: &str,
+    newdirfd: isize,
+    newpath: &str,
+    flags: usize,
+) -> isize {
+    syscall(SYSCALL_LINKAT, [
+        olddirfd as usize,
+        oldpath.as_ptr() as usize,
+        newdirfd as usize,
+        newpath.as_ptr() as usize,
+        flags,
+        0,
+    ])
+}
+
+pub fn sys_mount(
+    source: &str,
+    target: &str,
+    fstype: &str,
+    flags: usize,
+    data: usize,
+) -> isize {
+    syscall(SYSCALL_MOUNT, [
+        source.as_ptr() as usize,
+        target.as_ptr() as usize,
+        fstype.as_ptr() as usize,
+        flags,
+        data,
+        0,
+    ])
+}
+
+pub fn sys_umount2(target: &str, flags: usize) -> isize {
+    syscall(SYSCALL_UMOUNT2, [target.as_ptr() as usize, flags, 0, 0, 0, 0])
+}
+
+pub fn sys_nanosleep(req: &TimeVal, rem: &mut TimeVal) -> isize {
+    syscall(SYSCALL_NANOSLEEP, [req as *const _ as usize, rem as *mut _ as usize, 0, 0, 0, 0])
+}
+
+pub fn sys_setpriority(which: usize, who: usize, prio: isize) -> isize {
+    syscall(SYSCALL_SETPRIORITY, [which, who, prio as usize, 0, 0, 0])
+}
+
+pub fn sys_times(tms: &mut Tms) -> isize {
+    syscall(SYSCALL_TIMES, [tms as *mut _ as usize, 0, 0, 0, 0, 0])
+}
+
+pub fn sys_uname(buf: &mut UtsName) -> isize {
+    syscall(SYSCALL_UNAME, [buf as *mut _ as usize, 0, 0, 0, 0, 0])
+}
+
+pub fn sys_getpid() -> isize {
+    syscall(SYSCALL_GETPID, [0, 0, 0, 0, 0, 0])
+}
+
+pub fn sys_getppid() -> isize {
+    syscall(SYSCALL_GETPPID, [0, 0, 0, 0, 0, 0])
+}
+
+pub fn sys_brk(addr: usize) -> isize {
+    syscall(SYSCALL_BRK, [addr, 0, 0, 0, 0, 0])
+}
+
+pub fn sys_munmap(addr: usize, len: usize) -> isize {
+    syscall(SYSCALL_MUNMAP, [addr, len, 0, 0, 0, 0])
+}
+
+pub fn sys_mmap(
+    addr: usize,
+    len: usize,
+    prot: usize,
+    flags: usize,
+    fd: isize,
+    offset: usize,
+) -> isize {
+    syscall(SYSCALL_MMAP, [addr, len, prot, flags, fd as usize, offset])
+}

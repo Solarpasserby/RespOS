@@ -15,22 +15,23 @@ mod task;
 mod signal;
 mod action;
 
-use lazy_static::lazy_static;
-use alloc::sync::Arc;
-use crate::loader::get_app_data_by_name;
-use alloc::sync::Arc;
 use task::{TaskControlBlock, TaskStatus};
 pub use context::TaskContext;
 pub use manager::{add_task, pid2task, PID2TCB};
 pub use kstack::get_kernel_stack_top_by_sp;
-use lazy_static::lazy_static;
-pub use manager::{add_task, pid2task, PID2TCB};
 pub use processor::{
-    current_task, current_trap_cx, current_user_token, run_tasks, schedule, take_current_task,
+    current_task,
+    current_trap_cx,
+    current_user_token,
+    run_tasks,
+    schedule,
+    take_current_task,
 };
-pub use signal::SignalFlags;
+pub use signal::{SignalFlags, MAX_SIG};
 pub use action::{SignalAction, SignalActions};
-pub use signal::MAX_SIG;
+use crate::loader::get_app_data_by_name;
+use lazy_static::lazy_static;
+use alloc::sync::Arc;
 
 lazy_static! {
     pub static ref INITPROC: Arc<TaskControlBlock> = {
