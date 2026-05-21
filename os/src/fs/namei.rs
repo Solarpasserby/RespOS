@@ -1,9 +1,12 @@
 // os/src/fs/namei.rs
 
+use super::Path;
 use super::vfs::{Dentry, File, InodeType, OpenFlags, ROOT_DENTRY};
 use crate::syscall::{Errno, SysResult};
 use crate::task::current_task;
 use alloc::{format, string::String, sync::Arc, vec::Vec};
+
+pub const AT_FDCWD: isize = -100;
 
 /// 路径名解析状态量
 pub struct Nameidata<'a> {
@@ -15,13 +18,23 @@ pub struct Nameidata<'a> {
 
 impl<'a> Nameidata<'a> {
     pub fn new(file_name: &'a str) -> Self {
-        let path_segments: Vec<&'a str> = file_name.split('/').filter(|s| !s.is_empty()).collect();
         let task = current_task().expect("[kernel] current task is None.");
-        let (_, dentry) = if file_name.starts_with("/") {
-            (0, ROOT_DENTRY.clone())
+        Self::new_from_path(file_name, task.cwd())
+    }
+
+    pub fn new_at(dirfd: isize, file_name: &'a str) -> SysResult<Self> {
+        let base = base_path_from_dirfd(dirfd, file_name)?;
+        Ok(Self::new_from_path(file_name, base))
+    }
+
+    fn new_from_path(file_name: &'a str, base: Arc<Path>) -> Self {
+        let path_segments: Vec<&'a str> =
+            file_name.split('/').filter(|s| !s.is_empty()).collect();
+
+        let dentry = if file_name.starts_with("/") {
+            ROOT_DENTRY.clone()
         } else {
-            let path = task.cwd();
-            (0, path.dentry.clone())
+            base.dentry.clone()
         };
 
         Nameidata {
@@ -30,6 +43,23 @@ impl<'a> Nameidata<'a> {
             depth: 0,
         }
     }
+}
+
+fn base_path_from_dirfd(dirfd: isize, file_name: &str) -> SysResult<Arc<Path>> {
+    let task = current_task().expect("[kernel] current task is None.");
+    if file_name.starts_with('/') || dirfd == AT_FDCWD {
+        return Ok(task.cwd());
+    }
+    if dirfd < 0 {
+        return Err(Errno::EBADF);
+    }
+
+    let file = task.get_fd_entry(dirfd as usize)?.get_file();
+    let file = file.as_any().downcast_ref::<File>().ok_or(Errno::ENOTDIR)?;
+    if file.inode().node_type() != InodeType::Directory {
+        return Err(Errno::ENOTDIR);
+    }
+    Ok(file.path())
 }
 
 /// 根据当前 `Nameidate` 查找下一级目录项
@@ -101,6 +131,7 @@ pub fn open_last_lookups(
     // 目标为根目录或工作目录
     if nd.path_segments.is_empty() {
         return Ok(Arc::new(File::new(
+            Path::new(nd.dentry.clone()),
             nd.dentry.get_inode(),
             OpenFlags::from(flags),
         )));
@@ -109,11 +140,10 @@ pub fn open_last_lookups(
     let name = nd.path_segments[nd.depth];
     let flags = OpenFlags::from(flags);
 
-    let inode = if name == "." {
-        nd.dentry.get_inode()
+    let dentry = if name == "." {
+        nd.dentry.clone()
     } else if name == ".." {
-        let parent_dentry = nd.dentry.get_parent_or_self();
-        parent_dentry.get_inode()
+        nd.dentry.get_parent_or_self()
     } else {
         match lookup_dentry(nd) {
             // 成功
@@ -126,7 +156,7 @@ pub fn open_last_lookups(
                     return Err(Errno::ENOTDIR);
                 }
                 // TODO: 此处默认 dentry 不是负目录项，在引入缓存后需修改
-                inode
+                dentry
             }
             Err(Errno::ENOENT) if flags.contains(OpenFlags::O_CREATE) => {
                 // 期望打开目录，但目标不存在
@@ -135,32 +165,32 @@ pub fn open_last_lookups(
                 }
                 let current_dir_inode = nd.dentry.get_inode();
                 let inode = current_dir_inode.create(name, InodeType::Regular)?;
-                install_child_dentry(&nd.dentry, name, inode.clone());
-                inode
+                install_child_dentry(&nd.dentry, name, inode.clone())
             }
             Err(err) => return Err(err),
         }
     };
 
-    Ok(Arc::new(File::new(inode, flags)))
+    let inode = dentry.get_inode();
+    Ok(Arc::new(File::new(Path::new(dentry), inode, flags)))
 }
 
 /// 根据路径打开文件
-pub fn path_open(path: &str, flags: usize, mode: usize) -> SysResult<Arc<File>> {
+pub fn path_open(dirfd: isize, path: &str, flags: usize, mode: usize) -> SysResult<Arc<File>> {
     if path.is_empty() {
         return Err(Errno::ENOENT);
     }
-    let mut nd = Nameidata::new(path);
+    let mut nd = Nameidata::new_at(dirfd, path)?;
     link_path_walk(&mut nd)?;
     open_last_lookups(&mut nd, flags, mode)
 }
 
 /// 根据路径创建文件
-pub fn filename_create(path: &str, ty: InodeType, _mode: usize) -> SysResult {
+pub fn filename_create(dirfd: isize, path: &str, ty: InodeType, _mode: usize) -> SysResult {
     if path.is_empty() {
         return Err(Errno::ENOENT);
     }
-    let mut nd = Nameidata::new(path);
+    let mut nd = Nameidata::new_at(dirfd, path)?;
     link_path_walk(&mut nd)?;
 
     // 目标为根目录或工作目录，返回错误
@@ -188,11 +218,11 @@ pub fn filename_create(path: &str, ty: InodeType, _mode: usize) -> SysResult {
 }
 
 /// 根据路径查询文件
-pub fn filename_lookup(path: &str, _mode: usize) -> SysResult<Arc<Dentry>> {
+pub fn filename_lookup(dirfd: isize, path: &str, _mode: usize) -> SysResult<Arc<Dentry>> {
     if path.is_empty() {
         return Err(Errno::ENOENT);
     }
-    let mut nd = Nameidata::new(path);
+    let mut nd = Nameidata::new_at(dirfd, path)?;
     link_path_walk(&mut nd)?;
 
     // 目标为根目录或工作目录
@@ -215,12 +245,12 @@ pub fn filename_lookup(path: &str, _mode: usize) -> SysResult<Arc<Dentry>> {
 ///
 /// `remove_dir == false` 只能删除非目录；
 /// `remove_dir == true` 只能删除目录。
-pub fn filename_unlink(path: &str, remove_dir: bool) -> SysResult {
+pub fn filename_unlink(dirfd: isize, path: &str, remove_dir: bool) -> SysResult {
     if path.is_empty() {
         return Err(Errno::ENOENT);
     }
 
-    let mut nd = Nameidata::new(path);
+    let mut nd = Nameidata::new_at(dirfd, path)?;
     link_path_walk(&mut nd)?;
 
     // 目标为根目录或工作目录，不允许删除目录项
@@ -259,17 +289,22 @@ pub fn filename_unlink(path: &str, remove_dir: bool) -> SysResult {
 }
 
 /// 根据两个路径创建硬链接。
-pub fn filename_link(oldpath: &str, newpath: &str) -> SysResult {
+pub fn filename_link(
+    olddirfd: isize,
+    oldpath: &str,
+    newdirfd: isize,
+    newpath: &str,
+) -> SysResult {
     if oldpath.is_empty() || newpath.is_empty() {
         return Err(Errno::ENOENT);
     }
 
-    let old_dentry = filename_lookup(oldpath, 0)?;
+    let old_dentry = filename_lookup(olddirfd, oldpath, 0)?;
     if old_dentry.get_inode().node_type() == InodeType::Directory {
         return Err(Errno::EPERM);
     }
 
-    let mut nd = Nameidata::new(newpath);
+    let mut nd = Nameidata::new_at(newdirfd, newpath)?;
     link_path_walk(&mut nd)?;
 
     // 目标为根目录或工作目录

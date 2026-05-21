@@ -3,12 +3,13 @@
 use super::{Errno, SysResult};
 use crate::fs::vfs::{File, InodeType, OpenFlags};
 use crate::fs::{
-    FdEntry, Path, Stat, filename_create, filename_link, filename_lookup, filename_unlink,
-    make_pipe, path_open,
+    AT_FDCWD, FdEntry, Path, Stat, filename_create, filename_link, filename_lookup,
+    filename_unlink, make_pipe, path_open,
 };
 use crate::mm::{check_user_writable, copy_cstr_from_user, copy_from_user, copy_to_user};
 use crate::task::current_task;
 use alloc::vec;
+
 
 // 使用 mm 实现的 `copy_cstr_from_user`, `copy_from_user`, `copy_to_user` 来访问用户空间的数据
 
@@ -53,11 +54,9 @@ pub fn sys_write(fd: usize, buf: *mut u8, len: usize) -> SysResult<usize> {
 
 /// 系统调用 sys-open
 pub fn sys_openat(dirfd: isize, path: *const u8, flags: usize, mode: usize) -> SysResult<usize> {
-    // TODO[ABI-COMPAT]: 当前仅兼容 AT_FDCWD 语义，尚未真正支持相对 dirfd 打开。
-    let _ = dirfd;
     let task = current_task().expect("[kernel] current task is None.");
     let path = copy_cstr_from_user(path)?;
-    let file = path_open(path.as_str(), flags, mode)?;
+    let file = path_open(dirfd, path.as_str(), flags, mode)?;
     let fd = task.alloc_fd(FdEntry::new(file, flags.into()))?;
     Ok(fd)
 }
@@ -72,7 +71,7 @@ pub fn sys_close(fd: usize) -> SysResult<usize> {
 /// 系统调用 sys-stat
 pub fn sys_stat(path: *const u8, stat: *mut Stat) -> SysResult<usize> {
     let path = copy_cstr_from_user(path)?;
-    let dentry = filename_lookup(path.as_str(), 0)?;
+    let dentry = filename_lookup(AT_FDCWD, path.as_str(), 0)?;
     let stat_buf: Stat = dentry.get_inode().stat()?.into();
     copy_to_user(stat, &stat_buf as *const Stat, 1)?;
     Ok(0)
@@ -112,10 +111,8 @@ pub fn sys_dup3(fd_src: usize, fd_dst: usize, flags: usize) -> SysResult<usize> 
 
 /// 系统调用 sys-mkdir
 pub fn sys_mkdirat(dirfd: isize, path: *const u8, mode: usize) -> SysResult<usize> {
-    // TODO[ABI-COMPAT]: 当前仅兼容 AT_FDCWD 语义，尚未真正支持相对 dirfd 创建目录。
-    let _ = dirfd;
     let path = copy_cstr_from_user(path)?;
-    filename_create(path.as_str(), InodeType::Directory, mode)?;
+    filename_create(dirfd, path.as_str(), InodeType::Directory, mode)?;
     Ok(0)
 }
 
@@ -127,28 +124,25 @@ pub fn sys_linkat(
     newpath: *const u8,
     flags: usize,
 ) -> SysResult<usize> {
-    let _ = (olddirfd, newdirfd);
     if flags != 0 {
         return Err(Errno::EINVAL);
     }
 
     let oldpath = copy_cstr_from_user(oldpath)?;
     let newpath = copy_cstr_from_user(newpath)?;
-    filename_link(oldpath.as_str(), newpath.as_str())?;
+    filename_link(olddirfd, oldpath.as_str(), newdirfd, newpath.as_str())?;
     Ok(0)
 }
 
 /// 系统调用 sys-unlink
 pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: usize) -> SysResult<usize> {
-    // TODO[ABI-COMPAT]: 当前仅兼容 AT_FDCWD 语义，尚未真正支持相对 dirfd 删除。
-    let _ = dirfd;
     const AT_REMOVEDIR: usize = 0x200;
     if flags & !AT_REMOVEDIR != 0 {
         return Err(Errno::EINVAL);
     }
 
     let path = copy_cstr_from_user(path)?;
-    filename_unlink(path.as_str(), flags & AT_REMOVEDIR != 0)?;
+    filename_unlink(dirfd, path.as_str(), flags & AT_REMOVEDIR != 0)?;
     Ok(0)
 }
 
@@ -156,7 +150,7 @@ pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: usize) -> SysResult<us
 pub fn sys_chdir(path: *const u8) -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
     let path = copy_cstr_from_user(path)?;
-    let dentry = filename_lookup(path.as_str(), 0)?;
+    let dentry = filename_lookup(AT_FDCWD, path.as_str(), 0)?;
     task.set_cwd(Path::new(dentry));
     Ok(0)
 }

@@ -7,7 +7,7 @@ use crate::task::{
 use alloc::sync::Arc;
 
 use super::{Errno, SysResult};
-use crate::fs::path_open;
+use crate::fs::{path_open, AT_FDCWD};
 use crate::mm::{copy_cstr_from_user, extract_cstrings_from_user};
 
 pub fn sys_exit(exit_code: i32) -> ! {
@@ -48,7 +48,7 @@ pub fn sys_execve(path: *const u8, args: *const usize, _envp: *const usize) -> S
     let args_vec = extract_cstrings_from_user(args)?;
     let task = current_task().expect("[kernel] current task is None.");
 
-    if let Ok(file) = path_open(&path, 0, 0) {
+    if let Ok(file) = path_open(AT_FDCWD, &path, 0, 0) {
         info!("[kernel] execute file in fs");
         let all_data = file.read_all()?;
         Ok(task.exec(all_data.as_slice(), args_vec)?)
