@@ -2,9 +2,9 @@
 
 //! ### 系统计时器模块
 
-use riscv::register::time;
-use crate::config::CLOCK_FREQ;
 use super::sbi::set_timer;
+use crate::config::CLOCK_FREQ;
+use riscv::register::time;
 
 const TICKS_PER_SEC: usize = 100; // 每秒触发时钟中断的次数
 const MSEC_PER_SEC: usize = 1000; // 微秒

@@ -1,14 +1,14 @@
 // os/src/drivers/virtio/block_dev.rs
 
+use crate::config::BLOCK_SIZE;
+use crate::drivers::{BlockDevice, DevError, DevResult, Device, DeviceType};
 use spin::Mutex;
 use virtio_drivers::{
-    Hal, 
+    Hal,
     device::blk::VirtIOBlk,
-    transport::Transport, 
+    transport::Transport,
     // transport::mmio::VirtIOHeader
 };
-use crate::drivers::{Device, BlockDevice, DevResult, DevError, DeviceType};
-use crate::config::BLOCK_SIZE;
 
 pub struct VirtIoBlkDev<H: Hal, T: Transport> {
     inner: Mutex<VirtIOBlk<H, T>>,
@@ -20,7 +20,9 @@ unsafe impl<H: Hal, T: Transport> Sync for VirtIoBlkDev<H, T> {}
 impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
     pub fn new(header: T) -> Self {
         Self {
-            inner: Mutex::new(VirtIOBlk::<H, T>::new(header).expect("[kernel] VirtIOBlk create failed")),
+            inner: Mutex::new(
+                VirtIOBlk::<H, T>::new(header).expect("[kernel] VirtIOBlk create failed"),
+            ),
         }
     }
 }
@@ -62,7 +64,7 @@ impl<H: Hal + 'static, T: Transport + 'static> BlockDevice for VirtIoBlkDev<H, T
 
     fn flush(&self) -> DevResult {
         self.inner.lock().flush().map_err(as_dev_err)
-    }    
+    }
 }
 
 #[allow(dead_code)]

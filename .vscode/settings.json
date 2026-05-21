@@ -3,5 +3,8 @@
     "rust-analyzer.cargo.target": "riscv64gc-unknown-none-elf",
     "rust-analyzer.cargo.allTargets": false,
     "json.schemaDownload.enable": false,
-    "makefile.configureOnOpen": false
+    "makefile.configureOnOpen": false,
+    "terminal.integrated.env.linux": {
+        "TZ": "Asia/Shanghai"
+    }
 }

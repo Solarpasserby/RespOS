@@ -1,11 +1,11 @@
 // os/src/fs/kstat.rs
 
+use super::vfs::InodeType;
 use crate::config::BLOCK_SIZE;
 use crate::timer::TimeSpec;
-use super::vfs::InodeType;
 
 /// 内核对文件状态的描述
-/// 
+///
 /// 当前实现相当简陋
 #[derive(Clone, Debug)]
 pub struct KStat {
@@ -50,9 +50,9 @@ pub struct Stat {
     pub st_uid: u32,        // 所有者的用户 ID
     pub st_gid: u32,        // 所有者的用户组 ID
     pub st_rdev: u64,       // 设备 ID （特殊文件）
-    pub __pad: u64,         // 
+    pub __pad: u64,         //
     pub st_size: u64,       // 文件总大小
-    pub st_blksize: u32,    // 文件系统 I/O 的块大小 
+    pub st_blksize: u32,    // 文件系统 I/O 的块大小
     pub __pad2: u32,        //
     pub st_blocks: u64,     // 分配的块数
     pub st_atime: TimeSpec, // 最近访问时间

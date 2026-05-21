@@ -1,20 +1,19 @@
 // os/src/fs/mod.rs
 
 pub mod ext4;
-pub mod vfs;
+mod fdtable;
 mod kstat;
 mod mount;
+mod namei;
 mod page_cache;
 mod path;
-mod fdtable;
-mod namei;
-mod stdio;
 mod pipe;
+mod stdio;
+pub mod vfs;
 
-pub use kstat::*;
-pub use path::*;
-use stdio::*;
 pub use fdtable::*;
+pub use kstat::*;
 pub use namei::*;
+pub use path::*;
 pub use pipe::*;
-
+use stdio::*;

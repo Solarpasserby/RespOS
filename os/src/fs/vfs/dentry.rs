@@ -1,13 +1,13 @@
 // os/src/fs/vfs/dentry.rs
 
-use lazy_static::lazy_static;
-use alloc::vec::Vec;
+use super::InodeOp;
+use crate::fs::ext4::root_inode;
 use alloc::string::{String, ToString};
 use alloc::sync::{Arc, Weak};
-use spin::Mutex;
+use alloc::vec::Vec;
 use hashbrown::HashMap;
-use crate::fs::ext4::root_inode;
-use super::InodeOp;
+use lazy_static::lazy_static;
+use spin::Mutex;
 
 lazy_static! {
     pub static ref ROOT_DENTRY: Arc<Dentry> = {
@@ -15,7 +15,6 @@ lazy_static! {
         Arc::new(Dentry::new("/".into(), None, inode))
     };
 }
-
 
 pub struct Dentry {
     pub abs_path: String,
@@ -28,13 +27,11 @@ impl Dentry {
         self.inner.lock().inode.clone()
     }
     pub fn get_inode(&self) -> Arc<dyn InodeOp> {
-        self.try_get_inode().expect("[kernel] func:get_inode() the inode is negative!")
+        self.try_get_inode()
+            .expect("[kernel] func:get_inode() the inode is negative!")
     }
     pub fn get_parent(&self) -> Option<Arc<Dentry>> {
-        self.inner
-            .lock()
-            .parent
-            .clone()
+        self.inner.lock().parent.clone()
     }
     pub fn set_parent(&self, parent: Arc<Dentry>) {
         self.inner.lock().parent = Some(parent);
@@ -69,10 +66,15 @@ impl Dentry {
     }
 
     /// 用于处理路径解析时根目录没有父目录的问题
-    /// 
+    ///
     /// 普通目录返回其父目录，根目录返回自身
     pub fn get_parent_or_self(self: &Arc<Self>) -> Arc<Dentry> {
         self.get_parent().unwrap_or_else(|| self.clone())
+    }
+
+    /// 是否为根目录项
+    pub fn is_root(&self) -> bool {
+        self.abs_path == "/" && self.get_parent().is_none()
     }
 }
 
@@ -98,7 +100,7 @@ impl Dentry {
 }
 
 /// 目录项内部数据
-/// 
+///
 /// 将 parent 变为强引用，将 child 变为弱引用
 /// 主要是考虑到前者难以查找，而后者可以查找
 pub struct DentryInner {
@@ -128,11 +130,11 @@ impl DentryInner {
 // 内核内部使用的目录项描述，真正返回给用户时需要按 linux_dirent64 的变长布局序列化成字节
 #[derive(Clone, Debug)]
 pub struct LinuxDirent64 {
-    pub d_ino: u64,     // inode 号
-    pub d_off: i64,     // 下一个目录项偏移
-    pub d_reclen: u16,  // 当前目录项记录长度
-    pub d_type: u8,     // 文件类型
-    pub d_name: Vec<u8>,   // 文件名，0 结尾，变长
+    pub d_ino: u64,      // inode 号
+    pub d_off: i64,      // 下一个目录项偏移
+    pub d_reclen: u16,   // 当前目录项记录长度
+    pub d_type: u8,      // 文件类型
+    pub d_name: Vec<u8>, // 文件名，0 结尾，变长
 }
 
 impl LinuxDirent64 {
@@ -145,4 +147,3 @@ impl LinuxDirent64 {
         buf[19..19 + name_len].copy_from_slice(&self.d_name[..]);
     }
 }
-

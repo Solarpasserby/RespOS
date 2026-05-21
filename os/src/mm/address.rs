@@ -1,9 +1,9 @@
 // os/src/mm/address.rs
 
-use core::fmt::{Debug, Formatter, self};
-use core::ops::Sub;
-use crate::config::{KERNEL_BASE, PAGE_SIZE, PAGE_SIZE_BITS};
 use super::PageTableEntry;
+use crate::config::{KERNEL_BASE, PAGE_SIZE, PAGE_SIZE_BITS};
+use core::fmt::{self, Debug, Formatter};
+use core::ops::Sub;
 
 // 使用 sv39 页表模式
 pub const PA_WIDTH_SV39: usize = 56;
@@ -49,31 +49,38 @@ impl Debug for PhysPageNum {
     }
 }
 
-
 impl From<usize> for PhysAddr {
-    fn from(value: usize) -> Self { Self(value & ((1 << PA_WIDTH_SV39) - 1)) }
+    fn from(value: usize) -> Self {
+        Self(value & ((1 << PA_WIDTH_SV39) - 1))
+    }
 }
 impl From<usize> for PhysPageNum {
-    fn from(value: usize) -> Self { Self(value & ((1 << PPN_WIDTH_SV39) - 1)) }
+    fn from(value: usize) -> Self {
+        Self(value & ((1 << PPN_WIDTH_SV39) - 1))
+    }
 }
 impl From<usize> for VirtAddr {
-    fn from(value: usize) -> Self { Self(value & ((1 << VA_WIDTH_SV39) - 1)) }
+    fn from(value: usize) -> Self {
+        Self(value & ((1 << VA_WIDTH_SV39) - 1))
+    }
 }
 impl From<usize> for VirtPageNum {
-    fn from(value: usize) -> Self { Self(value & ((1 << VPN_WIDTH_SV39) - 1)) }
+    fn from(value: usize) -> Self {
+        Self(value & ((1 << VPN_WIDTH_SV39) - 1))
+    }
 }
 
 // 另一种地址表达，在转换时就检查地址有效性
 // impl From<usize> for PhysAddr {
 //     fn from(value: usize) -> Self {
 //         assert!(value < (1 << PA_WIDTH_SV39));
-//         Self(value) 
+//         Self(value)
 //     }
 // }
 // impl From<usize> for PhysPageNum {
 //     fn from(value: usize) -> Self {
 //         assert!(value < (1 << PPN_WIDTH_SV39));
-//         Self(value) 
+//         Self(value)
 //     }
 // }
 // impl From<usize> for VirtAddr {
@@ -86,29 +93,37 @@ impl From<usize> for VirtPageNum {
 // impl From<usize> for VirtPageNum {
 //     fn from(value: usize) -> Self {
 //         assert!(value < (1 << VPN_WIDTH_SV39));
-//         Self(value) 
+//         Self(value)
 //     }
 // }
 
 impl From<PhysAddr> for usize {
-    fn from(value: PhysAddr) -> Self { value.0 }
+    fn from(value: PhysAddr) -> Self {
+        value.0
+    }
 }
 impl From<PhysPageNum> for usize {
-    fn from(value: PhysPageNum) -> Self { value.0 }
+    fn from(value: PhysPageNum) -> Self {
+        value.0
+    }
 }
 // TODO: 此处做了修改，之后某些地址越界的问题可能是这里导致的
 impl From<VirtAddr> for usize {
-    fn from(v: VirtAddr) -> Self { // 符号拓展
+    fn from(v: VirtAddr) -> Self {
+        // 符号拓展
         (((v.0 << 25) as isize) >> 25) as usize
     }
 }
 impl From<VirtPageNum> for usize {
-    fn from(value: VirtPageNum) -> Self { value.0 }
+    fn from(value: VirtPageNum) -> Self {
+        value.0
+    }
 }
 
-
 impl From<PhysPageNum> for PhysAddr {
-    fn from(value: PhysPageNum) -> Self { Self(value.0 << PAGE_SIZE_BITS) }
+    fn from(value: PhysPageNum) -> Self {
+        Self(value.0 << PAGE_SIZE_BITS)
+    }
 }
 impl From<PhysAddr> for PhysPageNum {
     fn from(value: PhysAddr) -> Self {
@@ -117,7 +132,9 @@ impl From<PhysAddr> for PhysPageNum {
     }
 }
 impl From<VirtPageNum> for VirtAddr {
-    fn from(v: VirtPageNum) -> Self { Self(v.0 << PAGE_SIZE_BITS) }
+    fn from(v: VirtPageNum) -> Self {
+        Self(v.0 << PAGE_SIZE_BITS)
+    }
 }
 impl From<VirtAddr> for VirtPageNum {
     fn from(v: VirtAddr) -> Self {
@@ -138,16 +155,28 @@ impl StepByOne for VirtPageNum {
 }
 
 impl PhysAddr {
-    pub fn page_offset(self) -> usize { self.0 & (PAGE_SIZE - 1) }
+    pub fn page_offset(self) -> usize {
+        self.0 & (PAGE_SIZE - 1)
+    }
 
-    pub fn floor(self) -> PhysPageNum { PhysPageNum(self.0 >> PAGE_SIZE_BITS) }
-    pub fn ceil(self) -> PhysPageNum { PhysPageNum((self.0 + PAGE_SIZE - 1) >> PAGE_SIZE_BITS) }
+    pub fn floor(self) -> PhysPageNum {
+        PhysPageNum(self.0 >> PAGE_SIZE_BITS)
+    }
+    pub fn ceil(self) -> PhysPageNum {
+        PhysPageNum((self.0 + PAGE_SIZE - 1) >> PAGE_SIZE_BITS)
+    }
 }
 impl VirtAddr {
-    pub fn page_offset(&self) -> usize { self.0 & (PAGE_SIZE - 1) }
+    pub fn page_offset(&self) -> usize {
+        self.0 & (PAGE_SIZE - 1)
+    }
 
-    pub fn floor(&self) -> VirtPageNum { VirtPageNum(self.0 >> PAGE_SIZE_BITS) }
-    pub fn ceil(&self) -> VirtPageNum { VirtPageNum((self.0 + PAGE_SIZE - 1) >> PAGE_SIZE_BITS) }
+    pub fn floor(&self) -> VirtPageNum {
+        VirtPageNum(self.0 >> PAGE_SIZE_BITS)
+    }
+    pub fn ceil(&self) -> VirtPageNum {
+        VirtPageNum((self.0 + PAGE_SIZE - 1) >> PAGE_SIZE_BITS)
+    }
 }
 
 impl PhysAddr {
@@ -212,18 +241,17 @@ impl Sub for VirtPageNum {
     }
 }
 
-
 /// 步进特征
 pub trait StepByOne {
     fn step(&mut self);
 }
 
 /// 简单范围
-/// 
+///
 /// 主要用于描述一段范围
 #[derive(Copy, Clone)]
 pub struct SimpleRange<T>
-where 
+where
     T: StepByOne + Copy + PartialEq + PartialOrd + Debug,
 {
     start: T,
@@ -238,18 +266,27 @@ where
         assert!(start <= end, "start {:?} > end {:?}!", start, end);
         Self { start, end }
     }
-    pub fn get_start(&self) -> T { self.start }
-    pub fn get_end(&self) -> T { self.end }
-    
+    pub fn get_start(&self) -> T {
+        self.start
+    }
+    pub fn get_end(&self) -> T {
+        self.end
+    }
+
     pub fn contain(&self, pos: &T) -> bool {
         self.start <= *pos && *pos < self.end
     }
     pub fn contain_range(&self, other: &Self) -> bool {
         self.start <= other.start && other.end <= self.end
     }
+
+    pub fn intersect_with(&self, other: &Self) -> bool {
+        self.start < other.end && self.end > other.start
+    }
 }
 
-impl<T> IntoIterator for SimpleRange<T> // TODO: 对迭代器的了解不足，不清楚为什么要转移变量的所有权
+impl<T> IntoIterator for SimpleRange<T>
+// TODO: 对迭代器的了解不足，不清楚为什么要转移变量的所有权
 where
     T: StepByOne + Copy + PartialEq + PartialOrd + Debug,
 {
@@ -260,7 +297,6 @@ where
     }
 }
 
-
 pub struct SimpleRangeIterator<T>
 where
     T: StepByOne + Copy + PartialEq + PartialOrd + Debug,
@@ -268,7 +304,7 @@ where
     current: T,
     end: T,
 }
-impl<T> SimpleRangeIterator<T> 
+impl<T> SimpleRangeIterator<T>
 where
     T: StepByOne + Copy + PartialEq + PartialOrd + Debug,
 {
@@ -277,7 +313,7 @@ where
     }
 }
 
-impl<T> Iterator for SimpleRangeIterator<T> 
+impl<T> Iterator for SimpleRangeIterator<T>
 where
     T: StepByOne + Copy + PartialEq + PartialOrd + Debug,
 {
@@ -293,8 +329,7 @@ where
     }
 }
 
-
 /// 虚拟页段
-/// 
+///
 /// 主要用于描述一段连续的虚拟页表
 pub type VPNRange = SimpleRange<VirtPageNum>;

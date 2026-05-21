@@ -30,6 +30,7 @@ pub mod syscall;
 pub mod mm;
 pub mod fs;
 pub mod utils;
+pub mod mutex;
 
 use core::arch::global_asm;
 

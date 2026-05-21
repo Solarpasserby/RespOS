@@ -3,19 +3,19 @@
 mod inode;
 mod super_block;
 
-use lazy_static::lazy_static;
-use alloc::sync::Arc;
-use crate::drivers::{BlockDeviceImpl, Disk};
 use super::vfs::{InodeOp, SuperBlockOp};
+use crate::drivers::{BlockDeviceImpl, Disk};
+use alloc::sync::Arc;
+use lazy_static::lazy_static;
 
 pub use inode::*;
 pub use super_block::*;
 
 lazy_static! {
     static ref SUPER_BLOCK: Arc<dyn SuperBlockOp> = {
-        Arc::new(Ext4SuperBlock::new(
-            Disk::new(Arc::new(BlockDeviceImpl::new_device())),
-        ))
+        Arc::new(Ext4SuperBlock::new(Disk::new(Arc::new(
+            BlockDeviceImpl::new_device(),
+        ))))
     };
 }
 

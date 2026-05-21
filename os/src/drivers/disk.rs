@@ -1,12 +1,12 @@
 // os/src/drivers/disk.rs
 
-use lwext4_rust::KernelDevOp;
-use alloc::sync::Arc;
-use crate::config::BLOCK_SIZE;
 use super::{BlockDevice, DevResult};
+use crate::config::BLOCK_SIZE;
+use alloc::sync::Arc;
+use lwext4_rust::KernelDevOp;
 
 /// 块设备读写器——提供对块设备的连续读写
-/// 
+///
 /// 使用偏移量，将连续读写转换为块读写
 pub struct Disk {
     block_id: usize,
@@ -126,12 +126,14 @@ impl KernelDevOp for Disk {
         let mut total_len = 0;
         while !buf.is_empty() {
             if let Ok(len) = dev.read_one(buf) {
-                if len == 0 { break; }
+                if len == 0 {
+                    break;
+                }
                 let tmp = buf;
                 buf = &mut tmp[len..]; // 推进指针（借用）
                 total_len += len;
             } else {
-                return Err(-1)
+                return Err(-1);
             }
         }
         Ok(total_len)
@@ -142,11 +144,13 @@ impl KernelDevOp for Disk {
         let mut total_len = 0;
         while !buf.is_empty() {
             if let Ok(len) = dev.write_one(buf) {
-                if len == 0 { break; }
+                if len == 0 {
+                    break;
+                }
                 buf = &buf[len..]; // 推进指针（借用）
                 total_len += len;
             } else {
-                return Err(-1)
+                return Err(-1);
             }
         }
         Ok(total_len)
@@ -165,9 +169,9 @@ impl KernelDevOp for Disk {
                 .position()
                 .checked_add_signed(off as isize)
                 .map(|v| v as i64),
-            lwext4_rust::bindings::SEEK_END => size
-                .checked_add_signed(off as isize)
-                .map(|v| v as i64),
+            lwext4_rust::bindings::SEEK_END => {
+                size.checked_add_signed(off as isize).map(|v| v as i64)
+            }
             _ => return Err(-1),
         }
         .ok_or(-1)?;

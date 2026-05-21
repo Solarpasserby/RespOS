@@ -1,14 +1,14 @@
 // os/src/arch/rv64/mm/page_table.rs
 
-use bitflags::*;
-use alloc::{vec, vec::Vec};
-use alloc::string::String;
 use crate::config::KERNEL_BASE;
+use crate::mm::{FrameTracker, KERNEL_SPACE, frame_alloc};
 use crate::mm::{PPN_WIDTH_SV39, PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
-use crate::mm::{FrameTracker, frame_alloc, KERNEL_SPACE};
+use alloc::string::String;
+use alloc::{vec, vec::Vec};
+use bitflags::*;
 
 /// 页表
-/// 
+///
 /// - [`PhysPageNum`] 根页表页帧的物理页号
 /// - [`Vec<FrameTracker>`] 页表占用的物理页帧的集合
 pub struct PageTable {
@@ -32,7 +32,8 @@ impl PageTable {
         let kernel_root_ppn = kernel_page_table.root_ppn;
         // 拷贝内核空间的根页表页
         let index = VirtAddr::from(KERNEL_BASE).floor().indexes()[0];
-        frame.ppn().get_pte_array()[index..].copy_from_slice(&kernel_root_ppn.get_pte_array()[index..]);
+        frame.ppn().get_pte_array()[index..]
+            .copy_from_slice(&kernel_root_ppn.get_pte_array()[index..]);
         PageTable {
             root_ppn: frame.ppn(),
             frames: vec![frame],
@@ -83,7 +84,7 @@ pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> &'static mut T {
 }
 
 /// 页表设置页表项接口
-/// 
+///
 /// 均返回页表项的可变借用，用于修改或读取页表项
 impl PageTable {
     /// 根据虚拟地址寻找目标页表项，若发现多级页表不存在则创建
@@ -134,12 +135,15 @@ impl PageTable {
 
 impl PageTable {
     /// 在页表中建立物理地址和虚拟地址的映射关系
-    /// 
+    ///
     /// 一般用于初始化一个新分配的物理页帧，所以还需要页表项标志位数据
     pub fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) {
         let pte = self.find_pte_create(vpn).unwrap();
         assert!(!pte.is_valid(), "vpn {:?} is mapped before mapping", vpn); // 页表项应当没有被创建
-        *pte = PageTableEntry::new(ppn, flags | PTEFlags::VALID | PTEFlags::ACCESSED | PTEFlags::DIRTY); // 被映射的物理页帧必定有效，这里需要统一配置
+        *pte = PageTableEntry::new(
+            ppn,
+            flags | PTEFlags::VALID | PTEFlags::ACCESSED | PTEFlags::DIRTY,
+        ); // 被映射的物理页帧必定有效，这里需要统一配置
     }
     /// 在页表中消除物理地址和虚拟地址的映射关系
     pub fn unmap(&mut self, vpn: VirtPageNum) {
@@ -149,9 +153,8 @@ impl PageTable {
     }
 }
 
-
 /// 页表项
-/// 
+///
 /// | Reserved | PPN   | RSW | D | A | G | U | X | W | R | V |
 /// | -------- | ----- | --- | - | - | - | - | - | - | - | - |
 /// | 63-54    | 53-10 | 9-8 | 7 | 6 | 5 | 4 | 3 | 2 | 1 | 0 |
@@ -210,7 +213,9 @@ impl PTEFlags {
 impl PageTableEntry {
     /// 创建一个新的页表项
     pub fn new(ppn: PhysPageNum, flags: PTEFlags) -> Self {
-        Self { bits: (ppn.0 << 10) | (flags.bits as usize) }
+        Self {
+            bits: (ppn.0 << 10) | (flags.bits as usize),
+        }
     }
     /// 创建一个空的（无效的）页表项
     pub fn empty() -> Self {
@@ -247,7 +252,7 @@ impl PageTableEntry {
 // 重构地址空间后内核可以直接访问用户空间中的数据，无需再额外转译
 
 // /// 转译虚拟地址，得到内核虚拟地址上的一段数据的可变借用
-// /// 
+// ///
 // /// 以向量返回，其内部的每个数据代表单个内存页上的数据的可变借用
 // pub fn translate_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&'static mut [u8]> {
 //     let page_table = PageTable::from_token(token);

@@ -1,22 +1,21 @@
 // os/src/task/task.rs
 
-use spin::{Mutex, MutexGuard};
-use alloc::vec::Vec;
+use super::context::TaskContext;
+use super::kstack::KernelStack;
+use super::pid::{PidHandle, pid_alloc};
+use super::SignalActions;
+use crate::fs::{FdEntry, FdTable, Path, vfs::ROOT_DENTRY};
+use crate::mm::MemorySet;
+use crate::task::{SignalFlags, manager::PID2TCB};
+use crate::syscall::SysResult;
+use crate::trap::TrapContext;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
-use crate::trap::TrapContext;
-use crate::mm::MemorySet;
-use crate::task::SignalFlags;
-use crate::fs::{FdTable, FdEntry, Path, vfs::ROOT_DENTRY};
-use crate::syscall::SysResult;
-use super::context::TaskContext;
-use super::pid::{PidHandle, pid_alloc};
-use super::kstack::KernelStack;
-use super::{SignalActions};
-use crate::task::manager::PID2TCB;
+use alloc::vec::Vec;
+use spin::{Mutex, MutexGuard, RwLock};
 
 /// 任务控制块——此处的任务是对一定资源和某个程序的抽象表述
-/// 
+///
 /// - 功能：将程序的一次执行过程及其使用的硬件资源抽象，从而方便内核调度（仅基于个人理解）
 /// - 内容：
 ///     - `pid`          ~~进程~~任务号
@@ -26,6 +25,7 @@ pub struct TaskControlBlock {
     // 不可变
     pub pid: PidHandle,
     pub kernel_stack: KernelStack,
+    pub memory_set: Arc<RwLock<MemorySet>>,
     // 可变
     inner: Mutex<TaskControlBlockInner>,
 }
@@ -33,7 +33,7 @@ pub struct TaskControlBlock {
 
 impl TaskControlBlock {
     /// 新建任务
-    /// 
+    ///
     /// 事实上只有初始任务会借由这个方法产生
     pub fn new(elf_data: &[u8]) -> Self {
         let pid = pid_alloc();
@@ -45,15 +45,15 @@ impl TaskControlBlock {
         let trap_context = TrapContext::init_app_context(entry_point, user_sp);
         kernel_stack_top -= core::mem::size_of::<TrapContext>();
         let trap_cx_ptr = kernel_stack_top as *mut TrapContext;
-        
+
         // 创建进程控制块
         let task_ctrl_block = Self {
             pid,
             kernel_stack,
-            inner: Mutex::new(TaskControlBlockInner{
+            memory_set: Arc::new(RwLock::new(memory_set)),
+            inner: Mutex::new(TaskControlBlockInner {
                 task_status: TaskStatus::Ready,
                 task_context: TaskContext::app_init_task_context(kernel_stack_top, token),
-                memory_set,
                 fd_table: FdTable::new(),
                 cwd: Path::new(ROOT_DENTRY.clone()),
                 parent: None,
@@ -69,8 +69,10 @@ impl TaskControlBlock {
                 killed: false,
             }),
         };
-        unsafe { trap_cx_ptr.write(trap_context); }
-    
+        unsafe {
+            trap_cx_ptr.write(trap_context);
+        }
+
         task_ctrl_block
     }
 
@@ -87,11 +89,13 @@ pub fn fork(self: &Arc<Self>) -> Arc<Self> {
     let task_ctrl_block = Arc::new(TaskControlBlock {
         pid,
         kernel_stack,
+        memory_set: Arc::new(RwLock::new(MemorySet::from_existed_user(
+            &self.memory_set.read(),
+        ))),
         inner: Mutex::new(TaskControlBlockInner {
             task_status: TaskStatus::Ready,
             // 全零初始化任务上下文
             task_context: TaskContext::app_init_task_context(0, 0),
-            memory_set: MemorySet::from_existed_user(&parent_inner.memory_set),
             fd_table: FdTable::from_existed_user(&parent_inner.fd_table),
             cwd: Path::from_existed_user(&parent_inner.cwd),
             parent: Some(Arc::downgrade(self)),
@@ -107,8 +111,7 @@ pub fn fork(self: &Arc<Self>) -> Arc<Self> {
             killed: false,
         }),
     });
-
-    // 初始化任务上下文
+    // 修改任务异常上下文
     task_ctrl_block.write_task_cx(kernel_stack_top);
 
     // 同时更新父任务状态
@@ -130,13 +133,15 @@ pub fn fork(self: &Arc<Self>) -> Arc<Self> {
 
         /* ===== 修改地址空间 ===== */
         let mut inner = self.inner_exclusive_access();
-        let old_memory_set = core::mem::replace(&mut inner.memory_set, memory_set);
-        // 设置任务上下文的 satp 值，使得之后切换任务到自身时能正确刷新页表
-        inner.task_context.set_satp(token);
+        let mut memory_set_guard = self.memory_set.write();
+        let old_memory_set = core::mem::replace(&mut *memory_set_guard, memory_set);
+        // 设置任务上下文的 mmu_token 字段，使得之后切换任务到自身时能正确刷新页表
+        inner.task_context.set_mmu_token(token);
         // 刷新页表，由于应用程序通过异常进入，在异常返回时不会刷新页表
         // 为了程序返回后看到的地址空间为自身而非父任务的地址空间，需要主动刷新页表
-        inner.memory_set.activate();
+        memory_set_guard.activate();
         drop(old_memory_set);
+        drop(memory_set_guard);
 
         /* ===== 修改用户栈数据 ===== */
         // 需保证页表已刷新，函数内部直接访存高度依赖
@@ -144,41 +149,67 @@ pub fn fork(self: &Arc<Self>) -> Arc<Self> {
 
         /* ===== 修改异常上下文 ===== */
         let trap_cx = self.get_trap_cx();
-        *trap_cx = TrapContext::init_app_context(
-            entry_point,
-            user_sp,
-        );
+        *trap_cx = TrapContext::init_app_context(entry_point, user_sp);
 
         trap_cx.x[10] = args.len(); // 实际上没用
         trap_cx.x[11] = argv_base;
         Ok(args.len())
     }
+}
 
+impl TaskControlBlock {
+    // 获取锁
     pub fn inner_exclusive_access(&self) -> MutexGuard<'_, TaskControlBlockInner> {
         self.inner.lock()
     }
 
+    // 内核栈操作
     pub fn get_trap_cx(&self) -> &'static mut TrapContext {
         let trap_cx_ptr = self.kernel_stack.get_top() - core::mem::size_of::<TrapContext>();
         unsafe { &mut *(trap_cx_ptr as *mut TrapContext) }
     }
     fn clone_trap_cx(&self, dst_kstack_top: usize) {
-        let src_trap_cx_ptr =
-            (self.kernel_stack.get_top() - core::mem::size_of::<TrapContext>()) as *const TrapContext;
-        let dst_trap_cx_ptr = 
+        let src_trap_cx_ptr = (self.kernel_stack.get_top() - core::mem::size_of::<TrapContext>())
+            as *const TrapContext;
+        let dst_trap_cx_ptr =
             (dst_kstack_top - core::mem::size_of::<TrapContext>()) as *mut TrapContext;
-        unsafe { dst_trap_cx_ptr.write(src_trap_cx_ptr.read()); }
+        unsafe {
+            dst_trap_cx_ptr.write(src_trap_cx_ptr.read());
+        }
     }
     fn write_task_cx(&self, kernel_stack_ptr: usize) {
+        let token = self.get_user_token();
         let mut inner = self.inner_exclusive_access();
-        let token = inner.get_user_token();
         let task_context = &mut inner.task_context;
         task_context.set_sp(kernel_stack_ptr);
-        task_context.set_satp(token);
+        task_context.set_mmu_token(token);
     }
 
+    // 操作内部数据
+    pub fn op_memory_set_read<T>(&self, f: impl FnOnce(&MemorySet) -> T) -> T {
+        f(&self.memory_set.read())
+    }
+    pub fn op_memory_set_write<T>(&self, f: impl FnOnce(&mut MemorySet) -> T) -> T {
+        f(&mut self.memory_set.write())
+    }
+
+    /// 获取用户任务页表的页表基址寄存器值
+    pub fn get_user_token(&self) -> usize {
+        self.memory_set.read().token()
+    }
+
+    // 进程号
     pub fn pid(&self) -> usize {
         self.pid.0
+    }
+    pub fn ppid(&self) -> usize {
+        self.inner_exclusive_access()
+            .parent
+            .as_ref()
+            .unwrap()
+            .upgrade()
+            .unwrap()
+            .pid()
     }
 
     // 文件描述符相关操作
@@ -200,12 +231,12 @@ pub fn fork(self: &Arc<Self>) -> Arc<Self> {
         self.inner_exclusive_access().cwd.clone()
     }
     pub fn set_cwd(&self, path: Arc<Path>) {
-        self.inner_exclusive_access().cwd = path; 
+        self.inner_exclusive_access().cwd = path;
     }
 }
 
 /// 任务控制块内部数据
-/// 
+///
 /// - 功能：用于保存任务的执行状态、地址空间、父子任务关系等信息
 /// - 内容:
 ///     - `task_status`   任务状态
@@ -221,7 +252,6 @@ pub fn fork(self: &Arc<Self>) -> Arc<Self> {
 pub struct TaskControlBlockInner {
     pub task_status: TaskStatus,
     pub task_context: TaskContext,
-    pub memory_set: MemorySet,
     pub fd_table: FdTable,
     pub cwd: Arc<Path>,
     pub parent: Option<Weak<TaskControlBlock>>,
@@ -238,10 +268,6 @@ pub struct TaskControlBlockInner {
 }
 
 impl TaskControlBlockInner {
-    /// 获取用户任务页表的页表基址寄存器值
-    pub fn get_user_token(&self) -> usize {
-        self.memory_set.token()
-    }
     fn get_status(&self) -> TaskStatus {
         self.task_status
     }
@@ -259,10 +285,7 @@ pub enum TaskStatus {
 }
 
 // 将命令行参数压入用户栈
-fn init_user_stack(
-    args_vec: &[String],
-    user_sp: &mut usize,
-) -> usize {
+fn init_user_stack(args_vec: &[String], user_sp: &mut usize) -> usize {
     fn push_strings_to_stack(strings: &[String], stack_ptr: &mut usize) -> usize {
         // 字符串首地址数组
         *stack_ptr -= (strings.len() + 1) * core::mem::size_of::<usize>();
@@ -277,7 +300,9 @@ fn init_user_stack(
                 *(string_ptr_base as *mut usize).add(i) = *stack_ptr;
             }
         }
-        unsafe { *(string_ptr_base as *mut usize).add(strings.len()) = 0; }
+        unsafe {
+            *(string_ptr_base as *mut usize).add(strings.len()) = 0;
+        }
         *stack_ptr -= *stack_ptr % core::mem::size_of::<usize>();
 
         string_ptr_base

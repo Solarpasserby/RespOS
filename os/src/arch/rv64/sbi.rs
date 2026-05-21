@@ -1,9 +1,8 @@
 // src/sbi.rs
 
 //! ### SBI 模块
-//! 
+//!
 //! 调用 SBI 的服务，实现一些更底层的操作，并封装成函数使用
-
 
 /// 设置 mtimecmp ，使指定时钟周期产生时钟中断
 pub fn set_timer(time_value: usize) {
@@ -26,7 +25,7 @@ pub fn console_getchar() -> usize {
 
 /// 关闭机器
 pub fn shutdown(failure: bool) -> ! {
-    use sbi_rt::{system_reset, NoReason, Shutdown, SystemFailure};
+    use sbi_rt::{NoReason, Shutdown, SystemFailure, system_reset};
     if !failure {
         system_reset(Shutdown, NoReason);
     } else {

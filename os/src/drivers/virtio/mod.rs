@@ -7,18 +7,13 @@ pub use block_dev::VirtIoBlkDev;
 use alloc::vec::Vec;
 use core::ptr::NonNull;
 use lazy_static::*;
-use riscv::register::satp;
 use spin::Mutex;
 use virtio_drivers::{BufferDirection, Hal, PhysAddr};
 
+use crate::arch::{mm::PageTable, read_mmu_token};
 use crate::config::{KERNEL_BASE, MEMORY_END};
-use crate::arch::mm::PageTable;
 use crate::mm::{
-    frame_alloc,
-    FrameTracker,
-    PhysAddr as KernelPA,
-    PhysPageNum as KernelPPN,
-    VirtAddr,
+    FrameTracker, PhysAddr as KernelPA, PhysPageNum as KernelPPN, VirtAddr, frame_alloc,
 };
 
 lazy_static! {
@@ -37,7 +32,7 @@ impl VirtIoHalImpl {
         if (direct_map_start..direct_map_end).contains(&vaddr) {
             vaddr - KERNEL_BASE
         } else {
-            let page_table = PageTable::from_token(satp::read().bits());
+            let page_table = PageTable::from_token(read_mmu_token());
             let pa = page_table
                 .translate_va(VirtAddr::from(vaddr))
                 .expect("[kernel] virtio share: address is not mapped");

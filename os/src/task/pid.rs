@@ -1,8 +1,8 @@
 // os/src/task/pid.rs
 
+use alloc::vec::Vec;
 use lazy_static::lazy_static;
 use spin::Mutex;
-use alloc::vec::Vec;
 
 lazy_static! {
     static ref PID_ALLOCATOR: Mutex<PidAllocatr> = Mutex::new(PidAllocatr::new());
@@ -43,7 +43,8 @@ impl PidAllocatr {
         assert!(pid < self.current);
         assert!(
             !self.recycled.iter().any(|ppid| *ppid == pid),
-            "pid {} has been deallocated!", pid
+            "pid {} has been deallocated!",
+            pid
         );
         self.recycled.push(pid);
     }

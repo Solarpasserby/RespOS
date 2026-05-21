@@ -21,7 +21,7 @@ pub enum Errno {
     ECHILD = 10,
     /// 资源暂时不可用，稍后可重试。
     EAGAIN = 11,
-    /// 内存不足。
+    /// 内存不足，无法拓展/分配页帧。
     ENOMEM = 12,
     /// 权限不足。
     EACCES = 13,
@@ -61,6 +61,8 @@ pub enum Errno {
     ENOSYS = 38,
     /// 目录非空。
     ENOTEMPTY = 39,
+    /// 我不知道。
+    EIDONTKNONW = 114514,
 }
 
 impl Errno {
@@ -107,6 +109,7 @@ impl Errno {
             Errno::ENAMETOOLONG => "File name too long",
             Errno::ENOSYS => "Function not implemented",
             Errno::ENOTEMPTY => "Directory not empty",
+            Errno::EIDONTKNONW => "I don't know which is proper",
         }
     }
 }

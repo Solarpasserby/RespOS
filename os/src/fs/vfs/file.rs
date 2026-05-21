@@ -1,12 +1,12 @@
 // os/src/vfs/file.rs
 
-use spin::Mutex;
+use super::{InodeOp, LinuxDirent64};
+use crate::fs::{KStat, Path};
+use crate::syscall::{Errno, SysResult};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
-use crate::syscall::{Errno, SysResult};
-use crate::fs::KStat;
-use super::{InodeOp, LinuxDirent64};
+use spin::Mutex;
 
 // 常规文件
 pub struct File {
@@ -16,6 +16,7 @@ pub struct File {
 
 struct FileInner {
     offset: usize,
+    path: Arc<Path>,
     flags: OpenFlags,
 }
 
@@ -38,7 +39,7 @@ pub trait FileOp: Any + Send + Sync {
 }
 
 impl File {
-    pub fn new(inode: Arc<dyn InodeOp>, flags: OpenFlags) -> Self {
+    pub fn new(path: Arc<Path>, inode: Arc<dyn InodeOp>, flags: OpenFlags) -> Self {
         if flags.contains(OpenFlags::O_TRUNC)
             && flags.intersects(OpenFlags::O_WRONLY | OpenFlags::O_RDWR)
         {
@@ -53,7 +54,8 @@ impl File {
             inode,
             inner: Mutex::new(FileInner {
                 offset,
-                flags,
+                path,
+                flags
             }),
         }
     }
@@ -80,9 +82,15 @@ impl File {
     pub fn readdir(&self) -> SysResult<Vec<LinuxDirent64>> {
         self.inode.readdir()
     }
+}
 
+impl File {
     pub fn inode(&self) -> Arc<dyn InodeOp> {
         self.inode.clone()
+    }
+
+    pub fn path(&self) -> Arc<Path> {
+        self.inner.lock().path.clone()
     }
 }
 

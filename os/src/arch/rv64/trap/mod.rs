@@ -1,25 +1,25 @@
 // os/src/trap.rs
 
 //! ### ~~中断~~异常模块
-//! 
+//!
 //! 注：应当注意到目前内核台下触发中断会被屏蔽
 //! 因此无需担心某些过程是否需要关闭中断
 
 mod context;
 
+use super::timer::set_next_ti_trigger;
+use crate::syscall::*;
+use crate::task::{exit_current_and_run_next, suspend_current_and_run_next, handle_signals};
+use core::arch::global_asm;
 use riscv::register::{
     mtvec::TrapMode,
-    stvec, stval, sie,
+    scause::{self, Exception, Interrupt, Trap},
+    sie,
     sstatus::{self, SPP},
-    scause::{self, Trap, Exception, Interrupt},
+    stval, stvec,
 };
-use core::arch::global_asm;
-use crate::syscall::*;
-use crate::task::{suspend_current_and_run_next, exit_current_and_run_next, handle_signals};
-use crate::timer::set_next_ti_trigger;
 
 pub use context::TrapContext;
-
 
 global_asm!(include_str!("trap.S"));
 
@@ -38,13 +38,15 @@ pub fn init() {
 }
 
 pub fn enable_timer_interrupt() {
-    unsafe { sie::set_stimer(); }
+    unsafe {
+        sie::set_stimer();
+    }
 }
 
 /// ~~中断~~异常处理函数
-/// 
+///
 /// 用户程序上下文保存于内核栈上，包含用户程序使用的寄存器数据以及系统调用传递的寄存器参数
-/// 
+///
 /// 该函数根据 `CSR` 区分不同异常类型，对不同类型异常做不同处理
 #[unsafe(no_mangle)]
 pub fn trap_handler(cx: &mut TrapContext) {
@@ -65,12 +67,12 @@ pub fn trap_handler(cx: &mut TrapContext) {
                 Err(err) => err.as_ret() as usize,
             };
         }
-        Trap::Exception(Exception::StoreFault) |
-        Trap::Exception(Exception::StorePageFault) |
-        Trap::Exception(Exception::InstructionFault) |
-        Trap::Exception(Exception::InstructionPageFault) |
-        Trap::Exception(Exception::LoadFault) |
-        Trap::Exception(Exception::LoadPageFault) => {
+        Trap::Exception(Exception::StoreFault)
+        | Trap::Exception(Exception::StorePageFault)
+        | Trap::Exception(Exception::InstructionFault)
+        | Trap::Exception(Exception::InstructionPageFault)
+        | Trap::Exception(Exception::LoadFault)
+        | Trap::Exception(Exception::LoadPageFault) => {
             println!(
                 "[kernel] PageFault in application, cause = {:?}, sepc = {:#x}, bad addr = {:#x}, kernel killed it.",
                 scause.cause(),
@@ -90,7 +92,11 @@ pub fn trap_handler(cx: &mut TrapContext) {
             suspend_current_and_run_next();
         }
         _ => {
-            panic!("Unsupported trap {:?}, stval = {:#?}!", scause.cause(), stval);
+            panic!(
+                "Unsupported trap {:?}, stval = {:#?}!",
+                scause.cause(),
+                stval
+            );
         }
     };
     handle_signals();
@@ -100,6 +106,7 @@ pub fn trap_handler(cx: &mut TrapContext) {
 
 #[unsafe(no_mangle)]
 pub fn trap_from_kernel() -> ! {
+    // TODO: 需补齐内核对于异常的处理
     panic!(
         "[kernel] Trap is not defined in kernel: cause = {:?}, sepc = {:#x}, stval = {:#x}",
         scause::read().cause(),

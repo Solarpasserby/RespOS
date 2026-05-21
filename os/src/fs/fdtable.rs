@@ -1,20 +1,20 @@
 // os/src/fs/fdtable.rs
 
-use alloc::{vec, vec::Vec};
-use alloc::sync::Arc;
-use crate::config::FTB_RLIMIT;
-use crate::syscall::{SysResult, Errno};
 use super::vfs::{FileOp, OpenFlags};
 use super::{Stdin, Stdout};
+use crate::config::FTB_RLIMIT;
+use crate::syscall::{Errno, SysResult};
+use alloc::sync::Arc;
+use alloc::{vec, vec::Vec};
 
 pub struct FdTable {
-    pub table: Vec<Option<FdEntry>>
-}   
+    pub table: Vec<Option<FdEntry>>,
+}
 
 impl FdTable {
     pub fn new() -> Self {
         // 自带三个文件描述符，分别是标准输入、标准输出、标准错误
-        let stdin  = FdEntry::new(Arc::new(Stdin), OpenFlags::O_RDONLY);
+        let stdin = FdEntry::new(Arc::new(Stdin), OpenFlags::O_RDONLY);
         let stdout = FdEntry::new(Arc::new(Stdout), OpenFlags::O_WRONLY);
         let stderr = FdEntry::new(Arc::new(Stdout), OpenFlags::O_WRONLY);
         FdTable {
@@ -45,7 +45,7 @@ impl FdTable {
     pub fn set_fd(&mut self, fd: usize, fd_entry: FdEntry) -> SysResult<Option<FdEntry>> {
         if fd >= FTB_RLIMIT {
             return Err(Errno::EBADF);
-        }       
+        }
         if fd >= self.table.len() {
             self.table.resize_with(fd + 1, || None);
         }
@@ -64,7 +64,7 @@ impl FdTable {
     /// 根据文件描述符找到对应的文件描述项
     pub fn get_fd_entry(&self, fd: usize) -> SysResult<FdEntry> {
         if fd >= self.table.len() {
-            return  Err(Errno::EBADF);
+            return Err(Errno::EBADF);
         }
         if let Some(fd_entry) = &self.table[fd] {
             Ok(fd_entry.clone())
@@ -92,10 +92,7 @@ pub struct FdEntry {
 
 impl FdEntry {
     pub fn new(file: Arc<dyn FileOp>, flags: OpenFlags) -> Self {
-        Self {
-            file,
-            flags,
-        }
+        Self { file, flags }
     }
 
     #[inline(always)]

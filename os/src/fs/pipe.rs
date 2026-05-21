@@ -1,13 +1,13 @@
 // os/src/fs/pipe.rs
 
-use spin::Mutex;
+use super::KStat;
+use super::vfs::{FileOp, InodeType, OpenFlags};
+use crate::config::PIPE_BUFFER_SIZE;
+use crate::syscall::{Errno, SysResult};
+use crate::task::suspend_current_and_run_next;
 use alloc::sync::Arc;
 use core::any::Any;
-use crate::config::PIPE_BUFFER_SIZE;
-use crate::syscall::{SysResult, Errno};
-use crate::task::suspend_current_and_run_next;
-use super::vfs::{OpenFlags, FileOp, InodeType};
-use super::KStat;
+use spin::Mutex;
 
 pub struct Pipe {
     buffer: Arc<Mutex<PipeRingBuffer>>,
@@ -88,7 +88,7 @@ impl FileOp for Pipe {
                 let ret = self.write_inner(buf);
                 if ret != 0 {
                     return Ok(ret);
-                } else  {
+                } else {
                     // 缓存已满但读端存在
                     suspend_current_and_run_next();
                     continue;
@@ -191,11 +191,7 @@ impl PipeRingBuffer {
 
 pub fn make_pipe() -> (Arc<Pipe>, Arc<Pipe>) {
     let buffer = Arc::new(Mutex::new(PipeRingBuffer::new()));
-    let read_end = Arc::new(
-        Pipe::read_end_with_buffer(buffer.clone())
-    );
-    let write_end = Arc::new(
-        Pipe::write_end_with_buffer(buffer.clone())
-    );
+    let read_end = Arc::new(Pipe::read_end_with_buffer(buffer.clone()));
+    let write_end = Arc::new(Pipe::write_end_with_buffer(buffer.clone()));
     (read_end, write_end)
 }
