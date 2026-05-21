@@ -52,7 +52,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     }
     task_inner.children.clear();
 
-    task_inner.memory_set.recycle_data_pages();
+    task.op_memory_set_write(|memory_set| memory_set.recycle_data_pages());
     drop(task_inner);
     drop(task); // 该函数不会正常结束，手动删除引用
     // 到此为止应当仅有其父任务有其原子引用，父任务将其回收后，资源将会回收

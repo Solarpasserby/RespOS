@@ -1,6 +1,6 @@
 | 测试文件 | 依赖的系统调用 | 是否成功 |
 | --- | --- | --- |
-| `brk` | `brk` | ☐ |
+| `brk` | `brk` | ☑ |
 | `chdir` | `chdir`, `mkdir` | ☐ |
 | `clone` | `clone` | ☐ |
 | `close` | `open`, `close` | ☑ |
@@ -16,9 +16,9 @@
 | `getppid` | `getppid` | ☑ |
 | `gettimeofday` | `gettimeofday` | ☑ |
 | `mkdir_` | `mkdirat` / `mkdir` | ☐ |
-| `mmap` | `mmap` | ☐ |
+| `mmap` | `mmap` | ☑ |
 | `mount` | `mount`, `umount2` | ☐ |
-| `munmap` | `mmap`, `munmap` | ☐ |
+| `munmap` | `mmap`, `munmap` | ☑ |
 | `openat` | `openat`, `close` | ☐ |
 | `open` | `open`, `read`, `close` | ☐ |
 | `pipe` | `pipe2` / `pipe`, `read`, `write`, `close` | ☐ |
@@ -45,8 +45,6 @@
 
 | 系统调用 / 语义缺口 | 当前状态 | 为什么排在第二梯队 |
 | --- | --- | --- |
-| `brk` | `TODO[UNIMPLEMENTED]` | 直接对应 `brk` 测试，也是后续用户堆的基础能力。 |
-| `mmap` / `munmap` | `TODO[UNIMPLEMENTED]` | 直接对应 `mmap`、`munmap` 测试，但会进入内存管理核心，复杂度明显高于 P0。 |
 | `openat` 的 `dirfd` 语义 | `TODO[ABI-COMPAT]` | 现在只兼容 `AT_FDCWD`；若 basic 测试出现相对目录 fd，这里会暴露问题。 |
 | `mkdirat` 的 `dirfd` 语义 | `TODO[ABI-COMPAT]` | 与 `openat` 同类，建议和路径解析能力一起补。 |
 | `wait4` 的完整语义 | `TODO[ABI-COMPAT]` | 目前只够覆盖 `waitpid` 子集；如果测试检查 `options`，需要继续补。 |

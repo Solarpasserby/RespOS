@@ -104,6 +104,7 @@ pub fn trap_handler(cx: &mut TrapContext) {
 
 #[unsafe(no_mangle)]
 pub fn trap_from_kernel() -> ! {
+    // TODO: 需补齐内核对于异常的处理
     panic!(
         "[kernel] Trap is not defined in kernel: cause = {:?}, sepc = {:#x}, stval = {:#x}",
         scause::read().cause(),

@@ -41,9 +41,11 @@ pub fn copy_cstr_from_user(ptr: *const u8) -> SysResult<String> {
 
     let vpn_range = current_task()
         .expect("[kernel] current task is None.")
-        .inner_exclusive_access()
-        .memory_set
-        .check_valid_user_vpn(start_vpn, MapPermission::READ)?;
+        .op_memory_set_read(|memory_set| {
+            // TODO[ABI-COMPAT]: 当前 C 字符串读取只允许字符串落在起始逻辑段内；
+            // 后续需要支持跨相邻合法逻辑段的用户字符串。
+            memory_set.check_valid_user_vpn(start_vpn, MapPermission::READ)
+        })?;
 
     let area_end = usize::from(VirtAddr::from(vpn_range.get_end()));
     let max_end = (ptr as usize)
@@ -156,6 +158,8 @@ pub fn check_user_writable<T>(dst: *mut T, len: usize) -> SysResult {
 ///
 /// 当前检验不支持跨逻辑段的数据
 fn check_user_buffer(start: usize, byte_len: usize, perm: MapPermission) -> SysResult {
+    // TODO[ABI-COMPAT]: 当前要求整个用户 buffer 完整落在同一个逻辑段内；
+    // 后续需要按页/按逻辑段逐段检查，允许跨相邻且权限满足的逻辑段。
     if byte_len == 0 {
         return Ok(());
     }
@@ -167,8 +171,6 @@ fn check_user_buffer(start: usize, byte_len: usize, perm: MapPermission) -> SysR
     let vpn_range = VPNRange::new(start_vpn, end_vpn);
     current_task()
         .expect("[kernel] current task is None.")
-        .inner_exclusive_access()
-        .memory_set
-        .check_valid_user_vpn_range(vpn_range, perm)?;
+        .op_memory_set_read(|memory_set| memory_set.check_valid_user_vpn_range(vpn_range, perm))?;
     Ok(())
 }

@@ -86,6 +86,7 @@ impl MemorySet {
             .areas
             .iter_mut()
             .enumerate()
+            .rev()
             .find(|(_, area)| area.vpn_range.get_start() == stack_bottom_vpn)
         {
             area.unmap(&mut self.page_table);
@@ -105,8 +106,119 @@ impl MemorySet {
             0,
         );
     }
+    /// 根据首虚拟页号删除对应逻辑段
+    pub fn remove_area_with_start_vpn(&mut self, vpn_start: VirtPageNum) -> SysResult {
+        let (idx, area) = self
+            .areas
+            .iter_mut()
+            .enumerate()
+            .rev()
+            .find(|(_, area)| area.vpn_range.get_start() == vpn_start)
+            .ok_or(Errno::EINVAL)?;
 
-    /// 激活地址空间，即修改页表基址寄存器，切换页表
+        area.unmap(&mut self.page_table);
+        self.areas.remove(idx);
+        Ok(())
+    }
+    /// 删除与给定虚拟页区间重叠的映射，必要时裁剪或切分原逻辑段
+    pub fn remove_area_with_overlap_range(&mut self, vpn_range: VPNRange) -> SysResult {
+        let mut idx = 0;
+        while idx < self.areas.len() {
+            if !self.areas[idx].vpn_range.intersect_with(&vpn_range) {
+                idx += 1;
+                continue;
+            }
+
+            let area_start = self.areas[idx].vpn_range.get_start();
+            let area_end = self.areas[idx].vpn_range.get_end();
+            let remove_start = vpn_range.get_start();
+            let remove_end = vpn_range.get_end();
+            let overlap_start = area_start.max(remove_start);
+            let overlap_end = area_end.min(remove_end);
+
+            let new_right_area = {
+                let area = &mut self.areas[idx];
+                for vpn in VPNRange::new(overlap_start, overlap_end) {
+                    area.unmap_one(&mut self.page_table, vpn);
+                }
+
+                if overlap_start == area_start && overlap_end == area_end {
+                    None
+                } else if overlap_start == area_start {
+                    area.vpn_range = VPNRange::new(overlap_end, area_end);
+                    None
+                } else if overlap_end == area_end {
+                    area.vpn_range = VPNRange::new(area_start, overlap_start);
+                    None
+                } else {
+                    let right_frames = area.data_frames.split_off(&overlap_end);
+                    let right_area = MapArea {
+                        vpn_range: VPNRange::new(overlap_end, area_end),
+                        data_frames: right_frames,
+                        map_type: area.map_type,
+                        map_perm: area.map_perm,
+                    };
+                    area.vpn_range = VPNRange::new(area_start, overlap_start);
+                    Some(right_area)
+                }
+            };
+
+            if overlap_start == area_start && overlap_end == area_end {
+                self.areas.remove(idx);
+            } else {
+                idx += 1;
+            }
+
+            if let Some(right_area) = new_right_area {
+                self.areas.push(right_area);
+            }
+        }
+        Ok(())
+    }
+
+    /// 根据首虚拟页号重新映射对应逻辑段（逻辑段的大小发生变化）
+    pub fn remap_area_with_start_vpn(
+        &mut self,
+        vpn_start: VirtPageNum,
+        new_vpn_end: VirtPageNum,
+    ) -> SysResult {
+        let (idx, area) = self
+            .areas
+            .iter_mut()
+            .enumerate()
+            .rev()
+            .find(|(_, area)| area.vpn_range.get_start() == vpn_start)
+            .ok_or(Errno::EINVAL)?;
+
+        if vpn_start == new_vpn_end {
+            area.unmap(&mut self.page_table);
+            self.areas.remove(idx);
+            return Ok(());
+        }
+
+        let old_vpn_end = area.vpn_range.get_end();
+        let page_table = &mut self.page_table;
+        if new_vpn_end > old_vpn_end {
+            let vpn_range = VPNRange::new(old_vpn_end, new_vpn_end);
+            for vpn in vpn_range {
+                area.map_one(page_table, vpn);
+            }
+        } else {
+            let vpn_range = VPNRange::new(new_vpn_end, old_vpn_end);
+            for vpn in vpn_range {
+                area.unmap_one(page_table, vpn);
+            }
+        }
+        area.vpn_range = VPNRange::new(vpn_start, new_vpn_end);
+        Ok(())
+    }
+
+    /// 修改页表基址寄存器，切换页表
+    pub fn flush_tlb(&self) {
+        sfence();
+    }
+
+    /// 激活地址空间
     #[cfg(target_arch = "riscv64")]
     pub fn activate(&self) {
         let token = self.page_table.token();
@@ -116,7 +228,7 @@ impl MemorySet {
         assert!(pte.readable() || pte.executable() || pte.writable());
 
         write_mmu_token(token);
-        sfence(); // 内存屏障，刷新 TLB，确保之后内存读写正确
+        self.flush_tlb(); // 内存屏障，刷新 TLB，确保之后内存读写正确
     }
 
     /// 生成页表对应 `stap` 寄存器值
@@ -491,7 +603,6 @@ impl MapArea {
         page_table.map(vpn, ppn, pte_flags);
     }
 
-    #[allow(unused)]
     /// 消除虚拟页与物理页帧的映射关系，自动销毁失去连接的物理页帧
     pub fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
         match self.map_type {

@@ -10,7 +10,7 @@ use crate::trap::TrapContext;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use spin::{Mutex, MutexGuard};
+use spin::{Mutex, MutexGuard, RwLock};
 
 /// 任务控制块——此处的任务是对一定资源和某个程序的抽象表述
 ///
@@ -23,6 +23,7 @@ pub struct TaskControlBlock {
     // 不可变
     pub pid: PidHandle,
     pub kernel_stack: KernelStack,
+    pub memory_set: Arc<RwLock<MemorySet>>,
     // 可变
     inner: Mutex<TaskControlBlockInner>,
 }
@@ -46,10 +47,10 @@ impl TaskControlBlock {
         let task_ctrl_block = Self {
             pid,
             kernel_stack,
+            memory_set: Arc::new(RwLock::new(memory_set)),
             inner: Mutex::new(TaskControlBlockInner {
                 task_status: TaskStatus::Ready,
                 task_context: TaskContext::app_init_task_context(kernel_stack_top, token),
-                memory_set,
                 fd_table: FdTable::new(),
                 cwd: Path::new(ROOT_DENTRY.clone()),
                 parent: None,
@@ -78,11 +79,13 @@ impl TaskControlBlock {
         let task_ctrl_block = Arc::new(TaskControlBlock {
             pid,
             kernel_stack,
+            memory_set: Arc::new(RwLock::new(MemorySet::from_existed_user(
+                &self.memory_set.read(),
+            ))),
             inner: Mutex::new(TaskControlBlockInner {
                 task_status: TaskStatus::Ready,
                 // 全零初始化任务上下文
                 task_context: TaskContext::app_init_task_context(0, 0),
-                memory_set: MemorySet::from_existed_user(&parent_inner.memory_set),
                 fd_table: FdTable::from_existed_user(&parent_inner.fd_table),
                 cwd: Path::from_existed_user(&parent_inner.cwd),
                 parent: Some(Arc::downgrade(self)),
@@ -108,13 +111,15 @@ impl TaskControlBlock {
 
         /* ===== 修改地址空间 ===== */
         let mut inner = self.inner_exclusive_access();
-        let old_memory_set = core::mem::replace(&mut inner.memory_set, memory_set);
+        let mut memory_set_guard = self.memory_set.write();
+        let old_memory_set = core::mem::replace(&mut *memory_set_guard, memory_set);
         // 设置任务上下文的 mmu_token 字段，使得之后切换任务到自身时能正确刷新页表
         inner.task_context.set_mmu_token(token);
         // 刷新页表，由于应用程序通过异常进入，在异常返回时不会刷新页表
         // 为了程序返回后看到的地址空间为自身而非父任务的地址空间，需要主动刷新页表
-        inner.memory_set.activate();
+        memory_set_guard.activate();
         drop(old_memory_set);
+        drop(memory_set_guard);
 
         /* ===== 修改用户栈数据 ===== */
         // 需保证页表已刷新，函数内部直接访存高度依赖
@@ -151,15 +156,25 @@ impl TaskControlBlock {
         }
     }
     fn write_task_cx(&self, kernel_stack_ptr: usize) {
+        let token = self.get_user_token();
         let mut inner = self.inner_exclusive_access();
-        let token = inner.get_user_token();
         let task_context = &mut inner.task_context;
         task_context.set_sp(kernel_stack_ptr);
         task_context.set_mmu_token(token);
     }
 
     // 操作内部数据
-    // ...
+    pub fn op_memory_set_read<T>(&self, f: impl FnOnce(&MemorySet) -> T) -> T {
+        f(&self.memory_set.read())
+    }
+    pub fn op_memory_set_write<T>(&self, f: impl FnOnce(&mut MemorySet) -> T) -> T {
+        f(&mut self.memory_set.write())
+    }
+
+    /// 获取用户任务页表的页表基址寄存器值
+    pub fn get_user_token(&self) -> usize {
+        self.memory_set.read().token()
+    }
 
     // 进程号
     pub fn pid(&self) -> usize {
@@ -215,7 +230,6 @@ impl TaskControlBlock {
 pub struct TaskControlBlockInner {
     pub task_status: TaskStatus,
     pub task_context: TaskContext,
-    pub memory_set: MemorySet,
     pub fd_table: FdTable,
     pub cwd: Arc<Path>,
     pub parent: Option<Weak<TaskControlBlock>>,
@@ -225,10 +239,6 @@ pub struct TaskControlBlockInner {
 }
 
 impl TaskControlBlockInner {
-    /// 获取用户任务页表的页表基址寄存器值
-    pub fn get_user_token(&self) -> usize {
-        self.memory_set.token()
-    }
     fn get_status(&self) -> TaskStatus {
         self.task_status
     }

@@ -279,6 +279,10 @@ where
     pub fn contain_range(&self, other: &Self) -> bool {
         self.start <= other.start && other.end <= self.end
     }
+
+    pub fn intersect_with(&self, other: &Self) -> bool {
+        self.start < other.end && self.end > other.start
+    }
 }
 
 impl<T> IntoIterator for SimpleRange<T>
