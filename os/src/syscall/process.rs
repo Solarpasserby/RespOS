@@ -95,11 +95,14 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> SysResult<usize> {
 
     if let Some((idx, _)) = pair {
         // 从 children 中移除
-        let child = task_inner.children.remove(idx);;
-        // 此时只剩父进程持有这一份 Arc
-        assert_eq!(Arc::strong_count(&child), 1);
-
+        let child = task_inner.children.remove(idx);
         let child_pid = child.pid();
+
+        { &*PID2TCB }
+        .lock()
+        .remove(&child_pid);
+
+        assert_eq!(Arc::strong_count(&child), 1);
         let exit_code = child.inner_exclusive_access().exit_code;
 
         // 写回退出码（如果指针非空）
@@ -108,11 +111,6 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> SysResult<usize> {
                 *exit_code_ptr = exit_code;
             }
         }
-
-        //在真正回收子进程时，从 PID2TCB 中删除
-        { &*PID2TCB }
-            .lock()
-            .remove(&child_pid);
 
         Ok(child_pid)
     } else {
