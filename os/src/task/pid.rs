@@ -42,7 +42,7 @@ impl PidAllocatr {
     pub fn dealloc(&mut self, pid: usize) {
         assert!(pid < self.current);
         assert!(
-            self.recycled.iter().find(|ppid| **ppid == pid).is_none(),
+            !self.recycled.iter().any(|ppid| *ppid == pid),
             "pid {} has been deallocated!", pid
         );
         self.recycled.push(pid);

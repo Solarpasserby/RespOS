@@ -1,12 +1,11 @@
-// os/src/mm/page_table.rs
+// os/src/arch/rv64/mm/page_table.rs
 
 use bitflags::*;
 use alloc::{vec, vec::Vec};
 use alloc::string::String;
 use crate::config::KERNEL_BASE;
-use super::address::{PPN_WIDTH_SV39, PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
-use super::frame_allocator::{ FrameTracker, frame_alloc };
-use super::memory_set::KERNEL_SPACE;
+use crate::mm::{PPN_WIDTH_SV39, PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
+use crate::mm::{FrameTracker, frame_alloc, KERNEL_SPACE};
 
 /// 页表
 /// 
@@ -49,7 +48,7 @@ impl PageTable {
 
     /// 生成页表对应 `stap` 寄存器值
     pub fn token(&self) -> usize {
-        8usize << 60 | self.root_ppn.0
+        (8usize << 60) | self.root_ppn.0
     }
     /// 转译虚拟页号为对应页表项
     pub fn translate(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
@@ -211,7 +210,7 @@ impl PTEFlags {
 impl PageTableEntry {
     /// 创建一个新的页表项
     pub fn new(ppn: PhysPageNum, flags: PTEFlags) -> Self {
-        Self { bits: ppn.0 << 10 | (flags.bits as usize) }
+        Self { bits: (ppn.0 << 10) | (flags.bits as usize) }
     }
     /// 创建一个空的（无效的）页表项
     pub fn empty() -> Self {

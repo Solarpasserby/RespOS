@@ -69,7 +69,7 @@ $(KERNEL_BIN): kernel
 
 kernel:
 	@cd ../user && make build MODE=$(MODE)
-	@cargo build $(CARGO_BUILD_ARG)
+	@RESPOS_USER_PROFILE_DIR=$(CARGO_TARGET_DIR) cargo build $(CARGO_BUILD_ARG)
 
 clean:
 	@cargo clean

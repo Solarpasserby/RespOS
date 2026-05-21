@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use core::any::Any;
 use crate::syscall::{Errno, SysResult};
 use crate::fs::KStat;
-use super::{InodeOp, DirEntry};
+use super::{InodeOp, LinuxDirent64};
 
 // 常规文件
 pub struct File {
@@ -39,43 +39,46 @@ pub trait FileOp: Any + Send + Sync {
 
 impl File {
     pub fn new(inode: Arc<dyn InodeOp>, flags: OpenFlags) -> Self {
+        if flags.contains(OpenFlags::O_TRUNC)
+            && flags.intersects(OpenFlags::O_WRONLY | OpenFlags::O_RDWR)
+        {
+            let _ = inode.truncate(0);
+        }
+        let offset = if flags.contains(OpenFlags::O_APPEND) {
+            inode.stat().map(|stat| stat.size).unwrap_or(0)
+        } else {
+            0
+        };
         Self {
             inode,
             inner: Mutex::new(FileInner {
-                offset: 0,
+                offset,
                 flags,
             }),
         }
     }
 
-    pub fn read(&self, buf: &mut [u8]) -> SysResult<usize> {
-        let mut inner = self.inner.lock();
-        let n = self.inode.read_at(inner.offset, buf)?;
-        inner.offset += n;
-        Ok(n)
+    pub fn read_all(&self) -> SysResult<Vec<u8>> {
+        let stat = self.get_stat()?;
+        let size = stat.size;
+
+        let mut data = alloc::vec![0u8; size];
+        let mut offset = 0;
+
+        while offset < size {
+            let n = self.inode.read_at(offset, &mut data[offset..])?;
+            if n == 0 {
+                break;
+            }
+            offset += n;
+        }
+
+        data.truncate(offset);
+        Ok(data)
     }
 
-    pub fn write(&self, buf: &[u8]) -> SysResult<usize> {
-        let mut inner = self.inner.lock();
-        let n = self.inode.write_at(inner.offset, buf)?;
-        inner.offset += n;
-        Ok(n)
-    }
-
-    pub fn seek(&self, offset: usize) {
-        self.inner.lock().offset = offset;
-    }
-
-    pub fn offset(&self) -> usize {
-        self.inner.lock().offset
-    }
-
-    pub fn readdir(&self) -> SysResult<Vec<DirEntry>> {
+    pub fn readdir(&self) -> SysResult<Vec<LinuxDirent64>> {
         self.inode.readdir()
-    }
-
-    pub fn stat(&self) -> SysResult<KStat> {
-        self.inode.stat()
     }
 
     pub fn inode(&self) -> Arc<dyn InodeOp> {
@@ -89,21 +92,30 @@ impl FileOp for File {
     }
 
     fn read<'a>(&'a self, buf: &'a mut [u8]) -> SysResult<usize> {
-        self.read(buf)
+        let mut inner = self.inner.lock();
+        let n = self.inode.read_at(inner.offset, buf)?;
+        inner.offset += n;
+        Ok(n)
     }
 
     fn write<'a>(&'a self, buf: &'a [u8]) -> SysResult<usize> {
-        self.write(buf)
+        let mut inner = self.inner.lock();
+        if inner.flags.contains(OpenFlags::O_APPEND) {
+            inner.offset = self.inode.stat()?.size;
+        }
+        let n = self.inode.write_at(inner.offset, buf)?;
+        inner.offset += n;
+        Ok(n)
     }
 
     fn seek(&self, offset: isize) -> SysResult<usize> {
         let offset = usize::try_from(offset).map_err(|_| Errno::EINVAL)?;
-        self.seek(offset);
+        self.inner.lock().offset = offset;
         Ok(offset)
     }
 
     fn get_offset(&self) -> usize {
-        self.offset()
+        self.inner.lock().offset
     }
 
     fn get_flags(&self) -> OpenFlags {
@@ -111,7 +123,7 @@ impl FileOp for File {
     }
 
     fn get_stat(&self) -> SysResult<KStat> {
-        self.stat()
+        self.inode.stat()
     }
 
     fn readable(&self) -> bool {

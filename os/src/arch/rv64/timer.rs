@@ -4,7 +4,7 @@
 
 use riscv::register::time;
 use crate::config::CLOCK_FREQ;
-use crate::sbi::set_timer;
+use super::sbi::set_timer;
 
 const TICKS_PER_SEC: usize = 100; // 每秒触发时钟中断的次数
 const MSEC_PER_SEC: usize = 1000; // 微秒
@@ -16,6 +16,34 @@ pub struct TimeSpec {
     pub sec: usize,
     // 纳秒数
     pub nsec: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+#[repr(C)]
+pub struct StatxTimeStamp {
+    /// 自 UNIX time以来的秒数
+    pub sec: i64,
+    /// 纳秒数, 秒数后剩余小数部分
+    pub nsec: u32,
+}
+
+impl StatxTimeStamp {
+    pub fn new() -> Self {
+        let current_time = get_time_ms();
+        Self {
+            sec: (current_time / 1000) as i64,
+            nsec: ((current_time % 1000) * 1000000) as u32,
+        }
+    }
+}
+
+impl From<TimeSpec> for StatxTimeStamp {
+    fn from(ts: TimeSpec) -> Self {
+        Self {
+            sec: ts.sec as i64,
+            nsec: ts.nsec as u32,
+        }
+    }
 }
 
 /// 获取 `mtime` 的值

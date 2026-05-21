@@ -5,12 +5,16 @@
 #[macro_use]
 pub mod console;
 mod lang_item;
+#[allow(unused)]
 mod syscall;
+
+extern crate alloc;
 
 use bitflags::bitflags;
 use buddy_system_allocator::LockedHeap;
 
-const USER_HEAP_SIZE: usize = 4 * 4096;
+const USER_HEAP_SIZE: usize = 8 * 4096;
+const USER_ARG_MAX_COUNT: usize = 32;
 
 static mut USER_SPACE: [u8; USER_HEAP_SIZE] = [0; USER_HEAP_SIZE];
 
@@ -24,7 +28,7 @@ pub fn handle_alloc_error(layout: core::alloc::Layout) -> ! {
 
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.entry")]
-pub extern "C" fn _start() -> ! {
+pub extern "C" fn _start(argc: usize, argv: usize) -> ! {
     clear_bss();
     unsafe {
         HEAP
@@ -32,13 +36,26 @@ pub extern "C" fn _start() -> ! {
             .init((&raw mut USER_SPACE) as usize, USER_HEAP_SIZE);
     }
 
-    exit(main());
+    let mut argv_ref: [&str; USER_ARG_MAX_COUNT] = [""; USER_ARG_MAX_COUNT];
+    for i in 0..argc {
+        let str_start = unsafe {
+            ((argv + i * core::mem::size_of::<usize>()) as *const usize).read_volatile()
+        };
+        let len = (0usize..).find(|i| unsafe {
+            ((str_start + *i) as *const u8).read_volatile() == 0
+        }).unwrap();
+        argv_ref[i] = core::str::from_utf8(unsafe {
+            core::slice::from_raw_parts(str_start as *const u8, len)
+        }).unwrap();
+    }
+    
+    exit(main(argc, &argv_ref[..argc]));
     panic!("unreachable after sys_exit!");
 }
 
 #[linkage = "weak"]
 #[unsafe(no_mangle)]
-fn main() -> i32 {
+fn main(_argc: usize, _argv: &[&str]) -> i32 {
     panic!("Cannot find main!");
 }
 
@@ -54,7 +71,7 @@ fn clear_bss() {
 
 use syscall::*;
 
-pub use syscall::{Stat, TimeSpec};
+pub use syscall::{Stat, TimeSpec, TimeVal};
 
 pub const O_RDONLY: usize = 0;
 pub const O_WRONLY: usize = 1 << 0;
@@ -67,6 +84,7 @@ pub const O_DIRECTORY: usize = 1 << 16;
 pub const SEEK_SET: usize = 0;
 pub const SEEK_CUR: usize = 1;
 pub const SEEK_END: usize = 2;
+pub const AT_FDCWD: isize = -100;
 
 pub const SIGDEF: i32  = 0;  // 无信号，默认处理
 pub const SIGHUP: i32  = 1;  // 挂起（终端断开）
@@ -105,26 +123,35 @@ pub fn read(fd: usize, buf: &mut [u8]) -> isize { sys_read(fd, buf) }
 pub fn write(fd: usize, buf: &[u8]) -> isize { sys_write(fd, buf) }
 pub fn getcwd(buf: &mut [u8]) -> isize { sys_getcwd(buf) }
 pub fn dup(fd: usize) -> isize { sys_dup(fd) }
-pub fn dup2(fd_src: usize, fd_dst: usize) -> isize { sys_dup2(fd_src, fd_dst) }
-pub fn mkdir(path: &str, mode: usize) -> isize { sys_mkdir(path, mode) }
-pub fn unlink(path: &str) -> isize { sys_unlink(path) }
+pub fn dup2(fd_src: usize, fd_dst: usize) -> isize { sys_dup3(fd_src, fd_dst, 0) }
+pub fn mkdir(path: &str, mode: usize) -> isize { sys_mkdirat(AT_FDCWD, path, mode) }
+pub fn unlink(path: &str) -> isize { sys_unlinkat(AT_FDCWD, path, 0) }
 pub fn chdir(path: &str) -> isize { sys_chdir(path) }
-pub fn open(path: &str, flags: usize, mode: usize) -> isize { sys_open(path, flags, mode) }
+pub fn open(path: &str, flags: usize, mode: usize) -> isize { sys_openat(AT_FDCWD, path, flags, mode) }
 pub fn close(fd: usize) -> isize { sys_close(fd) }
-pub fn pipe(pipefd: &mut [u32; 2]) -> isize { sys_pipe(pipefd) }
+pub fn pipe(pipefd: &mut [usize; 2]) -> isize { sys_pipe2(pipefd, 0) }
+pub fn getdents64(fd: usize, buf: &mut [u8]) -> isize {
+    sys_getdents64(fd, buf.as_mut_ptr(), buf.len())
+}
 pub fn lseek(fd: usize, offset: isize, whence: usize) -> isize {
     sys_lseek(fd, offset, whence)
 }
 pub fn stat(path: &str, stat: &mut Stat) -> isize { sys_stat(path, stat) }
 pub fn fstat(fd: usize, stat: &mut Stat) -> isize { sys_fstat(fd, stat) }
 pub fn exit(exit_code: i32) -> isize { sys_exit(exit_code) }
-pub fn yield_() -> isize { sys_yield() }
-pub fn time_get() -> isize { sys_get_time() }
-pub fn fork() -> isize { sys_fork() }
-pub fn exec(path: &str) -> isize { sys_exec(path) }
+pub fn yield_() -> isize { sys_sched_yield() }
+pub fn time_get() -> isize {
+    let mut tv = TimeVal::default();
+    match sys_gettimeofday(&mut tv, 0) {
+        0 => (tv.sec * 1000 + tv.usec / 1000) as isize,
+        err => err,
+    }
+}
+pub fn fork() -> isize { sys_clone(17, 0, 0, 0, 0) }
+pub fn exec(path: &str, args: &[*const u8]) -> isize { sys_execve(path, args, &[]) }
 pub fn wait(exit_code: &mut i32) -> isize {
     loop { // 等待任意进程
-        match sys_waitpid(-1, exit_code as *mut _) {
+        match sys_wait4(-1, exit_code as *mut _) {
             -11 => { yield_(); } // 子进程未结束则让出资源
             exit_pid => return exit_pid,
         }
@@ -132,7 +159,7 @@ pub fn wait(exit_code: &mut i32) -> isize {
 }
 pub fn waitpid(pid: usize, exit_code: &mut i32) -> isize {
     loop { // 等待指定进程
-        match sys_waitpid(pid as isize, exit_code as *mut _) {
+        match sys_wait4(pid as isize, exit_code as *mut _) {
             -11 => { yield_(); } // 子进程未结束则让出资源
             exit_pid => return exit_pid,
         }

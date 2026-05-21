@@ -80,13 +80,11 @@ impl FrameAllocator for StackFrameAllocator {
         // `recycle` 中的值是页表页数数字，而输出要求为页表页数结构体
         if let Some(ppn) = self.recycled.pop() {
             Some(ppn.into())
+        } else if self.current == self.end {
+            None
         } else {
-            if self.current == self.end {
-                None
-            } else {
-                self.current += 1;
-                Some((self.current - 1).into())
-            }
+            self.current += 1;
+            Some((self.current - 1).into())
         }
     }
 

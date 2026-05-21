@@ -1,12 +1,13 @@
 // os/src/fs/vfs/dentry.rs
 
 use lazy_static::lazy_static;
-use alloc::sync::{Arc, Weak};
+use alloc::vec::Vec;
 use alloc::string::{String, ToString};
+use alloc::sync::{Arc, Weak};
 use spin::Mutex;
 use hashbrown::HashMap;
 use crate::fs::ext4::root_inode;
-use super::{InodeOp, InodeType};
+use super::InodeOp;
 
 lazy_static! {
     pub static ref ROOT_DENTRY: Arc<Dentry> = {
@@ -107,25 +108,41 @@ pub struct DentryInner {
 }
 
 impl DentryInner {
-    pub fn new(parent: Option<Arc<Dentry>>, inode: Arc<dyn InodeOp>) -> Self {
+    pub fn new(parent_dentry: Option<Arc<Dentry>>, inode: Arc<dyn InodeOp>) -> Self {
         Self {
             inode: Some(inode),
-            parent: parent,
+            parent: parent_dentry,
             children: HashMap::new(),
         }
     }
     // 负目录项
-    pub fn negative(parent: Option<Arc<Dentry>>) -> Self {
+    pub fn negative(parent_dentry: Option<Arc<Dentry>>) -> Self {
         Self {
             inode: None,
-            parent: parent,
+            parent: parent_dentry,
             children: HashMap::new(),
         }
     }
 }
 
+// 内核内部使用的目录项描述，真正返回给用户时需要按 linux_dirent64 的变长布局序列化成字节
 #[derive(Clone, Debug)]
-pub struct DirEntry {
-    pub name: String,
-    pub ty: InodeType,
+pub struct LinuxDirent64 {
+    pub d_ino: u64,     // inode 号
+    pub d_off: i64,     // 下一个目录项偏移
+    pub d_reclen: u16,  // 当前目录项记录长度
+    pub d_type: u8,     // 文件类型
+    pub d_name: Vec<u8>,   // 文件名，0 结尾，变长
 }
+
+impl LinuxDirent64 {
+    pub fn copy_to_buffer(&self, buf: &mut [u8]) {
+        buf[0..8].copy_from_slice(&self.d_ino.to_le_bytes());
+        buf[8..16].copy_from_slice(&self.d_off.to_le_bytes());
+        buf[16..18].copy_from_slice(&self.d_reclen.to_le_bytes());
+        buf[18] = self.d_type;
+        let name_len = self.d_name.len();
+        buf[19..19 + name_len].copy_from_slice(&self.d_name[..]);
+    }
+}
+

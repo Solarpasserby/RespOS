@@ -1,4 +1,4 @@
-# os/src/entry.S
+# os/src/arch/rv64/entry/entry.S
 
     .section .text.entry
     .globl _start

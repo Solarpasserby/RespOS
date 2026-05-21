@@ -7,7 +7,7 @@ mod virtio;
 use core::ptr::NonNull;
 
 use virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader};
-use crate::config::{KERNEL_BASE, MMIO};
+use crate::arch::config::{KERNEL_BASE, MMIO};
 use device::*;
 use virtio::*;
 pub use disk::Disk;

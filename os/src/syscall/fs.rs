@@ -1,7 +1,8 @@
 // os/src/syscall/fs.rs
 
-use crate::fs::{FdEntry, Stat, Path, path_open, filename_create,  filename_lookup};
-use crate::fs::vfs::InodeType;
+use alloc::vec;
+use crate::fs::{FdEntry, Path, Stat, filename_create, filename_lookup, make_pipe, path_open};
+use crate::fs::vfs::{InodeType, OpenFlags, File};
 use crate::task::{current_task};
 use crate::mm::{check_user_writable, copy_cstr_from_user, copy_from_user, copy_to_user};
 use super::{SysResult, Errno};
@@ -48,7 +49,9 @@ pub fn sys_write(fd: usize, buf: *mut u8, len: usize) -> SysResult<usize> {
 }
 
 /// 系统调用 sys-open
-pub fn sys_open(path: *const u8, flags: usize, mode: usize) -> SysResult<usize> {
+pub fn sys_openat(dirfd: isize, path: *const u8, flags: usize, mode: usize) -> SysResult<usize> {
+    // TODO[ABI-COMPAT]: 当前仅兼容 AT_FDCWD 语义，尚未真正支持相对 dirfd 打开。
+    let _ = dirfd;
     let task = current_task().expect("[kernel] current task is None.");
     let path = copy_cstr_from_user(path)?;
     let file = path_open(path.as_str(), flags, mode)?;
@@ -94,8 +97,10 @@ pub fn sys_dup(fd: usize) -> SysResult<usize> {
     task.alloc_fd(fd_entry)
 }
 
-/// 系统调用 sys-dup2
-pub fn sys_dup2(fd_src: usize, fd_dst: usize) -> SysResult<usize> {
+/// 系统调用 sys-dup3
+pub fn sys_dup3(fd_src: usize, fd_dst: usize, flags: usize) -> SysResult<usize> {
+    // TODO[ABI-COMPAT]: 当前忽略 flags，尚未完整实现 dup3 语义。
+    let _ = flags;
     let task = current_task().expect("[kernel] current task is None.");
     let fd_entry = task.get_fd_entry(fd_src)?;
     task.set_fd(fd_dst, fd_entry)?;
@@ -103,15 +108,18 @@ pub fn sys_dup2(fd_src: usize, fd_dst: usize) -> SysResult<usize> {
 }
 
 /// 系统调用 sys-mkdir
-pub fn sys_mkdir(path: *const u8, mode: usize) -> SysResult<usize> {
+pub fn sys_mkdirat(dirfd: isize, path: *const u8, mode: usize) -> SysResult<usize> {
+    // TODO[ABI-COMPAT]: 当前仅兼容 AT_FDCWD 语义，尚未真正支持相对 dirfd 创建目录。
+    let _ = dirfd;
     let path = copy_cstr_from_user(path)?;
     filename_create(path.as_str(), InodeType::Directory, mode)?;
     Ok(0)
 }
 
 /// 系统调用 sys-unlink
-pub fn sys_unlink(path: *const u8) -> SysResult<usize> {
-    let _ = path;
+pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: usize) -> SysResult<usize> {
+    // TODO[UNIMPLEMENTED]: 需要补完 unlinkat 逻辑，并处理 dirfd / flags 语义。
+    let _ = (dirfd, path, flags);
     Err(Errno::ENOSYS)
 }
 
@@ -142,7 +150,101 @@ pub fn sys_getcwd(buf: *mut u8, len: usize) -> SysResult<usize> {
 }
 
 /// 系统调用 sys-pipe
-pub fn sys_pipe(pipefd: *mut u32) -> SysResult<usize> {
-    let _ = pipefd;
+pub fn sys_pipe2(pipefd: *mut [usize; 2], flags: usize) -> SysResult<usize> {
+    // TODO[ABI-COMPAT]: 当前忽略 flags，尚未完整实现 pipe2 语义。
+    let _ = flags;
+    let task = current_task().expect("[kernel] current task is None.");
+    let (pipe_read, pipe_write) = make_pipe();
+    let mut fds = [0usize; 2];
+
+    fds[0] = match task.alloc_fd(FdEntry::new(pipe_read, OpenFlags::O_RDONLY)) {
+        Ok(fd) => fd,
+        Err(e) => return Err(e),
+    };
+    fds[1] = match task.alloc_fd(FdEntry::new(pipe_write, OpenFlags::O_WRONLY)) {
+        Ok(fd) => fd,
+        Err(e) => {
+            task.close(fds[0])?;
+            return Err(e);
+        },
+    };
+
+    if let Err(e) = copy_to_user(pipefd, &fds as *const [usize; 2], 1) {
+        task.close(fds[0])?;
+        task.close(fds[1])?;
+        return Err(e);
+    }
+
+    Ok(0)
+}
+
+/// 系统调用 sys-getdents64
+pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> SysResult<usize> {
+    if count == 0 {
+        return Ok(0);
+    }
+    check_user_writable(dirp, count)?;
+
+    let task = current_task().expect("[kernel] current task is None.");
+    let file = task.get_fd_entry(fd)?.get_file();
+    let file = if let Some(file_cast) = file.as_any().downcast_ref::<File>() {
+        file_cast
+    } else {
+        return Err(Errno::ENOTDIR);
+    };
+
+    let mut offset = 0;
+    let mut buf = vec![0u8; count];
+    let dirents = file.readdir()?;
+    for dirent in dirents {
+        let dirent_size = dirent.d_reclen as usize;
+        if dirent_size == 0 {
+            return Err(Errno::EINVAL);
+        }
+        if offset + dirent_size > count {
+            if offset == 0 {
+                return Err(Errno::EINVAL);
+            }
+            break;
+        }
+        dirent.copy_to_buffer(&mut buf[offset..offset + dirent_size]);
+        offset += dirent_size;
+    }
+    copy_to_user(dirp, buf.as_ptr(), offset)?;
+
+    Ok(offset)
+}
+
+
+/// 系统调用 sys-linkat
+/// TODO[UNIMPLEMENTED]: 需要补完 linkat 逻辑。
+pub fn sys_linkat(
+    olddirfd: isize,
+    oldpath: *const u8,
+    newdirfd: isize,
+    newpath: *const u8,
+    flags: usize,
+) -> SysResult<usize> {
+    let _ = (olddirfd, oldpath, newdirfd, newpath, flags);
+    Err(Errno::ENOSYS)
+}
+
+/// 系统调用 sys-mount
+/// TODO[UNIMPLEMENTED]: 需要补完 mount 逻辑。
+pub fn sys_mount(
+    source: *const u8,
+    target: *const u8,
+    fstype: *const u8,
+    flags: usize,
+    data: *const u8,
+) -> SysResult<usize> {
+    let _ = (source, target, fstype, flags, data);
+    Err(Errno::ENOSYS)
+}
+
+/// 系统调用 sys-umount2
+/// TODO[UNIMPLEMENTED]: 需要补完 umount2 逻辑。
+pub fn sys_umount2(target: *const u8, flags: usize) -> SysResult<usize> {
+    let _ = (target, flags);
     Err(Errno::ENOSYS)
 }

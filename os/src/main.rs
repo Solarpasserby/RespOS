@@ -14,21 +14,25 @@ extern crate bitflags;
 #[macro_use]
 mod console;
 mod lang_item;
-mod sbi;
-pub mod config;
+
+pub mod arch;
+use arch::{
+    config,
+    trap,
+    timer,
+    sbi,
+};
+
 pub mod drivers;
 pub mod task;
 pub mod loader;
 pub mod syscall;
-pub mod timer;
-pub mod trap;
 pub mod mm;
 pub mod fs;
 pub mod utils;
 
 use core::arch::global_asm;
 
-global_asm!(include_str!("entry.asm"));
 global_asm!(include_str!("link_app.S"));
 
 #[unsafe(no_mangle)]

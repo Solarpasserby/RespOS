@@ -13,7 +13,7 @@ use alloc::sync::Arc;
 use crate::trap::TrapContext;
 use super::task::{ TaskControlBlock, TaskStatus };
 use super::manager::fetch_task;
-use super::switch::__switch;
+use crate::arch::task::__switch;
 use super::context::TaskContext;
 
 lazy_static! {
@@ -43,7 +43,7 @@ impl Processor {
 
     /// 返回当前执行的任务的一份拷贝
     pub fn current(&self) -> Option<Arc<TaskControlBlock>> {
-        self.current.as_ref().map(|task| Arc::clone(task))
+        self.current.as_ref().map(Arc::clone)
     }
 
     /// 获取空闲任务上下文的可变借用
@@ -62,7 +62,7 @@ pub fn current_task() -> Option<Arc<TaskControlBlock>> {
     PROCESSOR.lock().current()
 }
 
-/// 获取当前执行的任务的 `stap` 寄存器值
+/// 获取当前执行的任务的页表基址寄存器值
 pub fn current_user_token() -> usize {
     let task = current_task().unwrap();
     let token = task.inner_exclusive_access().get_user_token();

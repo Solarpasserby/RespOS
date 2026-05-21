@@ -13,6 +13,8 @@ pub enum Errno {
     EINTR = 4,
     /// 输入输出错误，常用于底层块设备或文件系统读写失败。
     EIO = 5,
+    /// 参数列表过长。
+    E2BIG = 7,
     /// 无效的文件描述符。
     EBADF = 9,
     /// 没有子进程。
@@ -81,6 +83,7 @@ impl Errno {
             Errno::ESRCH => "No such process",
             Errno::EINTR => "Interrupted system call",
             Errno::EIO => "Input/output error",
+            Errno::E2BIG => "Argument list too long",
             Errno::EBADF => "Bad file descriptor",
             Errno::ECHILD => "No child processes",
             Errno::EAGAIN => "Resource temporarily unavailable",

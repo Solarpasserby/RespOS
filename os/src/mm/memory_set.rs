@@ -1,6 +1,5 @@
 // os/src/mm/memory_set.rs
 
-use riscv::register::satp;
 use lazy_static::lazy_static;
 use bitflags::bitflags;
 use spin::Mutex;
@@ -10,9 +9,9 @@ use alloc::sync::Arc;
 use core::arch::asm;
 use crate::config::{MEMORY_END, KERNEL_BASE, KERNEL_STACK_SIZE, PAGE_SIZE, USER_STACK_SIZE, MMIO};
 use crate::syscall::{SysResult, Errno};
+use super::{PageTable, PTEFlags, PageTableEntry};
 use super::address::{PhysPageNum, VirtAddr, VirtPageNum, VPNRange, StepByOne};
 use super::frame_allocator::{frame_alloc, FrameTracker};
-use super::page_table::{PageTable, PTEFlags, PageTableEntry};
 
 unsafe extern "C" {
     fn stext();
@@ -82,7 +81,8 @@ impl MemorySet {
         }
     }
 
-    /// 激活地址空间，即修改 `stap` ，切换页表
+    /// 激活地址空间，即修改页表基址寄存器，切换页表
+    #[cfg(target_arch = "riscv64")]
     pub fn activate(&self) {
         let stap = self.page_table.token();
         let vpn = VirtAddr::from(stext as *const () as usize).floor();
@@ -91,7 +91,7 @@ impl MemorySet {
         assert!(pte.readable() || pte.executable() || pte.writable());
 
         unsafe {
-            satp::write(stap);
+            riscv::register::satp::write(stap);
             asm!("sfence.vma"); // 屏障，可认为是刷新 TLB，确保页表修改生效
         }
     }

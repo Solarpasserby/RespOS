@@ -1,10 +1,15 @@
 {
   "name": "OS Contest",
-  "image": "zhouzhouyi/os-contest:20260104",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
   "overrideCommand": true,
   "workspaceFolder": "/workspaces/RespOS",
-  "remoteUser": "root",
+  "remoteUser": "ubuntu",
   "shutdownAction": "stopContainer",
+  "mounts": [
+    "source=/home/lorenash/Code/kernel/RespOS/img/mnt,target=/workspaces/RespOS/img/mnt,type=bind"
+  ],
   "forwardPorts": [
     1234
   ],

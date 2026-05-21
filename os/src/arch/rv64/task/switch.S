@@ -1,4 +1,4 @@
-# os/src/task/switch.S
+# os/src/arch/rv64/task/switch.S
 
 .altmacro
 .macro SAVE_SN n
