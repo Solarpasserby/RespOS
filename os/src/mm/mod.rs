@@ -22,7 +22,6 @@ use crate::syscall::{SysResult, Errno};
 pub use address::*;
 pub use frame_allocator::{FrameTracker, frame_alloc};
 pub use memory_set::{KERNEL_SPACE, MemorySet, MapPermission};
-pub use page_table::{translated_ref, translated_refmut};
 
 
 /// 初始化内存管理，启用虚拟地址

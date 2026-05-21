@@ -53,22 +53,6 @@ pub fn sys_sched_yield() -> SysResult<usize> {
     Ok(0)
 }
 
-pub fn sys_get_time() -> SysResult<usize> {
-    Ok(get_time_ms())
-}
-
-fn check_sigaction_error(signal: SignalFlags, action: usize, old_action: usize) -> bool {
-    if action == 0
-        || old_action == 0
-        || signal == SignalFlags::SIGKILL
-        || signal == SignalFlags::SIGSTOP
-    {
-        true
-    } else {
-        false
-    }
-}
-
 pub fn sys_gettimeofday(tv: *mut TimeVal, _tz: usize) -> SysResult<usize> {
     let ms = get_time_ms();
     let timeval = TimeVal {
@@ -306,5 +290,17 @@ pub fn sys_sigreturn() -> SysResult<usize> {
         Ok(trap_ctx.x[10] as usize)
     } else {
         Err(Errno::ESRCH)
+    }
+}
+
+fn check_sigaction_error(signal: SignalFlags, action: usize, old_action: usize) -> bool {
+    if action == 0
+        || old_action == 0
+        || signal == SignalFlags::SIGKILL
+        || signal == SignalFlags::SIGSTOP
+    {
+        true
+    } else {
+        false
     }
 }
