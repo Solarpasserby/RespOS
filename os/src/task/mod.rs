@@ -9,7 +9,7 @@
 mod context;
 mod kstack;
 mod manager;
-mod pid;
+mod tid;
 mod processor;
 mod task;
 mod signal;
@@ -18,7 +18,6 @@ mod action;
 use task::{TaskControlBlock, TaskStatus};
 pub use context::TaskContext;
 pub use manager::{add_task, pid2task, PID2TCB};
-pub use kstack::get_kernel_stack_top_by_sp;
 pub use processor::{
     current_task,
     current_trap_cx,
@@ -36,7 +35,7 @@ use alloc::sync::Arc;
 lazy_static! {
     pub static ref INITPROC: Arc<TaskControlBlock> = {
         let initproc = Arc::new(
-            TaskControlBlock::new(get_app_data_by_name("initproc").unwrap())
+            TaskControlBlock::init(get_app_data_by_name("initproc").unwrap())
         );
 
         { &*PID2TCB }

@@ -9,6 +9,7 @@ use alloc::{vec, vec::Vec};
 
 pub struct FdTable {
     pub table: Vec<Option<FdEntry>>,
+    next_fd: usize,
 }
 
 impl FdTable {
@@ -19,6 +20,7 @@ impl FdTable {
         let stderr = FdEntry::new(Arc::new(Stdout), OpenFlags::O_WRONLY);
         FdTable {
             table: vec![Some(stdin), Some(stdout), Some(stderr)],
+            next_fd: 3,
         }
     }
 
@@ -28,9 +30,12 @@ impl FdTable {
             .table
             .iter_mut()
             .enumerate()
+            .skip(self.next_fd)
             .find(|(_, it)| it.is_none())
         {
             *it = Some(fd_entry);
+            self.next_fd = fd + 1;
+            self.update_next_fd();
             return Ok(fd);
         }
         if self.table.len() >= FTB_RLIMIT {
@@ -39,6 +44,7 @@ impl FdTable {
 
         let fd = self.table.len();
         self.table.push(Some(fd_entry));
+        self.next_fd = self.table.len();
         Ok(fd)
     }
 
@@ -50,6 +56,10 @@ impl FdTable {
             self.table.resize_with(fd + 1, || None);
         }
         let old = self.table[fd].replace(fd_entry);
+        if fd == self.next_fd {
+            self.next_fd += 1;
+            self.update_next_fd();
+        }
         Ok(old)
     }
 
@@ -58,6 +68,7 @@ impl FdTable {
             return Err(Errno::EBADF);
         }
         self.table[fd].take().ok_or(Errno::EBADF)?;
+        self.next_fd = self.next_fd.min(fd);
         Ok(())
     }
 
@@ -75,10 +86,17 @@ impl FdTable {
 }
 
 impl FdTable {
+    fn update_next_fd(&mut self) {
+        while self.next_fd < self.table.len() && self.table[self.next_fd].is_some() {
+            self.next_fd += 1;
+        }
+    }
+
     pub fn from_existed_user(fd_table: &FdTable) -> Self {
         // TODO: Pipe 对象在进程 fork 时的复制操作存在不同语义，需结合实际来实现
         Self {
             table: fd_table.table.clone(),
+            next_fd: fd_table.next_fd,
         }
     }
 }

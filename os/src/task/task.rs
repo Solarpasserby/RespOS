@@ -2,128 +2,251 @@
 
 use super::context::TaskContext;
 use super::kstack::KernelStack;
-use super::pid::{PidHandle, pid_alloc};
+use super::tid::{TidHandle, tid_alloc};
 use super::SignalActions;
 use crate::fs::{FdEntry, FdTable, Path, vfs::ROOT_DENTRY};
 use crate::mm::MemorySet;
+use crate::mutex::SpinLock;
 use crate::task::{SignalFlags, manager::PID2TCB};
 use crate::syscall::SysResult;
 use crate::trap::TrapContext;
+use core::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+use alloc::collections::btree_map::BTreeMap;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
-use alloc::vec::Vec;
-use spin::{Mutex, MutexGuard, RwLock};
+use bitflags::bitflags;
+use spin::RwLock;
+use spin::rwlock::RwLock;
 
 /// 任务控制块——此处的任务是对一定资源和某个程序的抽象表述
-///
-/// - 功能：将程序的一次执行过程及其使用的硬件资源抽象，从而方便内核调度（仅基于个人理解）
-/// - 内容：
-///     - `pid`          ~~进程~~任务号
-///     - `kernel_stack` 任务内核栈
-///     - `inner`        任务控制块内部数据
+#[repr(C)]
 pub struct TaskControlBlock {
-    // 不可变
-    pub pid: PidHandle,
-    pub kernel_stack: KernelStack,
-    pub memory_set: Arc<RwLock<MemorySet>>,
-    // 可变
-    inner: Mutex<TaskControlBlockInner>,
+    // 固定数据
+    kernel_stack: KernelStack, // 对于当前实现，确保 `TaskControlBlock` 的第一个字段为内核栈
+
+    // 基本数据
+    tid: RwLock<TidHandle>,
+    tgid: AtomicUsize,
+    // pgid: AtomicUsize,
+    thread_group: Arc<SpinLock<ThreadGroup>>,
+    task_status: SpinLock<TaskStatus>,
+    parent: Arc<SpinLock<Option<Weak<TaskControlBlock>>>>,
+    children: Arc<SpinLock<BTreeMap<usize, Arc<TaskControlBlock>>>>,
+    exit_code: AtomicI32,
+    // task_context: TaskContext, // 注意任务上下文的处理
+
+    // 内存管理
+    memory_set: Arc<RwLock<MemorySet>>,
+
+    // 文件系统
+    fd_table: Arc<SpinLock<FdTable>>,
+    cwd: Arc<SpinLock<Arc<Path>>>,
+
+    // 信号处理（先保留原实现）
+    signals: SignalFlags,
+    signal_actions: SignalActions,
+    signal_mask: SignalFlags,
+    handling_sig: isize,
+    trap_ctx_backup: Option<TrapContext>,
+    frozen: bool,
+    killed: bool,
 }
 
+impl core::fmt::Debug for TaskControlBlock {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Task")
+            .field("tid", &self.tid())
+            .field("tgid", &self.tgid())
+            .finish()
+    }
+}
 
 impl TaskControlBlock {
     /// 新建任务
     ///
     /// 事实上只有初始任务会借由这个方法产生
-    pub fn new(elf_data: &[u8]) -> Self {
-        let pid = pid_alloc();
+    pub fn init(elf_data: &[u8]) -> Arc<Self> {
+        let tid: TidHandle = tid_alloc();
+        let tgid = tid.0;
         // 创建地址空间会拷贝内核页表，先创建内核栈生成页表映射，以保证任务切换后能正确访问内核栈
-        let kernel_stack = KernelStack::new(&pid);
+        let mut kernel_stack = KernelStack::new(&tid);
         let (memory_set, token, user_sp, entry_point) = MemorySet::from_elf_data(elf_data);
-        let mut kernel_stack_top = kernel_stack.get_top();
-        // 初始化内核栈上的异常上下文，并移动栈顶指针
-        let trap_context = TrapContext::init_app_context(entry_point, user_sp);
+
+        let mut kernel_stack_top = kernel_stack.get_top(); // 由于栈是新建的，栈顶就是栈顶边界
+        // 在栈上存储异常上下文，该数据不会从栈中弹出，固定位于栈最高位置
         kernel_stack_top -= core::mem::size_of::<TrapContext>();
         let trap_cx_ptr = kernel_stack_top as *mut TrapContext;
+        // 在栈上设置任务上下文，使任务可被正常切换
+        kernel_stack_top -= core::mem::size_of::<TaskContext>();
+        let task_cx_ptr = kernel_stack_top as *mut TaskContext;
+        // 重新设置栈顶指针
+        kernel_stack.set_top(kernel_stack_top);
 
         // 创建进程控制块
-        let task_ctrl_block = Self {
-            pid,
+        let task_ctrl_block = Arc::new(Self {
+            // 固定数据
             kernel_stack,
+
+            // 基本数据
+            tid: RwLock::new(tid),
+            tgid: AtomicUsize::new(tgid),
+            // pgid: 0,
+            thread_group: Arc::new(SpinLock::new(ThreadGroup::new())),
+            task_status: SpinLock::new(TaskStatus::Ready),
+            parent: Arc::new(SpinLock::new(None)),
+            children: Arc::new(SpinLock::new(BTreeMap::new())),
+            exit_code: AtomicI32::new(0),
+
+            // 内存管理
             memory_set: Arc::new(RwLock::new(memory_set)),
-            inner: Mutex::new(TaskControlBlockInner {
-                task_status: TaskStatus::Ready,
-                task_context: TaskContext::app_init_task_context(kernel_stack_top, token),
-                fd_table: FdTable::new(),
-                cwd: Path::new(ROOT_DENTRY.clone()),
-                parent: None,
-                children: Vec::new(),
-                base_size: user_sp,
-                exit_code: 0,
-                signals: SignalFlags::empty(),
-                signal_actions: SignalActions::default(),
-                signal_mask: SignalFlags::empty(),
-                handling_sig: -1,
-                trap_ctx_backup: None,
-                frozen: false,
-                killed: false,
-            }),
-        };
-        unsafe {
-            trap_cx_ptr.write(trap_context);
-        }
 
-        task_ctrl_block
-    }
+            // 文件系统
+            fd_table: Arc::new(SpinLock::new(FdTable::new())),
+            cwd: Arc::new(SpinLock::new(Path::new(ROOT_DENTRY.clone()))),
 
-    /// 以父~~进程~~任务创建子~~进程~~任务
-pub fn fork(self: &Arc<Self>) -> Arc<Self> {
-    let mut parent_inner = self.inner_exclusive_access();
-    let pid = pid_alloc();
-    let kernel_stack = KernelStack::new(&pid);
-    let mut kernel_stack_top = kernel_stack.get_top();
-    // 克隆内核栈上的异常上下文
-    self.clone_trap_cx(kernel_stack_top);
-    kernel_stack_top -= core::mem::size_of::<TrapContext>();
-
-    let task_ctrl_block = Arc::new(TaskControlBlock {
-        pid,
-        kernel_stack,
-        memory_set: Arc::new(RwLock::new(MemorySet::from_existed_user(
-            &self.memory_set.read(),
-        ))),
-        inner: Mutex::new(TaskControlBlockInner {
-            task_status: TaskStatus::Ready,
-            // 全零初始化任务上下文
-            task_context: TaskContext::app_init_task_context(0, 0),
-            fd_table: FdTable::from_existed_user(&parent_inner.fd_table),
-            cwd: Path::from_existed_user(&parent_inner.cwd),
-            parent: Some(Arc::downgrade(self)),
-            children: Vec::new(),
-            base_size: parent_inner.base_size,
-            exit_code: 0,
+            // 信号处理（先保留原实现）
             signals: SignalFlags::empty(),
-            signal_actions: parent_inner.signal_actions.clone(),
+            signal_actions: SignalActions::default(),
             signal_mask: SignalFlags::empty(),
             handling_sig: -1,
             trap_ctx_backup: None,
             frozen: false,
             killed: false,
-        }),
-    });
-    // 修改任务异常上下文
-    task_ctrl_block.write_task_cx(kernel_stack_top);
+        });
 
-    // 同时更新父任务状态
-    parent_inner.children.push(task_ctrl_block.clone());
+        // 在线程组中添加该线程
+        task_ctrl_block.thread_group.lock().add(task_ctrl_block.clone());
 
-    // 插入到全局 PID -> Task 映射表
-    { &*PID2TCB }
-        .lock()
-        .insert(task_ctrl_block.pid(), task_ctrl_block.clone());
+        // FIXME: 在这里就处理好调度队列，mod.rs 中主要修改寄存器 tp
+        
+        let task_ptr = Arc::as_ptr(&task_ctrl_block) as usize;
+        // 初始化内核栈上的异常上下文
+        let mut trap_context = TrapContext::init_app_context(
+            entry_point,
+            user_sp,
+            0,
+            0,
+            0,
+            0
+        );
+        trap_context.set_tp(task_ptr);
+        // 初始化任务上下文
+        let task_context = TaskContext::app_init_task_context(task_ptr, token);
 
-    task_ctrl_block
-}
+        // 修改内核栈中上下文数据
+        unsafe {
+            trap_cx_ptr.write(trap_context);
+            task_cx_ptr.write(task_context);
+        }
+
+        task_ctrl_block
+    }
+
+    /// 克隆父线程，创建子线程
+    pub fn clone(self: &Arc<Self>, flags: CloneFlags) -> Arc<Self> {
+        let tid = tid_alloc();
+
+        // 克隆内核栈
+        let mut kernel_stack = KernelStack::new(&tid);
+        let mut kernel_stack_top = kernel_stack.get_top(); // 由于栈是新建的，栈顶就是栈顶边界
+        kernel_stack_top -= core::mem::size_of::<TrapContext>();
+        self.clone_trap_cx(kernel_stack_top);
+        kernel_stack_top -= core::mem::size_of::<TaskContext>();
+        // 注意这里只修改了栈指针但没有修改栈上的任务上下文，这需要在创建完任务控制块后再调用相关函数
+        kernel_stack.set_top(kernel_stack_top);
+
+        // 创建线程或是进程
+        let (
+            tgid,
+            thread_group,
+            parent,
+            children,
+            cwd
+        ) = if flags.contains(CloneFlags::CLONE_THREAD) {
+            // 创建线程，属于同一线程组
+            (
+                self.tgid(),
+                self.thread_group.clone(),
+                self.parent.clone(),
+                self.children.clone(),
+                self.cwd.clone()
+            )
+        } else {
+            // 创建进程
+            (
+                tid.0,
+                Arc::new(SpinLock::new(ThreadGroup::new())),
+                Arc::new(SpinLock::new(Some(Arc::downgrade(self)))),
+                Arc::new(SpinLock::new(BTreeMap::new())),
+                Arc::new(SpinLock::new(Path::from_existed_user(&self.cwd())))
+            )
+        };
+
+        // 是否与父线程共享地址空间
+        let memory_set = if flags.contains(CloneFlags::CLONE_VM) {
+            // TODO: exec 替换地址空间时可能会出现问题
+            self.memory_set.clone()
+        } else {
+            Arc::new(RwLock::new(MemorySet::from_existed_user(&self.memory_set.read())))
+        };
+
+        // 是否与父线程共享文件数据
+        let fd_table = if flags.contains(CloneFlags::CLONE_FILES) {
+            self.fd_table.clone()
+        } else {
+            Arc::new(SpinLock::new(FdTable::from_existed_user(&self.fd_table.lock())))
+        };
+
+        // 是否与父线程共享信号处理
+        if flags.contains(CloneFlags::CLONE_SIGHAND) {
+            // TODO: 信号机制尚不完善
+            error!("[kernel] ellegal cloneflags: SIGHAND. thread: {}", tid);
+        }
+
+        let task_ctrl_block = Arc::new(TaskControlBlock {
+            // 固定数据
+            kernel_stack,
+
+            // 基本数据
+            tid: RwLock::new(tid),
+            tgid: AtomicUsize::new(tgid),
+            // pgid: 0,
+            thread_group,
+            task_status: SpinLock::new(TaskStatus::Ready),
+            parent,
+            children,
+            exit_code: AtomicI32::new(0),
+
+            // 内存管理
+            memory_set,
+
+            // 文件系统
+            fd_table,
+            cwd,
+
+            // 信号处理（先保留原实现）
+            signals: SignalFlags::empty(),
+            signal_actions: self.signal_actions.clone(),
+            signal_mask: SignalFlags::empty(),
+            handling_sig: -1,
+            trap_ctx_backup: None,
+            frozen: false,
+            killed: false,
+        });
+
+        // 修改任务异常上下文
+        task_ctrl_block.write_task_cx(kernel_stack_top);
+
+        // 同时更新父任务状态
+        parent_inner.children.push(task_ctrl_block.clone());
+
+        // 插入到全局 PID -> Task 映射表
+        { &*PID2TCB }
+            .lock()
+            .insert(task_ctrl_block.pid(), task_ctrl_block.clone());
+
+        task_ctrl_block
+    }
 
     /// 载入可执行程序，主要修改地址空间、用户栈、异常上下文等数据
     ///
@@ -158,130 +281,135 @@ pub fn fork(self: &Arc<Self>) -> Arc<Self> {
 }
 
 impl TaskControlBlock {
-    // 获取锁
-    pub fn inner_exclusive_access(&self) -> MutexGuard<'_, TaskControlBlockInner> {
-        self.inner.lock()
+    /* ======= 获取内部数据 ====== */
+    /// 线程号
+    pub fn tid(&self) -> usize {
+        self.tid.read().0
+    }
+    /// 线程组号
+    pub fn tgid(&self) -> usize {
+        self.tgid.load(Ordering::Relaxed)
+    }
+    pub fn status(&self) -> TaskStatus {
+        self.task_status.lock().clone()
+    }
+    pub fn cwd(&self) -> Arc<Path> {
+        self.cwd.lock().clone()
+    }
+    pub fn exit_code(&self) -> i32 {
+        self.exit_code.load(Ordering::Relaxed)
+    }
+    /// 获取用户任务页表的页表基址寄存器值
+    pub fn get_user_token(&self) -> usize {
+        self.memory_set.read().token()
+    }
+    // 任务状态判断
+    pub fn is_ready(&self) -> bool {
+        self.status() == TaskStatus::Ready
+    }
+    pub fn is_blocked(&self) -> bool {
+        self.status() == TaskStatus::Blocked
+    }
+    pub fn is_exited(&self) -> bool {
+        self.status() == TaskStatus::Exited
     }
 
-    // 内核栈操作
-    pub fn get_trap_cx(&self) -> &'static mut TrapContext {
-        let trap_cx_ptr = self.kernel_stack.get_top() - core::mem::size_of::<TrapContext>();
-        unsafe { &mut *(trap_cx_ptr as *mut TrapContext) }
+    /* ======= 设置内部数据 ====== */
+    pub fn set_tgid(&self, tgid: usize) {
+        self.tgid.swap(tgid, Ordering::Relaxed);
     }
-    fn clone_trap_cx(&self, dst_kstack_top: usize) {
-        let src_trap_cx_ptr = (self.kernel_stack.get_top() - core::mem::size_of::<TrapContext>())
-            as *const TrapContext;
-        let dst_trap_cx_ptr =
-            (dst_kstack_top - core::mem::size_of::<TrapContext>()) as *mut TrapContext;
-        unsafe {
-            dst_trap_cx_ptr.write(src_trap_cx_ptr.read());
-        }
+    pub fn set_cwd(&self, path: Arc<Path>) {
+        *self.cwd.lock() = path;
     }
-    fn write_task_cx(&self, kernel_stack_ptr: usize) {
-        let token = self.get_user_token();
-        let mut inner = self.inner_exclusive_access();
-        let task_context = &mut inner.task_context;
-        task_context.set_sp(kernel_stack_ptr);
-        task_context.set_mmu_token(token);
+    pub fn set_exit_code(&self, exit_code: i32) {
+        self.exit_code.swap(exit_code, Ordering::Relaxed);
+    }
+    pub fn set_parent(&self, parent: &Arc<TaskControlBlock>) {
+        *self.parent.lock() = Some(Arc::downgrade(parent));
+    }
+    // 添加子任务
+    pub fn add_child(&self, task: Arc<TaskControlBlock>) {
+        // TODO: 返回结果是个 `Result`，之后可能要修改实现统一返回 `SysResult`
+        self.children.lock().try_insert(task.tid(), task);
+    }
+    // 任务状态设置
+    pub fn set_ready(&self) {
+        *self.task_status.lock() = TaskStatus::Ready;
+    }
+    pub fn set_running(&self) {
+        *self.task_status.lock() = TaskStatus::Running;
+    }
+    pub fn set_blocked(&self) {
+        *self.task_status.lock() = TaskStatus::Blocked;
+    }
+    pub fn set_exited(&self) {
+        *self.task_status.lock() = TaskStatus::Exited;
     }
 
-    // 操作内部数据
+    /* ======= 操作内部数据 ====== */
     pub fn op_memory_set_read<T>(&self, f: impl FnOnce(&MemorySet) -> T) -> T {
         f(&self.memory_set.read())
     }
     pub fn op_memory_set_write<T>(&self, f: impl FnOnce(&mut MemorySet) -> T) -> T {
         f(&mut self.memory_set.write())
     }
-
-    /// 获取用户任务页表的页表基址寄存器值
-    pub fn get_user_token(&self) -> usize {
-        self.memory_set.read().token()
+    pub fn op_parent<T>(&self, f: impl FnOnce(&Option<Weak<TaskControlBlock>>) -> T) -> T {
+        f(&self.parent.lock())
     }
-
-    // 进程号
-    pub fn pid(&self) -> usize {
-        self.pid.0
+    pub fn op_children_mut<T>(&self, f: impl FnOnce(&mut BTreeMap<usize, Arc<TaskControlBlock>>) -> T) -> T {
+        f(&mut self.children.lock())
     }
-    pub fn ppid(&self) -> usize {
-        self.inner_exclusive_access()
-            .parent
-            .as_ref()
-            .unwrap()
-            .upgrade()
-            .unwrap()
-            .pid()
+    pub fn op_thread_group<T>(&self, f: impl FnOnce(&ThreadGroup) -> T) -> T {
+        f(&self.thread_group.lock())
+    }
+    pub fn op_thread_group_mut<T>(&self, f: impl FnOnce(&mut ThreadGroup) -> T) -> T {
+        f(&mut self.thread_group.lock())
     }
 
     // 文件描述符相关操作
     pub fn alloc_fd(&self, fd_entry: FdEntry) -> SysResult<usize> {
-        self.inner_exclusive_access().fd_table.alloc_fd(fd_entry)
+        self.fd_table.lock().alloc_fd(fd_entry)
     }
     pub fn set_fd(&self, fd: usize, fd_entry: FdEntry) -> SysResult<Option<FdEntry>> {
-        self.inner_exclusive_access().fd_table.set_fd(fd, fd_entry)
+        self.fd_table.lock().set_fd(fd, fd_entry)
     }
     pub fn close(&self, fd: usize) -> SysResult {
-        self.inner_exclusive_access().fd_table.close(fd)
+        self.fd_table.lock().close(fd)
     }
     pub fn get_fd_entry(&self, fd: usize) -> SysResult<FdEntry> {
-        self.inner_exclusive_access().fd_table.get_fd_entry(fd)
-    }
-
-    // 获取当前工作路径
-    pub fn cwd(&self) -> Arc<Path> {
-        self.inner_exclusive_access().cwd.clone()
-    }
-    pub fn set_cwd(&self, path: Arc<Path>) {
-        self.inner_exclusive_access().cwd = path;
+        self.fd_table.lock().get_fd_entry(fd)
     }
 }
 
-/// 任务控制块内部数据
-///
-/// - 功能：用于保存任务的执行状态、地址空间、父子任务关系等信息
-/// - 内容:
-///     - `task_status`   任务状态
-///     - `task_context`  任务上下文
-///     - `memory_set`    任务的地址空间
-///     - `fd_table`      任务的文件描述符表，记录了当前任务使用的文件描述符
-///     - `cwd`           任务的当前工作目录
-///     - ~~`trap_cx_ppn` 任务的异常上下文所在物理页号~~ 原字段只是为了获取页帧上的数据，现在使用更~~安全~~高效的方法获取
-///     - `parent`        任务的父任务（进程），使用弱引用避免环形引用
-///     - `children`      任务的子任务（进程），使用原子计数引用
-///     - `base_size`     任务的内存空间大小 -> 暂时不知道有啥用，这里直接取栈顶的数值
-///     - `exit_code`     任务退出码
-pub struct TaskControlBlockInner {
-    pub task_status: TaskStatus,
-    pub task_context: TaskContext,
-    pub fd_table: FdTable,
-    pub cwd: Arc<Path>,
-    pub parent: Option<Weak<TaskControlBlock>>,
-    pub children: Vec<Arc<TaskControlBlock>>,
-    pub base_size: usize,
-    pub exit_code: i32,
-    pub signals: SignalFlags,
-    pub signal_actions: SignalActions,
-    pub signal_mask: SignalFlags,
-    pub handling_sig: isize,
-    pub trap_ctx_backup: Option<TrapContext>,
-    pub frozen: bool,
-    pub killed: bool,
-}
-
-impl TaskControlBlockInner {
-    fn get_status(&self) -> TaskStatus {
-        self.task_status
+impl TaskControlBlock {
+    // 内核栈操作
+    pub fn get_trap_cx(&self) -> &'static mut TrapContext {
+        let trap_cx_ptr = self.kernel_stack.get_top_edge() - core::mem::size_of::<TrapContext>();
+        unsafe { &mut *(trap_cx_ptr as *mut TrapContext) }
     }
-    pub fn is_zombie(&self) -> bool {
-        self.get_status() == TaskStatus::Exited
+    // 克隆异常上下文，注意传入的栈指针应指向栈上异常上下文数据的位置
+    fn clone_trap_cx(&self, kernel_stack_ptr: usize) {
+        let src_trap_cx_ptr =
+            (self.kernel_stack.get_top_edge() - core::mem::size_of::<TrapContext>()) as *const TrapContext;
+        let dst_trap_cx_ptr =
+            kernel_stack_ptr as *mut TrapContext;
+        unsafe {
+            dst_trap_cx_ptr.write(src_trap_cx_ptr.read());
+        }
     }
-}
-
-/// 任务状态
-#[derive(Copy, Clone, PartialEq)]
-pub enum TaskStatus {
-    Ready,   // 已就绪
-    Running, // 正在运行
-    Exited,  // 已退出
+    // 修改任务上下文，注意传入的栈指针应指向栈上任务上下文数据的位置
+    fn write_task_cx(self: &Arc<Self>, kernel_stack_ptr: usize) {
+        let token = self.get_user_token();
+        let task_cx_ptr =
+            kernel_stack_ptr as *mut TaskContext;
+        let task_cx = TaskContext::app_init_task_context(
+            Arc::as_ptr(self) as usize,
+            token
+        );
+        unsafe {
+            task_cx_ptr.write(task_cx);
+        }
+    }
 }
 
 // 将命令行参数压入用户栈
@@ -312,4 +440,114 @@ fn init_user_stack(args_vec: &[String], user_sp: &mut usize) -> usize {
     let argv_base = push_strings_to_stack(args_vec, user_sp);
 
     argv_base
+}
+
+/// 线程组结构
+pub struct ThreadGroup {
+    member: BTreeMap<usize, Weak<TaskControlBlock>>,
+}
+
+impl ThreadGroup {
+    pub fn new() -> Self {
+        Self {
+            member: BTreeMap::new(),
+        }
+    }
+    pub fn size(&self) -> usize {
+        self.member.len()
+    }
+
+    pub fn add(&mut self, task: Arc<TaskControlBlock>) {
+        self.member.insert(task.tid(), Arc::downgrade(&task));
+    }
+    pub fn remove(&mut self, task: Arc<TaskControlBlock>) {
+        self.member.remove(&task.tid());
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = Arc<TaskControlBlock>> + '_ {
+        self.member.values().map(|task| task.upgrade().unwrap())
+    }
+}
+
+/// 任务状态
+#[derive(Copy, Clone, PartialEq)]
+pub enum TaskStatus {
+    Ready,   // 已就绪
+    Running, // 正在运行
+    Blocked, // 阻塞
+    Exited,  // 已退出
+}
+
+bitflags! {
+    /// clone/fork 系统调用使用的标志位。
+    ///
+    /// Linux 的 clone 参数低 8 位不是普通的共享标志，而是子任务退出时
+    /// 发送给父任务的信号编号；真正的 `CLONE_*` 标志从 bit 8 开始。
+    pub struct CloneFlags: u32 {
+        /// 退出信号掩码，低 8 位用于保存子任务退出时发送的信号编号。
+        const EXIT_SIGNAL_MASK = 0xff;
+        /// 子任务退出时向父任务发送 SIGCHLD。数值为 17，即退出信号编号。
+        const SIGCHLD = 17;
+
+        /// 共享地址空间；父子任务看到同一组用户虚拟内存映射。
+        const CLONE_VM = 1 << 8;
+        /// 共享文件系统上下文，例如当前工作目录和根目录。
+        const CLONE_FS = 1 << 9;
+        /// 共享文件描述符表；一方打开、关闭或替换 fd 会影响另一方。
+        const CLONE_FILES = 1 << 10;
+        /// 共享信号处理函数表。Linux 要求同时设置 `CLONE_VM`。
+        const CLONE_SIGHAND = 1 << 11;
+        /// 在父任务指定地址写入子任务 pidfd。
+        const CLONE_PIDFD = 1 << 12;
+        /// 子任务继续处于被 ptrace 跟踪状态。
+        const CLONE_PTRACE = 1 << 13;
+        /// 父任务阻塞到子任务 exec 或 exit；通常配合 vfork 语义使用。
+        const CLONE_VFORK = 1 << 14;
+        /// 子任务的父任务设为调用者的父任务，而不是调用者本身。
+        const CLONE_PARENT = 1 << 15;
+        /// 创建同一线程组内的新线程。Linux 要求同时设置 `CLONE_SIGHAND` 和 `CLONE_VM`。
+        const CLONE_THREAD = 1 << 16;
+        /// 为子任务创建新的 mount namespace。
+        const CLONE_NEWNS = 1 << 17;
+        /// 共享 System V semaphore undo 状态。
+        const CLONE_SYSVSEM = 1 << 18;
+        /// 设置子任务 TLS 指针。
+        const CLONE_SETTLS = 1 << 19;
+        /// 在父任务指定地址写入子任务 tid。
+        const CLONE_PARENT_SETTID = 1 << 20;
+        /// 子任务退出时清零指定地址并唤醒 futex 等待者。
+        const CLONE_CHILD_CLEARTID = 1 << 21;
+        /// 历史遗留标志，现代 Linux 基本忽略。
+        const CLONE_DETACHED = 1 << 22;
+        /// 阻止跟踪器强制对子任务设置 `CLONE_PTRACE`。
+        const CLONE_UNTRACED = 1 << 23;
+        /// 在子任务指定地址写入自己的 tid。
+        const CLONE_CHILD_SETTID = 1 << 24;
+        /// 为子任务创建新的 cgroup namespace。
+        const CLONE_NEWCGROUP = 1 << 25;
+        /// 为子任务创建新的 UTS namespace。
+        const CLONE_NEWUTS = 1 << 26;
+        /// 为子任务创建新的 IPC namespace。
+        const CLONE_NEWIPC = 1 << 27;
+        /// 为子任务创建新的 user namespace。
+        const CLONE_NEWUSER = 1 << 28;
+        /// 为子任务创建新的 PID namespace。
+        const CLONE_NEWPID = 1 << 29;
+        /// 为子任务创建新的 network namespace。
+        const CLONE_NEWNET = 1 << 30;
+        /// 共享 I/O 上下文。
+        const CLONE_IO = 1 << 31;
+    }
+}
+
+impl CloneFlags {
+    /// 返回 clone 参数低 8 位携带的退出信号编号。
+    pub fn exit_signal(self) -> u32 {
+        self.bits() & Self::EXIT_SIGNAL_MASK.bits()
+    }
+
+    /// 返回除退出信号之外的 `CLONE_*` 共享/命名空间标志。
+    pub fn clone_flags(self) -> Self {
+        self & !Self::EXIT_SIGNAL_MASK
+    }
 }

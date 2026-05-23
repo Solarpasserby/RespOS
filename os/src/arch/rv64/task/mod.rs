@@ -1,6 +1,5 @@
 // os/src/task/switch.rs
 
-use crate::task::TaskContext;
 use core::arch::global_asm;
 
 global_asm!(include_str!("switch.S"));
@@ -14,8 +13,5 @@ unsafe extern "C" {
     /// 直到某个任务调用了该函数，修改 CPU 状态到当前任务完成该函数调用的状态，此时从内核的角度来看当前任务继续执行
     ///
     /// 因此，从任务本身的角度来看，调用该函数并没有发生任何事
-    pub unsafe fn __switch(
-        current_task_context_ptr: *mut TaskContext,
-        next_task_context_ptr: *const TaskContext,
-    );
+    pub unsafe fn __switch(next_task_kstack_ptr: usize);
 }
