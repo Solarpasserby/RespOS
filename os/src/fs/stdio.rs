@@ -4,7 +4,7 @@ use super::KStat;
 use super::vfs::{FileOp, InodeType, OpenFlags};
 use crate::sbi::console_getchar;
 use crate::syscall::SysResult;
-use crate::task::suspend_current_and_run_next;
+use crate::task::yield_current_task;
 use core::any::Any;
 
 const LF: usize = 0x0a;
@@ -27,7 +27,7 @@ impl FileOp for Stdin {
             match c {
                 // `c > 255`是为了兼容OPENSBI，OPENSBI未获取字符时会返回-1
                 0 | 256.. => {
-                    suspend_current_and_run_next();
+                    yield_current_task();
                     continue;
                 }
                 CR | LF => {

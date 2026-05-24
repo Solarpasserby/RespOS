@@ -4,7 +4,7 @@ use super::KStat;
 use super::vfs::{FileOp, InodeType, OpenFlags};
 use crate::config::PIPE_BUFFER_SIZE;
 use crate::syscall::{Errno, SysResult};
-use crate::task::suspend_current_and_run_next;
+use crate::task::yield_current_task;
 use alloc::sync::Arc;
 use core::any::Any;
 use spin::Mutex;
@@ -74,7 +74,7 @@ impl FileOp for Pipe {
                 return Ok(0);
             } else {
                 // 缓存为空但存在写端
-                suspend_current_and_run_next();
+                yield_current_task();
                 continue;
             }
         }
@@ -90,7 +90,7 @@ impl FileOp for Pipe {
                     return Ok(ret);
                 } else {
                     // 缓存已满但读端存在
-                    suspend_current_and_run_next();
+                    yield_current_task();
                     continue;
                 }
             }

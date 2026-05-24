@@ -17,13 +17,20 @@ pub struct KernelStack {
 }
 
 impl KernelStack {
+    pub fn zero_init() -> Self {
+        Self {
+            top: 0,
+            tid: 0
+        }
+    }
+
     pub fn new(tid_handle: &TidHandle) -> Self {
         let tid = tid_handle.0;
         let stack_top = get_kernel_stack_top_edge(tid);
         KERNEL_SPACE
             .lock()
             .insert_stack_area(stack_top);
-        KernelStack {
+        Self {
             top: stack_top,
             tid
         }
@@ -65,9 +72,4 @@ impl Drop for KernelStack {
 /// 获取内核栈顶地址，保留守卫页面
 fn get_kernel_stack_top_edge(app_id: usize) -> usize {
     KERNEL_STACK_TOP - app_id * (KERNEL_STACK_SIZE + PAGE_SIZE)
-}
-
-pub fn get_kernel_stack_top_by_sp(sp: usize) -> usize {
-    let kernel_stack_id = (KERNEL_STACK_TOP - sp) / (KERNEL_STACK_SIZE + PAGE_SIZE);
-    get_kernel_stack_top_edge(kernel_stack_id)
 }

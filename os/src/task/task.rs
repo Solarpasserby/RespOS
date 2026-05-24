@@ -1,22 +1,37 @@
 // os/src/task/task.rs
 
+use super::INITPROC;
+use super::scheduler::remove_task;
 use super::context::TaskContext;
 use super::kstack::KernelStack;
 use super::tid::{TidHandle, tid_alloc};
-use super::SignalActions;
+use super::action::SignalActions;
 use crate::fs::{FdEntry, FdTable, Path, vfs::ROOT_DENTRY};
 use crate::mm::MemorySet;
-use crate::mutex::SpinLock;
-use crate::task::{SignalFlags, manager::PID2TCB};
+use crate::mutex::{MutexGuard, NoopLock, SpinLock};
+use crate::task::{SignalFlags, TASK_MANAGER, add_task};
 use crate::syscall::SysResult;
 use crate::trap::TrapContext;
 use core::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 use alloc::collections::btree_map::BTreeMap;
+use alloc::vec::Vec;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use bitflags::bitflags;
 use spin::RwLock;
-use spin::rwlock::RwLock;
+
+/// 对于信号机制的简单封装
+/// 
+/// TODO: 之后需要进行修改
+pub struct SignalStruct {
+    pub signals: SignalFlags,
+    pub signal_actions: SignalActions,
+    pub signal_mask: SignalFlags,
+    pub handling_sig: isize,
+    pub trap_ctx_backup: Option<TrapContext>,
+    pub frozen: bool,
+    pub killed: bool,
+}
 
 /// 任务控制块——此处的任务是对一定资源和某个程序的抽象表述
 #[repr(C)]
@@ -43,13 +58,7 @@ pub struct TaskControlBlock {
     cwd: Arc<SpinLock<Arc<Path>>>,
 
     // 信号处理（先保留原实现）
-    signals: SignalFlags,
-    signal_actions: SignalActions,
-    signal_mask: SignalFlags,
-    handling_sig: isize,
-    trap_ctx_backup: Option<TrapContext>,
-    frozen: bool,
-    killed: bool,
+    signal: Arc<SpinLock<SignalStruct>>,
 }
 
 impl core::fmt::Debug for TaskControlBlock {
@@ -62,6 +71,43 @@ impl core::fmt::Debug for TaskControlBlock {
 }
 
 impl TaskControlBlock {
+    /// 全零初始化
+    pub fn zero_init() -> Self {
+        Self {
+            // 固定数据
+            kernel_stack: KernelStack::zero_init(),
+
+            // 基本数据
+            tid: RwLock::new(TidHandle(0)),
+            tgid: AtomicUsize::new(0),
+            // pgid: AtomicUsize,
+            thread_group: Arc::new(SpinLock::new(ThreadGroup::new())),
+            task_status: SpinLock::new(TaskStatus::Ready),
+            parent: Arc::new(SpinLock::new(None)),
+            children: Arc::new(SpinLock::new(BTreeMap::new())),
+            exit_code: AtomicI32::new(0),
+            // task_context: TaskContext, // 注意任务上下文的处理
+
+            // 内存管理
+            memory_set: Arc::new(RwLock::new(MemorySet::new())),
+
+            // 文件系统
+            fd_table: Arc::new(SpinLock::new(FdTable::new())),
+            cwd: Arc::new(SpinLock::new(Path::new(ROOT_DENTRY.clone()))),
+
+            // 信号处理（先保留原实现）
+            signal: Arc::new(SpinLock::new(SignalStruct {
+                signals: SignalFlags::empty(),
+                signal_actions: SignalActions::default(),
+                signal_mask: SignalFlags::empty(),
+                handling_sig: -1,
+                trap_ctx_backup: None,
+                frozen: false,
+                killed: false,
+            })),
+        }
+    }
+
     /// 新建任务
     ///
     /// 事实上只有初始任务会借由这个方法产生
@@ -105,20 +151,21 @@ impl TaskControlBlock {
             cwd: Arc::new(SpinLock::new(Path::new(ROOT_DENTRY.clone()))),
 
             // 信号处理（先保留原实现）
-            signals: SignalFlags::empty(),
-            signal_actions: SignalActions::default(),
-            signal_mask: SignalFlags::empty(),
-            handling_sig: -1,
-            trap_ctx_backup: None,
-            frozen: false,
-            killed: false,
+            signal: Arc::new(SpinLock::new(SignalStruct {
+                signals: SignalFlags::empty(),
+                signal_actions: SignalActions::default(),
+                signal_mask: SignalFlags::empty(),
+                handling_sig: -1,
+                trap_ctx_backup: None,
+                frozen: false,
+                killed: false,
+            })),
         });
 
         // 在线程组中添加该线程
         task_ctrl_block.thread_group.lock().add(task_ctrl_block.clone());
-
-        // FIXME: 在这里就处理好调度队列，mod.rs 中主要修改寄存器 tp
         
+        // 生成 tp 指针
         let task_ptr = Arc::as_ptr(&task_ctrl_block) as usize;
         // 初始化内核栈上的异常上下文
         let mut trap_context = TrapContext::init_app_context(
@@ -139,11 +186,15 @@ impl TaskControlBlock {
             task_cx_ptr.write(task_context);
         }
 
+        // 设置任务调度
+        TASK_MANAGER.add(&task_ctrl_block);
+        add_task(task_ctrl_block.clone());
+
         task_ctrl_block
     }
 
     /// 克隆父线程，创建子线程
-    pub fn clone(self: &Arc<Self>, flags: CloneFlags) -> Arc<Self> {
+    pub fn fork(self: &Arc<Self>, flags: CloneFlags) -> Arc<Self> {
         let tid = tid_alloc();
 
         // 克隆内核栈
@@ -225,25 +276,29 @@ impl TaskControlBlock {
             cwd,
 
             // 信号处理（先保留原实现）
-            signals: SignalFlags::empty(),
-            signal_actions: self.signal_actions.clone(),
-            signal_mask: SignalFlags::empty(),
-            handling_sig: -1,
-            trap_ctx_backup: None,
-            frozen: false,
-            killed: false,
+            signal: Arc::new(SpinLock::new(SignalStruct {
+                signals: SignalFlags::empty(),
+                signal_actions: self.signal.lock().signal_actions.clone(),
+                signal_mask: SignalFlags::empty(),
+                handling_sig: -1,
+                trap_ctx_backup: None,
+                frozen: false,
+                killed: false,
+            })),
         });
 
         // 修改任务异常上下文
         task_ctrl_block.write_task_cx(kernel_stack_top);
 
-        // 同时更新父任务状态
-        parent_inner.children.push(task_ctrl_block.clone());
+        // 根据克隆设置更新父任务状态
+        self.add_child(task_ctrl_block.clone());
+        // 在线程组中添加线程
+        task_ctrl_block.op_thread_group_mut(|tg| tg.add(task_ctrl_block.clone()));
 
-        // 插入到全局 PID -> Task 映射表
-        { &*PID2TCB }
-            .lock()
-            .insert(task_ctrl_block.pid(), task_ctrl_block.clone());
+        // 在任务管理器中添加任务
+        TASK_MANAGER.add(&task_ctrl_block);
+        // 在调度器中添加任务
+        add_task(task_ctrl_block.clone());
 
         task_ctrl_block
     }
@@ -251,15 +306,17 @@ impl TaskControlBlock {
     /// 载入可执行程序，主要修改地址空间、用户栈、异常上下文等数据
     ///
     /// 将命令行参数个数 `argc` 作为返回值，考虑到系统调用异常时会统一修改 `a0` 寄存器
-    pub fn exec(&self, elf_data: &[u8], args: Vec<String>) -> SysResult<usize> {
-        let (memory_set, token, mut user_sp, entry_point) = MemorySet::from_elf_data(elf_data);
+    pub fn execve(
+        &self,
+        elf_data: &[u8], 
+        args: Vec<String>
+    ) -> SysResult<usize> {
+        let (memory_set, _token, mut user_sp, entry_point)
+            = MemorySet::from_elf_data(elf_data);
 
         /* ===== 修改地址空间 ===== */
-        let mut inner = self.inner_exclusive_access();
         let mut memory_set_guard = self.memory_set.write();
         let old_memory_set = core::mem::replace(&mut *memory_set_guard, memory_set);
-        // 设置任务上下文的 mmu_token 字段，使得之后切换任务到自身时能正确刷新页表
-        inner.task_context.set_mmu_token(token);
         // 刷新页表，由于应用程序通过异常进入，在异常返回时不会刷新页表
         // 为了程序返回后看到的地址空间为自身而非父任务的地址空间，需要主动刷新页表
         memory_set_guard.activate();
@@ -271,12 +328,24 @@ impl TaskControlBlock {
         let argv_base = init_user_stack(args.as_slice(), &mut user_sp);
 
         /* ===== 修改异常上下文 ===== */
+        let argc = args.len();
         let trap_cx = self.get_trap_cx();
-        *trap_cx = TrapContext::init_app_context(entry_point, user_sp);
+        *trap_cx = TrapContext::init_app_context(
+            entry_point,
+            user_sp,
+            argc,
+            argv_base,
+            0,
+            0
+        );
 
-        trap_cx.x[10] = args.len(); // 实际上没用
-        trap_cx.x[11] = argv_base;
-        Ok(args.len())
+        /* ===== 修改线程组 ===== */
+
+
+        /* ===== 修改信号处理 ===== */
+        // TODO: 信号完善
+
+        Ok(argc)
     }
 }
 
@@ -313,6 +382,11 @@ impl TaskControlBlock {
     pub fn is_exited(&self) -> bool {
         self.status() == TaskStatus::Exited
     }
+    // 获取 siganl 的锁
+    // TODO: 临时使用
+    pub(crate) fn get_signal_inner(&self) -> MutexGuard<'_, SignalStruct, NoopLock> {
+        self.signal.lock()
+    }
 
     /* ======= 设置内部数据 ====== */
     pub fn set_tgid(&self, tgid: usize) {
@@ -330,7 +404,8 @@ impl TaskControlBlock {
     // 添加子任务
     pub fn add_child(&self, task: Arc<TaskControlBlock>) {
         // TODO: 返回结果是个 `Result`，之后可能要修改实现统一返回 `SysResult`
-        self.children.lock().try_insert(task.tid(), task);
+        let tid = task.tid();
+        self.children.lock().insert(tid, task);
     }
     // 任务状态设置
     pub fn set_ready(&self) {
@@ -344,6 +419,19 @@ impl TaskControlBlock {
     }
     pub fn set_exited(&self) {
         *self.task_status.lock() = TaskStatus::Exited;
+    }
+    // 关闭线程组所有其他进程，保留自身
+    pub fn close_thread(&self) {
+        self.op_thread_group_mut(|tg| {
+            for task_ctrl_block in tg.iter() {
+                // 跳过当前线程
+                if task_ctrl_block.tid() == self.tid() {
+                    continue;
+                }
+                remove_task(task_ctrl_block.tid());
+                task_exit(task_ctrl_block, 0);
+            }
+        });
     }
 
     /* ======= 操作内部数据 ====== */
@@ -383,6 +471,10 @@ impl TaskControlBlock {
 
 impl TaskControlBlock {
     // 内核栈操作
+    pub fn kstack(&self) -> usize {
+        self.kernel_stack.get_top()
+    }
+
     pub fn get_trap_cx(&self) -> &'static mut TrapContext {
         let trap_cx_ptr = self.kernel_stack.get_top_edge() - core::mem::size_of::<TrapContext>();
         unsafe { &mut *(trap_cx_ptr as *mut TrapContext) }
@@ -410,6 +502,44 @@ impl TaskControlBlock {
             task_cx_ptr.write(task_cx);
         }
     }
+}
+
+/// 任务退出
+/// 
+/// 此函数仅负责如下工作，**调度器移除逻辑请自行解决**
+/// - 从线程组中移除指定任务
+/// - 托孤给 `INITPROC`
+/// - 将当前线程的资源
+/// - 清空待处理信号，向父进程发送 SIGCHLD 信号
+/// - 修改任务状态和退出码
+pub fn task_exit(task: Arc<TaskControlBlock>, exit_code: i32) {
+    // 从线程组中移除
+    task.op_thread_group_mut(|tg| {
+        tg.remove(&task.tid())
+    });
+
+    // 修改孩子线程的父亲——托孤
+    let children = task.op_children_mut(core::mem::take);
+    for (_, child) in children {
+        child.set_parent(&INITPROC);
+        INITPROC.add_child(child);
+    }
+    // 回收地址空间
+    task.op_memory_set_write(|mem| {
+        mem.recycle_data_pages();
+    });
+    // 清空文件描述符表fd_table
+    task.fd_table.lock().clear();
+    
+    // 设置任务为推出状态
+    task.set_exited();
+    // 设置退出码
+    task.set_exit_code(exit_code);
+    // TODO: 向父进程发送 SIGCHID 信号
+    // TODO: 清空信号
+
+    TASK_MANAGER.remove(task.tid());
+    drop(task);
 }
 
 // 将命令行参数压入用户栈
@@ -460,8 +590,8 @@ impl ThreadGroup {
     pub fn add(&mut self, task: Arc<TaskControlBlock>) {
         self.member.insert(task.tid(), Arc::downgrade(&task));
     }
-    pub fn remove(&mut self, task: Arc<TaskControlBlock>) {
-        self.member.remove(&task.tid());
+    pub fn remove(&mut self, tid: &usize) {
+        self.member.remove(tid);
     }
 
     pub fn iter(&self) -> impl Iterator<Item = Arc<TaskControlBlock>> + '_ {

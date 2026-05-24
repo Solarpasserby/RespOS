@@ -83,6 +83,12 @@ impl FdTable {
             Err(Errno::EBADF)
         }
     }
+
+    /// 清空文件描述符表
+    pub fn clear(&mut self) {
+        self.table.clear();
+        self.next_fd = 0;
+    }
 }
 
 impl FdTable {
