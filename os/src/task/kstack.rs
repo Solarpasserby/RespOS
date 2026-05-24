@@ -18,21 +18,16 @@ pub struct KernelStack {
 
 impl KernelStack {
     pub fn zero_init() -> Self {
-        Self {
-            top: 0,
-            tid: 0
-        }
+        Self { top: 0, tid: 0 }
     }
 
     pub fn new(tid_handle: &TidHandle) -> Self {
         let tid = tid_handle.0;
         let stack_top = get_kernel_stack_top_edge(tid);
-        KERNEL_SPACE
-            .lock()
-            .insert_stack_area(stack_top);
+        KERNEL_SPACE.lock().insert_stack_area(stack_top);
         Self {
             top: stack_top,
-            tid
+            tid,
         }
     }
 

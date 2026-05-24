@@ -16,21 +16,16 @@ mod console;
 mod lang_item;
 
 pub mod arch;
-use arch::{
-    config,
-    trap,
-    timer,
-    sbi,
-};
+use arch::{config, sbi, timer, trap};
 
 pub mod drivers;
-pub mod task;
-pub mod loader;
-pub mod syscall;
-pub mod mm;
 pub mod fs;
-pub mod utils;
+pub mod loader;
+pub mod mm;
 pub mod mutex;
+pub mod syscall;
+pub mod task;
+pub mod utils;
 
 use core::arch::global_asm;
 
@@ -65,7 +60,6 @@ fn clear_bss() {
         unsafe fn ebss();
     }
 
-    (sbss as *const() as usize..ebss as *const() as usize).for_each(|a| {
-        unsafe { (a as *mut u8).write_volatile(0) }
-    });
+    (sbss as *const () as usize..ebss as *const () as usize)
+        .for_each(|a| unsafe { (a as *mut u8).write_volatile(0) });
 }

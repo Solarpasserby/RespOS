@@ -42,9 +42,7 @@ pub struct Processor {
 
 impl Processor {
     pub fn new() -> Self {
-        Self {
-            current: None
-        }
+        Self { current: None }
     }
 
     /// 取出当前执行的任务

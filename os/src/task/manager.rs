@@ -6,17 +6,16 @@ use alloc::sync::{Arc, Weak};
 use hashbrown::HashMap;
 use lazy_static::lazy_static;
 
-
 // 任务管理器
-lazy_static!{
+lazy_static! {
     pub static ref TASK_MANAGER: TaskManager = TaskManager::new();
 }
 
 pub struct TaskManager(SpinNoIrqLock<HashMap<usize, Weak<TaskControlBlock>>>);
 
 impl TaskManager {
-    pub fn new() -> Self{
-        Self (SpinNoIrqLock::new(HashMap::new()))
+    pub fn new() -> Self {
+        Self(SpinNoIrqLock::new(HashMap::new()))
     }
 
     pub fn add(&self, task: &Arc<TaskControlBlock>) {
@@ -31,7 +30,7 @@ impl TaskManager {
         self.0.lock().len()
     }
 
-    pub fn get(&self, tid: usize) -> Option<Arc<TaskControlBlock>>{
+    pub fn get(&self, tid: usize) -> Option<Arc<TaskControlBlock>> {
         match self.0.lock().get(&tid) {
             Some(task) => task.upgrade(),
             None => None,

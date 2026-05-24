@@ -1,6 +1,6 @@
 // os/src/trap/context.rs
 
-use riscv::register::sstatus::{self, Sstatus, SPP};
+use riscv::register::sstatus::{self, SPP, Sstatus};
 
 /// 异常上下文
 ///
@@ -38,7 +38,7 @@ impl TrapContext {
     pub fn set_sepc(&mut self, sepc: usize) {
         self.sepc = sepc;
     }
-    
+
     /// 初始化用户程序上下文
     pub fn init_app_context(
         entry: usize,

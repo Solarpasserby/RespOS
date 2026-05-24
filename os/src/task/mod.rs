@@ -6,53 +6,40 @@
 //!
 //! 至少现在，这里你可以将“进程”和“任务”作为同一个概念
 
+mod action;
 mod context;
 mod kstack;
 mod manager;
-mod tid;
 mod processor;
-mod task;
-mod signal;
-mod action;
 mod scheduler;
+mod signal;
+mod task;
+mod tid;
 
-pub use task::{CloneFlags, TaskControlBlock};
-pub use context::TaskContext;
-pub use manager::TASK_MANAGER;
-pub use scheduler::{
-    add_task,
-    block_task,
-    fetch_task,
-    remove_task,
-    remove_thread_group,
-    switch_to_next_task,
-    yield_current_task,
-    blocking_and_run_next,
-    exit_and_run_next,
-};
-pub use processor::{
-    current_task,
-    current_user_token,
-    run_tasks,
-    take_current_task,
-};
-pub use signal::{SignalFlags, MAX_SIG};
-pub use action::{SignalAction, SignalActions};
 use crate::loader::get_app_data_by_name;
-use lazy_static::lazy_static;
+pub use action::{SignalAction, SignalActions};
 use alloc::sync::Arc;
+pub use context::TaskContext;
+use lazy_static::lazy_static;
+pub use manager::TASK_MANAGER;
+pub use processor::{current_task, current_user_token, run_tasks, take_current_task};
+pub use scheduler::{
+    add_task, block_task, blocking_and_run_next, exit_and_run_next, fetch_task, remove_task,
+    remove_thread_group, switch_to_next_task, yield_current_task,
+};
+pub use signal::{MAX_SIG, SignalFlags};
+pub use task::{CloneFlags, TaskControlBlock};
 
 lazy_static! {
-    pub static ref INITPROC: Arc<TaskControlBlock> = {
-        TaskControlBlock::init(get_app_data_by_name("initproc").unwrap())
-    };
+    pub static ref INITPROC: Arc<TaskControlBlock> =
+        TaskControlBlock::init(get_app_data_by_name("initproc").unwrap());
 }
 
 #[cfg(target_arch = "riscv64")]
 pub fn add_initproc() {
-    // 设置 tp 寄存器指向INITPROC
-    let _initproc_tp = Arc::as_ptr(&INITPROC) as usize;
+    add_task(INITPROC.clone());
     // unsafe {
+    //     // 设置 tp 寄存器指向INITPROC
     //     core::arch::asm!("mv tp, {}", in(reg) initproc_tp);
     // }
 }

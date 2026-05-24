@@ -2,43 +2,43 @@
 
 //! ### 系统调用模块
 
-const SYSCALL_GETCWD: usize         = 17;
-const SYSCALL_DUP: usize            = 23;
-const SYSCALL_DUP3: usize           = 24;
-const SYSCALL_MKDIRAT: usize        = 34;
-const SYSCALL_UNLINKAT: usize       = 35;
-const SYSCALL_LINKAT: usize         = 37;
-const SYSCALL_UMOUNT2: usize        = 39;
-const SYSCALL_MOUNT: usize          = 40;
-const SYSCALL_CHDIR: usize          = 49;
-const SYSCALL_OPENAT: usize         = 56;
-const SYSCALL_CLOSE: usize          = 57;
-const SYSCALL_PIPE2: usize          = 59;
-const SYSCALL_GETDENTS64: usize     = 61;
-const SYSCALL_LSEEK: usize          = 62;
-const SYSCALL_READ: usize           = 63;
-const SYSCALL_WRITE: usize          = 64;
-const SYSCALL_STAT: usize           = 79;
-const SYSCALL_FSTAT: usize          = 80;
-const SYSCALL_EXIT: usize           = 93;
-const SYSCALL_NANOSLEEP: usize      = 101;
-const SYSCALL_SCHED_YIELD: usize    = 124;
-const SYSCALL_KILL: usize           = 129;
-const SYSCALL_SIGACTION: usize      = 134;
-const SYSCALL_SIGPROCMASK: usize    = 135;
-const SYSCALL_SIGRETURN: usize      = 139;
-const SYSCALL_SETPRIORITY: usize    = 140;
-const SYSCALL_TIMES: usize          = 153;
-const SYSCALL_UNAME: usize          = 160;
-const SYSCALL_GETTIMEOFDAY: usize   = 169;
-const SYSCALL_GETPID: usize         = 172;
-const SYSCALL_GETPPID: usize        = 173;
-const SYSCALL_BRK: usize            = 214;
-const SYSCALL_MUNMAP: usize         = 215;
-const SYSCALL_CLONE: usize          = 220;
-const SYSCALL_EXECVE: usize         = 221;
-const SYSCALL_MMAP: usize           = 222;
-const SYSCALL_WAIT4: usize          = 260;
+const SYSCALL_GETCWD: usize = 17;
+const SYSCALL_DUP: usize = 23;
+const SYSCALL_DUP3: usize = 24;
+const SYSCALL_MKDIRAT: usize = 34;
+const SYSCALL_UNLINKAT: usize = 35;
+const SYSCALL_LINKAT: usize = 37;
+const SYSCALL_UMOUNT2: usize = 39;
+const SYSCALL_MOUNT: usize = 40;
+const SYSCALL_CHDIR: usize = 49;
+const SYSCALL_OPENAT: usize = 56;
+const SYSCALL_CLOSE: usize = 57;
+const SYSCALL_PIPE2: usize = 59;
+const SYSCALL_GETDENTS64: usize = 61;
+const SYSCALL_LSEEK: usize = 62;
+const SYSCALL_READ: usize = 63;
+const SYSCALL_WRITE: usize = 64;
+const SYSCALL_STAT: usize = 79;
+const SYSCALL_FSTAT: usize = 80;
+const SYSCALL_EXIT: usize = 93;
+const SYSCALL_NANOSLEEP: usize = 101;
+const SYSCALL_SCHED_YIELD: usize = 124;
+const SYSCALL_KILL: usize = 129;
+const SYSCALL_SIGACTION: usize = 134;
+const SYSCALL_SIGPROCMASK: usize = 135;
+const SYSCALL_SIGRETURN: usize = 139;
+const SYSCALL_SETPRIORITY: usize = 140;
+const SYSCALL_TIMES: usize = 153;
+const SYSCALL_UNAME: usize = 160;
+const SYSCALL_GETTIMEOFDAY: usize = 169;
+const SYSCALL_GETPID: usize = 172;
+const SYSCALL_GETPPID: usize = 173;
+const SYSCALL_BRK: usize = 214;
+const SYSCALL_MUNMAP: usize = 215;
+const SYSCALL_CLONE: usize = 220;
+const SYSCALL_EXECVE: usize = 221;
+const SYSCALL_MMAP: usize = 222;
+const SYSCALL_WAIT4: usize = 260;
 // FIXME: 把系统调用号按大小排布
 
 mod errno;
@@ -122,7 +122,12 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
             args[4] as isize,
             args[5],
         ),
-        SYSCALL_WAIT4 => sys_wait4(args[0] as isize, args[1] as *mut i32, args[2], args[3]),
+        SYSCALL_WAIT4 => sys_wait4(
+            args[0] as isize,
+            args[1] as *mut i32,
+            args[2],
+            args[3] as *mut RUsage,
+        ),
         _ => Err(Errno::ENOSYS),
     }
 }

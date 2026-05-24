@@ -3,8 +3,8 @@
 //! 调度器维护 FIFO 就绪队列，并在主动让出/阻塞/退出时选择下一个任务。
 //! 当前架构层 `__switch` 接收下一个任务的内核栈指针，因此这里会完成最后一步切换。
 
+use super::processor::{PROCESSOR, current_task};
 use super::task::{TaskControlBlock, task_exit};
-use super::processor::{current_task, PROCESSOR};
 use crate::{arch::task::__switch, mutex::SpinNoIrqLock};
 use alloc::{collections::vec_deque::VecDeque, sync::Arc};
 use bitflags::bitflags;
@@ -49,9 +49,7 @@ pub fn switch_to_next_task() {
     if let Some(next_task) = fetch_task() {
         let next_task_kernel_stack = next_task.kstack();
         next_task.set_running();
-        PROCESSOR
-            .lock()
-            .switch_to(next_task);
+        PROCESSOR.lock().switch_to(next_task);
         unsafe {
             __switch(next_task_kernel_stack);
         }
@@ -71,9 +69,7 @@ pub fn yield_current_task() {
 
         let next_task_kernel_stack = next_task.kstack();
         next_task.set_running();
-        PROCESSOR
-            .lock()
-            .switch_to(next_task);
+        PROCESSOR.lock().switch_to(next_task);
         unsafe {
             __switch(next_task_kernel_stack);
         }
@@ -93,9 +89,7 @@ pub fn blocking_and_run_next() {
 
         let next_task_kernel_stack = next_task.kstack();
         next_task.set_running();
-        PROCESSOR
-            .lock()
-            .switch_to(next_task);
+        PROCESSOR.lock().switch_to(next_task);
         unsafe {
             __switch(next_task_kernel_stack);
         }
@@ -108,6 +102,7 @@ pub fn exit_and_run_next(exit_code: i32) {
         return;
     };
 
+    // 当前任务本就不在调度队列中，无需删除
     task_exit(task, exit_code);
     switch_to_next_task();
 }

@@ -1,7 +1,7 @@
 // os/src/task/tid.rs
 
-use core::fmt::Display;
 use alloc::vec::Vec;
+use core::fmt::Display;
 use lazy_static::lazy_static;
 use spin::Mutex;
 

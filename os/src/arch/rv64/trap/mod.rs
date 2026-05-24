@@ -9,7 +9,7 @@ mod context;
 
 use super::timer::set_next_ti_trigger;
 use crate::syscall::*;
-use crate::task::{exit_and_run_next, yield_current_task, handle_signals};
+use crate::task::{exit_and_run_next, handle_signals, yield_current_task};
 use core::arch::global_asm;
 use riscv::register::{
     mtvec::TrapMode,
@@ -102,7 +102,6 @@ pub fn trap_handler(cx: &mut TrapContext) {
     handle_signals();
     return;
 }
-
 
 #[unsafe(no_mangle)]
 pub fn trap_from_kernel() -> ! {
