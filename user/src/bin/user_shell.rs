@@ -17,8 +17,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::str;
 use user_lib::{
-    chdir, close, dup2, exec, fork, getcwd, open, waitpid,
-    O_APPEND, O_CREATE, O_RDONLY, O_TRUNC, O_WRONLY,
+    chdir, close, dup2, exec, exit, fork, getcwd, getdents64, open, waitpid,
+    O_APPEND, O_CREATE, O_DIRECTORY, O_RDONLY, O_TRUNC, O_WRONLY,
 };
 use user_lib::console::getchar;
 
@@ -49,6 +49,107 @@ fn run_builtin_cd(command: &str) -> bool {
     if chdir(path.as_str()) < 0 {
         println!("cd: failed to change directory");
     }
+    true
+}
+
+const DIRENT64_HEADER_SIZE: usize = 19;
+
+const DT_DIR: u8 = 4; // InodeType::Directory as u8
+const DT_REG: u8 = 8; // InodeType::Regular as u8
+
+fn run_builtin_runall(command: &str) -> bool {
+    let mut parts = command.split_whitespace();
+    if parts.next() != Some("runall") {
+        return false;
+    }
+
+    let target = parts.next().unwrap_or(".");
+    let mut path = String::new();
+    path.push_str(target);
+    path.push('\0');
+
+    let fd = open(path.as_str(), O_RDONLY | O_DIRECTORY, 0);
+    if fd < 0 {
+        println!("runall: cannot open directory");
+        return true;
+    }
+
+    let fd = fd as usize;
+    let mut buf = [0u8; 8192];
+    let size = getdents64(fd, &mut buf);
+    close(fd);
+
+    if size < 0 {
+        println!("runall: cannot read directory");
+        return true;
+    }
+
+    let size = size as usize;
+    let mut offset = 0;
+    let mut programs: Vec<String> = Vec::new();
+
+    while offset + DIRENT64_HEADER_SIZE <= size {
+        let reclen = u16::from_le_bytes([buf[offset + 16], buf[offset + 17]]) as usize;
+        if reclen < DIRENT64_HEADER_SIZE || offset + reclen > size {
+            break;
+        }
+        let d_type = buf[offset + 18];
+        let name_start = offset + DIRENT64_HEADER_SIZE;
+        let name_end = name_start
+            + buf[name_start..offset + reclen]
+                .iter()
+                .position(|&ch| ch == 0)
+                .unwrap_or(offset + reclen - name_start);
+        if name_end > name_start {
+            if let Ok(name) = str::from_utf8(&buf[name_start..name_end]) {
+                if name != "." && name != ".." && d_type != DT_DIR {  // 只要不是目录
+    programs.push(String::from(name));
+}
+            }
+        }
+        offset += reclen;
+    }
+
+    if programs.is_empty() {
+        println!("runall: no regular files found");
+        return true;
+    }
+
+    println!("============================================================");
+    println!("Running test suite in directory: {}", target);
+    println!("============================================================");
+
+    for name in &programs {
+        println!("");
+        println!("============================================================");
+        println!("                    Running test: {}", name);
+        println!("============================================================");
+
+        let mut prog = String::new();
+        prog.push_str(name);
+        prog.push('\0');
+
+        let pid = fork();
+        if pid == 0 {
+            let ret = exec(prog.as_str(), &[prog.as_ptr(), core::ptr::null()]);
+            println!("[{}] exec failed, code = {}", name, ret);
+            exit(-1);
+        } else {
+            let mut exit_code: i32 = 0;
+            waitpid(pid as usize, &mut exit_code);
+
+            if exit_code == 0 {
+                println!("[{}] PASSED", name);
+            } else {
+                println!("[{}] FAILED, exit code = {}", name, exit_code);
+            }
+        }
+    }
+
+    println!("");
+    println!("============================================================");
+    println!("                      All tests finished");
+    println!("============================================================");
     true
 }
 
@@ -188,7 +289,7 @@ pub fn main() -> i32 {
             LF | CR => {
                 println!("");
                 let command = line.trim();
-                if !command.is_empty() && !run_builtin_cd(command) {
+                if !command.is_empty() && !run_builtin_cd(command) && !run_builtin_runall(command) {
                     let command = match parse_command(command) {
                         Ok(command) => command,
                         Err(err) => {
