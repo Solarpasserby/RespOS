@@ -6,14 +6,11 @@ use crate::fs::{AT_FDCWD, path_open};
 use crate::loader::get_app_data_by_name;
 use crate::mm::{copy_cstr_from_user, copy_from_user, copy_to_user, extract_cstrings_from_user};
 use crate::task::{
-    CloneFlags, MAX_SIG, SignalAction, SignalFlags, TASK_MANAGER, add_task, current_task,
-    exit_and_run_next, yield_current_task,
+    CloneFlags, MAX_SIG, SignalAction, SignalFlags, TASK_MANAGER, WaitOption, add_task,
+    current_task, exit_and_run_next, yield_current_task,
 };
-
-const WNOHANG: usize = 1;
-const WUNTRACED: usize = 1 << 1;
-const WCONTINUED: usize = 1 << 3;
-const SUPPORTED_WAIT_OPTIONS: usize = WNOHANG | WUNTRACED | WCONTINUED;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -71,38 +68,59 @@ pub fn sys_sched_yield() -> SysResult<usize> {
 
 pub fn sys_clone(
     flags: usize,
-    _stack: usize,
+    stack: usize,
     _ptid: usize,
     _tls: usize,
     _ctid: usize,
 ) -> SysResult<usize> {
-    // TODO[ABI-COMPAT]: 当前仅复用了 fork 语义，尚未真正支持 clone 的 flags/stack/tls 等能力。
+    // TODO[ABI-COMPAT]: 当前尚未支持 ptid/tls/ctid 等能力。
+    let flags = CloneFlags::from_bits(flags as u32).ok_or(Errno::EINVAL)?;
+
+    // 简化模型：CLONE_THREAD 表示真正线程，必须共享地址空间。
+    // 不共享地址空间的可调度实体按新进程处理，而不是放进同一线程组。
+    if flags.contains(CloneFlags::CLONE_THREAD) && !flags.contains(CloneFlags::CLONE_VM) {
+        return Err(Errno::EINVAL);
+    }
+    if flags.contains(CloneFlags::CLONE_SIGHAND) && !flags.contains(CloneFlags::CLONE_VM) {
+        return Err(Errno::EINVAL);
+    }
+
     let current_task = current_task().expect("[kernel] current task is None.");
     // 此处发生任务复制
-    let new_task = current_task.fork(CloneFlags::from_bits_truncate(flags as u32));
+    let new_task = current_task.fork(flags);
     let new_tid = new_task.tid();
-    // 修改新任务的异常上下文，将其 sys_fork 的返回值设为 0
-    let new_task_cx = new_task.get_trap_cx();
-    new_task_cx.x[10] = 0;
+
+    // 修改新任务的异常上下文，修改栈指针、任务指针、返回值
+    let new_task_trap_cx = new_task.get_trap_cx();
+    if stack != 0 {
+        new_task_trap_cx.set_sp(stack);
+    }
+    new_task_trap_cx.set_tp(Arc::as_ptr(&new_task) as usize);
+    new_task_trap_cx.set_a0(0);
+
     add_task(new_task);
     // 系统调用返回新创建任务的 pid
     Ok(new_tid)
 }
 
-pub fn sys_execve(path: *const u8, args: *const usize, _envp: *const usize) -> SysResult<usize> {
-    // TODO[ABI-COMPAT]: 当前忽略 envp，后续如需完整 execve 语义应补上环境变量处理。
+pub fn sys_execve(path: *const u8, args: *const usize, envp: *const usize) -> SysResult<usize> {
     let path = copy_cstr_from_user(path)?;
     let args_vec = extract_cstrings_from_user(args)?;
+    let envs_vec = if envp.is_null() {
+        Vec::new()
+    } else {
+        extract_cstrings_from_user(envp)?
+    };
     let task = current_task().expect("[kernel] current task is None.");
 
     if let Ok(file) = path_open(AT_FDCWD, &path, 0, 0) {
         info!("[kernel] execute file in fs");
         let all_data = file.read_all()?;
-        Ok(task.execve(all_data.as_slice(), args_vec)?)
+        Ok(task.execve(all_data.as_slice(), args_vec, envs_vec)?)
     } else if !path.starts_with("/") {
         // 从内核中加载的应用程序
         if let Some(data) = get_app_data_by_name(path.as_str()) {
-            Ok(task.execve(data, args_vec)?)
+            Ok(task.execve(data, args_vec, envs_vec)?)
         } else {
             Err(Errno::ENOENT)
         }
@@ -122,9 +140,7 @@ pub fn sys_wait4(
     options: usize,
     rusage: *mut RUsage,
 ) -> SysResult<usize> {
-    if options & !SUPPORTED_WAIT_OPTIONS != 0 {
-        return Err(Errno::EINVAL);
-    }
+    let options = WaitOption::from_bits(options as i32).ok_or(Errno::EINVAL)?;
 
     // pid == 0 和 pid < -1 需要按进程组等待；当前任务结构尚未维护 pgid，
     // 先显式拒绝，避免把进程组语义错误地退化成等待任意子任务。
@@ -132,7 +148,7 @@ pub fn sys_wait4(
         return Err(Errno::EINVAL);
     }
 
-    let nohang = options & WNOHANG != 0;
+    let nohang = options.contains(WaitOption::WNOHANG);
 
     loop {
         let task = current_task().expect("[kernel] current task is None.");

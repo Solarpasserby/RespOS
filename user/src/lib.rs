@@ -149,7 +149,9 @@ pub fn time_get() -> isize {
     }
 }
 pub fn fork() -> isize { sys_clone(17, 0, 0, 0, 0) }
-pub fn exec(path: &str, args: &[*const u8]) -> isize { sys_execve(path, args, &[]) }
+pub fn exec(path: &str, args: &[*const u8]) -> isize {
+    sys_execve(path, args, core::ptr::null())
+}
 pub fn wait(exit_code: &mut i32) -> isize {
     loop { // 等待任意进程
         match sys_wait4(-1, exit_code as *mut _) {

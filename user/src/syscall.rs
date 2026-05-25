@@ -188,8 +188,8 @@ pub fn sys_clone(flags: usize, stack: usize, ptid: usize, tls: usize, ctid: usiz
     syscall(SYSCALL_CLONE, [flags, stack, ptid, tls, ctid, 0])
 }
 
-pub fn sys_execve(path: &str, args: &[*const u8], envp: &[*const u8]) -> isize {
-    syscall(SYSCALL_EXECVE, [path.as_ptr() as usize, args.as_ptr() as usize, envp.as_ptr() as usize, 0, 0, 0])
+pub fn sys_execve(path: &str, args: &[*const u8], envp: *const *const u8) -> isize {
+    syscall(SYSCALL_EXECVE, [path.as_ptr() as usize, args.as_ptr() as usize, envp as usize, 0, 0, 0])
 }
 
 pub fn sys_wait4(pid: isize, exit_code: *mut i32) -> isize {
