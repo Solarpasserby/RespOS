@@ -1,67 +1,126 @@
 // os/src/syscall/process.rs
 
-use super::{SysResult, Errno};
-use crate::task::{
-    SignalFlags,
-    SignalAction,
-    MAX_SIG,
-    PID2TCB,
-    pid2task,
-    current_task,
-    add_task,
-    exit_current_and_run_next,
-    suspend_current_and_run_next,
-};
-use crate::mm::{copy_cstr_from_user, copy_to_user, copy_from_user, extract_cstrings_from_user};
+use super::time::TimeVal;
+use super::{Errno, SysResult};
 use crate::fs::{AT_FDCWD, path_open};
 use crate::loader::get_app_data_by_name;
+use crate::mm::{copy_cstr_from_user, copy_from_user, copy_to_user, extract_cstrings_from_user};
+use crate::task::{
+    CloneFlags, MAX_SIG, SignalAction, SignalFlags, TASK_MANAGER, WaitOption, add_task,
+    current_task, exit_and_run_next, yield_current_task,
+};
 use alloc::sync::Arc;
+use alloc::vec::Vec;
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct RUsage {
+    pub ru_utime: TimeVal,
+    pub ru_stime: TimeVal,
+    pub ru_maxrss: isize,
+    pub ru_ixrss: isize,
+    pub ru_idrss: isize,
+    pub ru_isrss: isize,
+    pub ru_minflt: isize,
+    pub ru_majflt: isize,
+    pub ru_nswap: isize,
+    pub ru_inblock: isize,
+    pub ru_oublock: isize,
+    pub ru_msgsnd: isize,
+    pub ru_msgrcv: isize,
+    pub ru_nsignals: isize,
+    pub ru_nvcsw: isize,
+    pub ru_nivcsw: isize,
+}
+
+impl Default for RUsage {
+    fn default() -> Self {
+        Self {
+            ru_utime: TimeVal { sec: 0, usec: 0 },
+            ru_stime: TimeVal { sec: 0, usec: 0 },
+            ru_maxrss: 0,
+            ru_ixrss: 0,
+            ru_idrss: 0,
+            ru_isrss: 0,
+            ru_minflt: 0,
+            ru_majflt: 0,
+            ru_nswap: 0,
+            ru_inblock: 0,
+            ru_oublock: 0,
+            ru_msgsnd: 0,
+            ru_msgrcv: 0,
+            ru_nsignals: 0,
+            ru_nvcsw: 0,
+            ru_nivcsw: 0,
+        }
+    }
+}
 
 pub fn sys_exit(exit_code: i32) -> ! {
-    exit_current_and_run_next(exit_code);
+    exit_and_run_next(exit_code);
     panic!("Unreachable in sys_exit!");
 }
 
 pub fn sys_sched_yield() -> SysResult<usize> {
-    suspend_current_and_run_next();
+    yield_current_task();
     Ok(0)
 }
 
 pub fn sys_clone(
-    _flags: usize,
-    _stack: usize,
+    flags: usize,
+    stack: usize,
     _ptid: usize,
     _tls: usize,
     _ctid: usize,
 ) -> SysResult<usize> {
-    // TODO[ABI-COMPAT]: 当前仅复用了 fork 语义，尚未真正支持 clone 的 flags/stack/tls 等能力。
+    // TODO[ABI-COMPAT]: 当前尚未支持 ptid/tls/ctid 等能力。
+    let flags = CloneFlags::from_bits(flags as u32).ok_or(Errno::EINVAL)?;
+
+    // 简化模型：CLONE_THREAD 表示真正线程，必须共享地址空间。
+    // 不共享地址空间的可调度实体按新进程处理，而不是放进同一线程组。
+    if flags.contains(CloneFlags::CLONE_THREAD) && !flags.contains(CloneFlags::CLONE_VM) {
+        return Err(Errno::EINVAL);
+    }
+    if flags.contains(CloneFlags::CLONE_SIGHAND) && !flags.contains(CloneFlags::CLONE_VM) {
+        return Err(Errno::EINVAL);
+    }
+
     let current_task = current_task().expect("[kernel] current task is None.");
     // 此处发生任务复制
-    let new_task = current_task.fork();
-    let new_pid = new_task.pid();
-    // 修改新任务的异常上下文，将其 sys_fork 的返回值设为 0
-    let new_task_cx = new_task.get_trap_cx();
-    new_task_cx.x[10] = 0;
-    // 添加新任务
+    let new_task = current_task.fork(flags);
+    let new_tid = new_task.tid();
+
+    // 修改新任务的异常上下文，修改栈指针、任务指针、返回值
+    let new_task_trap_cx = new_task.get_trap_cx();
+    if stack != 0 {
+        new_task_trap_cx.set_sp(stack);
+    }
+    new_task_trap_cx.set_tp(Arc::as_ptr(&new_task) as usize);
+    new_task_trap_cx.set_a0(0);
+
     add_task(new_task);
     // 系统调用返回新创建任务的 pid
-    Ok(new_pid)
+    Ok(new_tid)
 }
 
-pub fn sys_execve(path: *const u8, args: *const usize, _envp: *const usize) -> SysResult<usize> {
-    // TODO[ABI-COMPAT]: 当前忽略 envp，后续如需完整 execve 语义应补上环境变量处理。
+pub fn sys_execve(path: *const u8, args: *const usize, envp: *const usize) -> SysResult<usize> {
     let path = copy_cstr_from_user(path)?;
     let args_vec = extract_cstrings_from_user(args)?;
+    let envs_vec = if envp.is_null() {
+        Vec::new()
+    } else {
+        extract_cstrings_from_user(envp)?
+    };
     let task = current_task().expect("[kernel] current task is None.");
 
     if let Ok(file) = path_open(AT_FDCWD, &path, 0, 0) {
         info!("[kernel] execute file in fs");
         let all_data = file.read_all()?;
-        Ok(task.exec(all_data.as_slice(), args_vec)?)
+        Ok(task.execve(all_data.as_slice(), args_vec, envs_vec)?)
     } else if !path.starts_with("/") {
         // 从内核中加载的应用程序
         if let Some(data) = get_app_data_by_name(path.as_str()) {
-            Ok(task.exec(data, args_vec)?)
+            Ok(task.execve(data, args_vec, envs_vec)?)
         } else {
             Err(Errno::ENOENT)
         }
@@ -74,58 +133,61 @@ pub fn sys_execve(path: *const u8, args: *const usize, _envp: *const usize) -> S
 ///
 /// - 参数：
 ///     - `pid` 接受查询子任务任务号，可选值 -1 表示任意子任务
-///     - `exit_code_ptr` 目标子任务的退出码
+///     - `exit_code_ptr` 目标子任务的 wait status
 pub fn sys_wait4(
     pid: isize,
     exit_code_ptr: *mut i32,
-    _options: usize,
-    _rusage: usize,
+    options: usize,
+    rusage: *mut RUsage,
 ) -> SysResult<usize> {
-    // TODO[ABI-COMPAT]: 当前仅实现 waitpid 子集，尚未处理 options / rusage。
-    let task = current_task().expect("[kernel] current task is None.");
-    let mut task_inner = task.inner_exclusive_access();
+    let options = WaitOption::from_bits(options as i32).ok_or(Errno::EINVAL)?;
 
-    // 无法找到目标子任务则返回
-    if task_inner
-        .children
-        .iter()
-        .find(|p| pid == -1 || pid as usize == p.pid())
-        .is_none()
-    {
-        return Err(Errno::ECHILD);
+    // pid == 0 和 pid < -1 需要按进程组等待；当前任务结构尚未维护 pgid，
+    // 先显式拒绝，避免把进程组语义错误地退化成等待任意子任务。
+    if pid == 0 || pid < -1 {
+        return Err(Errno::EINVAL);
     }
 
-    // 得到已经退出（Zombie）的目标子任务
-    let pair = task_inner.children.iter()
-        .enumerate()
-        .find(|(_, p)| {
-            p.inner_exclusive_access().is_zombie()
-                && (pid == -1 || pid as usize == p.pid())
-        });
+    let nohang = options.contains(WaitOption::WNOHANG);
 
-    if let Some((idx, _)) = pair {
-        // 从 children 中移除
-        let child = task_inner.children.remove(idx);
-        let child_pid = child.pid();
+    loop {
+        let task = current_task().expect("[kernel] current task is None.");
+        let wait_result = task.op_children_mut(|children| {
+            let matches_pid = |child_tid: usize| pid == -1 || pid as usize == child_tid;
 
-        { &*PID2TCB }
-        .lock()
-        .remove(&child_pid);
-
-        assert_eq!(Arc::strong_count(&child), 1);
-        let exit_code = child.inner_exclusive_access().exit_code;
-
-        // 写回退出码（如果指针非空）
-        if !exit_code_ptr.is_null() {
-            unsafe {
-                *exit_code_ptr = exit_code;
+            if !children.keys().any(|child_tid| matches_pid(*child_tid)) {
+                return Err(Errno::ECHILD);
             }
+
+            Ok(children
+                .iter()
+                .find(|(child_tid, child)| matches_pid(**child_tid) && child.is_exited())
+                .map(|(child_tid, child)| (*child_tid, (child.exit_code() & 0xff) << 8)))
+        })?;
+
+        if let Some((child_tid, wait_status)) = wait_result {
+            if !exit_code_ptr.is_null() {
+                copy_to_user(exit_code_ptr, &wait_status as *const i32, 1)?;
+            }
+
+            // 当前内核还没有任务资源统计，先按 wait4 ABI 写回零值结构。
+            if !rusage.is_null() {
+                let usage = RUsage::default();
+                copy_to_user(rusage, &usage as *const RUsage, 1)?;
+            }
+
+            task.op_children_mut(|children| {
+                children.remove(&child_tid);
+            });
+
+            return Ok(child_tid);
         }
 
-        Ok(child_pid)
-    } else {
-        // 存在目标子任务但仍未结束
-        Err(Errno::EAGAIN)
+        if nohang {
+            return Ok(0);
+        }
+
+        yield_current_task();
     }
 }
 
@@ -139,19 +201,19 @@ pub fn sys_setpriority(which: usize, who: usize, prio: isize) -> SysResult<usize
 /// 系统调用 sys-getpid
 pub fn sys_getpid() -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
-    Ok(task.pid())
+    Ok(task.tid())
 }
 
 /// 系统调用 sys-getppid
 pub fn sys_getppid() -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
-    Ok(task.ppid())
+    Ok(task.op_parent(|parent| parent.as_ref().unwrap().upgrade().unwrap().tid()))
 }
 
 pub fn sys_kill(pid: usize, signum: i32) -> SysResult<usize> {
-    if let Some(task) = pid2task(pid) {
+    if let Some(task) = TASK_MANAGER.get(pid) {
         if let Some(flag) = SignalFlags::from_bits(1 << signum) {
-            let mut task_ref = task.inner_exclusive_access();
+            let mut task_ref = task.get_signal_inner();
             if task_ref.signals.contains(flag) {
                 // 信号已存在，返回错误
                 return Err(Errno::EINVAL);
@@ -181,25 +243,20 @@ pub fn sys_sigaction(
     // 先获取旧动作（持锁）
     let prev_action = {
         let task = current_task().unwrap();
-        let inner = task.inner_exclusive_access();
+        let signal_inner = task.get_signal_inner();
 
-        let flag = SignalFlags::from_bits(1u32 << signum)
-            .ok_or(Errno::EINVAL)?;
+        let flag = SignalFlags::from_bits(1u32 << signum).ok_or(Errno::EINVAL)?;
 
         if check_sigaction_error(flag, action as usize, old_action as usize) {
             return Err(Errno::EINVAL);
         }
 
-        inner.signal_actions.table[signum as usize]
-    }; // ← 这里 inner 自动释放
+        signal_inner.signal_actions.table[signum as usize]
+    }; // 这里 signal_inner 自动释放
 
     // 写回旧动作（无锁）
     if !old_action.is_null() {
-        copy_to_user(
-            old_action,
-            &prev_action as *const SignalAction,
-            1,
-        )?;
+        copy_to_user(old_action, &prev_action as *const SignalAction, 1)?;
     }
 
     // 如果需要设置新动作
@@ -207,16 +264,12 @@ pub fn sys_sigaction(
         let mut new_action = SignalAction::default();
 
         // 从用户空间读取（无锁）
-        copy_from_user(
-            &mut new_action as *mut SignalAction,
-            action,
-            1,
-        )?;
+        copy_from_user(&mut new_action as *mut SignalAction, action, 1)?;
 
         // 再次加锁并更新表
         let task = current_task().unwrap();
-        let mut inner = task.inner_exclusive_access();
-        inner.signal_actions.table[signum as usize] = new_action;
+        let mut signal_inner = task.get_signal_inner();
+        signal_inner.signal_actions.table[signum as usize] = new_action;
     }
 
     Ok(0)
@@ -224,10 +277,10 @@ pub fn sys_sigaction(
 
 pub fn sys_sigprocmask(mask: u32) -> SysResult<usize> {
     if let Some(task) = current_task() {
-        let mut inner = task.inner_exclusive_access();
-        let old_mask = inner.signal_mask;
+        let mut signal_inner = task.get_signal_inner();
+        let old_mask = signal_inner.signal_mask;
         if let Some(flag) = SignalFlags::from_bits(mask) {
-            inner.signal_mask = flag;
+            signal_inner.signal_mask = flag;
             Ok(old_mask.bits() as usize)
         } else {
             Err(Errno::EINVAL)
@@ -239,10 +292,10 @@ pub fn sys_sigprocmask(mask: u32) -> SysResult<usize> {
 
 pub fn sys_sigreturn() -> SysResult<usize> {
     if let Some(task) = current_task() {
-        let mut inner = task.inner_exclusive_access();
-        inner.handling_sig = -1;
+        let mut signal_inner = task.get_signal_inner();
+        signal_inner.handling_sig = -1;
         let trap_ctx = task.get_trap_cx();
-        *trap_ctx = inner.trap_ctx_backup.take().unwrap();
+        *trap_ctx = signal_inner.trap_ctx_backup.take().unwrap();
         Ok(trap_ctx.x[10] as usize)
     } else {
         Err(Errno::ESRCH)

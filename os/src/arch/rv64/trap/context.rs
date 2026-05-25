@@ -1,6 +1,6 @@
 // os/src/trap/context.rs
 
-use riscv::register::sstatus::{self, Sstatus};
+use riscv::register::sstatus::{self, SPP, Sstatus};
 
 /// 异常上下文
 ///
@@ -20,26 +20,49 @@ pub struct TrapContext {
 }
 
 impl TrapContext {
+    pub fn get_sp(&self) -> usize {
+        self.x[2]
+    }
+    pub fn set_ra(&mut self, ra: usize) {
+        self.x[1] = ra;
+    }
     pub fn set_sp(&mut self, sp: usize) {
         self.x[2] = sp;
     }
     pub fn set_tp(&mut self, tp: usize) {
         self.x[4] = tp;
     }
+    pub fn set_a0(&mut self, a0: usize) {
+        self.x[10] = a0;
+    }
+    pub fn set_sepc(&mut self, sepc: usize) {
+        self.sepc = sepc;
+    }
+
     /// 初始化用户程序上下文
-    ///
-    /// - 参数：
-    ///     - `entry` 用户程序入口
-    ///     - `sp` 用户程序栈
-    pub fn init_app_context(entry: usize, sp: usize) -> Self {
-        let mut sstatus = sstatus::read();
-        sstatus.set_spp(sstatus::SPP::User);
-        let mut context = Self {
-            x: [0; 32],
+    pub fn init_app_context(
+        entry: usize,
+        sp: usize,
+        argc: usize,
+        argv_base: usize,
+        envp_base: usize,
+        auxv_base: usize,
+    ) -> Self {
+        let mut sstatus = sstatus::read(); // CSR sstatus
+        sstatus.set_spp(SPP::User); //previous privilege mode: user mode
+        let mut gerneal_regs = [0; 32];
+        gerneal_regs[10] = argc;
+        gerneal_regs[11] = argv_base;
+        gerneal_regs[12] = envp_base;
+        gerneal_regs[13] = auxv_base;
+        let mut cx = Self {
+            x: gerneal_regs,
             sstatus,
             sepc: entry,
         };
-        context.set_sp(sp);
-        context
+        // 设置用户栈顶指针
+        cx.set_sp(sp);
+
+        cx
     }
 }

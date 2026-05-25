@@ -55,7 +55,7 @@ impl File {
             inner: Mutex::new(FileInner {
                 offset,
                 path,
-                flags
+                flags,
             }),
         }
     }

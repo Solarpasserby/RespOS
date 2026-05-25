@@ -28,8 +28,7 @@ impl<'a> Nameidata<'a> {
     }
 
     fn new_from_path(file_name: &'a str, base: Arc<Path>) -> Self {
-        let path_segments: Vec<&'a str> =
-            file_name.split('/').filter(|s| !s.is_empty()).collect();
+        let path_segments: Vec<&'a str> = file_name.split('/').filter(|s| !s.is_empty()).collect();
 
         let dentry = if file_name.starts_with("/") {
             ROOT_DENTRY.clone()
@@ -289,12 +288,7 @@ pub fn filename_unlink(dirfd: isize, path: &str, remove_dir: bool) -> SysResult 
 }
 
 /// 根据两个路径创建硬链接。
-pub fn filename_link(
-    olddirfd: isize,
-    oldpath: &str,
-    newdirfd: isize,
-    newpath: &str,
-) -> SysResult {
+pub fn filename_link(olddirfd: isize, oldpath: &str, newdirfd: isize, newpath: &str) -> SysResult {
     if oldpath.is_empty() || newpath.is_empty() {
         return Err(Errno::ENOENT);
     }

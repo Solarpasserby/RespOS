@@ -9,7 +9,7 @@ mod context;
 
 use super::timer::set_next_ti_trigger;
 use crate::syscall::*;
-use crate::task::{exit_current_and_run_next, suspend_current_and_run_next, handle_signals};
+use crate::task::{exit_and_run_next, handle_signals, yield_current_task};
 use core::arch::global_asm;
 use riscv::register::{
     mtvec::TrapMode,
@@ -80,16 +80,16 @@ pub fn trap_handler(cx: &mut TrapContext) {
                 stval
             );
             // 页错误退出码
-            exit_current_and_run_next(-2);
+            exit_and_run_next(-2);
         }
         Trap::Exception(Exception::IllegalInstruction) => {
             println!("[kernel] IllegalInstruction in application, kernel killed it.");
             // 非法指令退出码
-            exit_current_and_run_next(-3);
+            exit_and_run_next(-3);
         }
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
             set_next_ti_trigger();
-            suspend_current_and_run_next();
+            yield_current_task();
         }
         _ => {
             panic!(
@@ -102,7 +102,6 @@ pub fn trap_handler(cx: &mut TrapContext) {
     handle_signals();
     return;
 }
-
 
 #[unsafe(no_mangle)]
 pub fn trap_from_kernel() -> ! {

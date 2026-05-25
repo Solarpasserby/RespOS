@@ -4,20 +4,33 @@
 //!
 //! - 功能：processor 可以依据调度策略切换任务上下文转而执行目标任务
 //!
-//! - 理解：
-//!     - 上下文切换的关键是 [`__switch`] 函数，该函数保存和恢复
+//! - 理解：上下文切换的关键是 [`__switch`] 函数，该函数保存和恢复
 
-use super::context::TaskContext;
-use super::manager::fetch_task;
-use super::task::{TaskControlBlock, TaskStatus};
+use super::scheduler::fetch_task;
+use super::task::TaskControlBlock;
 use crate::arch::task::__switch;
-use crate::trap::TrapContext;
+use crate::mutex::SpinNoIrqLock;
 use alloc::sync::Arc;
 use lazy_static::lazy_static;
-use spin::Mutex;
+
+// 空闲任务
+#[cfg(target_arch = "riscv64")]
+lazy_static! {
+    pub static ref IDLE_TASK: Arc<TaskControlBlock> = {
+        let idle_task = Arc::new(TaskControlBlock::zero_init());
+        // 将tp寄存器指向idle_task
+        unsafe {
+            // 注意这里需要对Arc指针先解引用再取`IDLE_TASK`地址
+            // 两种方法都可以, Arc::as_ptr或者直接解引用然后引用
+            core::arch::asm!("mv tp, {}", in(reg) &(*idle_task) as *const _ as usize);
+
+        }
+        idle_task
+    };
+}
 
 lazy_static! {
-    pub static ref PROCESSOR: Mutex<Processor> = Mutex::new(Processor::new());
+    pub static ref PROCESSOR: SpinNoIrqLock<Processor> = SpinNoIrqLock::new(Processor::new());
 }
 
 /// 处理器管理
@@ -25,15 +38,11 @@ lazy_static! {
 /// 管理维护 CPU 状态
 pub struct Processor {
     current: Option<Arc<TaskControlBlock>>,
-    idle_task_cx: TaskContext, // 空闲任务上下文，无任务调度时切换到该任务上下文
 }
 
 impl Processor {
     pub fn new() -> Self {
-        Self {
-            current: None,
-            idle_task_cx: TaskContext::app_init_task_context(0, 0),
-        }
+        Self { current: None }
     }
 
     /// 取出当前执行的任务
@@ -46,9 +55,9 @@ impl Processor {
         self.current.as_ref().map(Arc::clone)
     }
 
-    /// 获取空闲任务上下文的可变借用
-    pub fn get_idle_task_cx(&mut self) -> *mut TaskContext {
-        &mut self.idle_task_cx as *mut TaskContext
+    /// 切换当前 CPU 记录的运行任务。
+    pub fn switch_to(&mut self, task: Arc<TaskControlBlock>) {
+        self.current = Some(task);
     }
 }
 
@@ -69,48 +78,25 @@ pub fn current_user_token() -> usize {
     token
 }
 
-/// 获取当前执行的任务的异常上下文
-///
-/// 生命周期警告，可变借用
-pub fn current_trap_cx() -> &'static mut TrapContext {
-    current_task().unwrap().get_trap_cx()
-}
-
 /// 运行任务
-///
-/// 死循环，不断尝试将任务队列中的任务载入执行
 ///
 /// 该函数仅被空闲任务调用，因此任务调度的内容只会出现在初始栈上
 pub fn run_tasks() {
     loop {
-        let mut processor = PROCESSOR.lock();
-        if let Some(task) = fetch_task() {
-            let idle_task_cx_ptr = processor.get_idle_task_cx();
-            let mut task_inner = task.inner_exclusive_access();
-            let next_task_cx_ptr = &task_inner.task_context as *const TaskContext;
-            task_inner.task_status = TaskStatus::Running;
-            drop(task_inner); // 销毁借用
-            processor.current = Some(task);
-            drop(processor); // 销毁借用
+        if let Some(next_task) = fetch_task() {
+            let idle_task = IDLE_TASK.clone();
+            let next_task_kstack = next_task.kstack();
+            idle_task.set_ready();
+            next_task.set_running();
+            let mut processor = PROCESSOR.lock();
+            processor.current = Some(next_task.clone());
+            drop(processor);
+            // 事实上这个循环只会执行一次，这里需要释放 `next_task` 的引用
+            drop(next_task);
             unsafe {
-                __switch(idle_task_cx_ptr, next_task_cx_ptr);
+                __switch(next_task_kstack);
             }
+            unreachable!("Unreachable in run_tasks");
         }
-    }
-}
-
-/// 任务安排——切换任务到空闲任务
-///
-/// 这一设计让其他用户任务不再涉及任务调度相关内容
-///
-/// > 使得调度机制对于换出进程的 Trap 执行流是不可见的，
-/// > 它在决定换出的时候只需调用 schedule 而无需操心调度的事情，
-/// > 从而各执行流的分工更加明确了，虽然带来了更大的开销
-pub fn schedule(switched_task_cx_ptr: *mut TaskContext) {
-    let mut processor = PROCESSOR.lock();
-    let idle_task_cx_ptr = processor.get_idle_task_cx();
-    drop(processor);
-    unsafe {
-        __switch(switched_task_cx_ptr, idle_task_cx_ptr);
     }
 }

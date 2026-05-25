@@ -6,7 +6,7 @@ pub const MAX_SIG: usize = 31;
 
 bitflags! {
     pub struct SignalFlags: u32 {
-        const SIGDEF    = 1; 
+        const SIGDEF    = 1;
         const SIGHUP    = 1 << 1;
         const SIGINT    = 1 << 2;
         const SIGQUIT   = 1 << 3;
