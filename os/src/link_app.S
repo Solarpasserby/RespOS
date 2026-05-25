@@ -1,9 +1,10 @@
 
+    # generated rebuild stamp: 1779720823052441576
     .align 3
     .section .data
     .global _app_num
 _app_num:
-    .quad 9
+    .quad 10
     .quad app_0_start
     .quad app_1_start
     .quad app_2_start
@@ -13,7 +14,8 @@ _app_num:
     .quad app_6_start
     .quad app_7_start
     .quad app_8_start
-    .quad app_8_end
+    .quad app_9_start
+    .quad app_9_end
 
     .global _app_names
 _app_names:
@@ -25,6 +27,7 @@ _app_names:
     .string "power"
     .string "sig_simple"
     .string "sleep"
+    .string "testrunner"
     .string "user_shell"
 
     .section .data
@@ -96,5 +99,13 @@ app_7_end:
     .global app_8_end
     .align 3
 app_8_start:
-    .incbin "../user/target/riscv64gc-unknown-none-elf/debug/user_shell"
+    .incbin "../user/target/riscv64gc-unknown-none-elf/debug/testrunner"
 app_8_end:
+
+    .section .data
+    .global app_9_start
+    .global app_9_end
+    .align 3
+app_9_start:
+    .incbin "../user/target/riscv64gc-unknown-none-elf/debug/user_shell"
+app_9_end:

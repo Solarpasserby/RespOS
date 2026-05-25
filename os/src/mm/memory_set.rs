@@ -5,7 +5,8 @@ use super::frame_allocator::{FrameTracker, frame_alloc};
 use super::{PTEFlags, PageTable, PageTableEntry};
 use crate::arch::{sfence, write_mmu_token};
 use crate::config::{
-    KERNEL_BASE, KERNEL_STACK_SIZE, MEMORY_END, MMAP_MIN_ADDR, MMIO, PAGE_SIZE, USER_STACK_SIZE,
+    KERNEL_BASE, KERNEL_STACK_SIZE, MEMORY_END, MMAP_MIN_ADDR, PAGE_SIZE, USER_STACK_SIZE,
+    VIRTIO_MMIO,
 };
 use crate::syscall::{Errno, SysResult};
 use alloc::collections::BTreeMap;
@@ -331,8 +332,8 @@ impl MemorySet {
             None,
             0,
         );
-        // MMIO 部分
-        for (start, len) in MMIO {
+        // 设备 MMIO 区域
+        for (start, len) in VIRTIO_MMIO.iter().copied() {
             memory_set.push_empty_map_area(
                 MapArea::new(
                     VirtAddr::from(KERNEL_BASE + start),

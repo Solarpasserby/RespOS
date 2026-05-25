@@ -6,6 +6,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../user/src/");
     println!("cargo:rerun-if-env-changed=PROFILE");
     println!("cargo:rerun-if-env-changed=RESPOS_USER_PROFILE_DIR");
+    println!("cargo:rerun-if-env-changed=RESPOS_APP_REBUILD_STAMP");
     insert_app_data().unwrap();
 }
 
@@ -18,6 +19,7 @@ fn target_path() -> String {
 fn insert_app_data() -> Result<()> {
     let mut f = File::create("src/link_app.S").unwrap();
     let target_path = target_path();
+    let rebuild_stamp = env::var("RESPOS_APP_REBUILD_STAMP").unwrap_or_else(|_| String::from("local"));
     println!("cargo:rerun-if-changed={}", target_path);
     let mut apps: Vec<_> = read_dir("../user/src/bin")
         .unwrap()
@@ -33,6 +35,7 @@ fn insert_app_data() -> Result<()> {
     writeln!(
         f,
         r#"
+    # generated rebuild stamp: {rebuild_stamp}
     .align 3
     .section .data
     .global _app_num

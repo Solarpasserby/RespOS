@@ -1,6 +1,7 @@
 // os/src/syscall/utils.rs
 
 use super::SysResult;
+use crate::arch::sbi;
 use crate::mm::copy_to_user;
 
 #[repr(C)]
@@ -50,4 +51,8 @@ pub fn sys_uname(buf: *mut UtsName) -> SysResult<usize> {
     let utsname = UtsName::default();
     copy_to_user(buf, &utsname as *const UtsName, 1)?;
     Ok(0)
+}
+
+pub fn sys_reboot() -> SysResult<usize> {
+    sbi::shutdown(false);
 }

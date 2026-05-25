@@ -246,6 +246,10 @@ pub fn sigreturn() -> isize {
     sys_sigreturn()
 }
 
+pub fn poweroff() -> isize {
+    sys_reboot()
+}
+
 bitflags! {
     pub struct SignalFlags: i32{
         const SIGDEF    = 1 << 0;  // 0 号信号 → 1
