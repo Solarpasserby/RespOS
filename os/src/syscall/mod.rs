@@ -21,6 +21,8 @@ const SYSCALL_WRITE: usize = 64;
 const SYSCALL_STAT: usize = 79;
 const SYSCALL_FSTAT: usize = 80;
 const SYSCALL_EXIT: usize = 93;
+const SYSCALL_SET_TID_ADDRESS: usize = 96;
+const SYSCALL_FUTEX: usize = 98;
 const SYSCALL_NANOSLEEP: usize = 101;
 const SYSCALL_SCHED_YIELD: usize = 124;
 const SYSCALL_KILL: usize = 129;
@@ -39,6 +41,7 @@ const SYSCALL_MUNMAP: usize = 215;
 const SYSCALL_CLONE: usize = 220;
 const SYSCALL_EXECVE: usize = 221;
 const SYSCALL_MMAP: usize = 222;
+const SYSCALL_MPROTECT: usize = 226;
 const SYSCALL_WAIT4: usize = 260;
 // FIXME: 把系统调用号按大小排布
 
@@ -91,6 +94,15 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         SYSCALL_STAT => sys_stat(args[0] as *const u8, args[1] as *mut crate::fs::Stat),
         SYSCALL_FSTAT => sys_fstat(args[0], args[1] as *mut crate::fs::Stat),
         SYSCALL_EXIT => sys_exit(args[0] as i32),
+        SYSCALL_SET_TID_ADDRESS => sys_set_tid_address(args[0]),
+        SYSCALL_FUTEX => sys_futex(
+            args[0] as *const i32,
+            args[1],
+            args[2],
+            args[3],
+            args[4],
+            args[5],
+        ),
         SYSCALL_NANOSLEEP => sys_nanosleep(args[0] as *const TimeVal, args[1] as *mut TimeVal),
         SYSCALL_SCHED_YIELD => sys_sched_yield(),
         SYSCALL_SETPRIORITY => sys_setpriority(args[0], args[1], args[2] as isize),
@@ -124,6 +136,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
             args[4] as isize,
             args[5],
         ),
+        SYSCALL_MPROTECT => sys_mprotect(args[0], args[1], args[2] as u32),
         SYSCALL_WAIT4 => sys_wait4(
             args[0] as isize,
             args[1] as *mut i32,

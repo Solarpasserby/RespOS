@@ -61,7 +61,9 @@ impl MemorySet {
         data: Option<&[u8]>,
         data_offset: usize,
     ) {
-        map_area.map(&mut self.page_table);
+        map_area
+            .map(&mut self.page_table)
+            .expect("failed to map area");
         if let Some(data) = data {
             map_area.copy_data(&self.page_table, data, data_offset);
         }
@@ -221,6 +223,123 @@ impl MemorySet {
         }
         area.vpn_range = VPNRange::new(vpn_start, new_vpn_end);
         Ok(())
+    }
+    /// 修改与给定虚拟页区间重叠的映射权限，必要时裁剪或切分原逻辑段
+    pub fn remap_area_with_overlap_range(
+        &mut self,
+        vpn_range: VPNRange,
+        map_perm: MapPermission,
+    ) -> SysResult {
+        let new_map_perm = map_perm | MapPermission::USER;
+
+        for vpn in vpn_range {
+            let area = self
+                .areas
+                .iter()
+                .rev()
+                .find(|area| area.vpn_range.contain(&vpn))
+                .ok_or(Errno::ENOMEM)?;
+            if !area.map_perm.contains(MapPermission::USER) {
+                return Err(Errno::EFAULT);
+            }
+        }
+
+        let mut idx = 0;
+        while idx < self.areas.len() {
+            if !self.areas[idx].vpn_range.intersect_with(&vpn_range) {
+                idx += 1;
+                continue;
+            }
+
+            let area_start = self.areas[idx].vpn_range.get_start();
+            let area_end = self.areas[idx].vpn_range.get_end();
+            let overlap_start = area_start.max(vpn_range.get_start());
+            let overlap_end = area_end.min(vpn_range.get_end());
+
+            // 重叠覆盖整个逻辑段——原地改权限即可，无需拆分
+            if overlap_start == area_start && overlap_end == area_end {
+                let area = &mut self.areas[idx];
+                area.map_perm = new_map_perm;
+                let mapped_vpns: Vec<_> = area.data_frames.keys().copied().collect();
+                for vpn in mapped_vpns {
+                    self.modify_user_pte_perm(vpn, new_map_perm);
+                }
+                idx += 1;
+                continue;
+            }
+
+            // 需要拆分：取出当前 area，分成左/中/右三段
+            let mut old_area = self.areas.remove(idx);
+            let old_map_type = old_area.map_type;
+            let old_map_perm = old_area.map_perm;
+
+            // 拆分 data_frames
+            let mut middle_and_right = old_area.data_frames.split_off(&overlap_start);
+            let right_frames = middle_and_right.split_off(&overlap_end);
+
+            // 修改中间段已映射页的 PTE 权限
+            let mapped_vpns: Vec<_> = middle_and_right.keys().copied().collect();
+            for vpn in mapped_vpns {
+                self.modify_user_pte_perm(vpn, new_map_perm);
+            }
+
+            // 插入左段（旧权限）
+            if overlap_start > area_start {
+                self.areas.insert(
+                    idx,
+                    MapArea {
+                        vpn_range: VPNRange::new(area_start, overlap_start),
+                        data_frames: old_area.data_frames,
+                        map_type: old_map_type,
+                        map_perm: old_map_perm,
+                    },
+                );
+                idx += 1;
+            }
+
+            // 插入中段（新权限）
+            self.areas.insert(
+                idx,
+                MapArea {
+                    vpn_range: VPNRange::new(overlap_start, overlap_end),
+                    data_frames: middle_and_right,
+                    map_type: old_map_type,
+                    map_perm: new_map_perm,
+                },
+            );
+            idx += 1;
+
+            // 插入右段（旧权限）
+            if overlap_end < area_end {
+                self.areas.insert(
+                    idx,
+                    MapArea {
+                        vpn_range: VPNRange::new(overlap_end, area_end),
+                        data_frames: right_frames,
+                        map_type: old_map_type,
+                        map_perm: old_map_perm,
+                    },
+                );
+                idx += 1;
+            }
+        }
+        Ok(())
+    }
+
+    fn modify_user_pte_perm(&mut self, vpn: VirtPageNum, map_perm: MapPermission) {
+        let Some(pte) = self.page_table.translate(vpn) else {
+            return;
+        };
+        if !pte.is_valid() {
+            return;
+        }
+
+        let mut flags = PTEFlags::from(map_perm);
+        if pte.is_cow() {
+            flags |= PTEFlags::COW;
+            flags.remove(PTEFlags::WRITE);
+        }
+        self.page_table.modify_pte(vpn, flags);
     }
 
     /// 修改页表基址寄存器，切换页表
@@ -565,20 +684,9 @@ impl MemorySet {
                 self.page_table.modify_pte(vpn, flags);
                 self.page_table.clear_pte_cow(vpn);
             } else {
-                // 分配新帧并拷贝
-                let new_frame = frame_alloc().ok_or(Errno::ENOMEM)?;
-                let new_ppn = new_frame.ppn();
-                new_frame
-                    .ppn()
-                    .get_bytes_array()
-                    .copy_from_slice(old_frame.ppn().get_bytes_array());
-
-                self.page_table.unmap(vpn);
-                let flags = PTEFlags::from(area_perm);
-                self.page_table.map(vpn, new_ppn, flags);
-                self.areas[area_idx]
-                    .data_frames
-                    .insert(vpn, Arc::new(new_frame));
+                // 多进程共享时，换入一页新物理页并复制旧页内容
+                let old_data = old_frame.ppn().get_bytes_array();
+                self.areas[area_idx].remap_one_with_data(&mut self.page_table, vpn, old_data)?;
             }
             self.flush_tlb();
             return Ok(());
@@ -599,13 +707,7 @@ impl MemorySet {
                 return Err(Errno::EFAULT);
             }
 
-            let new_frame = frame_alloc().ok_or(Errno::ENOMEM)?;
-            let new_ppn = new_frame.ppn();
-            let flags = PTEFlags::from(area_perm);
-            self.page_table.map(vpn, new_ppn, flags);
-            self.areas[area_idx]
-                .data_frames
-                .insert(vpn, Arc::new(new_frame));
+            self.areas[area_idx].map_one(&mut self.page_table, vpn)?;
             self.flush_tlb();
             return Ok(());
         }
@@ -688,13 +790,13 @@ impl MapArea {
     /// 为逻辑段上所有虚拟页创建物理页帧并建立映射
     ///
     /// 传入页表的可变借用，以修改传入页表的内容
-    pub fn map(&mut self, page_table: &mut PageTable) {
+    pub fn map(&mut self, page_table: &mut PageTable) -> SysResult {
         for vpn in self.vpn_range {
-            self.map_one(page_table, vpn);
+            self.map_one(page_table, vpn)?;
         }
+        Ok(())
     }
     /// 为逻辑段上所有虚拟页销毁物理页帧并消除映射
-    #[allow(unused)]
     pub fn unmap(&mut self, page_table: &mut PageTable) {
         for vpn in self.vpn_range {
             self.unmap_one(page_table, vpn);
@@ -741,7 +843,7 @@ impl MapArea {
     }
 
     /// 依据逻辑段的不同映射策略，为虚拟页分配物理页帧，并建立映射关系
-    pub fn map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
+    pub fn map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) -> SysResult {
         let ppn: PhysPageNum;
         match self.map_type {
             // 直接映射，物理页号和虚拟页号存在线性偏移，一般用于内核，无需分配页帧管理，因为内存地址固定
@@ -750,13 +852,32 @@ impl MapArea {
             }
             // 随机映射，物理页号和虚拟页号无关，用于用户程序，分配页帧统一管理
             MapType::Framed => {
-                let frame = frame_alloc().unwrap();
+                let frame = frame_alloc().ok_or(Errno::ENOMEM)?;
                 ppn = frame.ppn();
                 self.data_frames.insert(vpn, Arc::new(frame));
             }
         }
         let pte_flags = PTEFlags::from(self.map_perm);
         page_table.map(vpn, ppn, pte_flags);
+        Ok(())
+    }
+
+    /// 为已有映射换入一页新的物理页，并把给定数据复制进去
+    pub fn remap_one_with_data(
+        &mut self,
+        page_table: &mut PageTable,
+        vpn: VirtPageNum,
+        data: &[u8],
+    ) -> SysResult {
+        let frame = frame_alloc().ok_or(Errno::ENOMEM)?;
+        let ppn = frame.ppn();
+        // 由调用者保证 data 合法
+        ppn.get_bytes_array().copy_from_slice(data);
+
+        page_table.unmap(vpn);
+        self.data_frames.insert(vpn, Arc::new(frame));
+        page_table.map(vpn, ppn, PTEFlags::from(self.map_perm));
+        Ok(())
     }
 
     /// 消除虚拟页与物理页帧的映射关系，自动销毁失去连接的物理页帧

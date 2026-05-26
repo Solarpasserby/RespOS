@@ -55,6 +55,34 @@ impl Default for RUsage {
     }
 }
 
+/// 系统调用 sys_set_tid_address
+///
+/// musl 初始化线程库时调用，设置 clear-child-tid 地址。
+/// 与 CLONE_CHILD_CLEARTID 配合，在线程退出时向该地址写入 0 并 futex wake，
+/// 以唤醒 wait4 / pthread_join 的调用者。
+pub fn sys_set_tid_address(tidptr: usize) -> SysResult<usize> {
+    let _ = tidptr;
+    // TODO: 保存 clear_child_tid 地址到 TaskControlBlock
+    Err(Errno::ENOSYS)
+}
+
+/// 系统调用 sys_futex - 快速用户空间互斥锁
+///
+/// FUTEX_WAIT: 如果 *uaddr == val ，则阻塞当前任务；否则返回 EAGAIN。
+/// FUTEX_WAKE: 唤醒最多 val 个阻塞在 uaddr 上的任务，返回实际唤醒数。
+pub fn sys_futex(
+    uaddr: *const i32,
+    futex_op: usize,
+    val: usize,
+    _timeout: usize,
+    _uaddr2: usize,
+    _val3: usize,
+) -> SysResult<usize> {
+    let _ = (uaddr, futex_op, val);
+    // TODO: 实现 futex 等待/唤醒队列
+    Err(Errno::ENOSYS)
+}
+
 pub fn sys_exit(exit_code: i32) -> ! {
     exit_and_run_next(exit_code);
     panic!("Unreachable in sys_exit!");
