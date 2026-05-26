@@ -5,9 +5,11 @@ use super::frame_allocator::{FrameTracker, frame_alloc};
 use super::{PTEFlags, PageTable, PageTableEntry};
 use crate::arch::{sfence, write_mmu_token};
 use crate::config::{
-    KERNEL_BASE, KERNEL_STACK_SIZE, MEMORY_END, MMAP_MIN_ADDR, MMIO, PAGE_SIZE, USER_STACK_SIZE,
+    KERNEL_BASE, KERNEL_STACK_SIZE, MEMORY_END, MMAP_MIN_ADDR, PAGE_SIZE, USER_STACK_SIZE,
+    VIRTIO_MMIO,
 };
 use crate::syscall::{Errno, SysResult};
+use crate::trap::PageFaultCause;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -65,6 +67,11 @@ impl MemorySet {
         }
         self.areas.push(map_area); // 转移所有权
     }
+    /// 惰性添加逻辑段——只记录虚拟地址范围，不分配物理页不建立映射
+    fn push_map_area_lazy(&mut self, map_area: MapArea) {
+        self.areas.push(map_area);
+    }
+
     /// 对外暴露的添加内核栈段的接口
     pub fn insert_stack_area(&mut self, stack_top: usize) {
         self.push_empty_map_area(
@@ -105,6 +112,15 @@ impl MemorySet {
             None,
             0,
         );
+    }
+    /// 惰性插入逻辑段，只预留虚拟地址空间，不分配物理页（由 page fault handler 按需分配）
+    pub fn insert_framed_area_va_lazy(
+        &mut self,
+        start_va: VirtAddr,
+        end_va: VirtAddr,
+        map_perm: MapPermission,
+    ) {
+        self.push_map_area_lazy(MapArea::new(start_va, end_va, MapType::Framed, map_perm));
     }
     /// 根据首虚拟页号删除对应逻辑段
     pub fn remove_area_with_start_vpn(&mut self, vpn_start: VirtPageNum) -> SysResult {
@@ -176,8 +192,8 @@ impl MemorySet {
         Ok(())
     }
 
-    /// 根据首虚拟页号重新映射对应逻辑段（逻辑段的大小发生变化）
-    pub fn remap_area_with_start_vpn(
+    /// 惰性重映射：只修改 VPN 范围，不分配/释放物理页（由 page fault handler 按需处理）
+    pub fn remap_area_lazy(
         &mut self,
         vpn_start: VirtPageNum,
         new_vpn_end: VirtPageNum,
@@ -197,16 +213,10 @@ impl MemorySet {
         }
 
         let old_vpn_end = area.vpn_range.get_end();
-        let page_table = &mut self.page_table;
-        if new_vpn_end > old_vpn_end {
-            let vpn_range = VPNRange::new(old_vpn_end, new_vpn_end);
-            for vpn in vpn_range {
-                area.map_one(page_table, vpn);
-            }
-        } else {
+        if new_vpn_end < old_vpn_end {
             let vpn_range = VPNRange::new(new_vpn_end, old_vpn_end);
             for vpn in vpn_range {
-                area.unmap_one(page_table, vpn);
+                area.unmap_one(&mut self.page_table, vpn);
             }
         }
         area.vpn_range = VPNRange::new(vpn_start, new_vpn_end);
@@ -331,8 +341,8 @@ impl MemorySet {
             None,
             0,
         );
-        // MMIO 部分
-        for (start, len) in MMIO {
+        // 设备 MMIO 区域
+        for (start, len) in VIRTIO_MMIO.iter().copied() {
             memory_set.push_empty_map_area(
                 MapArea::new(
                     VirtAddr::from(KERNEL_BASE + start),
@@ -424,23 +434,56 @@ impl MemorySet {
         )
     }
 
-    pub fn from_existed_user(user_space: &MemorySet) -> Self {
+    /// 基于已有用户地址空间创建新地址空间（用于 fork）
+    ///
+    /// 使用 COW（写时复制）策略：
+    /// - 可写页：父子共享物理帧，两边 PTE 标记为只读 + COW
+    /// - 只读页：直接共享物理帧，保持只读
+    /// - 惰性未分配页：只复制 VPN 范围，各自按需分配
+    pub fn from_existed_user(user_space: &mut MemorySet) -> Self {
         let mut memory_set = Self::from_kernel_page_table();
-        // 复制 heap_bottom 和 brk
         memory_set.brk = user_space.brk;
         memory_set.heap_bottom = user_space.heap_bottom;
+        memory_set.mmap_start = user_space.mmap_start;
 
-        // 映射并复制各段，堆的内容也被复制
-        for area in user_space.areas.iter() {
-            let new_area = MapArea::from_another(area);
-            memory_set.push_empty_map_area(new_area, None, 0);
+        for area in user_space.areas.iter_mut() {
+            let mut new_area = MapArea::from_another(area);
+            let is_writable = area.map_perm.contains(MapPermission::WRITE);
+
             for vpn in area.vpn_range {
-                // 两个逻辑段的虚拟地址一致
-                let src = user_space.translate(vpn).unwrap().ppn().get_bytes_array();
-                let dst = memory_set.translate(vpn).unwrap().ppn().get_bytes_array();
-                dst.copy_from_slice(src);
+                if !area.data_frames.contains_key(&vpn) {
+                    // 惰性未分配页：PTE 无效，data_frames 无记录
+                    // 子进程也跳过，各自在访问时按需分配
+                    continue;
+                }
+
+                let shared_frame = area.data_frames.get(&vpn).unwrap().clone();
+                let ppn = shared_frame.ppn();
+
+                if is_writable {
+                    // COW 共享：标记父进程 PTE 为只读 + COW
+                    let parent_pte = user_space.page_table.translate(vpn).unwrap();
+                    let mut flags = parent_pte.flags();
+                    flags.remove(PTEFlags::WRITE);
+                    user_space.page_table.modify_pte(vpn, flags);
+                    user_space.page_table.set_pte_cow(vpn);
+
+                    // 子进程 PTE 同样为只读 + COW
+                    let mut child_flags = PTEFlags::from_bits(area.map_perm.bits).unwrap();
+                    child_flags.remove(PTEFlags::WRITE);
+                    memory_set.page_table.map(vpn, ppn, child_flags);
+                    memory_set.page_table.set_pte_cow(vpn);
+                } else {
+                    // 只读页直接共享，无需 COW
+                    let child_flags = PTEFlags::from_bits(area.map_perm.bits).unwrap();
+                    memory_set.page_table.map(vpn, ppn, child_flags);
+                }
+
+                new_area.data_frames.insert(vpn, shared_frame);
             }
+            memory_set.areas.push(new_area);
         }
+        user_space.flush_tlb();
         memory_set
     }
 }
@@ -486,6 +529,119 @@ impl MemorySet {
         }
         Err(Errno::EFAULT)
     }
+
+    /// 尝试处理用户态页错误，解决 COW 或惰性分配
+    pub fn handle_page_fault(&mut self, cause: PageFaultCause, stval: usize) -> SysResult {
+        let vpn = VirtAddr::from(stval).floor();
+
+        let area_idx = match self.areas.iter().position(|a| a.vpn_range.contain(&vpn)) {
+            Some(idx) => idx,
+            None => return Err(Errno::EFAULT),
+        };
+
+        let area_perm = self.areas[area_idx].map_perm;
+        if !area_perm.contains(MapPermission::USER) {
+            return Err(Errno::EFAULT);
+        }
+
+        let pte = self.page_table.translate(vpn);
+        let is_store = matches!(cause, PageFaultCause::Store);
+
+        // COW 写入：PTE 有效 + COW 标记 + area 允许写
+        if is_store && pte.is_some_and(|p| p.is_valid() && p.is_cow()) {
+            if !area_perm.contains(MapPermission::WRITE) {
+                return Err(Errno::EFAULT);
+            }
+
+            let old_frame = self.areas[area_idx]
+                .data_frames
+                .get(&vpn)
+                .ok_or(Errno::EFAULT)?;
+            let count = Arc::strong_count(old_frame);
+
+            if count == 1 {
+                // 无其他进程共享，直接恢复可写
+                let flags = PTEFlags::from(area_perm);
+                self.page_table.modify_pte(vpn, flags);
+                self.page_table.clear_pte_cow(vpn);
+            } else {
+                // 分配新帧并拷贝
+                let new_frame = frame_alloc().ok_or(Errno::ENOMEM)?;
+                let new_ppn = new_frame.ppn();
+                new_frame
+                    .ppn()
+                    .get_bytes_array()
+                    .copy_from_slice(old_frame.ppn().get_bytes_array());
+
+                self.page_table.unmap(vpn);
+                let flags = PTEFlags::from(area_perm);
+                self.page_table.map(vpn, new_ppn, flags);
+                self.areas[area_idx]
+                    .data_frames
+                    .insert(vpn, Arc::new(new_frame));
+            }
+            self.flush_tlb();
+            return Ok(());
+        }
+
+        // 惰性分配：PTE 无效 + 在有效 area 内
+        if pte.is_none() || !pte.unwrap().is_valid() {
+            let needed_perm = if is_store {
+                MapPermission::WRITE
+            } else {
+                match cause {
+                    PageFaultCause::Instruction => MapPermission::EXECUTE,
+                    _ => MapPermission::READ,
+                }
+            };
+
+            if !area_perm.contains(needed_perm) {
+                return Err(Errno::EFAULT);
+            }
+
+            let new_frame = frame_alloc().ok_or(Errno::ENOMEM)?;
+            let new_ppn = new_frame.ppn();
+            let flags = PTEFlags::from(area_perm);
+            self.page_table.map(vpn, new_ppn, flags);
+            self.areas[area_idx]
+                .data_frames
+                .insert(vpn, Arc::new(new_frame));
+            self.flush_tlb();
+            return Ok(());
+        }
+
+        Err(Errno::EFAULT)
+    }
+
+    pub fn ensure_user_page_access(
+        &mut self,
+        vpn_range: VPNRange,
+        perm: MapPermission,
+    ) -> SysResult {
+        for vpn in vpn_range {
+            let pte = self.page_table.translate(vpn);
+            let needs_fault = match pte {
+                Some(pte) if pte.is_valid() => {
+                    perm.contains(MapPermission::WRITE) && (!pte.writable() || pte.is_cow())
+                }
+                _ => true,
+            };
+            if !needs_fault {
+                continue;
+            }
+
+            let cause = if perm.contains(MapPermission::WRITE) {
+                PageFaultCause::Store
+            } else if perm.contains(MapPermission::EXECUTE) {
+                PageFaultCause::Instruction
+            } else {
+                PageFaultCause::Load
+            };
+            let va = usize::from(VirtAddr::from(vpn));
+            self.handle_page_fault(cause, va)?;
+        }
+        Ok(())
+    }
 }
 
 /// 逻辑段
@@ -493,7 +649,7 @@ impl MemorySet {
 /// 一段连续地址 [`VPNRange`] 的虚拟内存
 struct MapArea {
     vpn_range: VPNRange,
-    data_frames: BTreeMap<VirtPageNum, FrameTracker>,
+    data_frames: BTreeMap<VirtPageNum, Arc<FrameTracker>>,
     map_type: MapType,
     map_perm: MapPermission,
 }
@@ -596,10 +752,10 @@ impl MapArea {
             MapType::Framed => {
                 let frame = frame_alloc().unwrap();
                 ppn = frame.ppn();
-                self.data_frames.insert(vpn, frame);
+                self.data_frames.insert(vpn, Arc::new(frame));
             }
         }
-        let pte_flags = PTEFlags::from_bits(self.map_perm.bits).unwrap();
+        let pte_flags = PTEFlags::from(self.map_perm);
         page_table.map(vpn, ppn, pte_flags);
     }
 
@@ -611,7 +767,7 @@ impl MapArea {
             }
             _ => {}
         }
-        page_table.unmap(vpn);
+        page_table.try_unmap(vpn);
     }
 }
 
@@ -622,7 +778,7 @@ pub enum MapType {
 }
 
 bitflags! {
-    pub struct MapPermission: u8 {
+    pub struct MapPermission: u16 {
         const READ     = 1 << 1;
         const WRITE    = 1 << 2;
         const EXECUTE  = 1 << 3;

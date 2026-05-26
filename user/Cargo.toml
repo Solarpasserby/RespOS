@@ -7,6 +7,9 @@ edition = "2024"
 name = "user_lib"
 path = "src/lib.rs"
 
+[features]
+eval = []
+
 [dependencies]
 # riscv = "0.10"
 bitflags = "1.2.1"

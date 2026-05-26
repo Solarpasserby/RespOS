@@ -9,7 +9,7 @@ mod context;
 
 use super::timer::set_next_ti_trigger;
 use crate::syscall::*;
-use crate::task::{exit_and_run_next, handle_signals, yield_current_task};
+use crate::task::{current_task, exit_and_run_next, handle_signals, yield_current_task};
 use core::arch::global_asm;
 use riscv::register::{
     mtvec::TrapMode,
@@ -22,6 +22,27 @@ use riscv::register::{
 pub use context::TrapContext;
 
 global_asm!(include_str!("trap.S"));
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum PageFaultCause {
+    Instruction,
+    Load,
+    Store,
+}
+
+fn page_fault_cause(cause: Trap) -> Option<PageFaultCause> {
+    match cause {
+        Trap::Exception(Exception::InstructionFault)
+        | Trap::Exception(Exception::InstructionPageFault) => Some(PageFaultCause::Instruction),
+        Trap::Exception(Exception::LoadFault) | Trap::Exception(Exception::LoadPageFault) => {
+            Some(PageFaultCause::Load)
+        }
+        Trap::Exception(Exception::StoreFault) | Trap::Exception(Exception::StorePageFault) => {
+            Some(PageFaultCause::Store)
+        }
+        _ => None,
+    }
+}
 
 unsafe extern "C" {
     fn __trap_from_user();
@@ -73,14 +94,22 @@ pub fn trap_handler(cx: &mut TrapContext) {
         | Trap::Exception(Exception::InstructionPageFault)
         | Trap::Exception(Exception::LoadFault)
         | Trap::Exception(Exception::LoadPageFault) => {
-            println!(
-                "[kernel] PageFault in application, cause = {:?}, sepc = {:#x}, bad addr = {:#x}, kernel killed it.",
-                scause.cause(),
-                cx.sepc,
-                stval
-            );
-            // 页错误退出码
-            exit_and_run_next(-2);
+            let page_fault_cause = page_fault_cause(scause.cause()).unwrap();
+            let result = current_task()
+                .expect("[kernel] current task is None.")
+                .op_memory_set_write(|memory_set| {
+                    memory_set.handle_page_fault(page_fault_cause, stval)
+                });
+            if let Err(err) = result {
+                println!(
+                    "[kernel] PageFault in application, cause = {:?}, sepc = {:#x}, bad addr = {:#x}, err = {:?}, kernel killed it.",
+                    scause.cause(),
+                    cx.sepc,
+                    stval,
+                    err
+                );
+                exit_and_run_next(-2);
+            }
         }
         Trap::Exception(Exception::IllegalInstruction) => {
             println!("[kernel] IllegalInstruction in application, kernel killed it.");
@@ -104,12 +133,46 @@ pub fn trap_handler(cx: &mut TrapContext) {
 }
 
 #[unsafe(no_mangle)]
-pub fn trap_from_kernel() -> ! {
-    // TODO: 需补齐内核对于异常的处理
-    panic!(
-        "[kernel] Trap is not defined in kernel: cause = {:?}, sepc = {:#x}, stval = {:#x}",
-        scause::read().cause(),
-        riscv::register::sepc::read(),
-        stval::read()
-    );
+pub fn kernel_trap_handler(cx: &mut TrapContext) {
+    let scause = scause::read();
+    match scause.cause() {
+        Trap::Exception(Exception::Breakpoint) => {
+            info!("Breakpoint at 0x{:x}", cx.sepc);
+            cx.sepc += 2;
+        }
+        Trap::Exception(Exception::IllegalInstruction) => {
+            panic!("IllegalInstruction at 0x{:x}", cx.sepc);
+        }
+        Trap::Exception(Exception::LoadPageFault)
+        | Trap::Exception(Exception::LoadFault)
+        | Trap::Exception(Exception::StorePageFault)
+        | Trap::Exception(Exception::StoreFault) => {
+            panic!(
+                "page fault in kernel, sepc = {:#x}, bad addr = {:#x}, scause = {:?}",
+                cx.sepc,
+                stval::read(),
+                scause.cause()
+            );
+        }
+        Trap::Exception(Exception::InstructionPageFault) => {
+            panic!(
+                "Instruction page fault at 0x{:x}, badaddr = {:#x}",
+                cx.sepc,
+                stval::read()
+            );
+        }
+        Trap::Exception(Exception::UserEnvCall) => {
+            panic!("UserEnvCall from kernel!");
+        }
+        Trap::Interrupt(Interrupt::SupervisorTimer) => {
+            info!("SupervisorTimer in kernel mode");
+        }
+        _ => {
+            panic!(
+                "Unsupported trap {:?}, stval = {:#x}!",
+                scause.cause(),
+                stval::read()
+            );
+        }
+    }
 }

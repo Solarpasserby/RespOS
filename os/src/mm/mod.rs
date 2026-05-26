@@ -171,6 +171,9 @@ fn check_user_buffer(start: usize, byte_len: usize, perm: MapPermission) -> SysR
     let vpn_range = VPNRange::new(start_vpn, end_vpn);
     current_task()
         .expect("[kernel] current task is None.")
-        .op_memory_set_read(|memory_set| memory_set.check_valid_user_vpn_range(vpn_range, perm))?;
+        .op_memory_set_write(|memory_set| {
+            memory_set.check_valid_user_vpn_range(vpn_range.clone(), perm)?;
+            memory_set.ensure_user_page_access(vpn_range, perm)
+        })?;
     Ok(())
 }

@@ -1,43 +1,44 @@
-use core::arch::asm;
 use crate::SignalAction;
+use core::arch::asm;
 
-const SYSCALL_GETCWD: usize     = 17;
-const SYSCALL_DUP: usize        = 23;
-const SYSCALL_DUP3: usize       = 24;
-const SYSCALL_MKDIRAT: usize    = 34;
-const SYSCALL_UNLINKAT: usize   = 35;
-const SYSCALL_LINKAT: usize     = 37;
-const SYSCALL_UMOUNT2: usize    = 39;
-const SYSCALL_MOUNT: usize      = 40;
-const SYSCALL_CHDIR: usize      = 49;
-const SYSCALL_OPENAT: usize     = 56;
-const SYSCALL_CLOSE: usize      = 57;
-const SYSCALL_PIPE2: usize      = 59;
+const SYSCALL_GETCWD: usize = 17;
+const SYSCALL_DUP: usize = 23;
+const SYSCALL_DUP3: usize = 24;
+const SYSCALL_MKDIRAT: usize = 34;
+const SYSCALL_UNLINKAT: usize = 35;
+const SYSCALL_LINKAT: usize = 37;
+const SYSCALL_UMOUNT2: usize = 39;
+const SYSCALL_MOUNT: usize = 40;
+const SYSCALL_CHDIR: usize = 49;
+const SYSCALL_OPENAT: usize = 56;
+const SYSCALL_CLOSE: usize = 57;
+const SYSCALL_PIPE2: usize = 59;
 const SYSCALL_GETDENTS64: usize = 61;
-const SYSCALL_LSEEK: usize      = 62;
-const SYSCALL_READ: usize       = 63;
-const SYSCALL_WRITE: usize      = 64;
-const SYSCALL_STAT: usize       = 79;
-const SYSCALL_FSTAT: usize      = 80;
-const SYSCALL_EXIT: usize       = 93;
-const SYSCALL_NANOSLEEP: usize  = 101;
+const SYSCALL_LSEEK: usize = 62;
+const SYSCALL_READ: usize = 63;
+const SYSCALL_WRITE: usize = 64;
+const SYSCALL_STAT: usize = 79;
+const SYSCALL_FSTAT: usize = 80;
+const SYSCALL_EXIT: usize = 93;
+const SYSCALL_NANOSLEEP: usize = 101;
 const SYSCALL_SCHED_YIELD: usize = 124;
 const SYSCALL_SETPRIORITY: usize = 140;
-const SYSCALL_TIMES: usize      = 153;
-const SYSCALL_UNAME: usize      = 160;
-const SYSCALL_KILL: usize     = 129;
+const SYSCALL_TIMES: usize = 153;
+const SYSCALL_UNAME: usize = 160;
+const SYSCALL_KILL: usize = 129;
 const SYSCALL_SIGACTION: usize = 134;
 const SYSCALL_SIGPROCMASK: usize = 135;
 const SYSCALL_SIGRETURN: usize = 139;
+const SYSCALL_REBOOT: usize = 142;
 const SYSCALL_GETTIMEOFDAY: usize = 169;
-const SYSCALL_GETPID: usize     = 172;
-const SYSCALL_GETPPID: usize    = 173;
-const SYSCALL_BRK: usize        = 214;
-const SYSCALL_MUNMAP: usize     = 215;
-const SYSCALL_CLONE: usize      = 220;
-const SYSCALL_EXECVE: usize     = 221;
-const SYSCALL_MMAP: usize       = 222;
-const SYSCALL_WAIT4: usize      = 260;
+const SYSCALL_GETPID: usize = 172;
+const SYSCALL_GETPPID: usize = 173;
+const SYSCALL_BRK: usize = 214;
+const SYSCALL_MUNMAP: usize = 215;
+const SYSCALL_CLONE: usize = 220;
+const SYSCALL_EXECVE: usize = 221;
+const SYSCALL_MMAP: usize = 222;
+const SYSCALL_WAIT4: usize = 260;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default)]
@@ -111,16 +112,25 @@ fn syscall(id: usize, args: [usize; 6]) -> isize {
     ret
 }
 
-pub fn sys_read(fd: usize, buf: &mut[u8]) -> isize {
-    syscall(SYSCALL_READ, [fd, buf.as_mut_ptr() as usize, buf.len(), 0, 0, 0])
+pub fn sys_read(fd: usize, buf: &mut [u8]) -> isize {
+    syscall(
+        SYSCALL_READ,
+        [fd, buf.as_mut_ptr() as usize, buf.len(), 0, 0, 0],
+    )
 }
 
 pub fn sys_write(fd: usize, buf: &[u8]) -> isize {
-    syscall(SYSCALL_WRITE, [fd, buf.as_ptr() as usize, buf.len(), 0, 0, 0])
+    syscall(
+        SYSCALL_WRITE,
+        [fd, buf.as_ptr() as usize, buf.len(), 0, 0, 0],
+    )
 }
 
 pub fn sys_getcwd(buf: &mut [u8]) -> isize {
-    syscall(SYSCALL_GETCWD, [buf.as_mut_ptr() as usize, buf.len(), 0, 0, 0, 0])
+    syscall(
+        SYSCALL_GETCWD,
+        [buf.as_mut_ptr() as usize, buf.len(), 0, 0, 0, 0],
+    )
 }
 
 pub fn sys_dup(fd: usize) -> isize {
@@ -132,11 +142,17 @@ pub fn sys_dup3(fd_src: usize, fd_dst: usize, flags: usize) -> isize {
 }
 
 pub fn sys_mkdirat(dirfd: isize, path: &str, mode: usize) -> isize {
-    syscall(SYSCALL_MKDIRAT, [dirfd as usize, path.as_ptr() as usize, mode, 0, 0, 0])
+    syscall(
+        SYSCALL_MKDIRAT,
+        [dirfd as usize, path.as_ptr() as usize, mode, 0, 0, 0],
+    )
 }
 
 pub fn sys_unlinkat(dirfd: isize, path: &str, flags: usize) -> isize {
-    syscall(SYSCALL_UNLINKAT, [dirfd as usize, path.as_ptr() as usize, flags, 0, 0, 0])
+    syscall(
+        SYSCALL_UNLINKAT,
+        [dirfd as usize, path.as_ptr() as usize, flags, 0, 0, 0],
+    )
 }
 
 pub fn sys_chdir(path: &str) -> isize {
@@ -144,15 +160,21 @@ pub fn sys_chdir(path: &str) -> isize {
 }
 
 pub fn sys_openat(dirfd: isize, path: &str, flags: usize, mode: usize) -> isize {
-    syscall(SYSCALL_OPENAT, [dirfd as usize, path.as_ptr() as usize, flags, mode, 0, 0])
+    syscall(
+        SYSCALL_OPENAT,
+        [dirfd as usize, path.as_ptr() as usize, flags, mode, 0, 0],
+    )
 }
 
 pub fn sys_close(fd: usize) -> isize {
     syscall(SYSCALL_CLOSE, [fd, 0, 0, 0, 0, 0])
 }
 
-pub fn sys_pipe2(pipefd: &mut [usize; 2], flags: usize) -> isize {
-    syscall(SYSCALL_PIPE2, [pipefd.as_mut_ptr() as usize, flags, 0, 0, 0, 0])
+pub fn sys_pipe2(pipefd: &mut [i32; 2], flags: usize) -> isize {
+    syscall(
+        SYSCALL_PIPE2,
+        [pipefd.as_mut_ptr() as usize, flags, 0, 0, 0, 0],
+    )
 }
 
 pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> isize {
@@ -164,7 +186,10 @@ pub fn sys_lseek(fd: usize, offset: isize, whence: usize) -> isize {
 }
 
 pub fn sys_stat(path: &str, stat: &mut Stat) -> isize {
-    syscall(SYSCALL_STAT, [path.as_ptr() as usize, stat as *mut _ as usize, 0, 0, 0, 0])
+    syscall(
+        SYSCALL_STAT,
+        [path.as_ptr() as usize, stat as *mut _ as usize, 0, 0, 0, 0],
+    )
 }
 
 pub fn sys_fstat(fd: usize, stat: &mut Stat) -> isize {
@@ -181,7 +206,10 @@ pub fn sys_sched_yield() -> isize {
 }
 
 pub fn sys_gettimeofday(tv: &mut TimeVal, tz: usize) -> isize {
-    syscall(SYSCALL_GETTIMEOFDAY, [tv as *mut _ as usize, tz, 0, 0, 0, 0])
+    syscall(
+        SYSCALL_GETTIMEOFDAY,
+        [tv as *mut _ as usize, tz, 0, 0, 0, 0],
+    )
 }
 
 pub fn sys_clone(flags: usize, stack: usize, ptid: usize, tls: usize, ctid: usize) -> isize {
@@ -189,16 +217,29 @@ pub fn sys_clone(flags: usize, stack: usize, ptid: usize, tls: usize, ctid: usiz
 }
 
 pub fn sys_execve(path: &str, args: &[*const u8], envp: *const *const u8) -> isize {
-    syscall(SYSCALL_EXECVE, [path.as_ptr() as usize, args.as_ptr() as usize, envp as usize, 0, 0, 0])
+    syscall(
+        SYSCALL_EXECVE,
+        [
+            path.as_ptr() as usize,
+            args.as_ptr() as usize,
+            envp as usize,
+            0,
+            0,
+            0,
+        ],
+    )
 }
 
 pub fn sys_wait4(pid: isize, exit_code: *mut i32) -> isize {
-    syscall(SYSCALL_WAIT4, [pid as usize, exit_code as usize, 0, 0, 0, 0])
+    syscall(
+        SYSCALL_WAIT4,
+        [pid as usize, exit_code as usize, 0, 0, 0, 0],
+    )
 }
 
 pub fn sys_kill(pid: usize, signum: i32) -> isize {
     syscall(SYSCALL_KILL, [pid, signum as usize, 0, 0, 0, 0])
-}     
+}
 
 pub fn sys_sigaction(
     signum: i32,
@@ -207,7 +248,14 @@ pub fn sys_sigaction(
 ) -> isize {
     syscall(
         SYSCALL_SIGACTION,
-        [signum as usize, action as usize, old_action as usize, 0, 0, 0],
+        [
+            signum as usize,
+            action as usize,
+            old_action as usize,
+            0,
+            0,
+            0,
+        ],
     )
     /*
     syscall(
@@ -229,6 +277,10 @@ pub fn sys_sigreturn() -> isize {
     syscall(SYSCALL_SIGRETURN, [0, 0, 0, 0, 0, 0])
 }
 
+pub fn sys_reboot() -> isize {
+    syscall(SYSCALL_REBOOT, [0, 0, 0, 0, 0, 0])
+}
+
 pub fn sys_linkat(
     olddirfd: isize,
     oldpath: &str,
@@ -236,39 +288,45 @@ pub fn sys_linkat(
     newpath: &str,
     flags: usize,
 ) -> isize {
-    syscall(SYSCALL_LINKAT, [
-        olddirfd as usize,
-        oldpath.as_ptr() as usize,
-        newdirfd as usize,
-        newpath.as_ptr() as usize,
-        flags,
-        0,
-    ])
+    syscall(
+        SYSCALL_LINKAT,
+        [
+            olddirfd as usize,
+            oldpath.as_ptr() as usize,
+            newdirfd as usize,
+            newpath.as_ptr() as usize,
+            flags,
+            0,
+        ],
+    )
 }
 
-pub fn sys_mount(
-    source: &str,
-    target: &str,
-    fstype: &str,
-    flags: usize,
-    data: usize,
-) -> isize {
-    syscall(SYSCALL_MOUNT, [
-        source.as_ptr() as usize,
-        target.as_ptr() as usize,
-        fstype.as_ptr() as usize,
-        flags,
-        data,
-        0,
-    ])
+pub fn sys_mount(source: &str, target: &str, fstype: &str, flags: usize, data: usize) -> isize {
+    syscall(
+        SYSCALL_MOUNT,
+        [
+            source.as_ptr() as usize,
+            target.as_ptr() as usize,
+            fstype.as_ptr() as usize,
+            flags,
+            data,
+            0,
+        ],
+    )
 }
 
 pub fn sys_umount2(target: &str, flags: usize) -> isize {
-    syscall(SYSCALL_UMOUNT2, [target.as_ptr() as usize, flags, 0, 0, 0, 0])
+    syscall(
+        SYSCALL_UMOUNT2,
+        [target.as_ptr() as usize, flags, 0, 0, 0, 0],
+    )
 }
 
 pub fn sys_nanosleep(req: &TimeVal, rem: &mut TimeVal) -> isize {
-    syscall(SYSCALL_NANOSLEEP, [req as *const _ as usize, rem as *mut _ as usize, 0, 0, 0, 0])
+    syscall(
+        SYSCALL_NANOSLEEP,
+        [req as *const _ as usize, rem as *mut _ as usize, 0, 0, 0, 0],
+    )
 }
 
 pub fn sys_setpriority(which: usize, who: usize, prio: isize) -> isize {

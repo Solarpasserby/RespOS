@@ -21,13 +21,15 @@ pub fn sys_brk(addr: usize) -> SysResult<usize> {
         if addr == memory_set.heap_bottom {
             memory_set.remove_area_with_start_vpn(heap_start.floor())?;
         } else if memory_set.brk == memory_set.heap_bottom {
-            memory_set.insert_framed_area_va(
+            // 惰性分配
+            memory_set.insert_framed_area_va_lazy(
                 heap_start,
                 new_end,
                 MapPermission::READ | MapPermission::WRITE | MapPermission::USER,
             );
         } else {
-            memory_set.remap_area_with_start_vpn(heap_start.floor(), new_end.ceil())?;
+            // 惰性分配，惰态修改
+            memory_set.remap_area_lazy(heap_start.floor(), new_end.ceil())?;
         }
 
         memory_set.brk = addr;
@@ -75,7 +77,8 @@ pub fn sys_mmap(
             if end > MMAP_MAX_ADDR {
                 return Err(Errno::ENOMEM);
             }
-            memory_set.insert_framed_area_va(
+            // 惰性分配
+            memory_set.insert_framed_area_va_lazy(
                 VirtAddr::from(start),
                 VirtAddr::from(end),
                 permission,

@@ -3,3 +3,7 @@
 img/*
 .cargo-home/
 CLAUDE.md
+os/.cargo/
+user/.cargo/
+kernel-rv
+kernel-la

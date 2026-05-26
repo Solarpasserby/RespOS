@@ -38,10 +38,6 @@ lazy_static! {
 #[cfg(target_arch = "riscv64")]
 pub fn add_initproc() {
     add_task(INITPROC.clone());
-    // unsafe {
-    //     // 设置 tp 寄存器指向INITPROC
-    //     core::arch::asm!("mv tp, {}", in(reg) initproc_tp);
-    // }
 }
 
 fn call_user_signal_handler(sig: usize, signal: SignalFlags) {
