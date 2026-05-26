@@ -1,0 +1,13 @@
+// os/src/arch/loongarch64/task/mod.rs
+
+use core::arch::global_asm;
+
+global_asm!(include_str!("switch.S"));
+
+unsafe extern "C" {
+    /// 切换任务上下文
+    ///
+    /// 保存当前任务的寄存器到内核栈上，
+    /// 从 next_task_kstack_ptr 恢复下一个任务的上下文。
+    pub fn __switch(next_task_kstack_ptr: usize);
+}

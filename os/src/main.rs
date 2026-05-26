@@ -5,6 +5,7 @@
 #![feature(alloc_error_handler)]
 // TODO: 实现内核内部锁机制后立刻移除
 #![feature(sync_unsafe_cell)]
+#![feature(c_variadic)]
 
 extern crate alloc;
 
@@ -16,6 +17,9 @@ mod console;
 mod lang_item;
 
 pub mod arch;
+// Stub symbols for lwext4 C library when musl-gcc is unavailable
+#[cfg(target_arch = "riscv64")]
+mod lwext4_stubs;
 use arch::{config, sbi, timer, trap};
 
 pub mod drivers;

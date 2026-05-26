@@ -228,7 +228,14 @@ impl MemorySet {
         assert!(pte.readable() || pte.executable() || pte.writable());
 
         write_mmu_token(token);
-        self.flush_tlb(); // 内存屏障，刷新 TLB，确保之后内存读写正确
+        self.flush_tlb();
+    }
+
+    #[cfg(target_arch = "loongarch64")]
+    pub fn activate(&self) {
+        let token = self.page_table.token();
+        write_mmu_token(token);
+        self.flush_tlb();
     }
 
     /// 生成页表对应 `stap` 寄存器值

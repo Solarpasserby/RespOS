@@ -1,3 +1,4 @@
+
 # 目标平台和构建模式
 TARGET := riscv64gc-unknown-none-elf
 MODE ?= debug

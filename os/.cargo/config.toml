@@ -6,6 +6,11 @@ rustflags = [
     "-Clink-arg=-Tsrc/linker_riscv.ld", "-Cforce-frame-pointers=yes"
 ]
 
+[target.loongarch64-unknown-none]
+rustflags = [
+    "-Clink-arg=-Tsrc/linker_loongarch.ld", "-Cforce-frame-pointers=yes"
+]
+
 [profile.dev]
 panic = "abort"
 

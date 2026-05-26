@@ -16,6 +16,7 @@ mod signal;
 mod task;
 mod tid;
 
+#[cfg(target_arch = "riscv64")]
 use crate::loader::get_app_data_by_name;
 pub use action::{SignalAction, SignalActions};
 use alloc::sync::Arc;
@@ -31,17 +32,18 @@ pub use signal::{MAX_SIG, SignalFlags};
 pub use task::{CloneFlags, TaskControlBlock};
 
 lazy_static! {
-    pub static ref INITPROC: Arc<TaskControlBlock> =
-        TaskControlBlock::init(get_app_data_by_name("initproc").unwrap());
+    pub static ref INITPROC: Arc<TaskControlBlock> = {
+        #[cfg(target_arch = "riscv64")]
+        let data = get_app_data_by_name("initproc").unwrap();
+        #[cfg(target_arch = "loongarch64")]
+        let data = &[][..];
+
+        TaskControlBlock::init(data)
+    };
 }
 
-#[cfg(target_arch = "riscv64")]
 pub fn add_initproc() {
     add_task(INITPROC.clone());
-    // unsafe {
-    //     // 设置 tp 寄存器指向INITPROC
-    //     core::arch::asm!("mv tp, {}", in(reg) initproc_tp);
-    // }
 }
 
 fn call_user_signal_handler(sig: usize, signal: SignalFlags) {
@@ -61,7 +63,7 @@ fn call_user_signal_handler(sig: usize, signal: SignalFlags) {
         signal_inner.trap_ctx_backup = Some(*trap_ctx);
 
         // modify trapframe
-        trap_ctx.sepc = handler;
+        trap_ctx.set_sepc(handler);
 
         // put args (a0)
         trap_ctx.x[10] = sig;

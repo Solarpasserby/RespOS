@@ -1,0 +1,144 @@
+# os/src/arch/loongarch64/trap/trap.S
+
+# LoongArch 异常处理汇编
+#
+# 寄存器别名（ABI）:
+#   $r0=zero, $r1=ra, $r2=tp, $r3=sp, $r4=a0, $r5=a1
+#   $r12-$r20=t0-t8 (临时寄存器)
+#
+# LoongArch CSR:
+#   KSAVE0-7 (0x30-0x37): 内核可用暂存寄存器
+#   PRMD   (0x1): 异常前模式（PPLV=bit0, PIE=bit1）
+#   ERA    (0x6): 异常返回地址
+#   ESTAT  (0x5): 异常状态（Ecode=bits[15:0], IS=bit11）
+#   BADV   (0x7): 触发异常的坏地址
+#   EENTRY (0xC): 异常入口地址
+#   ECFG   (0x4): 异常配置
+#   CRMD   (0x0): 当前模式
+#
+# 上下文保存布局 (每个slot 8字节):
+#   sp + 0..31*8:   x1..x31 (跳过x0=zero)
+#   实际按 x0..x31 全部保存方便索引:
+#     x0@sp+0, x1@sp+8, ..., x31@sp+248
+#     prmd@sp+256 (32*8)
+#     era@sp+264  (33*8)
+
+    .section .text
+    .globl __trap_from_user
+    .globl __restore
+    .align 4
+__trap_from_user:
+    # 步骤1: 用 KSAVE0 保存 sp
+    csrwr       $sp, 0x30       # KSAVE0 <-> sp, 现在 sp=原KS值, KSAVE0=用户sp
+    # 现在 $sp 指向内核栈（由之前恢复流程保留在 KSAVE0 中的值）
+    # 如果没有之前的值，说明是首次trap，KSAVE0需要预先初始化
+
+    # 步骤2: 在内核栈上分配 TrapContext 空间 (32*8 + 2*8 = 272 bytes)
+    addi.d      $sp, $sp, -272
+
+    # 步骤3: 保存通用寄存器
+    # x0 恒为0不需要保存，但为了对齐我们保存0
+    st.d        $zero, $sp, 0       # x0
+    # x1(ra), x2(tp), x3(sp from KSAVE0)
+    st.d        $ra, $sp, 8        # x1
+    st.d        $tp, $sp, 16       # x2
+    # 从 KSAVE0 恢复用户 sp 并保存
+    csrrd       $t0, 0x30          # t0 = 用户sp (刚从sp交换进来)
+    st.d        $t0, $sp, 24       # x3 = 用户sp
+    st.d        $a0, $sp, 32       # x4
+    st.d        $a1, $sp, 40       # x5
+    st.d        $a2, $sp, 48       # x6
+    st.d        $a3, $sp, 56       # x7
+    st.d        $a4, $sp, 64       # x8
+    st.d        $a5, $sp, 72       # x9
+    st.d        $a6, $sp, 80       # x10
+    st.d        $a7, $sp, 88       # x11
+    st.d        $t0, $sp, 96       # x12
+    st.d        $t1, $sp, 104      # x13
+    st.d        $t2, $sp, 112      # x14
+    st.d        $t3, $sp, 120      # x15
+    st.d        $t4, $sp, 128      # x16
+    st.d        $t5, $sp, 136      # x17
+    st.d        $t6, $sp, 144      # x18
+    st.d        $t7, $sp, 152      # x19
+    st.d        $t8, $sp, 160      # x20
+    # 保留 x21-x31
+    st.d        $r21, $sp, 168
+    st.d        $s0, $sp, 176      # x23 = s0/fp
+    st.d        $s1, $sp, 184      # x24
+    st.d        $s2, $sp, 192      # x25
+    st.d        $s3, $sp, 200      # x26
+    st.d        $s4, $sp, 208      # x27
+    st.d        $s5, $sp, 216      # x28
+    st.d        $s6, $sp, 224      # x29
+    st.d        $s7, $sp, 232      # x30
+    st.d        $s8, $sp, 240      # x31
+
+    # 步骤4: 保存 PRMD 和 ERA
+    csrrd       $t0, 0x1           # PRMD
+    st.d        $t0, $sp, 256      # offset 32*8
+    csrrd       $t0, 0x6           # ERA
+    st.d        $t0, $sp, 264      # offset 33*8
+
+    # 步骤5: 切换到内核上下文
+    # 设置 CRMD: PLV=0(kernel), IE=0(disable interrupts)
+    csrrd       $t0, 0x0           # CRMD
+    bstrins.d   $t0, $zero, 1, 0   # PLV=0, PIE=0
+    bstrins.d   $t0, $zero, 3, 2   # IE=0
+    csrwr       $t0, 0x0
+
+    # 步骤6: 调用 Rust trap_handler
+    # 参数: a0 = &mut TrapContext (sp)
+    ori         $a0, $sp, 0
+    bl          trap_handler
+
+    # 步骤7: 恢复上下文并返回用户态
+    # 直接落入 __restore
+
+__restore:
+    # 恢复 PRMD 和 ERA
+    ld.d        $t0, $sp, 256
+    csrwr       $t0, 0x1           # PRMD
+    ld.d        $t0, $sp, 264
+    csrwr       $t0, 0x6           # ERA
+
+    # 恢复通用寄存器
+    ld.d        $ra, $sp, 8
+    ld.d        $tp, $sp, 16
+    ld.d        $a0, $sp, 32
+    ld.d        $a1, $sp, 40
+    ld.d        $a2, $sp, 48
+    ld.d        $a3, $sp, 56
+    ld.d        $a4, $sp, 64
+    ld.d        $a5, $sp, 72
+    ld.d        $a6, $sp, 80
+    ld.d        $a7, $sp, 88
+    ld.d        $t0, $sp, 96
+    ld.d        $t1, $sp, 104
+    ld.d        $t2, $sp, 112
+    ld.d        $t3, $sp, 120
+    ld.d        $t4, $sp, 128
+    ld.d        $t5, $sp, 136
+    ld.d        $t6, $sp, 144
+    ld.d        $t7, $sp, 152
+    ld.d        $t8, $sp, 160
+    ld.d        $r21, $sp, 168
+    ld.d        $s0, $sp, 176
+    ld.d        $s1, $sp, 184
+    ld.d        $s2, $sp, 192
+    ld.d        $s3, $sp, 200
+    ld.d        $s4, $sp, 208
+    ld.d        $s5, $sp, 216
+    ld.d        $s6, $sp, 224
+    ld.d        $s7, $sp, 232
+    ld.d        $s8, $sp, 240
+
+    # 恢复 sp: 先把内核栈指针存到 KSAVE0，再从用户sp位置恢复
+    # 先不恢复 x0 (保持与保存时一致)
+    ld.d        $sp, $sp, 24       # 恢复用户 sp (从 x3 的位置)
+    # ERTN: 异常返回 (恢复 PLV 和 PC, 根据 PRMD 返回到用户态)
+    ertn
+
+    .globl __trap_from_kernel
+__trap_from_kernel:
+    bl          trap_from_kernel

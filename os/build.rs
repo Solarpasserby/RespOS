@@ -6,7 +6,13 @@ fn main() {
     println!("cargo:rerun-if-changed=../user/src/");
     println!("cargo:rerun-if-env-changed=PROFILE");
     println!("cargo:rerun-if-env-changed=RESPOS_USER_PROFILE_DIR");
-    insert_app_data().unwrap();
+
+    let target = env::var("TARGET").unwrap_or_default();
+    if target.starts_with("riscv") {
+        insert_app_data().unwrap();
+    } else {
+        insert_empty_app_data().unwrap();
+    }
 }
 
 fn target_path() -> String {
@@ -15,13 +21,28 @@ fn target_path() -> String {
     format!("../user/target/riscv64gc-unknown-none-elf/{profile_dir}/")
 }
 
+fn insert_empty_app_data() -> Result<()> {
+    let mut f = File::create("src/link_app.S").unwrap();
+    writeln!(
+        f,
+        r#"
+    .section .data
+    .global _app_num
+_app_num:
+    .dword 0
+    .global _app_names
+_app_names:
+"#
+    )?;
+    Ok(())
+}
+
 fn insert_app_data() -> Result<()> {
     let mut f = File::create("src/link_app.S").unwrap();
     let target_path = target_path();
     println!("cargo:rerun-if-changed={}", target_path);
     let mut apps: Vec<_> = read_dir("../user/src/bin")
         .unwrap()
-        // .into_iter()
         .map(|dir_entry| {
             let mut name_with_ext = dir_entry.unwrap().file_name().into_string().unwrap();
             name_with_ext.drain(name_with_ext.find('.').unwrap()..name_with_ext.len());
