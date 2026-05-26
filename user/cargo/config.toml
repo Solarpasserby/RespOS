@@ -3,7 +3,7 @@ target = "riscv64gc-unknown-none-elf"
 
 [target.riscv64gc-unknown-none-elf]
 rustflags = [
-    "-Clink-arg=-Tsrc/linker_riscv.ld", "-Cforce-frame-pointers=yes"
+    "-Clink-arg=-Tsrc/linker.ld", "-Cforce-frame-pointers=yes"
 ]
 
 [profile.dev]
@@ -11,7 +11,6 @@ panic = "abort"
 
 [profile.release]
 debug = false
-lto = "thin"
 panic = "abort"
 
 [profile.release-debug]

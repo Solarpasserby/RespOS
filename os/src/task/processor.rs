@@ -16,17 +16,7 @@ use lazy_static::lazy_static;
 // 空闲任务
 #[cfg(target_arch = "riscv64")]
 lazy_static! {
-    pub static ref IDLE_TASK: Arc<TaskControlBlock> = {
-        let idle_task = Arc::new(TaskControlBlock::zero_init());
-        // 将tp寄存器指向idle_task
-        unsafe {
-            // 注意这里需要对Arc指针先解引用再取`IDLE_TASK`地址
-            // 两种方法都可以, Arc::as_ptr或者直接解引用然后引用
-            core::arch::asm!("mv tp, {}", in(reg) &(*idle_task) as *const _ as usize);
-
-        }
-        idle_task
-    };
+    pub static ref IDLE_TASK: Arc<TaskControlBlock> = Arc::new(TaskControlBlock::zero_init());
 }
 
 // 空闲任务 (LoongArch 版本)
@@ -98,6 +88,7 @@ pub fn run_tasks() {
         if let Some(next_task) = fetch_task() {
             let idle_task = IDLE_TASK.clone();
             let next_task_kstack = next_task.kstack();
+            let idle_task_ptr = Arc::as_ptr(&idle_task) as usize;
             idle_task.set_ready();
             next_task.set_running();
             let mut processor = PROCESSOR.lock();
@@ -106,7 +97,7 @@ pub fn run_tasks() {
             // 事实上这个循环只会执行一次，这里需要释放 `next_task` 的引用
             drop(next_task);
             unsafe {
-                __switch(next_task_kstack);
+                __switch(next_task_kstack, idle_task_ptr);
             }
             unreachable!("Unreachable in run_tasks");
         }

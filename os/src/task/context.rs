@@ -9,7 +9,7 @@ use crate::trap::__restore;
 #[repr(C)]
 pub struct TaskContext {
     ra: usize, // 返回地址
-    tp: usize, // 线程指针，内核栈作为线程第一个字段，可以获取栈顶指针
+    tp: usize, // x4(tp)，仅按调用约定保存/恢复；用户态会将它用作 TLS 指针
     // 调用约定被调用者保存的寄存器
     // 由于切换上下文总是以函数调用的形式实现，因而只作部分保存
     s: [usize; 12],
@@ -20,10 +20,10 @@ pub struct TaskContext {
 
 impl TaskContext {
     /// 创建用于恢复指定内核栈上用户异常上下文的任务上下文
-    pub fn app_init_task_context(task_ptr: usize, token: usize) -> Self {
+    pub fn app_init_task_context(token: usize) -> Self {
         Self {
             ra: __restore as *const () as usize,
-            tp: task_ptr,
+            tp: 0,
             s: [0; 12],
             mmu_token: token,
             _padding: 0,

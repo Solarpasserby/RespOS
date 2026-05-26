@@ -1,8 +1,10 @@
 // os/src/arch/rv64/mm/page_table.rs
 
 use crate::config::KERNEL_BASE;
-use crate::mm::{FrameTracker, KERNEL_SPACE, frame_alloc};
-use crate::mm::{PPN_WIDTH_SV39, PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
+use crate::mm::{
+    FrameTracker, KERNEL_SPACE, MapPermission, PPN_WIDTH_SV39, PhysAddr, PhysPageNum, VirtAddr,
+    VirtPageNum, frame_alloc,
+};
 use alloc::string::String;
 use alloc::{vec, vec::Vec};
 use bitflags::*;
@@ -145,19 +147,51 @@ impl PageTable {
             flags | PTEFlags::VALID | PTEFlags::ACCESSED | PTEFlags::DIRTY,
         ); // 被映射的物理页帧必定有效，这里需要统一配置
     }
-    /// 在页表中消除物理地址和虚拟地址的映射关系
+    /// 在页表中消除物理页和虚拟页的映射关系
     pub fn unmap(&mut self, vpn: VirtPageNum) {
         let pte = self.find_pte(vpn).unwrap();
         assert!(pte.is_valid(), "vpn {:?} is invalid before unmapping", vpn);
         *pte = PageTableEntry::empty();
     }
+    /// 尝试在页表中消除物理页和虚拟页的映射关系，若该虚拟页未映射物理页则直接返回
+    pub fn try_unmap(&mut self, vpn: VirtPageNum) {
+        let pte = if let Some(page_table_entry) = self.find_pte(vpn) {
+            page_table_entry
+        } else {
+            return;
+        };
+        if !pte.is_valid() {
+            return;
+        }
+        *pte = PageTableEntry::empty();
+    }
+
+    /// 修改已有映射的标志位（不改变物理页号），用于 COW 恢复等场景
+    pub fn modify_pte(&mut self, vpn: VirtPageNum, flags: PTEFlags) {
+        let pte = self.find_pte(vpn).unwrap();
+        assert!(pte.is_valid(), "vpn {:?} is invalid in modify_pte", vpn);
+        *pte = PageTableEntry::new(
+            pte.ppn(),
+            flags | PTEFlags::VALID | PTEFlags::ACCESSED | PTEFlags::DIRTY,
+        );
+    }
+    /// 设置页表项的 COW 标记位
+    pub fn set_pte_cow(&mut self, vpn: VirtPageNum) {
+        let pte = self.find_pte(vpn).unwrap();
+        pte.set_cow_bit();
+    }
+    /// 清除页表项的 COW 标记位
+    pub fn clear_pte_cow(&mut self, vpn: VirtPageNum) {
+        let pte = self.find_pte(vpn).unwrap();
+        pte.clear_cow_bit();
+    }
 }
 
 /// 页表项
 ///
-/// | Reserved | PPN   | RSW | D | A | G | U | X | W | R | V |
-/// | -------- | ----- | --- | - | - | - | - | - | - | - | - |
-/// | 63-54    | 53-10 | 9-8 | 7 | 6 | 5 | 4 | 3 | 2 | 1 | 0 |
+/// | Reserved | PPN   | RSW | COW | D | A | G | U | X | W | R | V |
+/// | -------- | ----- | --- | --- | - | - | - | - | - | - | - | - |
+/// | 63-54    | 53-10 |  9  |  8  | 7 | 6 | 5 | 4 | 3 | 2 | 1 | 0 |
 #[derive(Copy, Clone)]
 #[repr(C)]
 pub struct PageTableEntry {
@@ -166,7 +200,7 @@ pub struct PageTableEntry {
 
 // 页表项的标志位
 bitflags! {
-    pub struct PTEFlags: u8 {
+    pub struct PTEFlags: u16 {
         const VALID    = 1 << 0;
         const READ     = 1 << 1;
         const WRITE    = 1 << 2;
@@ -175,6 +209,7 @@ bitflags! {
         const GLOBAL   = 1 << 5;
         const ACCESSED = 1 << 6;
         const DIRTY    = 1 << 7;
+        const COW      = 1 << 8;
     }
 }
 
@@ -210,6 +245,12 @@ impl PTEFlags {
     }
 }
 
+impl From<MapPermission> for PTEFlags {
+    fn from(value: MapPermission) -> Self {
+        PTEFlags::from_bits(value.bits()).unwrap()
+    }
+}
+
 impl PageTableEntry {
     /// 创建一个新的页表项
     pub fn new(ppn: PhysPageNum, flags: PTEFlags) -> Self {
@@ -228,7 +269,7 @@ impl PageTableEntry {
     }
     /// 获取标志位
     pub fn flags(&self) -> PTEFlags {
-        PTEFlags::from_bits(self.bits as u8).unwrap()
+        PTEFlags::from_bits_truncate(self.bits as u16)
     }
 
     /// 判断页表项是否有效
@@ -246,6 +287,21 @@ impl PageTableEntry {
     /// 判断指定页是否可执行
     pub fn executable(&self) -> bool {
         self.flags().contains(PTEFlags::EXECUTE)
+    }
+    /// 判断是否是写时复制页面
+    pub fn is_cow(&self) -> bool {
+        self.flags().contains(PTEFlags::COW)
+    }
+}
+
+impl PageTableEntry {
+    /// 设置 COW 标记位
+    pub fn set_cow_bit(&mut self) {
+        self.bits |= 1 << 8;
+    }
+    /// 清除 COW 标记位
+    pub fn clear_cow_bit(&mut self) {
+        self.bits &= !(1 << 8);
     }
 }
 

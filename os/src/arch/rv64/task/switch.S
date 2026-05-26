@@ -14,7 +14,8 @@ __switch:
     # 现在在内核栈上保存任务上下文，发生切换时将上下文存入栈顶
     # 切换到其他任务时，根据栈指针从栈顶恢复任务上下文
     # fn __switch(
-    #     next_task_kernel_stack: usize
+    #     next_task_kernel_stack: usize,
+    #     current_task_ptr: usize,
     # )
     # 保存当前任务的上下文
     # 在内核栈上存储 `TaskContext` 数据
@@ -29,8 +30,9 @@ __switch:
     # 保存 satp
     csrr t0, satp
     sd t0, 14*8(sp)
-    # 更新当前任务的内核栈顶指针
-    sd sp, 0(tp)
+    # 更新当前任务的内核栈顶指针。
+    # TaskControlBlock 的第一个字段是 KernelStack，KernelStack 的第一个字段是 top。
+    sd sp, 0(a1)
 
     # 恢复下个任务的上下文
     # a0 为下个任务的栈指针

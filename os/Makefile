@@ -44,7 +44,7 @@ DISK_IMG ?= disk.img
 # # 反汇编？
 # DISASM ?= -x
 
-build: $(KERNEL_BIN)
+build: prepare-cargo-config $(KERNEL_BIN)
 
 build-debug:
 	@$(MAKE) build MODE=debug
@@ -68,9 +68,15 @@ env:
 $(KERNEL_BIN): kernel
 	@$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $@
 
-kernel:
+prepare-cargo-config:
+	@mkdir -p .cargo ../user/.cargo
+	@cp cargo/config.toml .cargo/config.toml
+	@cp ../user/cargo/config.toml ../user/.cargo/config.toml
+
+kernel: prepare-cargo-config
 	@cd ../user && make build MODE=$(MODE)
-	@RESPOS_USER_PROFILE_DIR=$(CARGO_TARGET_DIR) cargo build $(CARGO_BUILD_ARG)
+	@PATH="$$HOME/.local/bin:$$PATH" RESPOS_USER_PROFILE_DIR=$(CARGO_TARGET_DIR) \
+		RESPOS_APP_REBUILD_STAMP=$$(date +%s%N) cargo build $(CARGO_BUILD_ARG)
 
 clean:
 	@cargo clean
