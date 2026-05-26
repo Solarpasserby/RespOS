@@ -235,7 +235,7 @@ impl TaskControlBlock {
             self.memory_set.clone()
         } else {
             Arc::new(RwLock::new(MemorySet::from_existed_user(
-                &self.memory_set.read(),
+                &mut self.memory_set.write(),
             )))
         };
 
