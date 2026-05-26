@@ -133,12 +133,46 @@ pub fn trap_handler(cx: &mut TrapContext) {
 }
 
 #[unsafe(no_mangle)]
-pub fn trap_from_kernel() -> ! {
-    // TODO: 需补齐内核对于异常的处理
-    panic!(
-        "[kernel] Trap is not defined in kernel: cause = {:?}, sepc = {:#x}, stval = {:#x}",
-        scause::read().cause(),
-        riscv::register::sepc::read(),
-        stval::read()
-    );
+pub fn kernel_trap_handler(cx: &mut TrapContext) {
+    let scause = scause::read();
+    match scause.cause() {
+        Trap::Exception(Exception::Breakpoint) => {
+            info!("Breakpoint at 0x{:x}", cx.sepc);
+            cx.sepc += 2;
+        }
+        Trap::Exception(Exception::IllegalInstruction) => {
+            panic!("IllegalInstruction at 0x{:x}", cx.sepc);
+        }
+        Trap::Exception(Exception::LoadPageFault)
+        | Trap::Exception(Exception::LoadFault)
+        | Trap::Exception(Exception::StorePageFault)
+        | Trap::Exception(Exception::StoreFault) => {
+            panic!(
+                "page fault in kernel, sepc = {:#x}, bad addr = {:#x}, scause = {:?}",
+                cx.sepc,
+                stval::read(),
+                scause.cause()
+            );
+        }
+        Trap::Exception(Exception::InstructionPageFault) => {
+            panic!(
+                "Instruction page fault at 0x{:x}, badaddr = {:#x}",
+                cx.sepc,
+                stval::read()
+            );
+        }
+        Trap::Exception(Exception::UserEnvCall) => {
+            panic!("UserEnvCall from kernel!");
+        }
+        Trap::Interrupt(Interrupt::SupervisorTimer) => {
+            info!("SupervisorTimer in kernel mode");
+        }
+        _ => {
+            panic!(
+                "Unsupported trap {:?}, stval = {:#x}!",
+                scause.cause(),
+                stval::read()
+            );
+        }
+    }
 }
