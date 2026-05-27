@@ -9,7 +9,7 @@ use super::scheduler::remove_task;
 use super::signal::SignalFlags;
 use super::tid::{TidHandle, tid_alloc};
 use crate::fs::{FdEntry, FdTable, Path, vfs::ROOT_DENTRY};
-use crate::mm::MemorySet;
+use crate::mm::{MemorySet, copy_to_user};
 use crate::mutex::{MutexGuard, NoopLock, SpinLock};
 use crate::syscall::{Errno, SysResult};
 use crate::trap::TrapContext;
@@ -32,6 +32,23 @@ pub struct SignalStruct {
     pub trap_ctx_backup: Option<TrapContext>,
     pub frozen: bool,
     pub killed: bool,
+}
+
+/// 线程 tid 地址信息，用于 pthread 线程退出同步。
+pub struct TidAddress {
+    /// 当 CLONE_CHILD_SETTID 被设置时，新线程将其 TID 写入此地址。
+    pub set_child_tid: Option<usize>,
+    /// 线程退出时清零并做 futex wake 的用户空间地址。
+    pub clear_child_tid: Option<usize>,
+}
+
+impl TidAddress {
+    pub fn new() -> Self {
+        Self {
+            set_child_tid: None,
+            clear_child_tid: None,
+        }
+    }
 }
 
 /// 任务控制块——此处的任务是对一定资源和某个程序的抽象表述
@@ -60,6 +77,9 @@ pub struct TaskControlBlock {
 
     // 信号处理（先保留原实现）
     signal: Arc<SpinLock<SignalStruct>>,
+
+    // 线程同步
+    tid_address: SpinLock<TidAddress>,
 }
 
 impl core::fmt::Debug for TaskControlBlock {
@@ -106,6 +126,9 @@ impl TaskControlBlock {
                 frozen: false,
                 killed: false,
             })),
+
+            // 线程同步
+            tid_address: SpinLock::new(TidAddress::new()),
         }
     }
 
@@ -161,6 +184,9 @@ impl TaskControlBlock {
                 frozen: false,
                 killed: false,
             })),
+
+            // 线程同步
+            tid_address: SpinLock::new(TidAddress::new()),
         });
 
         // 在线程组中添加该线程
@@ -274,6 +300,9 @@ impl TaskControlBlock {
                 frozen: false,
                 killed: false,
             })),
+
+            // 线程同步
+            tid_address: SpinLock::new(TidAddress::new()),
         });
 
         // 修改任务异常上下文
@@ -421,6 +450,20 @@ impl TaskControlBlock {
     pub fn set_exited(&self) {
         *self.task_status.lock() = TaskStatus::Exited;
     }
+
+    // tid_address 设置
+    pub fn set_clear_child_tid(&self, addr: usize) {
+        self.tid_address.lock().clear_child_tid = (addr != 0).then_some(addr);
+    }
+
+    pub fn set_set_child_tid(&self, addr: usize) {
+        self.tid_address.lock().set_child_tid = Some(addr);
+    }
+
+    pub fn clear_child_tid_addr(&self) -> Option<usize> {
+        self.tid_address.lock().clear_child_tid
+    }
+
     // exec 时关闭线程组中除自身外的其它线程，只清理线程私有状态。
     pub fn close_other_threads_for_exec(&self) {
         let self_tid = self.tid();
@@ -506,18 +549,29 @@ impl TaskControlBlock {
     }
 }
 
+/// 线程退出
+///
+/// 修改线程退出码，随后移除线程并释放线程占有的资源
 fn exit_thread(task: Arc<TaskControlBlock>, exit_code: i32) {
+    if let Some(ctid) = task.clear_child_tid_addr() {
+        let zero: i32 = 0;
+        let _ = copy_to_user(ctid as *mut i32, &zero as *const i32, 1);
+        let _ = crate::task::futex::futex_wake(ctid, 1);
+    }
+
     task.op_thread_group_mut(|tg| tg.remove(&task.tid()));
     task.set_exited();
     task.set_exit_code(exit_code);
     TASK_MANAGER.remove(task.tid());
 }
 
-/// 进程退出。
+/// 进程退出
 ///
 /// 当前简化模型中，sys_exit 退出整个线程组；只有进程 leader 会留在父进程
 /// children 中等待 wait4 回收，普通线程不会作为子进程暴露给父进程。
 pub fn task_exit(task: Arc<TaskControlBlock>, exit_code: i32) {
+    warn! {"[kernel] Process exit. tid: {}, tgid: {}, thread_count: {}", task.tid(), task.tgid(), task.thread_group.lock().iter().count()}
+
     let tgid = task.tgid();
     let threads = task.op_thread_group(|tg| tg.iter().collect::<Vec<_>>());
     let leader = threads

@@ -1,5 +1,4 @@
 // os/src/loader.rs
-// FIXME: 删了很多之前写的，心痛~
 
 use alloc::vec::Vec;
 use lazy_static::lazy_static;

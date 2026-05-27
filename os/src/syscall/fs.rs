@@ -172,8 +172,6 @@ pub fn sys_getcwd(buf: *mut u8, len: usize) -> SysResult<usize> {
 }
 
 /// 系统调用 sys-pipe
-///
-/// FIXME: 当前实现存在 BUG
 pub fn sys_pipe2(pipefd: *mut [i32; 2], flags: usize) -> SysResult<usize> {
     // TODO[ABI-COMPAT]: 当前忽略 flags，尚未完整实现 pipe2 语义。
     let _ = flags;

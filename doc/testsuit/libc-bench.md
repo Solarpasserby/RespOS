@@ -20,19 +20,6 @@
 
    musl 初始化线程库时会用它设置 clear-child-tid 地址。你的反汇编也看到 syscall 96。它和 `CLONE_CHILD_CLEARTID` 配合，用于线程退出唤醒 joiner。
 
-4. **`mprotect` syscall 226**
-
-   这个 libc-bench 二进制明确调用 syscall 226，先做最小可用：
-
-   ```text
-   addr 页对齐
-   len 向上取整
-   prot -> MapPermission
-   修改对应 MapArea 权限
-   修改已映射 PTE 权限
-   sfence
-   ```
-
 5. **`/proc/self/smaps` fake 文件**
 
 6. **`tmpfile` 依赖的文件语义**

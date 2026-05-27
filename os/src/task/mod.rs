@@ -8,6 +8,7 @@
 
 mod action;
 mod context;
+mod futex;
 mod kstack;
 mod manager;
 mod processor;
@@ -20,12 +21,14 @@ use crate::loader::get_app_data_by_name;
 pub use action::{SignalAction, SignalActions};
 use alloc::sync::Arc;
 pub use context::TaskContext;
+pub use futex::do_futex;
 use lazy_static::lazy_static;
 pub use manager::TASK_MANAGER;
 pub use processor::{current_task, current_user_token, run_tasks, take_current_task};
 pub use scheduler::{
     WaitOption, add_task, block_task, blocking_and_run_next, exit_and_run_next, fetch_task,
-    remove_task, remove_thread_group, switch_to_next_task, yield_current_task,
+    prepare_current_task_blocked, remove_task, remove_thread_group, switch_to_next_task,
+    wakeup_task, yield_current_task,
 };
 pub use signal::{MAX_SIG, SignalFlags};
 pub use task::{CloneFlags, TaskControlBlock};

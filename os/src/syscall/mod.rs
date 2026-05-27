@@ -43,7 +43,6 @@ const SYSCALL_EXECVE: usize = 221;
 const SYSCALL_MMAP: usize = 222;
 const SYSCALL_MPROTECT: usize = 226;
 const SYSCALL_WAIT4: usize = 260;
-// FIXME: 把系统调用号按大小排布
 
 mod errno;
 mod fs;

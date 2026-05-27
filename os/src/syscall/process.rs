@@ -7,7 +7,7 @@ use crate::loader::get_app_data_by_name;
 use crate::mm::{copy_cstr_from_user, copy_from_user, copy_to_user, extract_cstrings_from_user};
 use crate::task::{
     CloneFlags, MAX_SIG, SignalAction, SignalFlags, TASK_MANAGER, WaitOption, add_task,
-    current_task, exit_and_run_next, yield_current_task,
+    current_task, do_futex, exit_and_run_next, yield_current_task,
 };
 use alloc::vec::Vec;
 
@@ -55,34 +55,6 @@ impl Default for RUsage {
     }
 }
 
-/// 系统调用 sys_set_tid_address
-///
-/// musl 初始化线程库时调用，设置 clear-child-tid 地址。
-/// 与 CLONE_CHILD_CLEARTID 配合，在线程退出时向该地址写入 0 并 futex wake，
-/// 以唤醒 wait4 / pthread_join 的调用者。
-pub fn sys_set_tid_address(tidptr: usize) -> SysResult<usize> {
-    let _ = tidptr;
-    // TODO: 保存 clear_child_tid 地址到 TaskControlBlock
-    Err(Errno::ENOSYS)
-}
-
-/// 系统调用 sys_futex - 快速用户空间互斥锁
-///
-/// FUTEX_WAIT: 如果 *uaddr == val ，则阻塞当前任务；否则返回 EAGAIN。
-/// FUTEX_WAKE: 唤醒最多 val 个阻塞在 uaddr 上的任务，返回实际唤醒数。
-pub fn sys_futex(
-    uaddr: *const i32,
-    futex_op: usize,
-    val: usize,
-    _timeout: usize,
-    _uaddr2: usize,
-    _val3: usize,
-) -> SysResult<usize> {
-    let _ = (uaddr, futex_op, val);
-    // TODO: 实现 futex 等待/唤醒队列
-    Err(Errno::ENOSYS)
-}
-
 pub fn sys_exit(exit_code: i32) -> ! {
     exit_and_run_next(exit_code);
     panic!("Unreachable in sys_exit!");
@@ -96,11 +68,10 @@ pub fn sys_sched_yield() -> SysResult<usize> {
 pub fn sys_clone(
     flags: usize,
     stack: usize,
-    _ptid: usize,
-    _tls: usize,
-    _ctid: usize,
+    ptid: usize,
+    tls: usize,
+    ctid: usize,
 ) -> SysResult<usize> {
-    // TODO[ABI-COMPAT]: 当前尚未支持 ptid/tls/ctid 等能力。
     let flags = CloneFlags::from_bits(flags as u32).ok_or(Errno::EINVAL)?;
 
     // 简化模型：CLONE_THREAD 表示真正线程，必须共享地址空间。
@@ -117,11 +88,32 @@ pub fn sys_clone(
     let new_task = current_task.fork(flags);
     let new_tid = new_task.tid();
 
+    // CLONE_PARENT_SETTID: 在父进程地址空间写入子进程 tid
+    if flags.contains(CloneFlags::CLONE_PARENT_SETTID) && ptid != 0 {
+        let tid_val = new_tid as u32;
+        copy_to_user(ptid as *mut u32, &tid_val as *const u32, 1)?;
+    }
+
+    // CLONE_CHILD_SETTID: 子线程开始运行前在 ctid 写入自己的 tid。
+    if flags.contains(CloneFlags::CLONE_CHILD_SETTID) && ctid != 0 {
+        let tid_val = new_tid as u32;
+        copy_to_user(ctid as *mut u32, &tid_val as *const u32, 1)?;
+        new_task.set_set_child_tid(ctid);
+    }
+
+    // CLONE_CHILD_CLEARTID: 记录线程退出时清零并唤醒的地址
+    if flags.contains(CloneFlags::CLONE_CHILD_CLEARTID) && ctid != 0 {
+        new_task.set_clear_child_tid(ctid);
+    }
+
     // 修改新任务的异常上下文，修改栈指针和返回值。
     // x4(tp) 属于用户态 TLS，不能写成内核 TaskControlBlock 指针。
     let new_task_trap_cx = new_task.get_trap_cx();
     if stack != 0 {
         new_task_trap_cx.set_sp(stack);
+    }
+    if flags.contains(CloneFlags::CLONE_SETTLS) {
+        new_task_trap_cx.set_tp(tls);
     }
     new_task_trap_cx.set_a0(0);
 
@@ -255,6 +247,32 @@ pub fn sys_kill(pid: usize, signum: i32) -> SysResult<usize> {
         // 进程不存在
         Err(Errno::ESRCH)
     }
+}
+
+/// 系统调用 sys_set_tid_address
+///
+/// musl 初始化线程库时调用，设置 clear-child-tid 地址。
+/// 与 CLONE_CHILD_CLEARTID 配合，在线程退出时向该地址写入 0 并 futex wake，
+/// 以唤醒 wait4 / pthread_join 的调用者。
+pub fn sys_set_tid_address(tidptr: usize) -> SysResult<usize> {
+    let task = current_task().expect("[kernel] current task is None.");
+    task.set_clear_child_tid(tidptr);
+    Ok(task.tid())
+}
+
+/// 系统调用 sys_futex - 快速用户空间互斥锁
+///
+/// FUTEX_WAIT: 如果 *uaddr == val ，则阻塞当前任务；否则返回 EAGAIN
+/// FUTEX_WAKE: 唤醒最多 val 个阻塞在 uaddr 上的任务，返回实际唤醒数
+pub fn sys_futex(
+    uaddr: *const i32,
+    futex_op: usize,
+    val: usize,
+    timeout: usize,
+    uaddr2: usize,
+    val3: usize,
+) -> SysResult<usize> {
+    do_futex(uaddr as usize, futex_op, val, timeout, uaddr2, val3)
 }
 
 pub fn sys_sigaction(
