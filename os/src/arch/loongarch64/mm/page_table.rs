@@ -21,7 +21,7 @@
 
 use crate::config::KERNEL_BASE;
 use crate::mm::{
-    KERNEL_SPACE, PhysAddr, PhysPageNum, PPN_WIDTH, VirtAddr, VirtPageNum,
+    KERNEL_SPACE, MapPermission, PhysAddr, PhysPageNum, PPN_WIDTH, VirtAddr, VirtPageNum,
 };
 use crate::mm::{FrameTracker, frame_alloc as alloc_frame};
 use alloc::string::String;
@@ -170,6 +170,40 @@ impl PageTable {
         assert!(pte.is_valid(), "vpn {:?} is invalid before unmapping", vpn);
         *pte = PageTableEntry::empty();
     }
+
+    pub fn try_unmap(&mut self, vpn: VirtPageNum) {
+        let pte = match self.find_pte(vpn) {
+            Some(pte) => pte,
+            None => return,
+        };
+        if !pte.is_valid() {
+            return;
+        }
+        *pte = PageTableEntry::empty();
+    }
+
+    pub fn modify_pte(&mut self, vpn: VirtPageNum, flags: PTEFlags) {
+        let pte = self.find_pte(vpn).unwrap();
+        assert!(pte.is_valid(), "vpn {:?} is invalid in modify_pte", vpn);
+        let was_cow = pte.is_cow();
+        *pte = PageTableEntry::new(
+            pte.ppn(),
+            flags | PTEFlags::VALID | PTEFlags::ACCESSED | PTEFlags::DIRTY,
+        );
+        if was_cow {
+            pte.set_cow_bit();
+        }
+    }
+
+    pub fn set_pte_cow(&mut self, vpn: VirtPageNum) {
+        let pte = self.find_pte(vpn).unwrap();
+        pte.set_cow_bit();
+    }
+
+    pub fn clear_pte_cow(&mut self, vpn: VirtPageNum) {
+        let pte = self.find_pte(vpn).unwrap();
+        pte.clear_cow_bit();
+    }
 }
 
 /// LoongArch 页表项
@@ -182,7 +216,7 @@ pub struct PageTableEntry {
 }
 
 bitflags! {
-    pub struct PTEFlags: u8 {
+    pub struct PTEFlags: u16 {
         const VALID    = 1 << 0;
         const READ     = 1 << 1;  // maps to !NR via conversion
         const WRITE    = 1 << 2;  // maps to D via conversion
@@ -191,6 +225,7 @@ bitflags! {
         const GLOBAL   = 1 << 5;
         const ACCESSED = 1 << 6;  // LA64 has no explicit A bit, kept for interface
         const DIRTY    = 1 << 7;  // maps to D bit
+        const COW      = 1 << 8;  // Copy-on-Write (software flag, stored in PTE reserved bit)
     }
 }
 
@@ -207,6 +242,12 @@ impl PTEFlags {
         if self.contains(PTEFlags::ACCESSED) { ret.push_str("A"); }
         if self.contains(PTEFlags::DIRTY) { ret.push_str("D"); }
         ret
+    }
+}
+
+impl From<MapPermission> for PTEFlags {
+    fn from(value: MapPermission) -> Self {
+        PTEFlags::from_bits(value.bits()).unwrap()
     }
 }
 
@@ -296,5 +337,18 @@ impl PageTableEntry {
 
     pub fn executable(&self) -> bool {
         self.bits & (1 << 8) == 0
+    }
+
+    /// COW 标志存储在 PTE 保留位 [48]，不影响硬件 flags[11:0] 和 PPN[47:12]
+    pub fn is_cow(&self) -> bool {
+        (self.bits >> 48) & 1 != 0
+    }
+
+    pub fn set_cow_bit(&mut self) {
+        self.bits |= 1 << 48;
+    }
+
+    pub fn clear_cow_bit(&mut self) {
+        self.bits &= !(1 << 48);
     }
 }

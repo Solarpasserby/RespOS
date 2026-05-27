@@ -10,6 +10,14 @@ use core::arch::global_asm;
 
 pub use context::TrapContext;
 
+/// 页错误原因
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageFaultCause {
+    Instruction,
+    Load,
+    Store,
+}
+
 global_asm!(include_str!("trap.S"));
 
 unsafe extern "C" {

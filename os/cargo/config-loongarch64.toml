@@ -1,0 +1,19 @@
+[build]
+target = "loongarch64-unknown-none"
+
+[target.loongarch64-unknown-none]
+rustflags = [
+    "-Clink-arg=-Tsrc/linker_loongarch.ld", "-Cforce-frame-pointers=yes"
+]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+debug = false
+lto = "thin"
+panic = "abort"
+
+[profile.release-debug]
+inherits = "release"
+debug = true

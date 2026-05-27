@@ -2,8 +2,9 @@
 
 # LoongArch 任务上下文切换
 #
-# 函数签名: fn __switch(next_task_kstack_ptr: usize)
+# 函数签名: fn __switch(next_task_kstack_ptr: usize, _current_task_ptr: usize)
 #   参数: a0 = next_task_kstack_ptr (下个任务的内核栈指针)
+#         a1 = _current_task_ptr (忽略，LA64 通过 $tp 传递当前任务指针)
 #
 # TaskContext 内存布局 (与 task/context.rs 一致):
 #   sp + 0*8:   ra (r1)

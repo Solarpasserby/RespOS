@@ -1,5 +1,6 @@
 // os/src/task/task.rs
 
+#[cfg(target_arch = "riscv64")]
 use super::INITPROC;
 use super::action::SignalActions;
 use super::context::TaskContext;
@@ -538,8 +539,13 @@ pub fn task_exit(task: Arc<TaskControlBlock>, exit_code: i32) {
     // 修改孩子进程的父亲——托孤。children 是进程级资源，只处理一次。
     let children = task.op_children_mut(core::mem::take);
     for (_, child) in children {
-        child.set_parent(&INITPROC);
-        INITPROC.add_child(child);
+        #[cfg(target_arch = "riscv64")]
+        {
+            child.set_parent(&INITPROC);
+            INITPROC.add_child(child);
+        }
+        #[cfg(target_arch = "loongarch64")]
+        drop(child);
     }
 
     // 回收进程级共享资源。

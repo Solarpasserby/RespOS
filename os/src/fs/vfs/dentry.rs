@@ -1,6 +1,7 @@
 // os/src/fs/vfs/dentry.rs
 
 use super::InodeOp;
+#[cfg(target_arch = "riscv64")]
 use crate::fs::ext4::root_inode;
 use alloc::string::{String, ToString};
 use alloc::sync::{Arc, Weak};
@@ -8,6 +9,31 @@ use alloc::vec::Vec;
 use hashbrown::HashMap;
 use lazy_static::lazy_static;
 use spin::Mutex;
+
+/// LA64 暂不支持 ext4，提供最小根 inode 桩
+#[cfg(target_arch = "loongarch64")]
+fn root_inode() -> Arc<dyn InodeOp> {
+    use super::InodeType;
+    use crate::fs::KStat;
+    use crate::syscall::{Errno, SysResult};
+    use alloc::vec::Vec;
+
+    struct StubInode;
+    impl InodeOp for StubInode {
+        fn as_any(&self) -> &dyn core::any::Any { self }
+        fn node_type(&self) -> InodeType { InodeType::Directory }
+        fn stat(&self) -> SysResult<KStat> { Err(Errno::ENOSYS) }
+        fn read_at(&self, _off: usize, _buf: &mut [u8]) -> SysResult<usize> { Err(Errno::ENOSYS) }
+        fn write_at(&self, _off: usize, _buf: &[u8]) -> SysResult<usize> { Err(Errno::ENOSYS) }
+        fn truncate(&self, _size: usize) -> SysResult<usize> { Err(Errno::ENOSYS) }
+        fn lookup(&self, _name: &str) -> SysResult<Arc<dyn InodeOp>> { Err(Errno::ENOSYS) }
+        fn readdir(&self) -> SysResult<Vec<LinuxDirent64>> { Err(Errno::ENOSYS) }
+        fn create(&self, _name: &str, _ty: InodeType) -> SysResult<Arc<dyn InodeOp>> { Err(Errno::ENOSYS) }
+        fn link(&self, _bare_dentry: Arc<Dentry>) -> SysResult { Err(Errno::ENOSYS) }
+        fn unlink(&self, _valid_dentry: Arc<Dentry>) -> SysResult { Err(Errno::ENOSYS) }
+    }
+    Arc::new(StubInode)
+}
 
 lazy_static! {
     pub static ref ROOT_DENTRY: Arc<Dentry> = {

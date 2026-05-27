@@ -133,9 +133,12 @@ __restore:
     ld.d        $s7, $sp, 232
     ld.d        $s8, $sp, 240
 
-    # 恢复 sp: 先把内核栈指针存到 KSAVE0，再从用户sp位置恢复
-    # 先不恢复 x0 (保持与保存时一致)
-    ld.d        $sp, $sp, 24       # 恢复用户 sp (从 x3 的位置)
+    # 弹出 TrapContext: 将内核栈指针保存到 KSAVE0 供下次 trap entry 使用
+    addi.d      $t0, $sp, 272      # t0 = kernel stack top
+    csrwr       $t0, 0x30          # KSAVE0 = kernel sp (下次 trap entry 时 csrwr 恢复)
+
+    # 恢复用户 sp (从 x3 的位置，offset = 24)
+    ld.d        $sp, $sp, 24       # sp = user sp
     # ERTN: 异常返回 (恢复 PLV 和 PC, 根据 PRMD 返回到用户态)
     ertn
 

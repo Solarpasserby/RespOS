@@ -19,8 +19,10 @@ mod tid;
 #[cfg(target_arch = "riscv64")]
 use crate::loader::get_app_data_by_name;
 pub use action::{SignalAction, SignalActions};
+#[cfg(target_arch = "riscv64")]
 use alloc::sync::Arc;
 pub use context::TaskContext;
+#[cfg(target_arch = "riscv64")]
 use lazy_static::lazy_static;
 pub use manager::TASK_MANAGER;
 pub use processor::{current_task, current_user_token, run_tasks, take_current_task};
@@ -31,19 +33,19 @@ pub use scheduler::{
 pub use signal::{MAX_SIG, SignalFlags};
 pub use task::{CloneFlags, TaskControlBlock};
 
+#[cfg(target_arch = "riscv64")]
 lazy_static! {
     pub static ref INITPROC: Arc<TaskControlBlock> = {
-        #[cfg(target_arch = "riscv64")]
         let data = get_app_data_by_name("initproc").unwrap();
-        #[cfg(target_arch = "loongarch64")]
-        let data = &[][..];
-
         TaskControlBlock::init(data)
     };
 }
 
 pub fn add_initproc() {
+    #[cfg(target_arch = "riscv64")]
     add_task(INITPROC.clone());
+    #[cfg(target_arch = "loongarch64")]
+    info!("[kernel] LoongArch64: no user programs yet, kernel idling.");
 }
 
 fn call_user_signal_handler(sig: usize, signal: SignalFlags) {

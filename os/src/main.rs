@@ -37,9 +37,8 @@ global_asm!(include_str!("link_app.S"));
 
 #[unsafe(no_mangle)]
 pub fn rust_main() -> ! {
-    clear_bss(); // 手动清理 .bss
+    clear_bss();
 
-    // TODO: 单纯是为消除警告，后续需要对这些宏做一定修改
     error!("hello world");
     warn!("hello world");
     info!("hello world");
@@ -58,6 +57,8 @@ pub fn rust_main() -> ! {
     panic!("unreachable!");
 }
 
+/// RISC-V: 使用 Rust 迭代器清零 BSS
+#[cfg(target_arch = "riscv64")]
 fn clear_bss() {
     unsafe extern "C" {
         unsafe fn sbss();
@@ -66,4 +67,29 @@ fn clear_bss() {
 
     (sbss as *const () as usize..ebss as *const () as usize)
         .for_each(|a| unsafe { (a as *mut u8).write_volatile(0) });
+}
+
+/// LoongArch64: 使用内联汇编清零 BSS（Rust 循环在该目标上有 bug）
+#[cfg(target_arch = "loongarch64")]
+fn clear_bss() {
+    unsafe extern "C" {
+        unsafe fn sbss();
+        unsafe fn ebss();
+    }
+
+    let mut start = sbss as *const () as usize;
+    let end = ebss as *const () as usize;
+    unsafe {
+        core::arch::asm!(
+            "1:",
+            "bgeu   {start}, {end}, 2f",
+            "st.b   $zero, {start}, 0",
+            "addi.d {start}, {start}, 1",
+            "b      1b",
+            "2:",
+            start = inout(reg) start,
+            end = in(reg) end,
+            options(nostack),
+        );
+    }
 }

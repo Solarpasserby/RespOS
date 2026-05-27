@@ -245,7 +245,7 @@ impl MemorySet {
     pub fn activate(&self) {
         let token = self.page_table.token();
         write_mmu_token(token);
-        self.flush_tlb();
+        crate::arch::enable_mmu();
     }
 
     /// 生成页表对应 `stap` 寄存器值

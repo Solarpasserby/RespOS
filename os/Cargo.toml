@@ -12,7 +12,6 @@ lazy_static = { version = "1.4.0", features = ["spin_no_std"] }
 buddy_system_allocator = "0.10.0"
 bitflags = "1.2.1"
 xmas-elf = "0.7.0"
-lwext4_rust = { git = "https://github.com/elliott10/lwext4_rust", default-features = false }
 virtio-drivers = "0.11.0"
 spin = "0.9.8"
 hashbrown = "0.16.1"
@@ -20,3 +19,4 @@ hashbrown = "0.16.1"
 [target.'cfg(target_arch = "riscv64")'.dependencies]
 riscv = { git = "https://github.com/rcore-os/riscv", features = ["inline-asm"] }
 sbi-rt = { version = "0.0.3", features = ["legacy"] }
+lwext4_rust = { git = "https://github.com/elliott10/lwext4_rust", default-features = false }

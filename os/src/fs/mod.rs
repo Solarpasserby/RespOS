@@ -1,5 +1,6 @@
 // os/src/fs/mod.rs
 
+#[cfg(target_arch = "riscv64")]
 pub mod ext4;
 mod fdtable;
 mod kstat;
