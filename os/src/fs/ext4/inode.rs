@@ -1,44 +1,52 @@
 // os/src/ext4/inode.rs
 
 use alloc::ffi::CString;
-use alloc::string::{String, ToString};
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::any::Any;
-use core::cell::SyncUnsafeCell;
+use hashbrown::HashMap;
+use lazy_static::lazy_static;
 use lwext4_rust::{Ext4File, InodeTypes as Ext4InodeTypes, bindings};
+use spin::Mutex;
 
 use crate::fs::KStat;
 use crate::fs::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
 use crate::syscall::{Errno, SysResult};
 
+lazy_static! {
+    static ref EXT4_INODE_CACHE: Mutex<HashMap<u64, Weak<dyn InodeOp>>> =
+        Mutex::new(HashMap::new());
+}
+
 pub struct Ext4Inode {
-    abs_path: String,
+    pub ino: u64,
     ty: Ext4InodeTypes,
-    inner: SyncUnsafeCell<Ext4File>,
 }
 
 unsafe impl Send for Ext4Inode {}
 unsafe impl Sync for Ext4Inode {}
 
 impl Ext4Inode {
-    pub fn new(path: &str, ty: Ext4InodeTypes) -> Self {
-        Self {
-            abs_path: path.to_string(),
-            ty: ty.clone(),
-            inner: SyncUnsafeCell::new(Ext4File::new(path, ty)),
+    pub fn new(ino: u64, ty: Ext4InodeTypes) -> Self {
+        Self { ino, ty }
+    }
+
+    pub fn get_or_create(ino: u64, ty: Ext4InodeTypes) -> Arc<dyn InodeOp> {
+        let mut cache = EXT4_INODE_CACHE.lock();
+        if let Some(inode) = cache.get(&ino).and_then(Weak::upgrade) {
+            return inode;
         }
+
+        let inode: Arc<dyn InodeOp> = Arc::new(Self::new(ino, ty));
+        cache.insert(ino, Arc::downgrade(&inode));
+        inode
     }
 
-    fn inner(&self) -> &mut Ext4File {
-        unsafe { &mut *self.inner.get() }
-    }
-
-    fn child_path(&self, name: &str) -> String {
-        if self.abs_path == "/" {
+    fn child_path(parent_path: &str, name: &str) -> alloc::string::String {
+        if parent_path == "/" {
             alloc::format!("/{}", name)
         } else {
-            alloc::format!("{}/{}", self.abs_path, name)
+            alloc::format!("{}/{}", parent_path, name)
         }
     }
 
@@ -78,8 +86,8 @@ impl Ext4Inode {
         }
     }
 
-    fn file_link(&self, hardlink_path: &str) -> SysResult {
-        let old_path = CString::new(self.abs_path.as_str()).map_err(|_| Errno::EINVAL)?;
+    fn file_link(old_path: &str, hardlink_path: &str) -> SysResult {
+        let old_path = CString::new(old_path).map_err(|_| Errno::EINVAL)?;
         let new_path = CString::new(hardlink_path).map_err(|_| Errno::EINVAL)?;
         let ret = unsafe { bindings::ext4_flink(old_path.as_ptr(), new_path.as_ptr()) };
         if ret != 0 {
@@ -88,11 +96,8 @@ impl Ext4Inode {
         Ok(())
     }
 
-    fn file_size(&self) -> SysResult<usize> {
-        let file = self.inner();
-        let path = file.get_path();
-        let path = path.to_str().map_err(|_| Errno::EINVAL)?;
-
+    fn file_size(&self, path: &str) -> SysResult<usize> {
+        let file = &mut Ext4File::new(path, self.ty.clone());
         file.file_open(path, bindings::O_RDONLY)
             .map_err(Self::map_lwext4_err)?;
         let size = file.file_size() as usize;
@@ -106,6 +111,43 @@ impl Ext4Inode {
         // 变长文件名字段大小
         ((DIRENT64_HEADER_SIZE + name_len + 1) + 7) & !7 // 对齐 8 字节
     }
+
+    fn lookup_dirent(parent_path: &str, name: &str) -> SysResult<(u64, Ext4InodeTypes)> {
+        let c_path = CString::new(parent_path).map_err(|_| Errno::EINVAL)?;
+        let c_path = c_path.into_raw();
+        let mut dir: bindings::ext4_dir = unsafe { core::mem::zeroed() };
+        let ret = unsafe { bindings::ext4_dir_open(&mut dir, c_path) };
+        unsafe {
+            drop(CString::from_raw(c_path));
+        }
+        if ret != 0 {
+            return Err(Self::map_lwext4_err(ret));
+        }
+
+        let mut found = None;
+        loop {
+            let dirent = unsafe { bindings::ext4_dir_entry_next(&mut dir) };
+            if dirent.is_null() {
+                break;
+            }
+
+            let dirent = unsafe { &*dirent };
+            if Self::dirent_name_eq(&dirent.name, name) {
+                found = Some((
+                    dirent.inode as u64,
+                    Ext4InodeTypes::from(dirent.inode_type as usize),
+                ));
+                break;
+            }
+        }
+
+        let ret = unsafe { bindings::ext4_dir_close(&mut dir) };
+        if ret != 0 {
+            return Err(Self::map_lwext4_err(ret));
+        }
+
+        found.ok_or(Errno::ENOENT)
+    }
 }
 
 impl InodeOp for Ext4Inode {
@@ -117,23 +159,20 @@ impl InodeOp for Ext4Inode {
         InodeType::from(self.ty.clone())
     }
 
-    fn stat(&self) -> SysResult<KStat> {
+    fn stat(&self, path: &str) -> SysResult<KStat> {
         let ty = self.node_type();
         let size = if ty == InodeType::Regular {
-            self.file_size()?
+            self.file_size(path)?
         } else {
             0
         };
         Ok(KStat { size, ty })
     }
 
-    fn read_at(&self, off: usize, buf: &mut [u8]) -> SysResult<usize> {
+    fn read_at(&self, path: &str, off: usize, buf: &mut [u8]) -> SysResult<usize> {
         self.check_type(InodeType::Regular)?;
 
-        let file = self.inner();
-        let path = file.get_path();
-        let path = path.to_str().map_err(|_| Errno::EINVAL)?;
-
+        let file = &mut Ext4File::new(path, self.ty.clone());
         file.file_open(path, bindings::O_RDONLY)
             .map_err(Self::map_lwext4_err)?;
         file.file_seek(off as i64, bindings::SEEK_SET)
@@ -144,13 +183,10 @@ impl InodeOp for Ext4Inode {
         Ok(read_size)
     }
 
-    fn write_at(&self, off: usize, buf: &[u8]) -> SysResult<usize> {
+    fn write_at(&self, path: &str, off: usize, buf: &[u8]) -> SysResult<usize> {
         self.check_type(InodeType::Regular)?;
 
-        let file = self.inner();
-        let path = file.get_path();
-        let path = path.to_str().map_err(|_| Errno::EINVAL)?;
-
+        let file = &mut Ext4File::new(path, self.ty.clone());
         file.file_open(path, bindings::O_RDWR)
             .map_err(Self::map_lwext4_err)?;
         file.file_seek(off as i64, bindings::SEEK_SET)
@@ -161,13 +197,10 @@ impl InodeOp for Ext4Inode {
         Ok(write_size)
     }
 
-    fn truncate(&self, size: usize) -> SysResult<usize> {
+    fn truncate(&self, path: &str, size: usize) -> SysResult<usize> {
         self.check_type(InodeType::Regular)?;
 
-        let file = self.inner();
-        let path = file.get_path();
-        let path = path.to_str().map_err(|_| Errno::EINVAL)?;
-
+        let file = &mut Ext4File::new(path, self.ty.clone());
         file.file_open(path, bindings::O_RDWR)
             .map_err(Self::map_lwext4_err)?;
         file.file_truncate(size as u64)
@@ -178,31 +211,21 @@ impl InodeOp for Ext4Inode {
     }
 
     /// 查找与 name 匹配的子索引节点，约定 name 为常规文件名
-    fn lookup(&self, name: &str) -> SysResult<Arc<dyn InodeOp>> {
+    fn lookup(&self, parent_path: &str, name: &str) -> SysResult<Arc<dyn InodeOp>> {
         self.check_type(InodeType::Directory)?;
 
         if name.is_empty() || name == "." || name == ".." || name.contains('/') {
             return Err(Errno::EINVAL);
         }
 
-        let file = self.inner();
-        let (names, types) = file.lwext4_dir_entries().map_err(Self::map_lwext4_err)?;
-        let child_ty = names
-            .iter()
-            .zip(types.into_iter())
-            .find_map(|(entry_name, entry_ty)| {
-                Self::dirent_name_eq(entry_name, name).then_some(entry_ty)
-            })
-            .ok_or(Errno::ENOENT)?;
-
-        let child_path = self.child_path(name);
-        Ok(Arc::new(Self::new(&child_path, child_ty)))
+        let (child_ino, child_ty) = Self::lookup_dirent(parent_path, name)?;
+        Ok(Self::get_or_create(child_ino, child_ty))
     }
 
-    fn readdir(&self) -> SysResult<Vec<LinuxDirent64>> {
+    fn readdir(&self, path: &str) -> SysResult<Vec<LinuxDirent64>> {
         self.check_type(InodeType::Directory)?;
 
-        let c_path = CString::new(self.abs_path.as_str()).map_err(|_| Errno::EINVAL)?;
+        let c_path = CString::new(path).map_err(|_| Errno::EINVAL)?;
         let c_path = c_path.into_raw();
         let mut dir: bindings::ext4_dir = unsafe { core::mem::zeroed() };
         let ret = unsafe { bindings::ext4_dir_open(&mut dir, c_path) };
@@ -246,19 +269,18 @@ impl InodeOp for Ext4Inode {
         Ok(entries)
     }
 
-    fn create(&self, name: &str, ty: InodeType) -> SysResult<Arc<dyn InodeOp>> {
+    fn create(&self, parent_path: &str, name: &str, ty: InodeType) -> SysResult<Arc<dyn InodeOp>> {
         self.check_type(InodeType::Directory)?;
 
-        let path = self.child_path(name);
+        let path = Self::child_path(parent_path, name);
         let ext4_ty = Ext4InodeTypes::from(ty);
-        let file = self.inner();
+        let file = &mut Ext4File::new(parent_path, self.ty.clone());
 
         if file.check_inode_exist(&path, ext4_ty.clone()) {
             return Err(Errno::EEXIST);
         }
 
-        let new_inode = Self::new(&path, ext4_ty.clone());
-        let new_file = new_inode.inner();
+        let new_file = &mut Ext4File::new(&path, ext4_ty.clone());
 
         match ext4_ty {
             Ext4InodeTypes::EXT4_DE_DIR => {
@@ -276,10 +298,10 @@ impl InodeOp for Ext4Inode {
             _ => return Err(Errno::ENOSYS),
         }
 
-        Ok(Arc::new(new_inode))
+        self.lookup(parent_path, name)
     }
 
-    fn link(&self, bare_dentry: Arc<Dentry>) -> SysResult {
+    fn link(&self, old_path: &str, bare_dentry: Arc<Dentry>) -> SysResult {
         // 调用者保证参数合法
         // if self.node_type() == InodeType::Directory {
         //     return Err(Errno::EPERM);
@@ -288,10 +310,7 @@ impl InodeOp for Ext4Inode {
         //     return Err(Errno::EEXIST);
         // }
 
-        self.file_link(&bare_dentry.abs_path)?;
-        // TODO: 这里语义是新建了一个 inode，在优化 Ext4Inode 类型后需做修改
-        bare_dentry.inner.lock().inode =
-            Some(Arc::new(Self::new(&bare_dentry.abs_path, self.ty.clone())));
+        Self::file_link(old_path, &bare_dentry.abs_path)?;
         Ok(())
     }
 
@@ -299,29 +318,24 @@ impl InodeOp for Ext4Inode {
         // 调用者保证参数合法
         // self.check_type(InodeType::Directory)?;
 
-        let file = self.inner();
         info!("[kernel] unlink: {}", valid_dentry.abs_path);
 
         let child_abs_path = &valid_dentry.abs_path;
         let child_inode = valid_dentry.try_get_inode().ok_or(Errno::ENOENT)?;
         if child_inode.node_type() == InodeType::Directory {
-            let entries = child_inode.readdir()?;
+            let entries = child_inode.readdir(child_abs_path)?;
             if !entries.is_empty() {
                 return Err(Errno::ENOTEMPTY);
             }
+            let file = &mut Ext4File::new(child_abs_path, self.ty.clone());
             file.dir_rm(child_abs_path).map_err(Self::map_lwext4_err)?;
         } else {
             // lwext4_rust 包中 `file_remove` 的语义是 unlink 而非删除文件
+            let file = &mut Ext4File::new(child_abs_path, child_inode.node_type().into());
             file.file_remove(child_abs_path)
                 .map_err(Self::map_lwext4_err)?;
         };
         Ok(())
-    }
-}
-
-impl Drop for Ext4Inode {
-    fn drop(&mut self) {
-        let _ = self.inner().file_close();
     }
 }
 

@@ -82,7 +82,7 @@ pub fn lookup_dentry(nd: &mut Nameidata) -> SysResult<Arc<Dentry>> {
     // 获取当前 Dentry 的 Inode
     let current_dir_inode = nd.dentry.get_inode();
     // 查找 Inode 的子节点
-    let child_inode = current_dir_inode.lookup(name)?;
+    let child_inode = current_dir_inode.lookup(&nd.dentry.abs_path, name)?;
 
     // 创建新的 Dentry，并更新父子状态。TODO: 将新建 Dentry 加入缓存
     let child_dentry = Arc::new(Dentry::new(abs_path, Some(nd.dentry.clone()), child_inode));
@@ -163,7 +163,8 @@ pub fn open_last_lookups(
                     return Err(Errno::ENOTDIR);
                 }
                 let current_dir_inode = nd.dentry.get_inode();
-                let inode = current_dir_inode.create(name, InodeType::Regular)?;
+                let inode =
+                    current_dir_inode.create(&nd.dentry.abs_path, name, InodeType::Regular)?;
                 install_child_dentry(&nd.dentry, name, inode.clone())
             }
             Err(err) => return Err(err),
@@ -208,7 +209,7 @@ pub fn filename_create(dirfd: isize, path: &str, ty: InodeType, _mode: usize) ->
         // 未找到目标文件，创建文件
         Err(Errno::ENOENT) => {
             let current_dir_inode = nd.dentry.get_inode();
-            let inode = current_dir_inode.create(name, ty)?;
+            let inode = current_dir_inode.create(&nd.dentry.abs_path, name, ty)?;
             install_child_dentry(&nd.dentry, name, inode);
             Ok(())
         }
@@ -316,7 +317,9 @@ pub fn filename_link(olddirfd: isize, oldpath: &str, newdirfd: isize, newpath: &
         Err(Errno::ENOENT) => {
             let bare_dentry =
                 Dentry::negative(child_abs_path(&nd.dentry, name), Some(nd.dentry.clone()));
-            old_dentry.get_inode().link(bare_dentry.clone())?;
+            let old_inode = old_dentry.get_inode();
+            old_inode.link(&old_dentry.abs_path, bare_dentry.clone())?;
+            bare_dentry.inner.lock().inode = Some(old_inode);
             nd.dentry.insert_child(name, bare_dentry);
             Ok(())
         }

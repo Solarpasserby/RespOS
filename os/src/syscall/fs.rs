@@ -71,7 +71,7 @@ pub fn sys_close(fd: usize) -> SysResult<usize> {
 pub fn sys_stat(path: *const u8, stat: *mut Stat) -> SysResult<usize> {
     let path = copy_cstr_from_user(path)?;
     let dentry = filename_lookup(AT_FDCWD, path.as_str(), 0)?;
-    let stat_buf: Stat = dentry.get_inode().stat()?.into();
+    let stat_buf: Stat = dentry.get_inode().stat(&dentry.abs_path)?.into();
     copy_to_user(stat, &stat_buf as *const Stat, 1)?;
     Ok(0)
 }

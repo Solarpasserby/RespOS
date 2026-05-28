@@ -11,18 +11,18 @@ pub trait InodeOp: Any + Send + Sync {
     fn as_any(&self) -> &dyn Any;
 
     fn node_type(&self) -> InodeType;
-    fn stat(&self) -> SysResult<KStat>;
+    fn stat(&self, path: &str) -> SysResult<KStat>;
 
-    fn read_at(&self, off: usize, buf: &mut [u8]) -> SysResult<usize>;
-    fn write_at(&self, off: usize, buf: &[u8]) -> SysResult<usize>;
-    fn truncate(&self, size: usize) -> SysResult<usize>;
+    fn read_at(&self, path: &str, off: usize, buf: &mut [u8]) -> SysResult<usize>;
+    fn write_at(&self, path: &str, off: usize, buf: &[u8]) -> SysResult<usize>;
+    fn truncate(&self, path: &str, size: usize) -> SysResult<usize>;
 
-    fn lookup(&self, name: &str) -> SysResult<Arc<dyn InodeOp>>;
-    fn readdir(&self) -> SysResult<Vec<LinuxDirent64>>;
+    fn lookup(&self, parent_path: &str, name: &str) -> SysResult<Arc<dyn InodeOp>>;
+    fn readdir(&self, path: &str) -> SysResult<Vec<LinuxDirent64>>;
 
-    fn create(&self, name: &str, ty: InodeType) -> SysResult<Arc<dyn InodeOp>>;
+    fn create(&self, parent_path: &str, name: &str, ty: InodeType) -> SysResult<Arc<dyn InodeOp>>;
 
-    fn link(&self, bare_dentry: Arc<Dentry>) -> SysResult;
+    fn link(&self, old_path: &str, bare_dentry: Arc<Dentry>) -> SysResult;
     fn unlink(&self, valid_dentry: Arc<Dentry>) -> SysResult;
 }
 
