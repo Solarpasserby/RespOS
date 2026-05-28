@@ -1,5 +1,5 @@
 
-    # generated rebuild stamp: 1779902542304788855
+    # generated rebuild stamp: 1779972924716185366
     .align 3
     .section .data
     .global _app_num
@@ -35,7 +35,7 @@ _app_names:
     .global app_0_end
     .align 3
 app_0_start:
-    .incbin "../user/target/riscv64gc-unknown-none-elf/debug/cat"
+    .incbin "../user/target/loongarch64-unknown-none/debug/cat"
 app_0_end:
 
     .section .data
@@ -43,7 +43,7 @@ app_0_end:
     .global app_1_end
     .align 3
 app_1_start:
-    .incbin "../user/target/riscv64gc-unknown-none-elf/debug/hello_world"
+    .incbin "../user/target/loongarch64-unknown-none/debug/hello_world"
 app_1_end:
 
     .section .data
@@ -51,7 +51,7 @@ app_1_end:
     .global app_2_end
     .align 3
 app_2_start:
-    .incbin "../user/target/riscv64gc-unknown-none-elf/debug/initproc"
+    .incbin "../user/target/loongarch64-unknown-none/debug/initproc"
 app_2_end:
 
     .section .data
@@ -59,7 +59,7 @@ app_2_end:
     .global app_3_end
     .align 3
 app_3_start:
-    .incbin "../user/target/riscv64gc-unknown-none-elf/debug/ls"
+    .incbin "../user/target/loongarch64-unknown-none/debug/ls"
 app_3_end:
 
     .section .data
@@ -67,7 +67,7 @@ app_3_end:
     .global app_4_end
     .align 3
 app_4_start:
-    .incbin "../user/target/riscv64gc-unknown-none-elf/debug/pipetest"
+    .incbin "../user/target/loongarch64-unknown-none/debug/pipetest"
 app_4_end:
 
     .section .data
@@ -75,7 +75,7 @@ app_4_end:
     .global app_5_end
     .align 3
 app_5_start:
-    .incbin "../user/target/riscv64gc-unknown-none-elf/debug/power"
+    .incbin "../user/target/loongarch64-unknown-none/debug/power"
 app_5_end:
 
     .section .data
@@ -83,7 +83,7 @@ app_5_end:
     .global app_6_end
     .align 3
 app_6_start:
-    .incbin "../user/target/riscv64gc-unknown-none-elf/debug/sig_simple"
+    .incbin "../user/target/loongarch64-unknown-none/debug/sig_simple"
 app_6_end:
 
     .section .data
@@ -91,7 +91,7 @@ app_6_end:
     .global app_7_end
     .align 3
 app_7_start:
-    .incbin "../user/target/riscv64gc-unknown-none-elf/debug/sleep"
+    .incbin "../user/target/loongarch64-unknown-none/debug/sleep"
 app_7_end:
 
     .section .data
@@ -99,7 +99,7 @@ app_7_end:
     .global app_8_end
     .align 3
 app_8_start:
-    .incbin "../user/target/riscv64gc-unknown-none-elf/debug/testrunner"
+    .incbin "../user/target/loongarch64-unknown-none/debug/testrunner"
 app_8_end:
 
     .section .data
@@ -107,5 +107,5 @@ app_8_end:
     .global app_9_end
     .align 3
 app_9_start:
-    .incbin "../user/target/riscv64gc-unknown-none-elf/debug/user_shell"
+    .incbin "../user/target/loongarch64-unknown-none/debug/user_shell"
 app_9_end:

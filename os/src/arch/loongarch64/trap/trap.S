@@ -5,10 +5,11 @@
 # 寄存器别名（ABI）:
 #   $r0=zero, $r1=ra, $r2=tp, $r3=sp, $r4=a0, $r5=a1
 #   $r12-$r20=t0-t8 (临时寄存器)
+#   $r21=reserved/u0, $r22=fp/s9, $r23-$r31=s0-s8
 #
 # LoongArch CSR:
 #   KSAVE0-7 (0x30-0x37): 内核可用暂存寄存器
-#   PRMD   (0x1): 异常前模式（PPLV=bit0, PIE=bit1）
+#   PRMD   (0x1): 异常前模式（PPLV=bits[1:0], PIE=bit2）
 #   ERA    (0x6): 异常返回地址
 #   ESTAT  (0x5): 异常状态（Ecode=bits[15:0], IS=bit11）
 #   BADV   (0x7): 触发异常的坏地址
@@ -39,12 +40,9 @@ __trap_from_user:
     # 步骤3: 保存通用寄存器
     # x0 恒为0不需要保存，但为了对齐我们保存0
     st.d        $zero, $sp, 0       # x0
-    # x1(ra), x2(tp), x3(sp from KSAVE0)
+    # x1(ra), x2(tp)
     st.d        $ra, $sp, 8        # x1
     st.d        $tp, $sp, 16       # x2
-    # 从 KSAVE0 恢复用户 sp 并保存
-    csrrd       $t0, 0x30          # t0 = 用户sp (刚从sp交换进来)
-    st.d        $t0, $sp, 24       # x3 = 用户sp
     st.d        $a0, $sp, 32       # x4
     st.d        $a1, $sp, 40       # x5
     st.d        $a2, $sp, 48       # x6
@@ -62,17 +60,22 @@ __trap_from_user:
     st.d        $t6, $sp, 144      # x18
     st.d        $t7, $sp, 152      # x19
     st.d        $t8, $sp, 160      # x20
-    # 保留 x21-x31
-    st.d        $r21, $sp, 168
-    st.d        $s0, $sp, 176      # x23 = s0/fp
-    st.d        $s1, $sp, 184      # x24
-    st.d        $s2, $sp, 192      # x25
-    st.d        $s3, $sp, 200      # x26
-    st.d        $s4, $sp, 208      # x27
-    st.d        $s5, $sp, 216      # x28
-    st.d        $s6, $sp, 224      # x29
-    st.d        $s7, $sp, 232      # x30
-    st.d        $s8, $sp, 240      # x31
+    st.d        $r21, $sp, 168     # x21
+    st.d        $r22, $sp, 176     # x22 = fp/s9
+    st.d        $s0, $sp, 184      # x23
+    st.d        $s1, $sp, 192      # x24
+    st.d        $s2, $sp, 200      # x25
+    st.d        $s3, $sp, 208      # x26
+    st.d        $s4, $sp, 216      # x27
+    st.d        $s5, $sp, 224      # x28
+    st.d        $s6, $sp, 232      # x29
+    st.d        $s7, $sp, 240      # x30
+    st.d        $s8, $sp, 248      # x31
+
+    # 从 KSAVE0 读回用户 sp。这里必须在保存 t0 原值之后做，
+    # 否则会破坏用户态 x12/t0。
+    csrrd       $t0, 0x30
+    st.d        $t0, $sp, 24       # x3 = 用户sp
 
     # 步骤4: 保存 PRMD 和 ERA
     csrrd       $t0, 0x1           # PRMD
@@ -83,8 +86,8 @@ __trap_from_user:
     # 步骤5: 切换到内核上下文
     # 设置 CRMD: PLV=0(kernel), IE=0(disable interrupts)
     csrrd       $t0, 0x0           # CRMD
-    bstrins.d   $t0, $zero, 1, 0   # PLV=0, PIE=0
-    bstrins.d   $t0, $zero, 3, 2   # IE=0
+    bstrins.d   $t0, $zero, 1, 0   # PLV=0
+    bstrins.d   $t0, $zero, 2, 2   # IE=0
     csrwr       $t0, 0x0
 
     # 步骤6: 调用 Rust trap_handler
@@ -123,15 +126,16 @@ __restore:
     ld.d        $t7, $sp, 152
     ld.d        $t8, $sp, 160
     ld.d        $r21, $sp, 168
-    ld.d        $s0, $sp, 176
-    ld.d        $s1, $sp, 184
-    ld.d        $s2, $sp, 192
-    ld.d        $s3, $sp, 200
-    ld.d        $s4, $sp, 208
-    ld.d        $s5, $sp, 216
-    ld.d        $s6, $sp, 224
-    ld.d        $s7, $sp, 232
-    ld.d        $s8, $sp, 240
+    ld.d        $r22, $sp, 176
+    ld.d        $s0, $sp, 184
+    ld.d        $s1, $sp, 192
+    ld.d        $s2, $sp, 200
+    ld.d        $s3, $sp, 208
+    ld.d        $s4, $sp, 216
+    ld.d        $s5, $sp, 224
+    ld.d        $s6, $sp, 232
+    ld.d        $s7, $sp, 240
+    ld.d        $s8, $sp, 248
 
     # 弹出 TrapContext: 将内核栈指针保存到 KSAVE0 供下次 trap entry 使用
     addi.d      $t0, $sp, 272      # t0 = kernel stack top

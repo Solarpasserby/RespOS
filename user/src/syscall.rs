@@ -98,6 +98,7 @@ pub struct Stat {
 fn syscall(id: usize, args: [usize; 6]) -> isize {
     let mut ret: isize;
     unsafe {
+        #[cfg(target_arch = "riscv64")]
         asm!(
             "ecall",
             inlateout("a0") args[0] => ret,
@@ -107,6 +108,17 @@ fn syscall(id: usize, args: [usize; 6]) -> isize {
             in("a4") args[4],
             in("a5") args[5],
             in("a7") id
+        );
+        #[cfg(target_arch = "loongarch64")]
+        asm!(
+            "syscall 0",
+            inlateout("$r4") args[0] => ret,
+            in("$r5") args[1],
+            in("$r6") args[2],
+            in("$r7") args[3],
+            in("$r8") args[4],
+            in("$r9") args[5],
+            in("$r11") id
         );
     }
     ret

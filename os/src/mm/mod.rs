@@ -27,6 +27,7 @@ pub use memory_set::{KERNEL_SPACE, MapPermission, MemorySet};
 pub fn init() {
     init_heap();
     init_frame_allocator();
+    println!("success!");
     KERNEL_SPACE.lock().activate();
     // 注意此时已经启用了虚拟地址
 }

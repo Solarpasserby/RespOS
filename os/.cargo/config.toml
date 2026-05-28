@@ -1,9 +1,11 @@
 [build]
-target = "riscv64gc-unknown-none-elf"
+target = "loongarch64-unknown-none"
 
-[target.riscv64gc-unknown-none-elf]
+[target.loongarch64-unknown-none]
 rustflags = [
-    "-Clink-arg=-Tsrc/linker_riscv.ld", "-Cforce-frame-pointers=yes"
+    "-Clink-arg=-Tsrc/linker_loongarch.ld",
+    "-Cforce-frame-pointers=yes",
+    "-Ctarget-feature=-lsx,-lasx",
 ]
 
 [profile.dev]

@@ -1,7 +1,22 @@
-TARGET := riscv64gc-unknown-none-elf
+# 架构选择: riscv64 | loongarch64
+ARCH ?= loongarch64
 MODE ?= debug
 FEATURES ?=
 APP_DIR := src/bin
+
+ifeq ($(ARCH),riscv64)
+TARGET := riscv64gc-unknown-none-elf
+OBJDUMP := rust-objdump --arch-name=riscv64
+OBJCOPY := rust-objcopy --binary-architecture=riscv64
+CARGO_CONFIG := cargo/config-riscv64.toml
+else ifeq ($(ARCH),loongarch64)
+TARGET := loongarch64-unknown-none
+OBJDUMP := rust-objdump --arch-name=loongarch64
+OBJCOPY := rust-objcopy --binary-architecture=loongarch64
+CARGO_CONFIG := cargo/config-loongarch64.toml
+else
+	$(error Unsupported ARCH '$(ARCH)'. Use ARCH=riscv64 or ARCH=loongarch64)
+endif
 
 ifeq ($(MODE),debug)
 	CARGO_BUILD_ARG :=
@@ -25,12 +40,9 @@ APPS := $(wildcard $(APP_DIR)/*.rs)
 ELFS := $(patsubst $(APP_DIR)/%.rs, $(TARGET_DIR)/%, $(APPS))
 BINS := $(patsubst $(APP_DIR)/%.rs, $(TARGET_DIR)/%.bin, $(APPS))
 
-OBJDUMP := rust-objdump --arch-name=riscv64
-OBJCOPY := rust-objcopy --binary-architecture=riscv64
-
 prepare-cargo-config:
 	@mkdir -p .cargo
-	@cp cargo/config.toml .cargo/config.toml
+	@cp $(CARGO_CONFIG) .cargo/config.toml
 
 elf: prepare-cargo-config
 	@cargo build $(CARGO_BUILD_ARG) $(CARGO_FEATURE_ARGS)
@@ -41,13 +53,13 @@ binary: elf
 build: binary
 
 build-debug:
-	@$(MAKE) build MODE=debug
+	@$(MAKE) build ARCH=$(ARCH) MODE=debug
 
 build-release:
-	@$(MAKE) build MODE=release
+	@$(MAKE) build ARCH=$(ARCH) MODE=release
 
 build-release-debug:
-	@$(MAKE) build MODE=release-debug
+	@$(MAKE) build ARCH=$(ARCH) MODE=release-debug
 
 clean:
 	@cargo clean

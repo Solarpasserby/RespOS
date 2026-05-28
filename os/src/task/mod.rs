@@ -66,7 +66,7 @@ fn call_user_signal_handler(sig: usize, signal: SignalFlags) {
         trap_ctx.set_sepc(handler);
 
         // put args (a0)
-        trap_ctx.x[10] = sig;
+        trap_ctx.set_a0(sig);
     } else {
         // default action
         println!("[K] task/call_user_signal_handler: default action: ignore it or kill process");

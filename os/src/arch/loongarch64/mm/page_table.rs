@@ -20,10 +20,10 @@
 //   bits[11:9]: RPLV
 
 use crate::config::KERNEL_BASE;
-use crate::mm::{
-    KERNEL_SPACE, MapPermission, PhysAddr, PhysPageNum, PPN_WIDTH, VirtAddr, VirtPageNum,
-};
 use crate::mm::{FrameTracker, frame_alloc as alloc_frame};
+use crate::mm::{
+    KERNEL_SPACE, MapPermission, PPN_WIDTH, PhysAddr, PhysPageNum, VirtAddr, VirtPageNum,
+};
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -154,11 +154,7 @@ impl PageTable {
 impl PageTable {
     pub fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) {
         let pte = self.find_pte_create(vpn).unwrap();
-        assert!(
-            !pte.is_valid(),
-            "vpn {:?} is mapped before mapping",
-            vpn
-        );
+        assert!(!pte.is_valid(), "vpn {:?} is mapped before mapping", vpn);
         *pte = PageTableEntry::new(
             ppn,
             flags | PTEFlags::VALID | PTEFlags::ACCESSED | PTEFlags::DIRTY,
@@ -233,14 +229,30 @@ bitflags! {
 impl PTEFlags {
     pub fn readable_flags(&self) -> String {
         let mut ret = String::new();
-        if self.contains(PTEFlags::VALID) { ret.push_str("V"); }
-        if self.contains(PTEFlags::READ) { ret.push_str("R"); }
-        if self.contains(PTEFlags::WRITE) { ret.push_str("W"); }
-        if self.contains(PTEFlags::EXECUTE) { ret.push_str("X"); }
-        if self.contains(PTEFlags::USER) { ret.push_str("U"); }
-        if self.contains(PTEFlags::GLOBAL) { ret.push_str("G"); }
-        if self.contains(PTEFlags::ACCESSED) { ret.push_str("A"); }
-        if self.contains(PTEFlags::DIRTY) { ret.push_str("D"); }
+        if self.contains(PTEFlags::VALID) {
+            ret.push_str("V");
+        }
+        if self.contains(PTEFlags::READ) {
+            ret.push_str("R");
+        }
+        if self.contains(PTEFlags::WRITE) {
+            ret.push_str("W");
+        }
+        if self.contains(PTEFlags::EXECUTE) {
+            ret.push_str("X");
+        }
+        if self.contains(PTEFlags::USER) {
+            ret.push_str("U");
+        }
+        if self.contains(PTEFlags::GLOBAL) {
+            ret.push_str("G");
+        }
+        if self.contains(PTEFlags::ACCESSED) {
+            ret.push_str("A");
+        }
+        if self.contains(PTEFlags::DIRTY) {
+            ret.push_str("D");
+        }
         ret
     }
 }

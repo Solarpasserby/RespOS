@@ -10,7 +10,7 @@
 #[derive(Debug, Clone, Copy)]
 pub struct TrapContext {
     pub x: [usize; 32],
-    pub prmd: usize, // Previous Mode: PPLV(bit0) + PIE(bit1)
+    pub prmd: usize, // Previous Mode: PPLV(bits 0..=1) + PIE(bit 2)
     pub era: usize,  // Exception Return Address
 }
 
@@ -39,7 +39,9 @@ impl TrapContext {
     }
     /// 获取 syscall 参数（LoongArch: a0-a5 = r4-r9）
     pub fn syscall_args(&self) -> [usize; 6] {
-        [self.x[4], self.x[5], self.x[6], self.x[7], self.x[8], self.x[9]]
+        [
+            self.x[4], self.x[5], self.x[6], self.x[7], self.x[8], self.x[9],
+        ]
     }
 
     /// 初始化用户程序上下文
@@ -57,8 +59,8 @@ impl TrapContext {
         regs[5] = argv_base;
         regs[6] = envp_base;
         regs[7] = auxv_base;
-        // PRMD: PLV=3(User), PIE=1(中断使能)
-        let prmd = (3 << 0) | (1 << 1);
+        // PRMD: PPLV=3(User), PIE=1(异常返回后开启中断)
+        let prmd = (3 << 0) | (1 << 2);
         let mut cx = Self {
             x: regs,
             prmd,

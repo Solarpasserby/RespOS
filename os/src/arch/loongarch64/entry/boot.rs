@@ -4,7 +4,7 @@ use core::arch::asm;
 
 /// 从汇编 _start 跳转到 rust_main 的桥接函数
 ///
-/// 初始阶段 phys == virt（CRMD.DA=1），直接跳转即可。
+/// 初始阶段 phys == virt，直接跳转即可。
 #[unsafe(no_mangle)]
 pub fn enter_main() {
     unsafe {

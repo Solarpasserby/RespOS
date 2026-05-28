@@ -15,8 +15,8 @@ xmas-elf = "0.7.0"
 virtio-drivers = "0.11.0"
 spin = "0.9.8"
 hashbrown = "0.16.1"
+lwext4_rust = { git = "https://github.com/elliott10/lwext4_rust", default-features = false }
 
 [target.'cfg(target_arch = "riscv64")'.dependencies]
 riscv = { git = "https://github.com/rcore-os/riscv", features = ["inline-asm"] }
 sbi-rt = { version = "0.0.3", features = ["legacy"] }
-lwext4_rust = { git = "https://github.com/elliott10/lwext4_rust", default-features = false }

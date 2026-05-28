@@ -19,16 +19,9 @@ lazy_static! {
     pub static ref IDLE_TASK: Arc<TaskControlBlock> = Arc::new(TaskControlBlock::zero_init());
 }
 
-// 空闲任务 (LoongArch 版本)
 #[cfg(target_arch = "loongarch64")]
 lazy_static! {
-    pub static ref IDLE_TASK: Arc<TaskControlBlock> = {
-        let idle_task = Arc::new(TaskControlBlock::zero_init());
-        unsafe {
-            core::arch::asm!("ori $tp, {}, 0", in(reg) &(*idle_task) as *const _ as usize);
-        }
-        idle_task
-    };
+    pub static ref IDLE_TASK: Arc<TaskControlBlock> = Arc::new(TaskControlBlock::zero_init());
 }
 
 lazy_static! {

@@ -21,8 +21,8 @@ pub const VPN_WIDTH: usize = VA_WIDTH - PAGE_SIZE_BITS;
 
 // 保留 SV39 名称供 rv64 页表代码使用
 pub use PA_WIDTH as PA_WIDTH_SV39;
-pub use VA_WIDTH as VA_WIDTH_SV39;
 pub use PPN_WIDTH as PPN_WIDTH_SV39;
+pub use VA_WIDTH as VA_WIDTH_SV39;
 pub use VPN_WIDTH as VPN_WIDTH_SV39;
 
 /// 物理地址

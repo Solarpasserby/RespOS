@@ -2,9 +2,9 @@
 #
 # LoongArch 启动入口
 #
-# 初始阶段运行在物理地址模式 (CRMD.DA=1，复位默认值)。
-# 链接地址 = 加载地址 = 0x1c000000，phys == virt。
-# mm::init() 之后才建立页表和 DMW，切换到虚拟地址模式。
+# QEMU virt 的启动代码通过 -kernel 将内核 ELF 加载到低 RAM。
+# 链接地址 = 加载地址 = 0x00200000，初始阶段 phys == virt。
+# mm::init() 之后才建立页表和 DMW，切换到分页模式。
 
     .section .text.entry
     .globl _start

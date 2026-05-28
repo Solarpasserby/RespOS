@@ -3,9 +3,8 @@
 // LoongArch 系统定时器模块
 // 使用 rdtime.d 指令读取稳定计数器，替代 RISC-V 的 mtime CSR。
 
-use super::sbi::set_timer;
+use super::{register, sbi::set_timer};
 use crate::config::CLOCK_FREQ;
-use core::arch::asm;
 
 const TICKS_PER_SEC: usize = 100;
 const MSEC_PER_SEC: usize = 1000;
@@ -48,20 +47,8 @@ impl From<TimeSpec> for StatxTimeStamp {
 }
 
 /// 读取 LoongArch 稳定计数器的值（rdtime.d）
-///
-/// rdtime.d 将 64 位计数器拆分为低 32 位和高 32 位分别写入两个寄存器
 pub fn get_time() -> usize {
-    let low: usize;
-    let high: usize;
-    unsafe {
-        asm!(
-            "rdtime.d {}, {}",
-            out(reg) low,
-            out(reg) high,
-            options(nomem, nostack)
-        );
-    }
-    (high << 32) | (low & 0xFFFFFFFF)
+    register::timer::read_time()
 }
 
 /// 设置下一次时钟中断触发
