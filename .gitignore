@@ -1,6 +1,7 @@
 .codex
 
 img/*
+testsuit/*
 .cargo-home/
 CLAUDE.md
 os/.cargo/

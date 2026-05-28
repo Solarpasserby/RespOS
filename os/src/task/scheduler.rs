@@ -4,14 +4,28 @@
 //! 当前架构层 `__switch` 接收下一个任务的内核栈指针，因此这里会完成最后一步切换。
 
 use super::processor::{PROCESSOR, current_task};
-use super::task::{TaskControlBlock, task_exit};
+use super::task::{TaskControlBlock, task_exit, task_group_exit};
 use crate::{arch::task::__switch, mutex::SpinNoIrqLock};
-use alloc::{collections::vec_deque::VecDeque, sync::Arc};
+use alloc::{collections::vec_deque::VecDeque, sync::Arc, vec::Vec};
 use bitflags::bitflags;
 use lazy_static::lazy_static;
 
 lazy_static! {
     pub static ref SCHEDULER: SpinNoIrqLock<Scheduler> = SpinNoIrqLock::new(Scheduler::new());
+    static ref DEAD_TASKS: SpinNoIrqLock<Vec<Arc<TaskControlBlock>>> =
+        SpinNoIrqLock::new(Vec::new());
+}
+
+fn defer_drop_task(task: Arc<TaskControlBlock>) {
+    DEAD_TASKS.lock().push(task);
+}
+
+fn cleanup_dead_tasks() {
+    let dead_tasks = {
+        let mut tasks = DEAD_TASKS.lock();
+        core::mem::take(&mut *tasks)
+    };
+    drop(dead_tasks);
 }
 
 /// 添加新任务到就绪队列。
@@ -75,6 +89,7 @@ pub fn switch_to_next_task() {
         unsafe {
             __switch(next_task_kernel_stack, current_task_ptr);
         }
+        cleanup_dead_tasks();
     }
 }
 
@@ -96,6 +111,7 @@ pub fn yield_current_task() {
         unsafe {
             __switch(next_task_kernel_stack, current_task_ptr);
         }
+        cleanup_dead_tasks();
     }
 }
 
@@ -117,6 +133,24 @@ pub fn blocking_and_run_next() {
         unsafe {
             __switch(next_task_kernel_stack, current_task_ptr);
         }
+        cleanup_dead_tasks();
+    }
+}
+
+fn switch_to_next_task_after_exit() {
+    let Some(current) = current_task() else {
+        return;
+    };
+
+    if let Some(next_task) = fetch_task() {
+        let next_task_kernel_stack = next_task.kstack();
+        let current_task_ptr = Arc::as_ptr(&current) as usize;
+        defer_drop_task(current);
+        next_task.set_running();
+        PROCESSOR.lock().switch_to(next_task);
+        unsafe {
+            __switch(next_task_kernel_stack, current_task_ptr);
+        }
     }
 }
 
@@ -125,10 +159,17 @@ pub fn exit_and_run_next(exit_code: i32) {
     let Some(task) = current_task() else {
         return;
     };
-
-    // 当前任务本就不在调度队列中，无需删除
     task_exit(task, exit_code);
-    switch_to_next_task();
+    switch_to_next_task_after_exit();
+}
+
+#[unsafe(no_mangle)]
+pub fn exit_group_and_run_next(exit_code: i32) {
+    let Some(task) = current_task() else {
+        return;
+    };
+    task_group_exit(task, exit_code);
+    switch_to_next_task_after_exit();
 }
 
 /// FIFO 任务调度器。

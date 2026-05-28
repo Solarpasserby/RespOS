@@ -7,7 +7,7 @@ use crate::loader::get_app_data_by_name;
 use crate::mm::{copy_cstr_from_user, copy_from_user, copy_to_user, extract_cstrings_from_user};
 use crate::task::{
     CloneFlags, MAX_SIG, SignalAction, SignalFlags, TASK_MANAGER, WaitOption, add_task,
-    current_task, do_futex, exit_and_run_next, yield_current_task,
+    current_task, do_futex, exit_and_run_next, exit_group_and_run_next, yield_current_task,
 };
 use alloc::vec::Vec;
 
@@ -55,9 +55,20 @@ impl Default for RUsage {
     }
 }
 
+/// 系统调用 sys_exit_group
+///
+/// 退出单个线程
 pub fn sys_exit(exit_code: i32) -> ! {
     exit_and_run_next(exit_code);
     panic!("Unreachable in sys_exit!");
+}
+
+/// 系统调用 sys_exit_group
+///
+/// 退出整个线程组
+pub fn sys_exit_group(exit_code: i32) -> ! {
+    exit_group_and_run_next(exit_code);
+    panic!("Unreachable in sys_exit_group!");
 }
 
 pub fn sys_sched_yield() -> SysResult<usize> {
@@ -85,7 +96,7 @@ pub fn sys_clone(
 
     let current_task = current_task().expect("[kernel] current task is None.");
     // 此处发生任务复制
-    let new_task = current_task.fork(flags);
+    let new_task = current_task.clone_(flags);
     let new_tid = new_task.tid();
 
     // CLONE_PARENT_SETTID: 在父进程地址空间写入子进程 tid
@@ -198,6 +209,8 @@ pub fn sys_wait4(
             task.op_children_mut(|children| {
                 children.remove(&child_tid);
             });
+
+            warn! {"[kernel] (wait4) parent:{}, child:{}.", task.tid(), child_tid};
 
             return Ok(child_tid);
         }

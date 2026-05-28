@@ -213,7 +213,7 @@ impl TaskControlBlock {
     }
 
     /// 克隆父线程，创建子线程
-    pub fn fork(self: &Arc<Self>, flags: CloneFlags) -> Arc<Self> {
+    pub fn clone_(self: &Arc<Self>, flags: CloneFlags) -> Arc<Self> {
         let tid = tid_alloc();
 
         // 克隆内核栈
@@ -559,19 +559,41 @@ fn exit_thread(task: Arc<TaskControlBlock>, exit_code: i32) {
         let _ = crate::task::futex::futex_wake(ctid, 1);
     }
 
+    // 只有数据 线程组 和 TASK_MANAGER 持有对线程的引用，当引用归零时该线程占有的私有资源被释放
     task.op_thread_group_mut(|tg| tg.remove(&task.tid()));
     task.set_exited();
     task.set_exit_code(exit_code);
     TASK_MANAGER.remove(task.tid());
 }
 
+/// 线程退出 - 对外接口
+///
+/// - 设置当前线程退出状态
+/// - 处理 clear_child_tid
+/// - 释放线程私有资源
+/// - 从线程组中移除自己
+/// - 最后一个线程则进入进程级退出流程（目前未实现）
+/// TODO: 当前退出线程组主线程时会退出整个线程组，与 Linux 实现存在差异
+pub fn task_exit(task: Arc<TaskControlBlock>, exit_code: i32) {
+    // warn! {"[kernel] Thread exit. tid: {}, tgid: {}, thread_count: {}.", task.tid(), task.tgid(), task.op_thread_group(|tg| tg.iter().count())}
+
+    if task.is_process_leader() {
+        task_group_exit(task, exit_code);
+        return;
+    } else {
+        exit_thread(task, exit_code);
+    }
+}
+
 /// 进程退出
 ///
-/// 当前简化模型中，sys_exit 退出整个线程组；只有进程 leader 会留在父进程
-/// children 中等待 wait4 回收，普通线程不会作为子进程暴露给父进程。
-pub fn task_exit(task: Arc<TaskControlBlock>, exit_code: i32) {
-    warn! {"[kernel] Process exit. tid: {}, tgid: {}, thread_count: {}", task.tid(), task.tgid(), task.thread_group.lock().iter().count()}
-
+/// - 杀掉/停止线程组内所有线程
+/// - 关闭文件描述符
+/// - 释放地址空间
+/// - 释放信号处理、文件系统上下文等共享资源
+/// - 给父进程发送 SIGCHLD
+/// - 留下 exited 状态，等待父进程 wait 回收
+pub fn task_group_exit(task: Arc<TaskControlBlock>, exit_code: i32) {
     let tgid = task.tgid();
     let threads = task.op_thread_group(|tg| tg.iter().collect::<Vec<_>>());
     let leader = threads
