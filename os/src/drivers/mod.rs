@@ -1,7 +1,6 @@
 // os/src/driver.rs
 
 mod device;
-#[cfg(target_arch = "riscv64")]
 mod disk;
 mod virtio;
 
@@ -9,7 +8,6 @@ use core::ptr::NonNull;
 
 use crate::arch::config::{KERNEL_BASE, VIRTIO_MMIO};
 use device::*;
-#[cfg(target_arch = "riscv64")]
 pub use disk::Disk;
 use virtio::*;
 use virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader};
