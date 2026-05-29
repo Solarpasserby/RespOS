@@ -89,3 +89,8 @@ __restore:
 
 __trap_from_kernel:
     call trap_from_kernel
+ .globl sigreturn_trampoline
+      .align 2
+  sigreturn_trampoline:
+      li a7, 139
+      ecall
