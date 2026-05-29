@@ -8,7 +8,8 @@ use super::manager::TASK_MANAGER;
 use super::scheduler::remove_task;
 use super::signal::SignalFlags;
 use super::tid::{TidHandle, tid_alloc};
-use crate::fs::{FdEntry, FdTable, Path, vfs::ROOT_DENTRY};
+use crate::fs::mount::init_root_fs;
+use crate::fs::{FdEntry, FdTable, Path};
 use crate::mm::{MemorySet, copy_to_user};
 use crate::mutex::{MutexGuard, NoopLock, SpinLock};
 use crate::syscall::{Errno, SysResult};
@@ -114,7 +115,7 @@ impl TaskControlBlock {
 
             // 文件系统
             fd_table: SpinLock::new(FdTable::new()),
-            cwd: Arc::new(SpinLock::new(Path::new(ROOT_DENTRY.clone()))),
+            cwd: Arc::new(SpinLock::new(Path::zero_init())),
 
             // 信号处理（先保留原实现）
             signal: Arc::new(SpinLock::new(SignalStruct {
@@ -172,7 +173,7 @@ impl TaskControlBlock {
 
             // 文件系统
             fd_table: SpinLock::new(FdTable::new()),
-            cwd: Arc::new(SpinLock::new(Path::new(ROOT_DENTRY.clone()))),
+            cwd: Arc::new(SpinLock::new(init_root_fs())),
 
             // 信号处理（先保留原实现）
             signal: Arc::new(SpinLock::new(SignalStruct {

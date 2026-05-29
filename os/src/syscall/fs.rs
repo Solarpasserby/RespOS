@@ -1,10 +1,11 @@
 // os/src/syscall/fs.rs
 
 use super::{Errno, SysResult};
+use crate::fs::mount::{do_mount, do_umount2};
 use crate::fs::vfs::{File, InodeType, OpenFlags};
 use crate::fs::{
-    AT_FDCWD, FdEntry, Path, Stat, filename_create, filename_link, filename_lookup,
-    filename_unlink, make_pipe, path_open,
+    AT_FDCWD, FdEntry, Stat, filename_create, filename_link, filename_lookup, filename_unlink,
+    make_pipe, path_open,
 };
 use crate::mm::{check_user_writable, copy_cstr_from_user, copy_from_user, copy_to_user};
 use crate::task::current_task;
@@ -70,8 +71,12 @@ pub fn sys_close(fd: usize) -> SysResult<usize> {
 /// 系统调用 sys-stat
 pub fn sys_stat(path: *const u8, stat: *mut Stat) -> SysResult<usize> {
     let path = copy_cstr_from_user(path)?;
-    let dentry = filename_lookup(AT_FDCWD, path.as_str(), 0)?;
-    let stat_buf: Stat = dentry.get_inode().stat(&dentry.abs_path)?.into();
+    let resolved = filename_lookup(AT_FDCWD, path.as_str(), 0)?;
+    let stat_buf: Stat = resolved
+        .dentry
+        .get_inode()
+        .stat(&resolved.abs_path())?
+        .into();
     copy_to_user(stat, &stat_buf as *const Stat, 1)?;
     Ok(0)
 }
@@ -149,15 +154,15 @@ pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: usize) -> SysResult<us
 pub fn sys_chdir(path: *const u8) -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
     let path = copy_cstr_from_user(path)?;
-    let dentry = filename_lookup(AT_FDCWD, path.as_str(), 0)?;
-    task.set_cwd(Path::new(dentry));
+    let resolved = filename_lookup(AT_FDCWD, path.as_str(), 0)?;
+    task.set_cwd(resolved);
     Ok(0)
 }
 
 /// 系统调用 sys-getcwd
 pub fn sys_getcwd(buf: *mut u8, len: usize) -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
-    let cwd = task.cwd().abs_path();
+    let cwd = task.cwd().global_abs_path();
     if cwd.len() >= len {
         return Err(Errno::ERANGE);
     }
@@ -239,21 +244,26 @@ pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> SysResult<usize
 }
 
 /// 系统调用 sys-mount
-/// TODO[UNIMPLEMENTED]: 需要补完 mount 逻辑。
 pub fn sys_mount(
     source: *const u8,
     target: *const u8,
     fstype: *const u8,
     flags: usize,
-    data: *const u8,
+    _data: *const u8,
 ) -> SysResult<usize> {
-    let _ = (source, target, fstype, flags, data);
-    Ok(0) // 只是为了过测例
+    let _source_str = copy_cstr_from_user(source)?;
+    let target_str = copy_cstr_from_user(target)?;
+    let fstype_str = copy_cstr_from_user(fstype)?;
+    do_mount(
+        _source_str.as_str(),
+        target_str.as_str(),
+        fstype_str.as_str(),
+        flags,
+    )
 }
 
 /// 系统调用 sys-umount2
-/// TODO[UNIMPLEMENTED]: 需要补完 umount2 逻辑。
 pub fn sys_umount2(target: *const u8, flags: usize) -> SysResult<usize> {
-    let _ = (target, flags);
-    Ok(0) // 只是为了过测例
+    let target = copy_cstr_from_user(target)?;
+    do_umount2(target.as_str(), flags)
 }

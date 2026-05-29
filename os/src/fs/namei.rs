@@ -1,7 +1,8 @@
 // os/src/fs/namei.rs
 
 use super::Path;
-use super::vfs::{Dentry, File, InodeType, OpenFlags, ROOT_DENTRY};
+use super::mount::{VfsMount, get_mount_by_dentry, get_mount_by_vfsmount, root_path};
+use super::vfs::{Dentry, File, InodeType, OpenFlags};
 use crate::syscall::{Errno, SysResult};
 use crate::task::current_task;
 use alloc::{format, string::String, sync::Arc, vec::Vec};
@@ -10,7 +11,7 @@ pub const AT_FDCWD: isize = -100;
 
 /// 路径名解析状态量
 pub struct Nameidata<'a> {
-    // pub mnt: Arc<VfsMount>,
+    pub mnt: Arc<VfsMount>,
     pub dentry: Arc<Dentry>,
     path_segments: Vec<&'a str>,
     depth: usize,
@@ -30,14 +31,15 @@ impl<'a> Nameidata<'a> {
     fn new_from_path(file_name: &'a str, base: Arc<Path>) -> Self {
         let path_segments: Vec<&'a str> = file_name.split('/').filter(|s| !s.is_empty()).collect();
 
-        let dentry = if file_name.starts_with("/") {
-            ROOT_DENTRY.clone()
+        let base = if file_name.starts_with("/") {
+            root_path()
         } else {
-            base.dentry.clone()
+            base
         };
 
         Nameidata {
-            dentry,
+            mnt: base.mnt.clone(),
+            dentry: base.dentry.clone(),
             path_segments,
             depth: 0,
         }
@@ -65,10 +67,25 @@ fn base_path_from_dirfd(dirfd: isize, file_name: &str) -> SysResult<Arc<Path>> {
 ///
 /// 首先查找 Dentry 的孩子，然后查找 DentryCache，最后查找 Inode 的子节点
 pub fn lookup_dentry(nd: &mut Nameidata) -> SysResult<Arc<Dentry>> {
+    lookup_dentry_maybe_follow_mount(nd, true)
+}
+
+fn lookup_dentry_maybe_follow_mount(
+    nd: &mut Nameidata,
+    follow_mount: bool,
+) -> SysResult<Arc<Dentry>> {
     let name = nd.path_segments[nd.depth];
 
     // 查找当前 Dentry 的孩子，找到直接返回
     if let Some(child) = nd.dentry.get_child(name) {
+        // 检查子目录项是否为挂载点，是则穿越
+        if follow_mount {
+            if let Some(mount) = get_mount_by_dentry(&child) {
+                nd.mnt = mount.vfs_mount.clone();
+                nd.dentry = mount.vfs_mount.root.clone();
+                return Ok(nd.dentry.clone());
+            }
+        }
         return Ok(child);
     }
 
@@ -88,7 +105,29 @@ pub fn lookup_dentry(nd: &mut Nameidata) -> SysResult<Arc<Dentry>> {
     let child_dentry = Arc::new(Dentry::new(abs_path, Some(nd.dentry.clone()), child_inode));
     nd.dentry.insert_child(name, child_dentry.clone());
 
+    // 检查子目录项是否为挂载点，是则穿越
+    if follow_mount {
+        if let Some(mount) = get_mount_by_dentry(&child_dentry) {
+            nd.mnt = mount.vfs_mount.clone();
+            nd.dentry = mount.vfs_mount.root.clone();
+            return Ok(nd.dentry.clone());
+        }
+    }
+
     Ok(child_dentry)
+}
+
+fn follow_dotdot(nd: &mut Nameidata) {
+    if Arc::ptr_eq(&nd.dentry, &nd.mnt.root) {
+        if let Some(mount) = get_mount_by_vfsmount(&nd.mnt) {
+            if let Some(parent) = mount.parent.as_ref().and_then(|parent| parent.upgrade()) {
+                nd.mnt = parent.vfs_mount.clone();
+                nd.dentry = mount.mountpoint.get_parent_or_self();
+                return;
+            }
+        }
+    }
+    nd.dentry = nd.dentry.get_parent_or_self();
 }
 
 // TODO: 个人觉得创建子目录项的过程不合适，之后实现缓存的时候再做修改
@@ -130,7 +169,7 @@ pub fn open_last_lookups(
     // 目标为根目录或工作目录
     if nd.path_segments.is_empty() {
         return Ok(Arc::new(File::new(
-            Path::new(nd.dentry.clone()),
+            Path::new(nd.mnt.clone(), nd.dentry.clone()),
             nd.dentry.get_inode(),
             OpenFlags::from(flags),
         )));
@@ -142,7 +181,8 @@ pub fn open_last_lookups(
     let dentry = if name == "." {
         nd.dentry.clone()
     } else if name == ".." {
-        nd.dentry.get_parent_or_self()
+        follow_dotdot(nd);
+        nd.dentry.clone()
     } else {
         match lookup_dentry(nd) {
             // 成功
@@ -172,7 +212,11 @@ pub fn open_last_lookups(
     };
 
     let inode = dentry.get_inode();
-    Ok(Arc::new(File::new(Path::new(dentry), inode, flags)))
+    Ok(Arc::new(File::new(
+        Path::new(nd.mnt.clone(), dentry),
+        inode,
+        flags,
+    )))
 }
 
 /// 根据路径打开文件
@@ -218,7 +262,19 @@ pub fn filename_create(dirfd: isize, path: &str, ty: InodeType, _mode: usize) ->
 }
 
 /// 根据路径查询文件
-pub fn filename_lookup(dirfd: isize, path: &str, _mode: usize) -> SysResult<Arc<Dentry>> {
+pub fn filename_lookup(dirfd: isize, path: &str, _mode: usize) -> SysResult<Arc<Path>> {
+    filename_lookup_maybe_follow_final_mount(dirfd, path, true)
+}
+
+pub fn filename_lookup_no_follow_final_mount(dirfd: isize, path: &str) -> SysResult<Arc<Path>> {
+    filename_lookup_maybe_follow_final_mount(dirfd, path, false)
+}
+
+fn filename_lookup_maybe_follow_final_mount(
+    dirfd: isize,
+    path: &str,
+    follow_final_mount: bool,
+) -> SysResult<Arc<Path>> {
     if path.is_empty() {
         return Err(Errno::ENOENT);
     }
@@ -227,17 +283,18 @@ pub fn filename_lookup(dirfd: isize, path: &str, _mode: usize) -> SysResult<Arc<
 
     // 目标为根目录或工作目录
     if nd.path_segments.is_empty() {
-        return Ok(nd.dentry.clone());
+        return Ok(Path::new(nd.mnt.clone(), nd.dentry.clone()));
     }
 
     let name = nd.path_segments[nd.depth];
     if name == "." {
-        Ok(nd.dentry.clone())
+        Ok(Path::new(nd.mnt.clone(), nd.dentry.clone()))
     } else if name == ".." {
-        let parent_dentry = nd.dentry.get_parent_or_self();
-        Ok(parent_dentry)
+        follow_dotdot(&mut nd);
+        Ok(Path::new(nd.mnt.clone(), nd.dentry.clone()))
     } else {
-        lookup_dentry(&mut nd)
+        let child_dentry = lookup_dentry_maybe_follow_mount(&mut nd, follow_final_mount)?;
+        Ok(Path::new(nd.mnt.clone(), child_dentry))
     }
 }
 
@@ -294,8 +351,8 @@ pub fn filename_link(olddirfd: isize, oldpath: &str, newdirfd: isize, newpath: &
         return Err(Errno::ENOENT);
     }
 
-    let old_dentry = filename_lookup(olddirfd, oldpath, 0)?;
-    if old_dentry.get_inode().node_type() == InodeType::Directory {
+    let old_path = filename_lookup(olddirfd, oldpath, 0)?;
+    if old_path.dentry.get_inode().node_type() == InodeType::Directory {
         return Err(Errno::EPERM);
     }
 
@@ -317,8 +374,8 @@ pub fn filename_link(olddirfd: isize, oldpath: &str, newdirfd: isize, newpath: &
         Err(Errno::ENOENT) => {
             let bare_dentry =
                 Dentry::negative(child_abs_path(&nd.dentry, name), Some(nd.dentry.clone()));
-            let old_inode = old_dentry.get_inode();
-            old_inode.link(&old_dentry.abs_path, bare_dentry.clone())?;
+            let old_inode = old_path.dentry.get_inode();
+            old_inode.link(&old_path.abs_path(), bare_dentry.clone())?;
             bare_dentry.inner.lock().inode = Some(old_inode);
             nd.dentry.insert_child(name, bare_dentry);
             Ok(())
@@ -340,8 +397,7 @@ pub fn link_path_walk(nd: &mut Nameidata) -> SysResult {
         if name == "." {
             //do nothing
         } else if name == ".." {
-            let parent_dentry = nd.dentry.get_parent_or_self();
-            nd.dentry = parent_dentry;
+            follow_dotdot(nd);
         } else {
             let child_dentry = lookup_dentry(nd)?;
             nd.dentry = child_dentry;
