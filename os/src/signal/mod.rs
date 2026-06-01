@@ -2,7 +2,7 @@ pub mod sig_handler;
 pub mod sig_info;
 pub mod sig_stack;
 pub mod sig_struct;
-use crate::mm::TRAMPOLINE;
+use crate::config::TRAMPOLINE;
 use crate::mm::copy_to_user;
 
 use crate::task::{current_task, exit_and_run_next};

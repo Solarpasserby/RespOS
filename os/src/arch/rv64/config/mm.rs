@@ -25,3 +25,10 @@ pub const MMAP_AREA_SIZE: usize = MMAP_MAX_ADDR - MMAP_MIN_ADDR; // 8G 大小
 // 页大小
 pub const PAGE_SIZE: usize = 0x1000;
 pub const PAGE_SIZE_BITS: usize = 12;
+
+/// 用户态 sigreturn 跳板页的虚拟地址。
+/// 该页在所有用户进程的地址空间中映射到同一位置。
+///
+/// Sv39 低半区最高一页的 end VPN 会跨到另一半区，和当前 VPNRange 的同半区
+/// 检查冲突，因此这里保留最高一页不用。
+pub const TRAMPOLINE: usize = 0x0000_003f_ffff_e000;

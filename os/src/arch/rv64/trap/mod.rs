@@ -49,9 +49,6 @@ unsafe extern "C" {
     fn __trap_from_kernel();
     pub fn __restore() -> !;
 }
-unsafe extern "C" {
-    pub fn sigreturn_trampoline();
-}
 
 pub fn init() {
     let mut sstatus = sstatus::read();
