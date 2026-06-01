@@ -18,9 +18,22 @@ impl SigPending {
         }
     }
 
+    pub fn with_mask(mask: SigSet) -> Self {
+        Self {
+            pending: SigSet::empty(),
+            mask,
+            info: BTreeMap::new(),
+        }
+    }
+
     pub fn clear(&mut self) {
         self.pending = SigSet::empty();
         self.mask = SigSet::empty();
+        self.info.clear();
+    }
+
+    pub fn clear_pending(&mut self) {
+        self.pending = SigSet::empty();
         self.info.clear();
     }
 

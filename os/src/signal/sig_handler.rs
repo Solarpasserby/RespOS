@@ -31,6 +31,15 @@ impl SigHandler {
             *action = SigAction::new(Sig::from((i + 1) as i32));
         }
     }
+
+    // exec 后，用户自定义 handler 需要恢复默认；被忽略的信号保持忽略。
+    pub fn reset_user_handlers_for_exec(&mut self) {
+        for (i, action) in self.actions.iter_mut().enumerate() {
+            if action.is_user() {
+                *action = SigAction::new(Sig::from((i + 1) as i32));
+            }
+        }
+    }
 }
 
 pub const SIG_DFL: usize = 0; // 默认行为

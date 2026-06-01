@@ -260,7 +260,8 @@ fn remove_mount_tree(mount: &Arc<Mount>) {
 pub fn init_root_fs() -> Arc<Path> {
     let root_fs = crate::fs::ext4::super_block();
     let root_inode = root_fs.root_inode();
-    let root_dentry = Arc::new(Dentry::new("/".into(), None, root_inode));
+    let root_dentry = Arc::new(Dentry::new("/".into(), None, root_inode.clone()));
+    ensure_tmp_dir(&root_inode, &root_dentry);
 
     let root_vfs_mount = VfsMount::new(root_dentry.clone(), root_fs, 0);
     let root_mount = Mount::new_root(root_dentry.clone(), root_vfs_mount.clone());
@@ -269,4 +270,28 @@ pub fn init_root_fs() -> Arc<Path> {
     init_procfs(root_dentry.clone());
 
     Path::new(root_vfs_mount, root_dentry)
+}
+
+fn ensure_tmp_dir(root_inode: &Arc<dyn super::vfs::InodeOp>, root_dentry: &Arc<Dentry>) {
+    match root_inode.lookup("/", "tmp") {
+        Ok(tmp_inode) => {
+            let tmp_dentry = Arc::new(Dentry::new(
+                "/tmp".into(),
+                Some(root_dentry.clone()),
+                tmp_inode,
+            ));
+            root_dentry.insert_child("tmp", tmp_dentry);
+        }
+        Err(Errno::ENOENT) => {
+            if let Ok(tmp_inode) = root_inode.create("/", "tmp", InodeType::Directory) {
+                let tmp_dentry = Arc::new(Dentry::new(
+                    "/tmp".into(),
+                    Some(root_dentry.clone()),
+                    tmp_inode,
+                ));
+                root_dentry.insert_child("tmp", tmp_dentry);
+            }
+        }
+        Err(_) => {}
+    }
 }

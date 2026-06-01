@@ -84,12 +84,20 @@ pub fn sys_sigaction(signum: i32, act: *const u8, oldact: *mut u8) -> SysResult<
     Ok(0)
 }
 
-pub fn sys_sigprocmask(how: usize, set: usize, oldset: usize) -> SysResult<usize> {
+pub fn sys_sigprocmask(
+    how: usize,
+    set: usize,
+    oldset: usize,
+    sigsetsize: usize,
+) -> SysResult<usize> {
     const SIG_BLOCK: usize = 0;
     const SIG_UNBLOCK: usize = 1;
     const SIG_SETMASK: usize = 2;
 
     if how > SIG_SETMASK {
+        return Err(Errno::EINVAL);
+    }
+    if sigsetsize != core::mem::size_of::<SigSet>() {
         return Err(Errno::EINVAL);
     }
 

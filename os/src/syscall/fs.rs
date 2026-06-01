@@ -92,8 +92,55 @@ pub fn sys_fstat(fd: usize, stat: *mut Stat) -> SysResult<usize> {
 
 /// 系统调用 sys-lseek
 pub fn sys_lseek(fd: usize, offset: isize, whence: usize) -> SysResult<usize> {
-    let _ = (fd, offset, whence);
-    Err(Errno::ENOSYS)
+    const SEEK_SET: usize = 0;
+    const SEEK_CUR: usize = 1;
+    const SEEK_END: usize = 2;
+
+    fn add_offset(base: usize, offset: isize) -> SysResult<usize> {
+        if offset >= 0 {
+            base.checked_add(offset as usize).ok_or(Errno::EINVAL)
+        } else {
+            let offset = offset.checked_neg().ok_or(Errno::EINVAL)? as usize;
+            base.checked_sub(offset).ok_or(Errno::EINVAL)
+        }
+    }
+
+    let task = current_task().expect("[kernel] current task is None.");
+    let file = task.get_fd_entry(fd)?.file;
+    if file.get_stat()?.ty != InodeType::Regular {
+        return Err(Errno::ESPIPE);
+    }
+
+    let new_offset = match whence {
+        SEEK_SET => add_offset(0, offset)?,
+        SEEK_CUR => add_offset(file.get_offset(), offset)?,
+        SEEK_END => add_offset(file.get_stat()?.size, offset)?,
+        _ => return Err(Errno::EINVAL),
+    };
+    file.seek(new_offset as isize)
+}
+
+/// 系统调用 sys-fcntl
+pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SysResult<usize> {
+    const F_GETFD: usize = 1;
+    const F_SETFD: usize = 2;
+    const F_GETFL: usize = 3;
+    const F_SETFL: usize = 4;
+
+    let task = current_task().expect("[kernel] current task is None.");
+    let mut fd_entry = task.get_fd_entry(fd)?;
+
+    match cmd {
+        F_GETFD => Ok(0),
+        F_SETFD => Ok(0),
+        F_GETFL => Ok(fd_entry.get_flags().bits() as usize),
+        F_SETFL => {
+            fd_entry.set_flags(OpenFlags::from(arg));
+            task.set_fd(fd, fd_entry)?;
+            Ok(0)
+        }
+        _ => Err(Errno::EINVAL),
+    }
 }
 
 /// 系统调用 sys-dup

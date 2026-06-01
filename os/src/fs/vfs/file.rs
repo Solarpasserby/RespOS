@@ -154,9 +154,11 @@ bitflags::bitflags! {
         const O_WRONLY = 1 << 0;
         const O_RDWR   = 1 << 1;
         const O_CREATE = 1 << 6;
+        const O_EXCL   = 1 << 7;
         const O_TRUNC  = 1 << 9;
         const O_APPEND = 1 << 10;
         const O_DIRECTORY = 1 << 16;
+        const O_CLOEXEC = 1 << 19;
     }
 }
 

@@ -188,6 +188,9 @@ pub fn open_last_lookups(
             // 成功
             Ok(dentry) => {
                 let inode = dentry.get_inode();
+                if flags.contains(OpenFlags::O_CREATE | OpenFlags::O_EXCL) {
+                    return Err(Errno::EEXIST);
+                }
                 // 期望打开目录，但实际文件类型不是目录，返回错误
                 if flags.contains(OpenFlags::O_DIRECTORY)
                     && inode.node_type() != InodeType::Directory

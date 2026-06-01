@@ -12,7 +12,7 @@ use crate::mm::{MemorySet, copy_to_user};
 use crate::mutex::SpinLock;
 use crate::signal::sig_handler::SigHandler;
 use crate::signal::sig_info::SigInfo;
-use crate::signal::sig_stack::SignalStack;
+use crate::signal::sig_stack::{SS_DISABLE, SignalStack};
 use crate::signal::sig_struct::SigPending;
 use crate::syscall::{Errno, SysResult};
 use crate::trap::TrapContext;
@@ -257,17 +257,18 @@ impl TaskControlBlock {
         } else {
             FdTable::from_existed_user(&self.fd_table.lock())
         };
+        let current_sig_mask = self.op_sig_pending(|pending| pending.mask);
         let (sig_handler, sig_pending, sig_stack) = if is_thread {
             (
                 self.sig_handler.clone(),              // 共享同一张 handler 表
-                SpinLock::new(SigPending::new()),      // 自己的队列
+                SpinLock::new(SigPending::with_mask(current_sig_mask)), // 自己的队列，继承当前 mask
                 SpinLock::new(SignalStack::default()), // 自己的栈
             )
         } else {
             (
-                Arc::new(SpinLock::new(SigHandler::new())), // 全新的表
-                SpinLock::new(SigPending::new()),
-                SpinLock::new(SignalStack::default()),
+                Arc::new(SpinLock::new(self.op_sig_handler(|handler| handler.clone()))),
+                SpinLock::new(SigPending::with_mask(current_sig_mask)),
+                SpinLock::new(*self.sig_stack.lock()),
             )
         };
         let task_ctrl_block = Arc::new(TaskControlBlock {
@@ -372,7 +373,9 @@ impl TaskControlBlock {
         // exec 保留 fd_table；后续可在这里处理 close-on-exec。
 
         /* ===== 修改信号处理 ===== */
-        // TODO: 信号完善
+        self.op_sig_handler_mut(|handler| handler.reset_user_handlers_for_exec());
+        self.op_sig_pending_mut(|pending| pending.clear_pending());
+        *self.sig_stack.lock() = SignalStack::default();
 
         Ok(argc)
     }
@@ -521,7 +524,7 @@ impl TaskControlBlock {
     // 取信号栈
     pub fn sigstack(&self) -> Option<SignalStack> {
         let stack = *self.sig_stack.lock();
-        if stack.ss_flags == 1 {
+        if stack.ss_flags == SS_DISABLE || stack.ss_size == 0 {
             None
         } else {
             Some(stack)
@@ -535,11 +538,29 @@ impl TaskControlBlock {
                 self.op_sig_pending_mut(|pending| pending.add_signal(siginfo));
             }
             false => {
-                self.op_thread_group(|tg| {
+                let sig = crate::signal::Sig::from(siginfo.signo);
+                let target = self.op_thread_group(|tg| {
+                    let mut fallback = None;
+                    let mut leader = None;
                     for task in tg.iter() {
-                        task.op_sig_pending_mut(|pending| pending.add_signal(siginfo));
+                        if fallback.is_none() {
+                            fallback = Some(task.clone());
+                        }
+                        if task.is_process_leader() {
+                            leader = Some(task.clone());
+                        }
+                        let can_take_now = task.op_sig_pending(|pending| {
+                            !pending.mask.contain_signal(sig) || sig.is_kill_or_stop()
+                        });
+                        if can_take_now {
+                            return Some(task.clone());
+                        }
                     }
+                    leader.or(fallback)
                 });
+                if let Some(task) = target {
+                    task.op_sig_pending_mut(|pending| pending.add_signal(siginfo));
+                }
             }
         }
     }
