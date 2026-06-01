@@ -21,7 +21,7 @@
 #   sp + 11*8:  s8 (r31)
 #   sp + 12*8:  padding
 #   sp + 13*8:  padding (s[11])
-#   sp + 14*8:  PGDH (mmu_token)
+#   sp + 14*8:  PGDL/PGDH root token
 #   sp + 15*8:  _padding
 
     .section .text
@@ -47,8 +47,8 @@ __switch:
     st.d        $zero, $sp, 96
     st.d        $zero, $sp, 104
 
-    # 保存 PGDH (根页表)
-    csrrd       $t0, 0x1b        # PGDH
+    # 保存当前用户页表 root。PGDL/PGDH 使用同一个 root。
+    csrrd       $t0, 0x19        # PGDL
     st.d        $t0, $sp, 112
 
     # 更新当前任务的内核栈指针。
@@ -70,10 +70,11 @@ __switch:
     ld.d        $r30, $a0, 80   # s7
     ld.d        $r31, $a0, 88   # s8
 
-    # 恢复 PGDH 并刷新 TLB
+    # 恢复 PGDL/PGDH 并刷新 TLB
     ld.d        $t0, $a0, 112
-    csrwr       $t0, 0x1b        # PGDH
-    invtlb      0, $zero, $zero  # TLB 全刷新
+    csrwr       $t0, 0x19        # PGDL
+    csrwr       $t0, 0x1a        # PGDH
+    invtlb      0x3, $zero, $zero
 
     # 弹出 TaskContext，切换到新栈
     addi.d      $a0, $a0, 128

@@ -16,7 +16,6 @@ mod signal;
 mod task;
 mod tid;
 
-#[cfg(target_arch = "riscv64")]
 use crate::loader::get_app_data_by_name;
 pub use action::{SignalAction, SignalActions};
 use alloc::sync::Arc;
@@ -33,11 +32,7 @@ pub use task::{CloneFlags, TaskControlBlock};
 
 lazy_static! {
     pub static ref INITPROC: Arc<TaskControlBlock> = {
-        #[cfg(target_arch = "riscv64")]
         let data = get_app_data_by_name("initproc").unwrap();
-        #[cfg(target_arch = "loongarch64")]
-        let data = &[][..];
-
         TaskControlBlock::init(data)
     };
 }

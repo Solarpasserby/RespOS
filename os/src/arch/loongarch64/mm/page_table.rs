@@ -7,17 +7,19 @@
 //   | 47..39 | 38..30 | 29..21 | 20..12 | 11..0      |
 //
 // PTE 格式 (64-bit):
-//   | Reserved[63:48] | PPN[47:12] | Flags[11:0] |
+//   | RPLV/NX/NR | Reserved | PPN[47:12] | Software | G/MAT/PLV/D/V |
 //
 // Flags:
 //   bit 0: V (Valid)
-//   bit 1: D (Dirty)
+//   bit 1: D (Dirty / Writable)
 //   bits[3:2]: PLV (Privilege: 0=kernel, 3=user)
 //   bits[5:4]: MAT (Memory type: 1=cached)
 //   bit 6: G (Global)
-//   bit 7: NR (No Read)
-//   bit 8: NX (No Execute)
-//   bits[11:9]: RPLV
+//   bit 7: P (software present)
+//   bit 8: W (software writable)
+//   bit 61: NR (No Read)
+//   bit 62: NX (No Execute)
+//   bit 63: RPLV
 
 use crate::config::KERNEL_BASE;
 use crate::mm::{FrameTracker, frame_alloc as alloc_frame};
@@ -47,11 +49,8 @@ impl PageTable {
         let frame = alloc_frame().unwrap();
         let kernel_page_table = &KERNEL_SPACE.lock().page_table;
         let kernel_root_ppn = kernel_page_table.root_ppn;
-        // 拷贝内核空间映射: 复制根页表的内核部分
-        // LA64 下 KERNEL_BASE 的 VPN[47:39] 决定了 PGD 索引
         let vpn = VirtPageNum::from(VirtAddr::from(KERNEL_BASE).floor().0);
         let pgd_idx = (vpn.0 >> 27) & 0x1FF;
-        // 从 pgd_idx 到 512 之间的条目属于内核空间
         let dst = frame.ppn().get_pte_array();
         let src = kernel_root_ppn.get_pte_array();
         dst[pgd_idx..].copy_from_slice(&src[pgd_idx..]);
@@ -69,7 +68,6 @@ impl PageTable {
     }
 
     pub fn token(&self) -> usize {
-        // PGDH 格式: root_ppn << 12
         self.root_ppn.0 << 12
     }
 
@@ -104,7 +102,6 @@ pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> &'static mut T {
         .get_mut()
 }
 
-/// LA64 4级页表 VPN 索引
 fn get_vpn_indexes(vpn: VirtPageNum) -> [usize; 4] {
     let v = vpn.0;
     [
@@ -126,7 +123,7 @@ impl PageTable {
             }
             if !pte.is_valid() {
                 let frame = alloc_frame().unwrap();
-                *pte = PageTableEntry::new(frame.ppn(), PTEFlags::VALID);
+                *pte = PageTableEntry::new_table(frame.ppn());
                 self.frames.push(frame);
             }
             ppn = pte.ppn();
@@ -203,8 +200,6 @@ impl PageTable {
 }
 
 /// LoongArch 页表项
-///
-/// | Reserved[63:48] | PPN[47:12] | RPLV[11:9] | NX | NR | G | MAT[5:4] | PLV[3:2] | D | V |
 #[derive(Copy, Clone)]
 #[repr(C)]
 pub struct PageTableEntry {
@@ -212,7 +207,7 @@ pub struct PageTableEntry {
 }
 
 bitflags! {
-    pub struct PTEFlags: u16 {
+    pub struct PTEFlags: usize {
         const VALID    = 1 << 0;
         const READ     = 1 << 1;  // maps to !NR via conversion
         const WRITE    = 1 << 2;  // maps to D via conversion
@@ -221,7 +216,7 @@ bitflags! {
         const GLOBAL   = 1 << 5;
         const ACCESSED = 1 << 6;  // LA64 has no explicit A bit, kept for interface
         const DIRTY    = 1 << 7;  // maps to D bit
-        const COW      = 1 << 8;  // Copy-on-Write (software flag, stored in PTE reserved bit)
+        const COW      = 1 << 9;  // Copy-on-Write (software flag)
     }
 }
 
@@ -259,11 +254,11 @@ impl PTEFlags {
 
 impl From<MapPermission> for PTEFlags {
     fn from(value: MapPermission) -> Self {
-        PTEFlags::from_bits(value.bits()).unwrap()
+        PTEFlags::from_bits(value.bits() as usize).unwrap()
     }
 }
 
-/// 将 RISC-V 风格的 PTEFlags 转换为 LoongArch PTE bits[11:0]
+/// 将通用 PTEFlags 转换为 LoongArch PTE bits。
 fn flags_to_la64(flags: PTEFlags) -> usize {
     let mut la64: usize = 0;
     if flags.contains(PTEFlags::VALID) {
@@ -272,7 +267,7 @@ fn flags_to_la64(flags: PTEFlags) -> usize {
     if flags.contains(PTEFlags::DIRTY) || flags.contains(PTEFlags::WRITE) {
         la64 |= 1 << 1; // D
     }
-    // PLV: USER → 3, otherwise → 0
+    // PLV: USER -> 3, otherwise -> 0
     if flags.contains(PTEFlags::USER) {
         la64 |= 3 << 2;
     }
@@ -281,18 +276,27 @@ fn flags_to_la64(flags: PTEFlags) -> usize {
     if flags.contains(PTEFlags::GLOBAL) {
         la64 |= 1 << 6;
     }
+    if flags.intersects(PTEFlags::READ | PTEFlags::WRITE | PTEFlags::EXECUTE) {
+        la64 |= 1 << 7; // P: software present bit, kept for refill compatibility
+    }
+    if flags.contains(PTEFlags::WRITE) {
+        la64 |= 1 << 8; // W: software writable bit
+    }
+    if flags.contains(PTEFlags::COW) {
+        la64 |= 1 << 9;
+    }
     // NR: No Read when READ flag absent
     if !flags.contains(PTEFlags::READ) {
-        la64 |= 1 << 7;
+        la64 |= 1usize << 61;
     }
     // NX: No Execute when EXECUTE flag absent
     if !flags.contains(PTEFlags::EXECUTE) {
-        la64 |= 1 << 8;
+        la64 |= 1usize << 62;
     }
     la64
 }
 
-/// 将 LoongArch PTE bits[11:0] 转换为 RISC-V 风格的 PTEFlags
+/// 将 LoongArch PTE bits 转换为通用 PTEFlags。
 fn flags_from_la64(bits: usize) -> PTEFlags {
     let mut flags = PTEFlags::empty();
     if bits & (1 << 0) != 0 {
@@ -301,10 +305,10 @@ fn flags_from_la64(bits: usize) -> PTEFlags {
     if bits & (1 << 1) != 0 {
         flags |= PTEFlags::DIRTY | PTEFlags::WRITE;
     }
-    if bits & (1 << 7) == 0 {
+    if bits & (1usize << 61) == 0 {
         flags |= PTEFlags::READ;
     }
-    if bits & (1 << 8) == 0 {
+    if bits & (1usize << 62) == 0 {
         flags |= PTEFlags::EXECUTE;
     }
     if (bits >> 2) & 3 == 3 {
@@ -313,10 +317,19 @@ fn flags_from_la64(bits: usize) -> PTEFlags {
     if bits & (1 << 6) != 0 {
         flags |= PTEFlags::GLOBAL;
     }
+    if bits & (1 << 9) != 0 {
+        flags |= PTEFlags::COW;
+    }
     flags | PTEFlags::ACCESSED
 }
 
 impl PageTableEntry {
+    pub fn new_table(ppn: PhysPageNum) -> Self {
+        Self {
+            bits: (ppn.0 << 12) | (1 << 0),
+        }
+    }
+
     pub fn new(ppn: PhysPageNum, flags: PTEFlags) -> Self {
         Self {
             bits: (ppn.0 << 12) | flags_to_la64(flags),
@@ -332,7 +345,7 @@ impl PageTableEntry {
     }
 
     pub fn flags(&self) -> PTEFlags {
-        flags_from_la64(self.bits & 0xFFF)
+        flags_from_la64(self.bits & !(((1usize << PPN_WIDTH) - 1) << 12))
     }
 
     pub fn is_valid(&self) -> bool {
@@ -340,7 +353,7 @@ impl PageTableEntry {
     }
 
     pub fn readable(&self) -> bool {
-        self.bits & (1 << 7) == 0
+        self.bits & (1usize << 61) == 0
     }
 
     pub fn writable(&self) -> bool {
@@ -348,19 +361,19 @@ impl PageTableEntry {
     }
 
     pub fn executable(&self) -> bool {
-        self.bits & (1 << 8) == 0
+        self.bits & (1usize << 62) == 0
     }
 
-    /// COW 标志存储在 PTE 保留位 [48]，不影响硬件 flags[11:0] 和 PPN[47:12]
+    /// COW 标志存储在软件位 [9]。
     pub fn is_cow(&self) -> bool {
-        (self.bits >> 48) & 1 != 0
+        self.bits & (1 << 9) != 0
     }
 
     pub fn set_cow_bit(&mut self) {
-        self.bits |= 1 << 48;
+        self.bits |= 1 << 9;
     }
 
     pub fn clear_cow_bit(&mut self) {
-        self.bits &= !(1 << 48);
+        self.bits &= !(1 << 9);
     }
 }

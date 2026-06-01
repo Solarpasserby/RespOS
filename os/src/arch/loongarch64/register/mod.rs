@@ -1,9 +1,7 @@
 //! Minimal LoongArch64 CSR helpers used by this kernel.
 //!
 //! Keep this module deliberately small. It mirrors only the `riscv::register`
-//! surface that the current kernel actually relies on: trap cause/address,
-//! interrupt enable state, timer configuration, MMU root registers, and a few
-//! architecture instructions.
+//! surface that the current kernel actually relies on.
 
 macro_rules! read_csr {
     ($csr:expr) => {{
@@ -28,6 +26,9 @@ pub mod crmd {
     const IE: usize = 1 << 2;
     const DA: usize = 1 << 3;
     const PG: usize = 1 << 4;
+    const DATF_SHIFT: usize = 5;
+    const DATM_SHIFT: usize = 7;
+    const MAT_CC: usize = 0b01;
 
     #[inline(always)]
     pub fn read() -> usize {
@@ -62,6 +63,10 @@ pub mod crmd {
         let mut bits = read();
         bits &= !DA;
         bits |= PG;
+        bits &= !(0b11 << DATF_SHIFT);
+        bits &= !(0b11 << DATM_SHIFT);
+        bits |= MAT_CC << DATF_SHIFT;
+        bits |= MAT_CC << DATM_SHIFT;
         unsafe {
             write(bits);
         }
@@ -90,6 +95,29 @@ pub mod ecfg {
     }
 }
 
+pub mod euen {
+    const CSR_EUEN: usize = 0x2;
+    const FPE: usize = 1 << 0;
+    const SXE: usize = 1 << 1;
+
+    #[inline(always)]
+    pub fn read() -> usize {
+        read_csr!(CSR_EUEN)
+    }
+
+    #[inline(always)]
+    pub unsafe fn write(bits: usize) {
+        write_csr!(CSR_EUEN, bits);
+    }
+
+    #[inline(always)]
+    pub unsafe fn enable_kernel_extensions() {
+        unsafe {
+            write(read() | FPE | SXE);
+        }
+    }
+}
+
 pub mod estat {
     const CSR_ESTAT: usize = 0x5;
     const IS_MASK: usize = (1 << 13) - 1;
@@ -113,6 +141,7 @@ pub mod estat {
         IllegalInstruction,
         PrivilegedInstruction,
         FloatingPointUnavailable,
+        SimdUnavailable,
         Unknown(usize),
     }
 
@@ -173,6 +202,7 @@ pub mod estat {
             0xd => Exception::IllegalInstruction,
             0xe => Exception::PrivilegedInstruction,
             0xf => Exception::FloatingPointUnavailable,
+            0x10 => Exception::SimdUnavailable,
             other => Exception::Unknown(other),
         }
     }
@@ -258,9 +288,22 @@ pub mod timer {
 }
 
 pub mod mmu {
-    const CSR_PGDH: usize = 0x1b;
+    use crate::config::PAGE_SIZE_BITS;
+
+    const CSR_PGDL: usize = 0x19;
+    const CSR_PGDH: usize = 0x1a;
+    const CSR_PWCL: usize = 0x1c;
+    const CSR_PWCH: usize = 0x1d;
+    const CSR_STLBPS: usize = 0x1e;
+    const CSR_TLBRENTRY: usize = 0x88;
+    const CSR_TLBREHI: usize = 0x8e;
     const CSR_DMW0: usize = 0x180;
     const CSR_DMW1: usize = 0x181;
+
+    #[inline(always)]
+    pub fn read_pgdl() -> usize {
+        read_csr!(CSR_PGDL)
+    }
 
     #[inline(always)]
     pub fn read_pgdh() -> usize {
@@ -268,8 +311,38 @@ pub mod mmu {
     }
 
     #[inline(always)]
+    pub unsafe fn write_pgdl(bits: usize) {
+        write_csr!(CSR_PGDL, bits);
+    }
+
+    #[inline(always)]
     pub unsafe fn write_pgdh(bits: usize) {
         write_csr!(CSR_PGDH, bits);
+    }
+
+    #[inline(always)]
+    pub unsafe fn write_tlbrentry(bits: usize) {
+        write_csr!(CSR_TLBRENTRY, bits);
+    }
+
+    #[inline(always)]
+    pub unsafe fn configure_page_walk() {
+        const DIR_WIDTH: usize = 9;
+        let pwcl = PAGE_SIZE_BITS
+            | (DIR_WIDTH << 5)
+            | ((PAGE_SIZE_BITS + DIR_WIDTH) << 10)
+            | (DIR_WIDTH << 15)
+            | ((PAGE_SIZE_BITS + DIR_WIDTH * 2) << 20)
+            | (DIR_WIDTH << 25);
+        let pwch = ((PAGE_SIZE_BITS + DIR_WIDTH * 3) << 0) | (DIR_WIDTH << 6);
+        write_csr!(CSR_PWCL, pwcl);
+        write_csr!(CSR_PWCH, pwch);
+    }
+
+    #[inline(always)]
+    pub unsafe fn configure_tlb_page_size() {
+        write_csr!(CSR_STLBPS, PAGE_SIZE_BITS);
+        write_csr!(CSR_TLBREHI, PAGE_SIZE_BITS);
     }
 
     #[inline(always)]
@@ -285,7 +358,7 @@ pub mod mmu {
     #[inline(always)]
     pub unsafe fn flush_tlb() {
         unsafe {
-            core::arch::asm!("invtlb 0, $zero, $zero", options(nostack));
+            core::arch::asm!("invtlb 0x3, $r0, $r0", options(nostack));
         }
     }
 }

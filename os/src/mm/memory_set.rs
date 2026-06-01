@@ -245,6 +245,9 @@ impl MemorySet {
     pub fn activate(&self) {
         let token = self.page_table.token();
         write_mmu_token(token);
+        if !crate::arch::paging_enabled() {
+            crate::arch::enable_mmu();
+        }
         self.flush_tlb();
     }
 
@@ -476,13 +479,13 @@ impl MemorySet {
                     user_space.page_table.set_pte_cow(vpn);
 
                     // 子进程 PTE 同样为只读 + COW
-                    let mut child_flags = PTEFlags::from_bits(area.map_perm.bits).unwrap();
+                    let mut child_flags = PTEFlags::from_bits(area.map_perm.bits as usize).unwrap();
                     child_flags.remove(PTEFlags::WRITE);
                     memory_set.page_table.map(vpn, ppn, child_flags);
                     memory_set.page_table.set_pte_cow(vpn);
                 } else {
                     // 只读页直接共享，无需 COW
-                    let child_flags = PTEFlags::from_bits(area.map_perm.bits).unwrap();
+                    let child_flags = PTEFlags::from_bits(area.map_perm.bits as usize).unwrap();
                     memory_set.page_table.map(vpn, ppn, child_flags);
                 }
 

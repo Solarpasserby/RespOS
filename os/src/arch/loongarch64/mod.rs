@@ -11,16 +11,48 @@ pub mod task;
 pub mod timer;
 pub mod trap;
 
+use core::arch::global_asm;
+use core::sync::atomic::{AtomicBool, Ordering};
+
 pub use entry::enter_main;
+
+global_asm!(include_str!("tlb_refill.S"));
+
+static KERNEL_MAPPING_ACTIVE: AtomicBool = AtomicBool::new(false);
+static LOW_DIRECT_MAP_ACTIVE: AtomicBool = AtomicBool::new(true);
+const BOOT_MAP_SIZE: usize = 16 * 1024 * 1024;
+const BOOT_PTE_TABLES: usize = BOOT_MAP_SIZE / (512 * crate::config::PAGE_SIZE);
+const PTE_VALID: usize = 1 << 0;
+const PTE_DIRTY: usize = 1 << 1;
+const PTE_MAT_CC: usize = 1 << 4;
+const PTE_GLOBAL: usize = 1 << 6;
+const PTE_PRESENT: usize = 1 << 7;
+const PTE_WRITABLE: usize = 1 << 8;
+
+#[repr(align(4096))]
+struct BootPage([usize; 512]);
+
+static mut BOOT_PGD: BootPage = BootPage([0; 512]);
+static mut BOOT_PUD: BootPage = BootPage([0; 512]);
+static mut BOOT_PMD: BootPage = BootPage([0; 512]);
+static mut BOOT_PTES: [BootPage; BOOT_PTE_TABLES] = [const { BootPage([0; 512]) }; BOOT_PTE_TABLES];
+
+unsafe extern "C" {
+    fn __rfill();
+}
 
 #[inline]
 pub fn read_mmu_token() -> usize {
-    register::mmu::read_pgdh()
+    register::mmu::read_pgdl()
 }
 
 #[inline]
 pub fn write_mmu_token(token: usize) {
     unsafe {
+        // 当前模型下用户低半区和内核高半区共享同一个根页表页。
+        // LoongArch 的硬件按 VA[47] 在 PGDL/PGDH 中选择根页表，
+        // 因此两个寄存器都要写入当前地址空间的 root。
+        register::mmu::write_pgdl(token);
         register::mmu::write_pgdh(token);
     }
 }
@@ -32,29 +64,108 @@ pub fn sfence() {
     }
 }
 
-/// 开启 MMU：配置 DMW0 为内核恒等映射，然后启动分页
-///
-/// DMW0: VA[47:44]=0 → PA[47:44]=0，缓存模式，仅 PLV0（内核）可用。
-/// 内核访问低 256GB 地址空间时走 DMW 直接映射，不经过页表。
-/// 用户态（PLV3）访问不命中 DMW，必须走页表。
-///
-/// CRMD: 清 DA（关闭直接地址模式），置 PG（开启分页）。
-pub fn enable_mmu() {
+#[inline]
+pub fn paging_enabled() -> bool {
+    KERNEL_MAPPING_ACTIVE.load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn low_direct_map_enabled() -> bool {
+    LOW_DIRECT_MAP_ACTIVE.load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn enable_kernel_extensions() {
     unsafe {
-        // DMW0: VSEG=0, PSEG=0, MAT=1 (cached), PLV0=1, PLV3=0
-        // DMW0 bit layout: [47:44]=VSEG, [43:40]=PSEG, [5:4]=MAT, [3]=PLV3, [2]=PLV0
-        let dmw0: usize = (1 << 4) | (1 << 2); // MAT=1(cached), PLV0=1
-        register::mmu::write_dmw0(dmw0);
+        register::euen::enable_kernel_extensions();
+    }
+}
 
-        // DMW1: 清零，暂不配置
+#[inline]
+fn phys_addr<T>(ptr: *const T) -> usize {
+    ptr as usize - crate::config::KERNEL_BASE
+}
+
+#[inline]
+fn table_pte(pa: usize) -> usize {
+    ((pa >> crate::config::PAGE_SIZE_BITS) << 12) | PTE_VALID
+}
+
+#[inline]
+fn leaf_pte(pa: usize) -> usize {
+    ((pa >> crate::config::PAGE_SIZE_BITS) << 12)
+        | PTE_VALID
+        | PTE_DIRTY
+        | PTE_MAT_CC
+        | PTE_GLOBAL
+        | PTE_PRESENT
+        | PTE_WRITABLE
+}
+
+unsafe fn configure_mmu() {
+    let refill_entry_pa = __rfill as usize - crate::config::KERNEL_BASE;
+    unsafe {
+        register::mmu::write_tlbrentry(refill_entry_pa);
+        register::mmu::configure_tlb_page_size();
+        register::mmu::configure_page_walk();
+    }
+}
+
+/// 建立一个最小的高地址恒等偏移映射，使高地址内核堆在正式内核页表构造前可用。
+pub fn enable_boot_paging() {
+    if paging_enabled() {
+        return;
+    }
+    unsafe {
+        let pgd = phys_addr(core::ptr::addr_of!(BOOT_PGD.0) as *const _) as *mut [usize; 512];
+        let pud = phys_addr(core::ptr::addr_of!(BOOT_PUD.0) as *const _) as *mut [usize; 512];
+        let pmd = phys_addr(core::ptr::addr_of!(BOOT_PMD.0) as *const _) as *mut [usize; 512];
+        let ptes = phys_addr(core::ptr::addr_of!(BOOT_PTES) as *const _)
+            as *mut [BootPage; BOOT_PTE_TABLES];
+
+        let base_vpn = crate::config::KERNEL_BASE >> crate::config::PAGE_SIZE_BITS;
+        let pgd_idx = (base_vpn >> 27) & 0x1ff;
+        let pud_idx = (base_vpn >> 18) & 0x1ff;
+        let pmd_idx = (base_vpn >> 9) & 0x1ff;
+
+        core::ptr::write_volatile(
+            (pgd as *mut usize).add(pgd_idx),
+            table_pte(phys_addr(core::ptr::addr_of!(BOOT_PUD) as *const _)),
+        );
+        core::ptr::write_volatile(
+            (pud as *mut usize).add(pud_idx),
+            table_pte(phys_addr(core::ptr::addr_of!(BOOT_PMD) as *const _)),
+        );
+        for table in 0..BOOT_PTE_TABLES {
+            let table_pa = ptes as usize + table * core::mem::size_of::<BootPage>();
+            core::ptr::write_volatile(
+                (pmd as *mut usize).add(pmd_idx + table),
+                table_pte(table_pa),
+            );
+            for idx in 0..512 {
+                let pa = (table * 512 + idx) * crate::config::PAGE_SIZE;
+                core::ptr::write_volatile((table_pa as *mut usize).add(idx), leaf_pte(pa));
+            }
+        }
+        configure_mmu();
+        let root = phys_addr(core::ptr::addr_of!(BOOT_PGD) as *const _);
+        write_mmu_token(root);
+
         register::mmu::write_dmw1(0);
-
-        // CRMD: 清 DA(bit3), 置 PG(bit4)
-        // DA=1 为直接地址模式，PG=1 为分页模式
         register::crmd::enable_paging();
+        KERNEL_MAPPING_ACTIVE.store(true, Ordering::Relaxed);
+    }
+}
 
-        // 从 DA=1 切换到 PG=1 后，TLB 应当为空（DA=1 时 bypass TLB），
-        // 但为安全起见做一次全刷新
+/// 开启 MMU：正式页表激活前若还未分页，则先走 boot page table 过渡。
+pub fn enable_mmu() {
+    enable_boot_paging();
+}
+
+pub fn disable_low_direct_map() {
+    unsafe {
+        register::mmu::write_dmw0(0);
         register::mmu::flush_tlb();
     }
+    LOW_DIRECT_MAP_ACTIVE.store(false, Ordering::Relaxed);
 }

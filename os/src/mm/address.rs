@@ -193,12 +193,26 @@ impl VirtAddr {
 }
 
 impl PhysAddr {
+    #[cfg(target_arch = "loongarch64")]
+    fn kernel_addr(self) -> usize {
+        if crate::arch::paging_enabled() {
+            self.0 + KERNEL_BASE
+        } else {
+            self.0
+        }
+    }
+
+    #[cfg(not(target_arch = "loongarch64"))]
+    fn kernel_addr(self) -> usize {
+        self.0 + KERNEL_BASE
+    }
+
     pub fn get_mut<T>(&self) -> &'static mut T {
-        let ptr = (self.0 + KERNEL_BASE) as *mut T;
+        let ptr = self.kernel_addr() as *mut T;
         unsafe { ptr.as_mut().unwrap() }
     }
     pub fn get_ref<T>(&self) -> &'static T {
-        let ptr = (self.0 + KERNEL_BASE) as *const T;
+        let ptr = self.kernel_addr() as *const T;
         unsafe { ptr.as_ref().unwrap() }
     }
 }
@@ -207,21 +221,18 @@ impl PhysAddr {
 impl PhysPageNum {
     pub fn get_pte_array(&self) -> &'static mut [PageTableEntry] {
         let pa = PhysAddr::from(*self);
-        let va = VirtAddr::from(pa.0 + KERNEL_BASE);
-        let ptr = usize::from(va) as *mut PageTableEntry;
+        let ptr = pa.kernel_addr() as *mut PageTableEntry;
         unsafe { core::slice::from_raw_parts_mut(ptr, 512) }
     }
     pub fn get_bytes_array(&self) -> &'static mut [u8] {
         let pa = PhysAddr::from(*self);
-        let va = VirtAddr::from(pa.0 + KERNEL_BASE);
-        let ptr = usize::from(va) as *mut u8;
+        let ptr = pa.kernel_addr() as *mut u8;
         unsafe { core::slice::from_raw_parts_mut(ptr, 4096) }
     }
     /// Get mutable reference to T on `PhysPageNum`
     pub fn get_mut<T>(&self) -> &'static mut T {
         let pa = PhysAddr::from(*self);
-        let va = VirtAddr::from(pa.0 + KERNEL_BASE);
-        let ptr = usize::from(va) as *mut T;
+        let ptr = pa.kernel_addr() as *mut T;
         unsafe { &mut *ptr }
     }
 }

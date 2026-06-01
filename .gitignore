@@ -7,3 +7,4 @@ os/.cargo/
 user/.cargo/
 kernel-rv
 kernel-la
+examples/*

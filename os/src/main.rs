@@ -36,6 +36,8 @@ global_asm!(include_str!("link_app.S"));
 #[unsafe(no_mangle)]
 pub fn rust_main() -> ! {
     clear_bss();
+    #[cfg(target_arch = "loongarch64")]
+    arch::enable_kernel_extensions();
 
     error!("hello world");
     warn!("hello world");
@@ -43,9 +45,9 @@ pub fn rust_main() -> ! {
     debug!("hello world");
     trace!("hello world");
 
+    trap::init();
     mm::init();
     task::add_initproc();
-    trap::init();
     trap::enable_timer_interrupt();
     timer::set_next_ti_trigger();
 
