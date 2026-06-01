@@ -2,6 +2,7 @@
 
 use super::INITPROC;
 use super::action::SignalActions;
+use super::aux::{AT_EXECFN, AT_NULL, AT_PLATFORM, AT_RANDOM, AuxHeader};
 use super::context::TaskContext;
 use super::kstack::KernelStack;
 use super::manager::TASK_MANAGER;
@@ -141,7 +142,8 @@ impl TaskControlBlock {
         let tgid = tid.0;
         // 创建地址空间会拷贝内核页表，先创建内核栈生成页表映射，以保证任务切换后能正确访问内核栈
         let mut kernel_stack = KernelStack::new(&tid);
-        let (memory_set, token, user_sp, entry_point) = MemorySet::from_elf_data(elf_data);
+        let (memory_set, token, user_sp, entry_point, _aux_vec) =
+            MemorySet::from_elf_data(elf_data);
 
         let mut kernel_stack_top = kernel_stack.get_top(); // 由于栈是新建的，栈顶就是栈顶边界
         // 在栈上存储异常上下文，该数据不会从栈中弹出，固定位于栈最高位置
@@ -336,7 +338,8 @@ impl TaskControlBlock {
             return Err(Errno::EINVAL);
         }
 
-        let (memory_set, _token, mut user_sp, entry_point) = MemorySet::from_elf_data(elf_data);
+        let (memory_set, _token, mut user_sp, entry_point, aux_vec) =
+            MemorySet::from_elf_data(elf_data);
 
         /* ===== 修改地址空间 ===== */
         let mut memory_set_guard = self.memory_set.write();
@@ -350,7 +353,7 @@ impl TaskControlBlock {
         /* ===== 修改用户栈数据 ===== */
         // 需保证页表已刷新，函数内部直接访存高度依赖
         let (argv_base, envp_base, auxv_base, stack_top) =
-            init_user_stack(args.as_slice(), envs.as_slice(), &mut user_sp);
+            init_user_stack(args.as_slice(), envs.as_slice(), aux_vec, &mut user_sp);
 
         /* ===== 修改异常上下文 ===== */
         let argc = args.len();
@@ -637,11 +640,10 @@ pub fn task_group_exit(task: Arc<TaskControlBlock>, exit_code: i32) {
 fn init_user_stack(
     args_vec: &[String],
     envs_vec: &[String],
+    mut auxv: Vec<AuxHeader>,
     user_sp: &mut usize,
 ) -> (usize, usize, usize, usize) {
     const STACK_ALIGN: usize = 16;
-    const AT_NULL: usize = 0;
-    const AT_PAGESZ: usize = 6;
 
     #[inline(always)]
     fn align_down(addr: usize) -> usize {
@@ -680,12 +682,10 @@ fn init_user_stack(
         *stack_ptr
     }
 
-    fn push_auxv_to_stack(auxv: &[(usize, usize)], stack_ptr: &mut usize) -> usize {
-        push_usize_to_stack(0, stack_ptr);
-        push_usize_to_stack(AT_NULL, stack_ptr);
-        for &(key, value) in auxv.iter().rev() {
-            push_usize_to_stack(value, stack_ptr);
-            push_usize_to_stack(key, stack_ptr);
+    fn push_auxv_to_stack(auxv: &[AuxHeader], stack_ptr: &mut usize) -> usize {
+        for header in auxv.iter().rev() {
+            push_usize_to_stack(header.value, stack_ptr);
+            push_usize_to_stack(header.aux_type, stack_ptr);
         }
         *stack_ptr
     }
@@ -695,10 +695,51 @@ fn init_user_stack(
     // 字符串内容可以位于指针数组之上，argv/envp 数组保存实际地址。
     let envp = push_strings_to_stack(envs_vec, user_sp);
     let argv = push_strings_to_stack(args_vec, user_sp);
-    let auxv = [(AT_PAGESZ, crate::config::PAGE_SIZE)];
+
+    // —— 压入 AT_PLATFORM 字符串 ——
+    #[cfg(target_arch = "riscv64")]
+    let platform: &str = "RISC-V64";
+    #[cfg(target_arch = "loongarch64")]
+    let platform: &str = "loongarch64";
+    #[cfg(not(any(target_arch = "riscv64", target_arch = "loongarch64")))]
+    let platform: &str = "unknown";
+
+    *user_sp -= platform.len() + 1;
+    *user_sp -= *user_sp % core::mem::size_of::<usize>();
+    unsafe {
+        let ptr = *user_sp as *mut u8;
+        ptr.copy_from_nonoverlapping(platform.as_ptr(), platform.len());
+        ptr.add(platform.len()).write(0);
+    }
+    let platform_addr = *user_sp;
+
+    // —— 压入 16 字节随机数（先用零占位，后续可接入随机数源） ——
+    *user_sp -= 16;
+    let random_addr = *user_sp;
+
+    // —— 追加动态 aux 条目 ——
+    auxv.push(AuxHeader {
+        aux_type: AT_PLATFORM,
+        value: platform_addr,
+    });
+    auxv.push(AuxHeader {
+        aux_type: AT_RANDOM,
+        value: random_addr,
+    });
+    auxv.push(AuxHeader {
+        aux_type: AT_EXECFN,
+        value: argv[0],
+    });
+    auxv.push(AuxHeader {
+        aux_type: AT_NULL,
+        value: 0,
+    });
 
     // 预留 padding，使压入 argc/argv/envp/auxv 后的最终 sp 仍保持 16 字节对齐。
-    let pointer_count = 1 + argv.len() + 1 + envp.len() + 1 + (auxv.len() + 1) * 2;
+    let pointer_count = 1                          // argc
+        + argv.len() + 1                           // argv[] + NULL
+        + envp.len() + 1                           // envp[] + NULL
+        + auxv.len() * 2; // auxv (type + value pairs)
     let pointer_bytes = pointer_count * core::mem::size_of::<usize>();
     let padding = (STACK_ALIGN - pointer_bytes % STACK_ALIGN) % STACK_ALIGN;
     *user_sp -= padding;

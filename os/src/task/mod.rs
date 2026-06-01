@@ -7,6 +7,7 @@
 //! 至少现在，这里你可以将“进程”和“任务”作为同一个概念
 
 mod action;
+mod aux;
 mod context;
 mod futex;
 mod kstack;
@@ -20,6 +21,7 @@ mod tid;
 use crate::loader::get_app_data_by_name;
 pub use action::{SignalAction, SignalActions};
 use alloc::sync::Arc;
+pub use aux::*;
 pub use context::TaskContext;
 pub use futex::do_futex;
 use lazy_static::lazy_static;

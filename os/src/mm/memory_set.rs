@@ -5,10 +5,14 @@ use super::frame_allocator::{FrameTracker, frame_alloc};
 use super::{PTEFlags, PageTable, PageTableEntry};
 use crate::arch::{sfence, write_mmu_token};
 use crate::config::{
-    KERNEL_BASE, KERNEL_STACK_SIZE, MEMORY_END, MMAP_MIN_ADDR, PAGE_SIZE, USER_STACK_SIZE,
-    VIRTIO_MMIO,
+    CLK_TCK, DL_INTERP_OFFSET, KERNEL_BASE, KERNEL_STACK_SIZE, MEMORY_END, MMAP_MIN_ADDR,
+    PAGE_SIZE, USER_STACK_SIZE, VIRTIO_MMIO,
 };
 use crate::syscall::{Errno, SysResult};
+use crate::task::{
+    AuxHeader, AT_BASE, AT_CLKTCK, AT_EGID, AT_ENTRY, AT_EUID, AT_GID, AT_PAGESZ, AT_PHDR,
+    AT_PHENT, AT_PHNUM, AT_UID,
+};
 use crate::trap::PageFaultCause;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
@@ -480,24 +484,37 @@ impl MemorySet {
     /// 根据 elf 格式的用户程序文件数据，创建用户程序内核空间
     ///
     /// 内部完成对elf文件的解析，当前内核对堆栈地址的处理能力不完善
-    pub fn from_elf_data(elf_data: &[u8]) -> (Self, usize, usize, usize) {
+    pub fn from_elf_data(elf_data: &[u8]) -> (Self, usize, usize, usize, Vec<AuxHeader>) {
         let mut memory_set = Self::from_kernel_page_table();
 
-        // 尝试移除跳板映射
-        // memory_set.map_trampoline();
         // 由于传入的是 elf 格式的数据，所以需要读取文件头来得到各段的地址，之后再做分配映射
-        // 也正是因为是外部库，我对这部分的细节不是非常了解
         let elf = xmas_elf::ElfFile::new(elf_data).unwrap();
         let elf_header = elf.header;
         let magic = elf_header.pt1.magic;
         assert_eq!(magic, [0x7f, 0x45, 0x4c, 0x46], "invalid elf!");
         let ph_count = elf_header.pt2.ph_count();
+        let ph_entsize = elf_header.pt2.ph_entry_size() as usize;
+        let mut entry_point = elf_header.pt2.entry_point() as usize;
+
         let mut max_vpn_end = VirtPageNum(0);
+        let mut ph_va: usize = 0;
+        let mut first_load: bool = true;
+        let mut need_dl: bool = false;
+        let mut interp_path: Option<alloc::string::String> = None;
+
         for i in 0..ph_count {
             let ph = elf.program_header(i).unwrap();
-            if ph.get_type().unwrap() == xmas_elf::program::Type::Load {
+            let ph_type = ph.get_type().unwrap();
+
+            if ph_type == xmas_elf::program::Type::Load {
                 let start_va = VirtAddr::from(ph.virtual_addr() as usize);
                 let end_va = VirtAddr::from((ph.virtual_addr() + ph.mem_size()) as usize);
+                if first_load {
+                    // 第一个 LOAD 段的起始地址减去 ELF 头中的 ph_offset 即为程序头表虚拟地址
+                    ph_va = start_va.0 + elf_header.pt2.ph_offset() as usize;
+                    first_load = false;
+                }
+
                 let mut map_perm = MapPermission::USER;
                 let ph_flags = ph.flags();
                 if ph_flags.is_read() {
@@ -519,6 +536,92 @@ impl MemorySet {
                     data_offset,
                 );
             }
+
+            if ph_type == xmas_elf::program::Type::Interp {
+                need_dl = true;
+            }
+        }
+
+        // —— 读取 .interp section 获取动态链接器路径 ——
+        if need_dl {
+            if let Some(section) = elf.find_section_by_name(".interp") {
+                let raw = section.raw_data(&elf);
+                if let Ok(s) = core::str::from_utf8(raw) {
+                    interp_path = Some(alloc::string::String::from(s.trim_end_matches('\0')));
+                }
+            }
+        }
+
+        // —— 加载动态链接器 ——
+        if let Some(ref interp) = interp_path {
+            // 尝试从内置应用数据中加载动态链接器
+            if let Some(interp_data) = crate::loader::get_app_data_by_name(interp) {
+                let interp_elf = xmas_elf::ElfFile::new(interp_data).unwrap();
+                let interp_head = interp_elf.header;
+                let interp_ph_count = interp_head.pt2.ph_count();
+                entry_point = interp_head.pt2.entry_point() as usize + DL_INTERP_OFFSET;
+
+                for i in 0..interp_ph_count {
+                    let ph = interp_elf.program_header(i).unwrap();
+                    if ph.get_type().unwrap() == xmas_elf::program::Type::Load {
+                        let start_va =
+                            VirtAddr::from(ph.virtual_addr() as usize + DL_INTERP_OFFSET);
+                        let end_va = VirtAddr::from(
+                            ph.virtual_addr() as usize + DL_INTERP_OFFSET + ph.mem_size() as usize,
+                        );
+                        let mut map_perm = MapPermission::USER;
+                        let ph_flags = ph.flags();
+                        if ph_flags.is_read() {
+                            map_perm |= MapPermission::READ;
+                        }
+                        if ph_flags.is_write() {
+                            map_perm |= MapPermission::WRITE;
+                        }
+                        if ph_flags.is_execute() {
+                            map_perm |= MapPermission::EXECUTE;
+                        }
+                        let map_area = MapArea::new(start_va, end_va, MapType::Framed, map_perm);
+                        let data_offset = start_va.0 & (PAGE_SIZE - 1);
+                        memory_set.push_empty_map_area(
+                            map_area,
+                            Some(
+                                &interp_data[ph.offset() as usize
+                                    ..(ph.offset() + ph.file_size()) as usize],
+                            ),
+                            data_offset,
+                        );
+                    }
+                }
+
+                info!(
+                    "[from_elf_data] loaded dynamic linker: {} at {:#x}",
+                    interp, DL_INTERP_OFFSET
+                );
+            } else {
+                warn!(
+                    "[from_elf_data] dynamic linker '{}' not found in embedded apps, proceeding without it",
+                    interp
+                );
+                need_dl = false;
+            }
+        }
+
+        // —— 构建 aux 向量 ——
+        let mut aux_vec: Vec<AuxHeader> = alloc::vec![
+            AuxHeader { aux_type: AT_PHDR,   value: ph_va },
+            AuxHeader { aux_type: AT_PHENT,  value: ph_entsize },
+            AuxHeader { aux_type: AT_PHNUM,  value: ph_count as usize },
+            AuxHeader { aux_type: AT_PAGESZ, value: PAGE_SIZE },
+            AuxHeader { aux_type: AT_ENTRY,  value: entry_point },
+            AuxHeader { aux_type: AT_UID,    value: 0 },
+            AuxHeader { aux_type: AT_EUID,   value: 0 },
+            AuxHeader { aux_type: AT_GID,    value: 0 },
+            AuxHeader { aux_type: AT_EGID,   value: 0 },
+            AuxHeader { aux_type: AT_CLKTCK, value: CLK_TCK },
+        ];
+
+        if need_dl {
+            aux_vec.push(AuxHeader { aux_type: AT_BASE, value: DL_INTERP_OFFSET });
         }
 
         // 映射其余段
@@ -548,8 +651,9 @@ impl MemorySet {
         (
             memory_set, // 用户程序地址空间
             token,
-            user_stack_top,                        // 用户程序栈顶地址
-            elf.header.pt2.entry_point() as usize, // 用户程序入口地址
+            user_stack_top, // 用户程序栈顶地址
+            entry_point,    // 用户程序入口地址（动态链接时指向 ld-linux）
+            aux_vec,        // auxiliary vector
         )
     }
 

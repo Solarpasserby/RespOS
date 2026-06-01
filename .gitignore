@@ -2,6 +2,7 @@
 
 img/*
 testsuit/*
+examples/*
 .cargo-home/
 CLAUDE.md
 os/.cargo/

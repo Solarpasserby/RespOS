@@ -25,3 +25,7 @@ pub const MMAP_AREA_SIZE: usize = MMAP_MAX_ADDR - MMAP_MIN_ADDR; // 8G 大小
 // 页大小
 pub const PAGE_SIZE: usize = 0x1000;
 pub const PAGE_SIZE_BITS: usize = 12;
+/// 动态链接器（ld-linux）的加载基址偏移
+pub const DL_INTERP_OFFSET: usize = 0x30_0000_0000;
+/// times() 系统调用的时钟滴答频率（Linux ABI 标准值 100Hz）
+pub const CLK_TCK: usize = 100;
