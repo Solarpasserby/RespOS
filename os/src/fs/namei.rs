@@ -327,7 +327,7 @@ pub fn filename_link(olddirfd: isize, oldpath: &str, newdirfd: isize, newpath: &
 /// 路径解析主函数，循环解析每一层，定位到最后的目标
 pub fn link_path_walk(nd: &mut Nameidata) -> SysResult {
     // TDOD: 未处理符号连接，连续解析路径的情况。主要这个函数被多次使用，我把未实现的提示搬到这里
-    println!("[kernel] func:link_path_walk path: {:?}", nd.path_segments);
+    // println!("[kernel] func:link_path_walk path: {:?}", nd.path_segments);
     if nd.path_segments.is_empty() {
         return Ok(());
     }

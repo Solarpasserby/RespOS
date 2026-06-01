@@ -86,6 +86,26 @@ impl SigPending {
         self.mask = mask;
         old_mask
     }
+    /// 在给定集合中查找未决信号（不检查 mask，直接匹配 set）
+    pub fn find_signal_in_set(&self, set: SigSet) -> Option<Sig> {
+        let intersection = self.pending & set;
+        let pos = intersection.bits().trailing_zeros() as usize;
+        if pos >= MAX_SIGNUM {
+            None
+        } else {
+            Some(Sig::from((pos + 1) as i32))
+        }
+    }
+
+    /// 从给定集合中取出并消费未决信号
+    pub fn fetch_signal_from_set(&mut self, set: SigSet) -> Option<(Sig, SigInfo)> {
+        if let Some(sig) = self.find_signal_in_set(set) {
+            self.pending.remove_signal(sig);
+            Some((sig, self.info.remove(&sig.raw()).unwrap()))
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Copy, Clone, Default, Debug, PartialEq, Eq)]

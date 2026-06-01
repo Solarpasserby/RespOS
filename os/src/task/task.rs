@@ -12,6 +12,7 @@ use crate::signal::sig_handler::SigHandler;
 use crate::signal::sig_info::SigInfo;
 use crate::signal::sig_stack::SignalStack;
 use crate::signal::sig_struct::SigPending;
+use crate::signal::{SiField, Sig};
 use crate::syscall::{Errno, SysResult};
 use crate::trap::TrapContext;
 use alloc::collections::btree_map::BTreeMap;
@@ -584,8 +585,20 @@ pub fn task_exit(task: Arc<TaskControlBlock>, exit_code: i32) {
 
     leader.set_exited();
     leader.set_exit_code(exit_code);
-    // TODO: 向父进程发送 SIGCHLD 信号
-    // TODO: 清空信号
+    // 向父进程发送 SIGCHLD 信号
+    leader.op_parent(|parent_opt| {
+        if let Some(parent) = parent_opt.as_ref().and_then(|w| w.upgrade()) {
+            let siginfo = SigInfo::new(
+                Sig::SIGCHLD.raw(),
+                SigInfo::CLD_EXITED,
+                SiField::Kill { tid: leader.tid() },
+            );
+            parent.receive_siginfo(siginfo, false);
+        }
+    });
+
+    // 清空残留信号
+    leader.op_sig_pending_mut(|p| p.clear());
 
     TASK_MANAGER.remove(leader.tid());
 }

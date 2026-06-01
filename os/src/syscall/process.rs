@@ -59,6 +59,54 @@ pub fn sys_exit(exit_code: i32) -> ! {
     panic!("Unreachable in sys_exit!");
 }
 
+/// 退出整个线程组，当前模型中等价于 sys_exit
+pub fn sys_exit_group(exit_code: i32) -> ! {
+    exit_and_run_next(exit_code);
+    panic!("Unreachable in sys_exit_group!");
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct Rlimit64 {
+    rlim_cur: u64,
+    rlim_max: u64,
+}
+
+/// prlimit64 最小 stub：查询时返回无限制，设置时直接忽略
+pub fn sys_prlimit64(
+    _pid: usize,
+    _resource: usize,
+    new_rlim: *const u8,
+    old_rlim: *mut u8,
+) -> SysResult<usize> {
+    const RLIM_INFINITY: u64 = !0u64;
+
+    if !old_rlim.is_null() {
+        let rlim = Rlimit64 {
+            rlim_cur: RLIM_INFINITY,
+            rlim_max: RLIM_INFINITY,
+        };
+        copy_to_user(old_rlim as *mut Rlimit64, &rlim as *const Rlimit64, 1)?;
+    }
+    // 忽略 new_rlim（musl 初始化时只查询，不设置）
+    let _ = new_rlim;
+    Ok(0)
+}
+
+/// set_tid_address: 记录 clear_child_tid 地址，返回当前 TID
+pub fn sys_set_tid_address(tidptr: usize) -> SysResult<usize> {
+    let task = current_task().expect("[kernel] current task is None.");
+    // TODO: 线程退出时需将 *tidptr 清零并 futex_wake
+    let _ = tidptr;
+    Ok(task.tid())
+}
+
+/// gettid: 返回当前线程 TID
+pub fn sys_gettid() -> SysResult<usize> {
+    let task = current_task().expect("[kernel] current task is None.");
+    Ok(task.tid())
+}
+
 pub fn sys_sched_yield() -> SysResult<usize> {
     yield_current_task();
     Ok(0)

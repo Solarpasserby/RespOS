@@ -21,12 +21,15 @@ const SYSCALL_WRITE: usize = 64;
 const SYSCALL_STAT: usize = 79;
 const SYSCALL_FSTAT: usize = 80;
 const SYSCALL_EXIT: usize = 93;
+const SYSCALL_EXIT_GROUP: usize = 94;
+const SYSCALL_SET_TID_ADDRESS: usize = 96;
 const SYSCALL_NANOSLEEP: usize = 101;
 const SYSCALL_SCHED_YIELD: usize = 124;
 const SYSCALL_KILL: usize = 129;
 const SYSCALL_TKILL: usize = 130;
 const SYSCALL_SIGACTION: usize = 134;
 const SYSCALL_SIGPROCMASK: usize = 135;
+const SYSCALL_RT_SIGTIMEDWAIT: usize = 137;
 const SYSCALL_SIGRETURN: usize = 139;
 const SYSCALL_SETPRIORITY: usize = 140;
 const SYSCALL_REBOOT: usize = 142;
@@ -35,12 +38,14 @@ const SYSCALL_UNAME: usize = 160;
 const SYSCALL_GETTIMEOFDAY: usize = 169;
 const SYSCALL_GETPID: usize = 172;
 const SYSCALL_GETPPID: usize = 173;
+const SYSCALL_GETTID: usize = 178;
 const SYSCALL_BRK: usize = 214;
 const SYSCALL_MUNMAP: usize = 215;
 const SYSCALL_CLONE: usize = 220;
 const SYSCALL_EXECVE: usize = 221;
 const SYSCALL_MMAP: usize = 222;
 const SYSCALL_WAIT4: usize = 260;
+const SYSCALL_PRLIMIT64: usize = 261;
 // FIXME: 把系统调用号按大小排布
 
 mod errno;
@@ -91,7 +96,9 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         SYSCALL_WRITE => sys_write(args[0], args[1] as *mut u8, args[2]),
         SYSCALL_STAT => sys_stat(args[0] as *const u8, args[1] as *mut crate::fs::Stat),
         SYSCALL_FSTAT => sys_fstat(args[0], args[1] as *mut crate::fs::Stat),
+        SYSCALL_SET_TID_ADDRESS => sys_set_tid_address(args[0]),
         SYSCALL_EXIT => sys_exit(args[0] as i32),
+        SYSCALL_EXIT_GROUP => sys_exit_group(args[0] as i32),
         SYSCALL_NANOSLEEP => sys_nanosleep(args[0] as *const TimeVal, args[1] as *mut TimeVal),
         SYSCALL_SCHED_YIELD => sys_sched_yield(),
         SYSCALL_SETPRIORITY => sys_setpriority(args[0], args[1], args[2] as isize),
@@ -104,10 +111,17 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         }
         SYSCALL_SIGPROCMASK => sys_sigprocmask(args[0], args[1], args[2]),
         SYSCALL_SIGRETURN => sys_sigreturn(),
+        SYSCALL_RT_SIGTIMEDWAIT => sys_rt_sigtimedwait(
+            args[0], // set: 信号集指针
+            args[1], // info: 信号信息输出指针
+            args[2], // timeout_ptr: 超时时间指针
+            args[3], // sigsetsize: 信号集大小
+        ),
         SYSCALL_REBOOT => sys_reboot(),
         SYSCALL_GETTIMEOFDAY => sys_gettimeofday(args[0] as *mut TimeVal, args[1]),
         SYSCALL_GETPID => sys_getpid(),
         SYSCALL_GETPPID => sys_getppid(),
+        SYSCALL_GETTID => sys_gettid(),
         SYSCALL_BRK => sys_brk(args[0]),
         SYSCALL_MUNMAP => sys_munmap(args[0], args[1]),
         SYSCALL_CLONE => sys_clone(args[0], args[1], args[2], args[3], args[4]),
@@ -130,6 +144,9 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
             args[2],
             args[3] as *mut RUsage,
         ),
+        SYSCALL_PRLIMIT64 => {
+            sys_prlimit64(args[0], args[1], args[2] as *const u8, args[3] as *mut u8)
+        }
         _ => Err(Errno::ENOSYS),
     }
 }
