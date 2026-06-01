@@ -112,7 +112,12 @@ pub fn trap_handler(cx: &mut TrapContext) {
             }
         }
         Trap::Exception(Exception::IllegalInstruction) => {
-            println!("[kernel] IllegalInstruction in application, kernel killed it.");
+            println!(
+                "[kernel] IllegalInstruction in application, cause = {:?}, sepc = {:#x}, bad addr = {:#x}, kernel killed it.",
+                scause.cause(),
+                cx.sepc,
+                stval
+            );
             // 非法指令退出码
             exit_and_run_next(-3);
         }

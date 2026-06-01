@@ -1,6 +1,6 @@
 // os/src/syscall/time.rs
 
-use super::SysResult;
+use super::{Errno, SysResult};
 use crate::mm::{copy_from_user, copy_to_user};
 use crate::timer::get_time_ms;
 
@@ -9,6 +9,13 @@ use crate::timer::get_time_ms;
 pub struct TimeVal {
     pub sec: usize,
     pub usec: usize,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct TimeSpec {
+    pub sec: usize,
+    pub nsec: usize,
 }
 
 #[repr(C)]
@@ -48,6 +55,39 @@ pub fn sys_gettimeofday(tv: *mut TimeVal, _tz: usize) -> SysResult<usize> {
     };
     copy_to_user(tv, &time_val as *const TimeVal, 1)?;
     Ok(0)
+}
+
+pub fn sys_clock_gettime(clock_id: usize, tp: *mut TimeSpec) -> SysResult<usize> {
+    const CLOCK_REALTIME: usize = 0;
+    const CLOCK_MONOTONIC: usize = 1;
+    const CLOCK_PROCESS_CPUTIME_ID: usize = 2;
+    const CLOCK_THREAD_CPUTIME_ID: usize = 3;
+    const CLOCK_MONOTONIC_RAW: usize = 4;
+    const CLOCK_REALTIME_COARSE: usize = 5;
+    const CLOCK_MONOTONIC_COARSE: usize = 6;
+    const CLOCK_BOOTTIME: usize = 7;
+
+    // TODO[ABI-COMPAT]: 目前调度器还没有统计进程/线程 CPU 时间，
+    // 所以 CPU 时间时钟暂时用墙上时钟近似。
+    match clock_id {
+        CLOCK_REALTIME
+        | CLOCK_MONOTONIC
+        | CLOCK_PROCESS_CPUTIME_ID
+        | CLOCK_THREAD_CPUTIME_ID
+        | CLOCK_MONOTONIC_RAW
+        | CLOCK_REALTIME_COARSE
+        | CLOCK_MONOTONIC_COARSE
+        | CLOCK_BOOTTIME => {
+            let ms = get_time_ms();
+            let time_spec = TimeSpec {
+                sec: ms / 1000,
+                nsec: (ms % 1000) * 1_000_000,
+            };
+            copy_to_user(tp, &time_spec as *const TimeSpec, 1)?;
+            Ok(0)
+        }
+        _ => Err(Errno::EINVAL),
+    }
 }
 
 /// 系统调用 sys-nanosleep

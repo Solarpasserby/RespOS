@@ -52,6 +52,40 @@ pub fn sys_write(fd: usize, buf: *mut u8, len: usize) -> SysResult<usize> {
     Ok(ret)
 }
 
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct IoVec {
+    pub base: *mut u8,
+    pub len: usize,
+}
+
+pub fn sys_writev(fd: usize, iov: *const IoVec, iovcnt: usize) -> SysResult<usize> {
+    const IOV_MAX: usize = 1024;
+    if iovcnt > IOV_MAX {
+        return Err(Errno::EINVAL);
+    }
+
+    let mut total: usize = 0;
+    for idx in 0..iovcnt {
+        let mut item = IoVec {
+            base: core::ptr::null_mut(),
+            len: 0,
+        };
+        unsafe {
+            copy_from_user(&mut item as *mut IoVec, iov.add(idx), 1)?;
+        }
+        if item.len == 0 {
+            continue;
+        }
+        let written = sys_write(fd, item.base, item.len)?;
+        total = total.checked_add(written).ok_or(Errno::EINVAL)?;
+        if written < item.len {
+            break;
+        }
+    }
+    Ok(total)
+}
+
 /// 系统调用 sys-open
 pub fn sys_openat(dirfd: isize, path: *const u8, flags: usize, mode: usize) -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
@@ -130,6 +164,8 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
     let mut fd_entry = task.get_fd_entry(fd)?;
 
+    // TODO[ABI-COMPAT]: 目前还没有记录 close-on-exec 标志；F_SETFL 也暂时接受整组
+    // 已保存标志，而不是只允许修改 Linux 规定的可变标志位。
     match cmd {
         F_GETFD => Ok(0),
         F_SETFD => Ok(0),

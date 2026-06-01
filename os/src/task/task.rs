@@ -183,7 +183,7 @@ impl TaskControlBlock {
             .add(task_ctrl_block.clone());
 
         // 初始化内核栈上的异常上下文
-        let trap_context = TrapContext::init_app_context(entry_point, user_sp, 0, 0, 0, 0);
+        let trap_context = TrapContext::init_app_context(entry_point, user_sp, 0, 0, 0, 0, false);
         // 初始化任务上下文
         let task_context = TaskContext::app_init_task_context(token);
 
@@ -328,6 +328,7 @@ impl TaskControlBlock {
         elf_data: &[u8],
         args: Vec<String>,
         envs: Vec<String>,
+        linux_abi: bool,
     ) -> SysResult<usize> {
         // 简化模型：只有进程 leader 可以 exec，避免非 leader exec 后父子关系和 tgid 语义混乱。
         if !self.is_process_leader() {
@@ -364,6 +365,7 @@ impl TaskControlBlock {
             argv_base,
             envp_base,
             auxv_base,
+            linux_abi,
         );
 
         /* ===== 修改线程组 ===== */
@@ -784,9 +786,19 @@ fn init_user_stack(
     }
     let platform_addr = *user_sp;
 
-    // —— 压入 16 字节随机数（先用零占位，后续可接入随机数源） ——
+    // —— 压入 16 字节随机数 ——
     *user_sp -= 16;
     let random_addr = *user_sp;
+    unsafe {
+        let random = random_addr as *mut u8;
+        let mut seed = random_addr ^ args_vec.len() ^ envs_vec.len().wrapping_shl(8);
+        for idx in 0..16 {
+            seed ^= seed << 7;
+            seed ^= seed >> 9;
+            seed ^= (idx + 1usize).wrapping_mul(0x9e37_79b9);
+            random.add(idx).write(seed as u8);
+        }
+    }
 
     // —— 追加动态 aux 条目 ——
     auxv.push(AuxHeader {
@@ -806,7 +818,7 @@ fn init_user_stack(
         value: 0,
     });
 
-    // 预留 padding，使压入 argc/argv/envp/auxv 后的最终 sp 仍保持 16 字节对齐。
+    // 预留填充空间，使压入 argc/argv/envp/auxv 后的最终 sp 仍保持 16 字节对齐。
     let pointer_count = 1                          // argc
         + argv.len() + 1                           // argv[] + NULL
         + envp.len() + 1                           // envp[] + NULL
