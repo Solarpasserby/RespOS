@@ -11,6 +11,13 @@ use user_lib::{exec, fork, wait, yield_};
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     if fork() == 0 {
+        #[cfg(feature = "eval")]
+        {
+            let argv = ["testrunner\0".as_ptr(), core::ptr::null()];
+            exec("testrunner\0", &argv);
+            println!("[initproc] failed to exec testrunner, falling back to shell");
+        }
+
         let argv = ["user_shell\0".as_ptr(), core::ptr::null()];
         exec("user_shell\0", &argv);
     } else {

@@ -151,7 +151,7 @@ pub fn open(path: &str, flags: usize, mode: usize) -> isize {
 pub fn close(fd: usize) -> isize {
     sys_close(fd)
 }
-pub fn pipe(pipefd: &mut [usize; 2]) -> isize {
+pub fn pipe(pipefd: &mut [i32; 2]) -> isize {
     sys_pipe2(pipefd, 0)
 }
 pub fn getdents64(fd: usize, buf: &mut [u8]) -> isize {
@@ -249,6 +249,10 @@ pub fn sigprocmask(mask: u32) -> isize {
 
 pub fn sigreturn() -> isize {
     sys_sigreturn()
+}
+
+pub fn poweroff() -> isize {
+    sys_reboot()
 }
 
 bitflags! {

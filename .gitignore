@@ -4,3 +4,7 @@ img/*
 .cargo-home/
 CLAUDE.md
 .claude/
+os/.cargo/
+user/.cargo/
+kernel-rv
+kernel-la

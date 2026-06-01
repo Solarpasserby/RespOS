@@ -8,7 +8,6 @@ use crate::mm::{copy_cstr_from_user, copy_to_user, extract_cstrings_from_user};
 use crate::task::{
     CloneFlags, WaitOption, add_task, current_task, exit_and_run_next, yield_current_task,
 };
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 #[repr(C)]
@@ -89,12 +88,12 @@ pub fn sys_clone(
     let new_task = current_task.fork(flags);
     let new_tid = new_task.tid();
 
-    // 修改新任务的异常上下文，修改栈指针、任务指针、返回值
+    // 修改新任务的异常上下文，修改栈指针和返回值。
+    // x4(tp) 属于用户态 TLS，不能写成内核 TaskControlBlock 指针。
     let new_task_trap_cx = new_task.get_trap_cx();
     if stack != 0 {
         new_task_trap_cx.set_sp(stack);
     }
-    new_task_trap_cx.set_tp(Arc::as_ptr(&new_task) as usize);
     new_task_trap_cx.set_a0(0);
 
     add_task(new_task);

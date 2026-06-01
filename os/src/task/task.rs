@@ -150,13 +150,10 @@ impl TaskControlBlock {
             .lock()
             .add(task_ctrl_block.clone());
 
-        // 生成 tp 指针
-        let task_ptr = Arc::as_ptr(&task_ctrl_block) as usize;
         // 初始化内核栈上的异常上下文
-        let mut trap_context = TrapContext::init_app_context(entry_point, user_sp, 0, 0, 0, 0);
-        trap_context.set_tp(task_ptr);
+        let trap_context = TrapContext::init_app_context(entry_point, user_sp, 0, 0, 0, 0);
         // 初始化任务上下文
-        let task_context = TaskContext::app_init_task_context(task_ptr, token);
+        let task_context = TaskContext::app_init_task_context(token);
 
         // 修改内核栈中上下文数据
         unsafe {
@@ -216,7 +213,7 @@ impl TaskControlBlock {
             self.memory_set.clone()
         } else {
             Arc::new(RwLock::new(MemorySet::from_existed_user(
-                &self.memory_set.read(),
+                &mut self.memory_set.write(),
             )))
         };
 
@@ -310,15 +307,20 @@ impl TaskControlBlock {
 
         /* ===== 修改用户栈数据 ===== */
         // 需保证页表已刷新，函数内部直接访存高度依赖
-        let (argv_base, envp_base, stack_top) =
+        let (argv_base, envp_base, auxv_base, stack_top) =
             init_user_stack(args.as_slice(), envs.as_slice(), &mut user_sp);
 
         /* ===== 修改异常上下文 ===== */
         let argc = args.len();
         let trap_cx = self.get_trap_cx();
-        *trap_cx =
-            TrapContext::init_app_context(entry_point, stack_top, argc, argv_base, envp_base, 0);
-        trap_cx.set_tp(Arc::as_ptr(&self) as usize);
+        *trap_cx = TrapContext::init_app_context(
+            entry_point,
+            stack_top,
+            argc,
+            argv_base,
+            envp_base,
+            auxv_base,
+        );
 
         /* ===== 修改线程组 ===== */
         self.close_other_threads_for_exec();
@@ -531,7 +533,7 @@ impl TaskControlBlock {
     fn write_task_cx(self: &Arc<Self>, kernel_stack_ptr: usize) {
         let token = self.get_user_token();
         let task_cx_ptr = kernel_stack_ptr as *mut TaskContext;
-        let task_cx = TaskContext::app_init_task_context(Arc::as_ptr(self) as usize, token);
+        let task_cx = TaskContext::app_init_task_context(token);
         unsafe {
             task_cx_ptr.write(task_cx);
         }
@@ -593,8 +595,10 @@ fn init_user_stack(
     args_vec: &[String],
     envs_vec: &[String],
     user_sp: &mut usize,
-) -> (usize, usize, usize) {
+) -> (usize, usize, usize, usize) {
     const STACK_ALIGN: usize = 16;
+    const AT_NULL: usize = 0;
+    const AT_PAGESZ: usize = 6;
 
     #[inline(always)]
     fn align_down(addr: usize) -> usize {
@@ -633,23 +637,35 @@ fn init_user_stack(
         *stack_ptr
     }
 
+    fn push_auxv_to_stack(auxv: &[(usize, usize)], stack_ptr: &mut usize) -> usize {
+        push_usize_to_stack(0, stack_ptr);
+        push_usize_to_stack(AT_NULL, stack_ptr);
+        for &(key, value) in auxv.iter().rev() {
+            push_usize_to_stack(value, stack_ptr);
+            push_usize_to_stack(key, stack_ptr);
+        }
+        *stack_ptr
+    }
+
     *user_sp = align_down(*user_sp);
 
     // 字符串内容可以位于指针数组之上，argv/envp 数组保存实际地址。
     let envp = push_strings_to_stack(envs_vec, user_sp);
     let argv = push_strings_to_stack(args_vec, user_sp);
+    let auxv = [(AT_PAGESZ, crate::config::PAGE_SIZE)];
 
-    // 预留 padding，使压入 argc/argv/envp 后的最终 sp 仍保持 16 字节对齐。
-    let pointer_count = 1 + argv.len() + 1 + envp.len() + 1;
+    // 预留 padding，使压入 argc/argv/envp/auxv 后的最终 sp 仍保持 16 字节对齐。
+    let pointer_count = 1 + argv.len() + 1 + envp.len() + 1 + (auxv.len() + 1) * 2;
     let pointer_bytes = pointer_count * core::mem::size_of::<usize>();
     let padding = (STACK_ALIGN - pointer_bytes % STACK_ALIGN) % STACK_ALIGN;
     *user_sp -= padding;
 
+    let auxv_base = push_auxv_to_stack(&auxv, user_sp);
     let envp_base = push_pointers_to_stack(&envp, user_sp);
     let argv_base = push_pointers_to_stack(&argv, user_sp);
     push_usize_to_stack(args_vec.len(), user_sp);
 
-    (argv_base, envp_base, *user_sp)
+    (argv_base, envp_base, auxv_base, *user_sp)
 }
 
 /// 线程组结构

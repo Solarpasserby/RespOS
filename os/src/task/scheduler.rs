@@ -46,12 +46,17 @@ pub fn remove_thread_group(tgid: usize) {
 /// 调用者需要在调用前处理好当前任务的退出或状态变化。
 #[unsafe(no_mangle)]
 pub fn switch_to_next_task() {
+    let Some(current) = current_task() else {
+        return;
+    };
+
     if let Some(next_task) = fetch_task() {
         let next_task_kernel_stack = next_task.kstack();
+        let current_task_ptr = Arc::as_ptr(&current) as usize;
         next_task.set_running();
         PROCESSOR.lock().switch_to(next_task);
         unsafe {
-            __switch(next_task_kernel_stack);
+            __switch(next_task_kernel_stack, current_task_ptr);
         }
     }
 }
@@ -64,6 +69,7 @@ pub fn yield_current_task() {
     };
 
     if let Some(next_task) = fetch_task() {
+        let current_task_ptr = Arc::as_ptr(&task) as usize;
         task.set_ready();
         add_task(task);
 
@@ -71,7 +77,7 @@ pub fn yield_current_task() {
         next_task.set_running();
         PROCESSOR.lock().switch_to(next_task);
         unsafe {
-            __switch(next_task_kernel_stack);
+            __switch(next_task_kernel_stack, current_task_ptr);
         }
     }
 }
@@ -84,6 +90,7 @@ pub fn blocking_and_run_next() {
     };
 
     if let Some(next_task) = fetch_task() {
+        let current_task_ptr = Arc::as_ptr(&task) as usize;
         task.set_blocked();
         block_task(task);
 
@@ -91,7 +98,7 @@ pub fn blocking_and_run_next() {
         next_task.set_running();
         PROCESSOR.lock().switch_to(next_task);
         unsafe {
-            __switch(next_task_kernel_stack);
+            __switch(next_task_kernel_stack, current_task_ptr);
         }
     }
 }
