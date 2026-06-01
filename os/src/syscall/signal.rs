@@ -19,7 +19,7 @@ pub fn sys_kill(pid: usize, signum: i32) -> SysResult<usize> {
             sig.raw(),
             SigInfo::USER,
             SiField::Kill {
-                tid: current_task().unwrap().tid(),
+                tid: current_task().unwrap().tgid(), // 获取发送者的进程号
             },
         );
         // 主线程 → 进程级信号（整个线程组）；普通线程 → 线程级信号
@@ -43,7 +43,7 @@ pub fn sys_tkill(tid: usize, signum: i32) -> SysResult<usize> {
             sig.raw(),
             SigInfo::TKILL,
             SiField::Kill {
-                tid: current_task().unwrap().tid(),
+                tid: current_task().unwrap().tid(), //获取发送者的线程号
             },
         );
         task.receive_siginfo(siginfo, true);
@@ -136,8 +136,11 @@ pub fn sys_sigreturn() -> SysResult<usize> {
     let trap_cx = task.get_trap_cx();
 
     // 从用户栈顶读取 SigContext
-    let user_sp = trap_cx.get_sp();
-    let sig_context_ptr = user_sp as *const SigContext;
+    let sig_context_addr = task.sig_context_addr();
+    if sig_context_addr == 0 {
+        return Err(Errno::EFAULT); // 没注册过 handler 就调 sigreturn，拒绝
+    }
+    let sig_context_ptr = sig_context_addr as *const SigContext;
     let mut sig_context: SigContext = unsafe { core::mem::zeroed() };
     copy_from_user(&mut sig_context as *mut SigContext, sig_context_ptr, 1)?;
 

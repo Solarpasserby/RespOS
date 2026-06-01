@@ -89,8 +89,12 @@ __restore:
 
 __trap_from_kernel:
     call trap_from_kernel
- .globl sigreturn_trampoline
-      .align 2
-  sigreturn_trampoline:
-      li a7, 139
-      ecall
+
+# sigreturn trampoline —— 内核通过复制其机器码到用户跳板页（TRAMPOLINE）来部署，
+# 原始代码保留在此处仅作参考；符号 sigreturn_trampoline 供汇编引用，但
+# handle_signal 实际使用用户空间的 TRAMPOLINE 地址。
+    .section .text.trampoline, "ax"
+    .globl sigreturn_trampoline
+sigreturn_trampoline:
+    li a7, 139
+    ecall

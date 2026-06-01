@@ -20,7 +20,7 @@ impl SigInfo {
 #[repr(C)]
 pub enum SiField {
     None,
-    Kill { tid: usize },
+    Kill { tid: usize }, //这里填的是发送者身份，不一定是线程号
 }
 
 #[allow(unused)]

@@ -15,6 +15,10 @@ use bitflags::bitflags;
 use lazy_static::lazy_static;
 use spin::Mutex;
 
+/// 用户态 sigreturn 跳板页的虚拟地址。
+/// 该页在所有用户进程的地址空间中映射到同一位置。
+pub const TRAMPOLINE: usize = 0x0000_003f_ffff_f000;
+
 unsafe extern "C" {
     fn stext();
     fn etext();
@@ -105,6 +109,37 @@ impl MemorySet {
             None,
             0,
         );
+    }
+    /// 将 sigreturn 跳板页映射到用户地址空间（TRAMPOLINE 虚拟地址）。
+    ///
+    /// 用户态信号处理函数返回后，会跳转到该页执行 `li a7,139; ecall`，
+    /// 从而进入内核的 sys_sigreturn。每个用户进程都需要此映射。
+    pub fn map_trampoline(&mut self) {
+        // `li a7, 139; ecall` 的 RISC-V 机器码。
+        // 这段跳板代码用于从用户态信号处理函数返回后，发起 sigreturn 系统调用。
+        const TRAMPOLINE_CODE: [u8; 8] = [
+            0x93, 0x08, 0xb0, 0x08, // addi x17, x0, 139  (li a7, 139)
+            0x73, 0x00, 0x00, 0x00, // ecall
+        ];
+        // 在用户空间分配一页并映射
+        self.push_empty_map_area(
+            MapArea::new(
+                VirtAddr::from(TRAMPOLINE),
+                VirtAddr::from(TRAMPOLINE + PAGE_SIZE),
+                MapType::Framed,
+                MapPermission::READ | MapPermission::EXECUTE | MapPermission::USER,
+            ),
+            None,
+            0,
+        );
+        // 把跳板指令复制到用户跳板页
+        let trampoline_page = self
+            .page_table
+            .translate(VirtAddr::from(TRAMPOLINE).floor())
+            .unwrap()
+            .ppn();
+        let dst = &mut trampoline_page.get_bytes_array();
+        dst[..8].copy_from_slice(&TRAMPOLINE_CODE);
     }
     /// 根据首虚拟页号删除对应逻辑段
     pub fn remove_area_with_start_vpn(&mut self, vpn_start: VirtPageNum) -> SysResult {
@@ -354,8 +389,8 @@ impl MemorySet {
     pub fn from_elf_data(elf_data: &[u8]) -> (Self, usize, usize, usize) {
         let mut memory_set = Self::from_kernel_page_table();
 
-        // 尝试移除跳板映射
-        // memory_set.map_trampoline();
+        // 在用户空间映射 sigreturn 跳板页
+        memory_set.map_trampoline();
         // 由于传入的是 elf 格式的数据，所以需要读取文件头来得到各段的地址，之后再做分配映射
         // 也正是因为是外部库，我对这部分的细节不是非常了解
         let elf = xmas_elf::ElfFile::new(elf_data).unwrap();

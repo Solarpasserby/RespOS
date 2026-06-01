@@ -50,6 +50,7 @@ pub struct TaskControlBlock {
     sig_pending: SpinLock<SigPending>, // 本线程的信号队列 + 掩码（独享）
     sig_stack: SpinLock<SignalStack>,  // 本线程的备用信号栈（独享）
     sig_handler: Arc<SpinLock<SigHandler>>, // 线程组共享的 handler 注册表（共享）
+    sig_context_addr: AtomicUsize,     // 用户栈上 SigContext 的地址
 }
 
 impl core::fmt::Debug for TaskControlBlock {
@@ -90,6 +91,7 @@ impl TaskControlBlock {
             sig_pending: SpinLock::new(SigPending::new()),
             sig_stack: SpinLock::new(SignalStack::default()),
             sig_handler: Arc::new(SpinLock::new(SigHandler::new())),
+            sig_context_addr: AtomicUsize::new(0),
         }
     }
 
@@ -139,6 +141,7 @@ impl TaskControlBlock {
             sig_pending: SpinLock::new(SigPending::new()),
             sig_stack: SpinLock::new(SignalStack::default()),
             sig_handler: Arc::new(SpinLock::new(SigHandler::new())),
+            sig_context_addr: AtomicUsize::new(0),
         });
 
         // 在线程组中添加该线程
@@ -261,6 +264,7 @@ impl TaskControlBlock {
             sig_pending,
             sig_stack,
             sig_handler,
+            sig_context_addr: AtomicUsize::new(0),
         });
 
         // 修改任务异常上下文
@@ -473,6 +477,13 @@ impl TaskControlBlock {
                 });
             }
         }
+    }
+    pub fn set_sig_context_addr(&self, addr: usize) {
+        self.sig_context_addr.store(addr, Ordering::Relaxed);
+    }
+
+    pub fn sig_context_addr(&self) -> usize {
+        self.sig_context_addr.load(Ordering::Relaxed)
     }
     pub fn op_thread_group<T>(&self, f: impl FnOnce(&ThreadGroup) -> T) -> T {
         f(&self.thread_group.lock())

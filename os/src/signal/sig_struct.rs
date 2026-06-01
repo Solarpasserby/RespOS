@@ -132,7 +132,7 @@ impl Sig {
     }
 
     pub fn is_valid(&self) -> bool {
-        self.0 > 0 && self.0 < MAX_SIGNUM as i32
+        self.0 > 0 && self.0 <= MAX_SIGNUM as i32
     }
 
     pub fn raw(&self) -> i32 {
@@ -144,7 +144,7 @@ impl Sig {
     }
 
     pub fn is_kill_or_stop(&self) -> bool {
-        self.0 == 9 || self.0 == 19
+        self.0 == Sig::SIGKILL.0 || self.0 == Sig::SIGSTOP.0
     }
 }
 
