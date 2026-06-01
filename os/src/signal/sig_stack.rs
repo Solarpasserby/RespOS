@@ -1,5 +1,7 @@
 use super::SigSet;
 
+pub const SS_DISABLE: usize = 1;
+
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
 
@@ -15,7 +17,7 @@ impl Default for SignalStack {
     fn default() -> Self {
         SignalStack {
             ss_sp: 0,
-            ss_flags: 0,
+            ss_flags: SS_DISABLE,
             ss_size: 0,
         }
     }

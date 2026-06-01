@@ -1,9 +1,9 @@
 .codex
 
 img/
-.cargo-home/
-examples/
 testsuit/
+examples/
+.cargo-home/
 CLAUDE.md
 .claude/
 os/.cargo/

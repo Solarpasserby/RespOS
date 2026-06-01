@@ -1,10 +1,11 @@
 // os/src/syscall/fs.rs
 
 use super::{Errno, SysResult};
+use crate::fs::mount::{do_mount, do_umount2};
 use crate::fs::vfs::{File, InodeType, OpenFlags};
 use crate::fs::{
-    AT_FDCWD, FdEntry, Path, Stat, filename_create, filename_link, filename_lookup,
-    filename_unlink, make_pipe, path_open,
+    AT_FDCWD, FdEntry, Stat, filename_create, filename_link, filename_lookup, filename_unlink,
+    make_pipe, path_open,
 };
 use crate::mm::{check_user_writable, copy_cstr_from_user, copy_from_user, copy_to_user};
 use crate::task::current_task;
@@ -51,6 +52,40 @@ pub fn sys_write(fd: usize, buf: *mut u8, len: usize) -> SysResult<usize> {
     Ok(ret)
 }
 
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct IoVec {
+    pub base: *mut u8,
+    pub len: usize,
+}
+
+pub fn sys_writev(fd: usize, iov: *const IoVec, iovcnt: usize) -> SysResult<usize> {
+    const IOV_MAX: usize = 1024;
+    if iovcnt > IOV_MAX {
+        return Err(Errno::EINVAL);
+    }
+
+    let mut total: usize = 0;
+    for idx in 0..iovcnt {
+        let mut item = IoVec {
+            base: core::ptr::null_mut(),
+            len: 0,
+        };
+        unsafe {
+            copy_from_user(&mut item as *mut IoVec, iov.add(idx), 1)?;
+        }
+        if item.len == 0 {
+            continue;
+        }
+        let written = sys_write(fd, item.base, item.len)?;
+        total = total.checked_add(written).ok_or(Errno::EINVAL)?;
+        if written < item.len {
+            break;
+        }
+    }
+    Ok(total)
+}
+
 /// 系统调用 sys-open
 pub fn sys_openat(dirfd: isize, path: *const u8, flags: usize, mode: usize) -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
@@ -70,8 +105,12 @@ pub fn sys_close(fd: usize) -> SysResult<usize> {
 /// 系统调用 sys-stat
 pub fn sys_stat(path: *const u8, stat: *mut Stat) -> SysResult<usize> {
     let path = copy_cstr_from_user(path)?;
-    let dentry = filename_lookup(AT_FDCWD, path.as_str(), 0)?;
-    let stat_buf: Stat = dentry.get_inode().stat()?.into();
+    let resolved = filename_lookup(AT_FDCWD, path.as_str(), 0)?;
+    let stat_buf: Stat = resolved
+        .dentry
+        .get_inode()
+        .stat(&resolved.abs_path())?
+        .into();
     copy_to_user(stat, &stat_buf as *const Stat, 1)?;
     Ok(0)
 }
@@ -87,8 +126,57 @@ pub fn sys_fstat(fd: usize, stat: *mut Stat) -> SysResult<usize> {
 
 /// 系统调用 sys-lseek
 pub fn sys_lseek(fd: usize, offset: isize, whence: usize) -> SysResult<usize> {
-    let _ = (fd, offset, whence);
-    Err(Errno::ENOSYS)
+    const SEEK_SET: usize = 0;
+    const SEEK_CUR: usize = 1;
+    const SEEK_END: usize = 2;
+
+    fn add_offset(base: usize, offset: isize) -> SysResult<usize> {
+        if offset >= 0 {
+            base.checked_add(offset as usize).ok_or(Errno::EINVAL)
+        } else {
+            let offset = offset.checked_neg().ok_or(Errno::EINVAL)? as usize;
+            base.checked_sub(offset).ok_or(Errno::EINVAL)
+        }
+    }
+
+    let task = current_task().expect("[kernel] current task is None.");
+    let file = task.get_fd_entry(fd)?.file;
+    if file.get_stat()?.ty != InodeType::Regular {
+        return Err(Errno::ESPIPE);
+    }
+
+    let new_offset = match whence {
+        SEEK_SET => add_offset(0, offset)?,
+        SEEK_CUR => add_offset(file.get_offset(), offset)?,
+        SEEK_END => add_offset(file.get_stat()?.size, offset)?,
+        _ => return Err(Errno::EINVAL),
+    };
+    file.seek(new_offset as isize)
+}
+
+/// 系统调用 sys-fcntl
+pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SysResult<usize> {
+    const F_GETFD: usize = 1;
+    const F_SETFD: usize = 2;
+    const F_GETFL: usize = 3;
+    const F_SETFL: usize = 4;
+
+    let task = current_task().expect("[kernel] current task is None.");
+    let mut fd_entry = task.get_fd_entry(fd)?;
+
+    // TODO[ABI-COMPAT]: 目前还没有记录 close-on-exec 标志；F_SETFL 也暂时接受整组
+    // 已保存标志，而不是只允许修改 Linux 规定的可变标志位。
+    match cmd {
+        F_GETFD => Ok(0),
+        F_SETFD => Ok(0),
+        F_GETFL => Ok(fd_entry.get_flags().bits() as usize),
+        F_SETFL => {
+            fd_entry.set_flags(OpenFlags::from(arg));
+            task.set_fd(fd, fd_entry)?;
+            Ok(0)
+        }
+        _ => Err(Errno::EINVAL),
+    }
 }
 
 /// 系统调用 sys-dup
@@ -149,15 +237,15 @@ pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: usize) -> SysResult<us
 pub fn sys_chdir(path: *const u8) -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
     let path = copy_cstr_from_user(path)?;
-    let dentry = filename_lookup(AT_FDCWD, path.as_str(), 0)?;
-    task.set_cwd(Path::new(dentry));
+    let resolved = filename_lookup(AT_FDCWD, path.as_str(), 0)?;
+    task.set_cwd(resolved);
     Ok(0)
 }
 
 /// 系统调用 sys-getcwd
 pub fn sys_getcwd(buf: *mut u8, len: usize) -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
-    let cwd = task.cwd().abs_path();
+    let cwd = task.cwd().global_abs_path();
     if cwd.len() >= len {
         return Err(Errno::ERANGE);
     }
@@ -172,8 +260,6 @@ pub fn sys_getcwd(buf: *mut u8, len: usize) -> SysResult<usize> {
 }
 
 /// 系统调用 sys-pipe
-///
-/// FIXME: 当前实现存在 BUG
 pub fn sys_pipe2(pipefd: *mut [i32; 2], flags: usize) -> SysResult<usize> {
     // TODO[ABI-COMPAT]: 当前忽略 flags，尚未完整实现 pipe2 语义。
     let _ = flags;
@@ -241,21 +327,45 @@ pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> SysResult<usize
 }
 
 /// 系统调用 sys-mount
-/// TODO[UNIMPLEMENTED]: 需要补完 mount 逻辑。
 pub fn sys_mount(
     source: *const u8,
     target: *const u8,
     fstype: *const u8,
     flags: usize,
-    data: *const u8,
+    _data: *const u8,
 ) -> SysResult<usize> {
-    let _ = (source, target, fstype, flags, data);
-    Ok(0) // 只是为了过测例
+    let _source_str = copy_cstr_from_user(source)?;
+    let target_str = copy_cstr_from_user(target)?;
+    let fstype_str = copy_cstr_from_user(fstype)?;
+    do_mount(
+        _source_str.as_str(),
+        target_str.as_str(),
+        fstype_str.as_str(),
+        flags,
+    )
 }
 
 /// 系统调用 sys-umount2
-/// TODO[UNIMPLEMENTED]: 需要补完 umount2 逻辑。
 pub fn sys_umount2(target: *const u8, flags: usize) -> SysResult<usize> {
-    let _ = (target, flags);
-    Ok(0) // 只是为了过测例
+    let target = copy_cstr_from_user(target)?;
+    do_umount2(target.as_str(), flags)
+}
+
+/// 系统调用 sys_readlinkat - 读取符号链接的目标路径
+pub fn sys_readlinkat(
+    dirfd: isize,
+    path: *const u8,
+    buf: *mut u8,
+    bufsize: usize,
+) -> SysResult<usize> {
+    let path_str = copy_cstr_from_user(path)?;
+    let target_path = filename_lookup(dirfd, &path_str, 0)?;
+    let inode = target_path.dentry.get_inode();
+    let link = inode.read_link(&target_path.abs_path())?;
+    let bytes = link.as_bytes();
+    let n = bytes.len().min(bufsize);
+    if n > 0 {
+        copy_to_user(buf, bytes.as_ptr(), n)?;
+    }
+    Ok(n)
 }

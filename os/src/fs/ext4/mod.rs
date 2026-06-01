@@ -22,3 +22,7 @@ lazy_static! {
 pub fn root_inode() -> Arc<dyn InodeOp> {
     SUPER_BLOCK.root_inode()
 }
+
+pub fn super_block() -> Arc<dyn SuperBlockOp> {
+    SUPER_BLOCK.clone()
+}

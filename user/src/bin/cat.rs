@@ -7,9 +7,7 @@
 extern crate user_lib;
 extern crate alloc;
 
-use user_lib::{
-    O_RDONLY, close, open, read, write
-};
+use user_lib::{O_RDONLY, close, open, read, write};
 
 #[unsafe(no_mangle)]
 pub fn main(argc: usize, argv: &[&str]) -> i32 {

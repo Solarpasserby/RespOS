@@ -6,15 +6,15 @@ use crate::signal::{SiField, Sig, SigInfo, SigSet};
 use crate::task::{TASK_MANAGER, current_task};
 
 pub fn sys_kill(pid: usize, signum: i32) -> SysResult<usize> {
-    //POSIX 规定：signum 为 0 时不发任何信号，只检查"pid 是否存在 + 我有没有权限发"。权限检查先跳过，存在性检查后面自然覆盖——如果 pid不存在下面会返回 ESRCH。
-    if signum == 0 {
-        return Ok(0);
-    }
+    // TODO[ABI-COMPAT]: 还没有实现负 pid 和进程组信号发送语义。
     let sig = Sig::from(signum);
-    if !sig.is_valid() {
+    if signum != 0 && !sig.is_valid() {
         return Err(Errno::EINVAL);
     }
     if let Some(task) = TASK_MANAGER.get(pid) {
+        if signum == 0 {
+            return Ok(0);
+        }
         let siginfo = SigInfo::new(
             sig.raw(),
             SigInfo::USER,
@@ -31,14 +31,14 @@ pub fn sys_kill(pid: usize, signum: i32) -> SysResult<usize> {
 }
 
 pub fn sys_tkill(tid: usize, signum: i32) -> SysResult<usize> {
-    if signum == 0 {
-        return Ok(0);
-    }
     let sig = Sig::from(signum);
-    if !sig.is_valid() {
+    if signum != 0 && !sig.is_valid() {
         return Err(Errno::EINVAL);
     }
     if let Some(task) = TASK_MANAGER.get(tid) {
+        if signum == 0 {
+            return Ok(0);
+        }
         let siginfo = SigInfo::new(
             sig.raw(),
             SigInfo::TKILL,
@@ -51,6 +51,20 @@ pub fn sys_tkill(tid: usize, signum: i32) -> SysResult<usize> {
     } else {
         Err(Errno::ESRCH)
     }
+}
+
+pub fn sys_tgkill(tgid: usize, tid: usize, signum: i32) -> SysResult<usize> {
+    if let Some(task) = TASK_MANAGER.get(tid) {
+        if tgid != 0 && task.tgid() != tgid {
+            return Err(Errno::ESRCH);
+        }
+        if signum == 0 {
+            return Ok(0);
+        }
+    } else {
+        return Err(Errno::ESRCH);
+    }
+    sys_tkill(tid, signum)
 }
 
 pub fn sys_sigaction(signum: i32, act: *const u8, oldact: *mut u8) -> SysResult<usize> {
@@ -84,12 +98,20 @@ pub fn sys_sigaction(signum: i32, act: *const u8, oldact: *mut u8) -> SysResult<
     Ok(0)
 }
 
-pub fn sys_sigprocmask(how: usize, set: usize, oldset: usize) -> SysResult<usize> {
+pub fn sys_sigprocmask(
+    how: usize,
+    set: usize,
+    oldset: usize,
+    sigsetsize: usize,
+) -> SysResult<usize> {
     const SIG_BLOCK: usize = 0;
     const SIG_UNBLOCK: usize = 1;
     const SIG_SETMASK: usize = 2;
 
     if how > SIG_SETMASK {
+        return Err(Errno::EINVAL);
+    }
+    if sigsetsize != core::mem::size_of::<SigSet>() {
         return Err(Errno::EINVAL);
     }
 
