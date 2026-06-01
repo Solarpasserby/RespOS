@@ -26,6 +26,7 @@ pub mod mutex;
 pub mod syscall;
 pub mod task;
 pub mod utils;
+pub mod signal;
 
 use core::arch::global_asm;
 

@@ -24,6 +24,7 @@ const SYSCALL_EXIT: usize = 93;
 const SYSCALL_NANOSLEEP: usize = 101;
 const SYSCALL_SCHED_YIELD: usize = 124;
 const SYSCALL_KILL: usize = 129;
+const SYSCALL_TKILL: usize = 130;
 const SYSCALL_SIGACTION: usize = 134;
 const SYSCALL_SIGPROCMASK: usize = 135;
 const SYSCALL_SIGRETURN: usize = 139;
@@ -46,6 +47,7 @@ mod errno;
 mod fs;
 mod mm;
 mod process;
+mod signal;
 mod system;
 mod time;
 
@@ -53,10 +55,9 @@ pub use errno::*;
 use fs::*;
 use mm::*;
 use process::*;
+use signal::*;
 use system::*;
 use time::*;
-
-use crate::task::SignalAction;
 
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
     match syscall_id {
@@ -97,12 +98,11 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         SYSCALL_TIMES => sys_times(args[0] as *mut Tms),
         SYSCALL_UNAME => sys_uname(args[0] as *mut UtsName),
         SYSCALL_KILL => sys_kill(args[0], args[1] as i32),
-        SYSCALL_SIGACTION => sys_sigaction(
-            args[0] as i32,
-            args[1] as *const SignalAction,
-            args[2] as *mut SignalAction,
-        ),
-        SYSCALL_SIGPROCMASK => sys_sigprocmask(args[0] as u32),
+        SYSCALL_TKILL => sys_tkill(args[0], args[1] as i32),
+        SYSCALL_SIGACTION => {
+            sys_sigaction(args[0] as i32, args[1] as *const u8, args[2] as *mut u8)
+        }
+        SYSCALL_SIGPROCMASK => sys_sigprocmask(args[0], args[1], args[2]),
         SYSCALL_SIGRETURN => sys_sigreturn(),
         SYSCALL_REBOOT => sys_reboot(),
         SYSCALL_GETTIMEOFDAY => sys_gettimeofday(args[0] as *mut TimeVal, args[1]),

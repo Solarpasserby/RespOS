@@ -4,10 +4,9 @@ use super::time::TimeVal;
 use super::{Errno, SysResult};
 use crate::fs::{AT_FDCWD, path_open};
 use crate::loader::get_app_data_by_name;
-use crate::mm::{copy_cstr_from_user, copy_from_user, copy_to_user, extract_cstrings_from_user};
+use crate::mm::{copy_cstr_from_user, copy_to_user, extract_cstrings_from_user};
 use crate::task::{
-    CloneFlags, MAX_SIG, SignalAction, SignalFlags, TASK_MANAGER, WaitOption, add_task,
-    current_task, exit_and_run_next, yield_current_task,
+    CloneFlags, WaitOption, add_task, current_task, exit_and_run_next, yield_current_task,
 };
 use alloc::vec::Vec;
 
@@ -207,108 +206,4 @@ pub fn sys_getpid() -> SysResult<usize> {
 pub fn sys_getppid() -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
     Ok(task.op_parent(|parent| parent.as_ref().unwrap().upgrade().unwrap().tid()))
-}
-
-pub fn sys_kill(pid: usize, signum: i32) -> SysResult<usize> {
-    if let Some(task) = TASK_MANAGER.get(pid) {
-        if let Some(flag) = SignalFlags::from_bits(1 << signum) {
-            let mut task_ref = task.get_signal_inner();
-            if task_ref.signals.contains(flag) {
-                // 信号已存在，返回错误
-                return Err(Errno::EINVAL);
-            }
-            task_ref.signals.insert(flag);
-            Ok(0) // 成功返回 Ok(0)
-        } else {
-            // 信号不合法
-            Err(Errno::EINVAL)
-        }
-    } else {
-        // 进程不存在
-        Err(Errno::ESRCH)
-    }
-}
-
-pub fn sys_sigaction(
-    signum: i32,
-    action: *const SignalAction,
-    old_action: *mut SignalAction,
-) -> SysResult<usize> {
-    // 先检查信号编号是否合法
-    if signum < 0 || signum as usize >= MAX_SIG {
-        return Err(Errno::EINVAL);
-    }
-
-    // 先获取旧动作（持锁）
-    let prev_action = {
-        let task = current_task().unwrap();
-        let signal_inner = task.get_signal_inner();
-
-        let flag = SignalFlags::from_bits(1u32 << signum).ok_or(Errno::EINVAL)?;
-
-        if check_sigaction_error(flag, action as usize, old_action as usize) {
-            return Err(Errno::EINVAL);
-        }
-
-        signal_inner.signal_actions.table[signum as usize]
-    }; // 这里 signal_inner 自动释放
-
-    // 写回旧动作（无锁）
-    if !old_action.is_null() {
-        copy_to_user(old_action, &prev_action as *const SignalAction, 1)?;
-    }
-
-    // 如果需要设置新动作
-    if !action.is_null() {
-        let mut new_action = SignalAction::default();
-
-        // 从用户空间读取（无锁）
-        copy_from_user(&mut new_action as *mut SignalAction, action, 1)?;
-
-        // 再次加锁并更新表
-        let task = current_task().unwrap();
-        let mut signal_inner = task.get_signal_inner();
-        signal_inner.signal_actions.table[signum as usize] = new_action;
-    }
-
-    Ok(0)
-}
-
-pub fn sys_sigprocmask(mask: u32) -> SysResult<usize> {
-    if let Some(task) = current_task() {
-        let mut signal_inner = task.get_signal_inner();
-        let old_mask = signal_inner.signal_mask;
-        if let Some(flag) = SignalFlags::from_bits(mask) {
-            signal_inner.signal_mask = flag;
-            Ok(old_mask.bits() as usize)
-        } else {
-            Err(Errno::EINVAL)
-        }
-    } else {
-        Err(Errno::ESRCH)
-    }
-}
-
-pub fn sys_sigreturn() -> SysResult<usize> {
-    if let Some(task) = current_task() {
-        let mut signal_inner = task.get_signal_inner();
-        signal_inner.handling_sig = -1;
-        let trap_ctx = task.get_trap_cx();
-        *trap_ctx = signal_inner.trap_ctx_backup.take().unwrap();
-        Ok(trap_ctx.x[10] as usize)
-    } else {
-        Err(Errno::ESRCH)
-    }
-}
-
-fn check_sigaction_error(signal: SignalFlags, action: usize, old_action: usize) -> bool {
-    if action == 0
-        || old_action == 0
-        || signal == SignalFlags::SIGKILL
-        || signal == SignalFlags::SIGSTOP
-    {
-        true
-    } else {
-        false
-    }
 }
