@@ -2,6 +2,7 @@
 
 use super::super::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
 use super::super::KStat;
+use super::exe::ProcExeInode;
 use super::smaps::SmapsInode;
 use crate::syscall::{Errno, SysResult};
 use alloc::sync::Arc;
@@ -91,10 +92,10 @@ impl InodeOp for ProcSelfInode {
     }
 
     fn lookup(&self, _parent_path: &str, name: &str) -> SysResult<Arc<dyn InodeOp>> {
-        if name == "smaps" {
-            Ok(Arc::new(SmapsInode))
-        } else {
-            Err(Errno::ENOENT)
+        match name {
+            "smaps" => Ok(Arc::new(SmapsInode)),
+            "exe" => Ok(Arc::new(ProcExeInode)),
+            _ => Err(Errno::ENOENT),
         }
     }
 
@@ -103,6 +104,7 @@ impl InodeOp for ProcSelfInode {
             dir_entry(1, b".\0"),
             dir_entry(2, b"..\0"),
             entry(InodeType::Regular, 3, b"smaps\0"),
+            entry(InodeType::SymLink, 4, b"exe\0"),
         ])
     }
 
@@ -134,10 +136,11 @@ impl InodeOp for ProcSelfInode {
 // ── helpers ───────────────────────────────────────────────────────
 
 fn entry(ty: InodeType, off: i64, name: &[u8]) -> LinuxDirent64 {
+    let reclen = (19 + name.len() + 7) & !7;
     LinuxDirent64 {
         d_ino: 0,
         d_off: off,
-        d_reclen: 0,
+        d_reclen: reclen as u16,
         d_type: ty as u8,
         d_name: name.to_vec(),
     }

@@ -2,7 +2,8 @@
 
 use super::{Dentry, LinuxDirent64};
 use crate::fs::KStat;
-use crate::syscall::SysResult;
+use crate::syscall::{Errno, SysResult};
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
@@ -24,6 +25,11 @@ pub trait InodeOp: Any + Send + Sync {
 
     fn link(&self, old_path: &str, bare_dentry: Arc<Dentry>) -> SysResult;
     fn unlink(&self, valid_dentry: Arc<Dentry>) -> SysResult;
+
+    /// 读取符号链接的目标路径。仅 SymLink 类型需要实现。
+    fn read_link(&self, _path: &str) -> SysResult<String> {
+        Err(Errno::EINVAL)
+    }
 }
 
 #[repr(u8)]

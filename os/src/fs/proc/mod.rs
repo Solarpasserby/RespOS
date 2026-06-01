@@ -9,6 +9,7 @@
 //! 后续可在此目录下新增 `exe`、`maps`、`stat`、`status` 等子模块。
 
 mod dirs;
+mod exe;
 mod smaps;
 
 use super::vfs::Dentry;

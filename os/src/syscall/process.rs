@@ -145,12 +145,13 @@ pub fn sys_execve(path: *const u8, args: *const usize, envp: *const usize) -> Sy
 
     if let Ok(file) = path_open(AT_FDCWD, &path, 0, 0) {
         info!("[kernel] execute file in fs");
+        let exe_path = file.path().global_abs_path();
         let all_data = file.read_all()?;
-        Ok(task.execve(all_data.as_slice(), args_vec, envs_vec)?)
+        Ok(task.execve(exe_path, all_data.as_slice(), args_vec, envs_vec)?)
     } else if !path.starts_with("/") {
         // 从内核中加载的应用程序
         if let Some(data) = get_app_data_by_name(path.as_str()) {
-            Ok(task.execve(data, args_vec, envs_vec)?)
+            Ok(task.execve(path.clone(), data, args_vec, envs_vec)?)
         } else {
             Err(Errno::ENOENT)
         }
@@ -266,4 +267,32 @@ pub fn sys_futex(
     val3: usize,
 ) -> SysResult<usize> {
     do_futex(uaddr as usize, futex_op, val, timeout, uaddr2, val3)
+}
+
+/// 系统调用 sys_set_robust_list - 设置线程的 robust futex 链表
+///
+/// glibc 线程初始化时无条件调用。当前内核不实现 robust futex，
+/// 直接返回成功即可。
+pub fn sys_set_robust_list() -> SysResult<usize> {
+    Ok(0)
+}
+
+/// 系统调用 sys_getuid - 获取实际用户 ID
+pub fn sys_getuid() -> SysResult<usize> {
+    Ok(0)
+}
+
+/// 系统调用 sys_geteuid - 获取有效用户 ID
+pub fn sys_geteuid() -> SysResult<usize> {
+    Ok(0)
+}
+
+/// 系统调用 sys_getgid - 获取实际组 ID
+pub fn sys_getgid() -> SysResult<usize> {
+    Ok(0)
+}
+
+/// 系统调用 sys_getegid - 获取有效组 ID
+pub fn sys_getegid() -> SysResult<usize> {
+    Ok(0)
 }

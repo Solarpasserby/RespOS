@@ -267,3 +267,22 @@ pub fn sys_umount2(target: *const u8, flags: usize) -> SysResult<usize> {
     let target = copy_cstr_from_user(target)?;
     do_umount2(target.as_str(), flags)
 }
+
+/// 系统调用 sys_readlinkat - 读取符号链接的目标路径
+pub fn sys_readlinkat(
+    dirfd: isize,
+    path: *const u8,
+    buf: *mut u8,
+    bufsize: usize,
+) -> SysResult<usize> {
+    let path_str = copy_cstr_from_user(path)?;
+    let target_path = filename_lookup(dirfd, &path_str, 0)?;
+    let inode = target_path.dentry.get_inode();
+    let link = inode.read_link(&target_path.abs_path())?;
+    let bytes = link.as_bytes();
+    let n = bytes.len().min(bufsize);
+    if n > 0 {
+        copy_to_user(buf, bytes.as_ptr(), n)?;
+    }
+    Ok(n)
+}

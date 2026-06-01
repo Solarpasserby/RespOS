@@ -64,6 +64,7 @@ pub struct TaskControlBlock {
     // 文件系统
     fd_table: SpinLock<Arc<FdTable>>,
     cwd: Arc<SpinLock<Arc<Path>>>,
+    exe_path: Arc<SpinLock<String>>,
 
     //信号
     sig_pending: SpinLock<SigPending>, // 本线程的信号队列 + 掩码（独享）
@@ -108,6 +109,7 @@ impl TaskControlBlock {
             // 文件系统
             fd_table: SpinLock::new(FdTable::new()),
             cwd: Arc::new(SpinLock::new(Path::zero_init())),
+            exe_path: Arc::new(SpinLock::new(String::new())),
 
             //信号
             sig_pending: SpinLock::new(SigPending::new()),
@@ -162,6 +164,7 @@ impl TaskControlBlock {
             // 文件系统
             fd_table: SpinLock::new(FdTable::new()),
             cwd: Arc::new(SpinLock::new(init_root_fs())),
+            exe_path: Arc::new(SpinLock::new(String::new())),
 
             //信号
             sig_pending: SpinLock::new(SigPending::new()),
@@ -216,7 +219,7 @@ impl TaskControlBlock {
             .unwrap_or_else(|| self.clone());
 
         // 创建线程或是进程
-        let (tgid, thread_group, parent, children, cwd) = if is_thread {
+        let (tgid, thread_group, parent, children, cwd, exe_path) = if is_thread {
             // 创建线程，属于同一线程组
             (
                 self.tgid(),
@@ -224,6 +227,7 @@ impl TaskControlBlock {
                 self.parent.clone(),
                 self.children.clone(),
                 self.cwd.clone(),
+                self.exe_path.clone(),
             )
         } else {
             // 创建进程
@@ -233,6 +237,7 @@ impl TaskControlBlock {
                 Arc::new(SpinLock::new(Some(Arc::downgrade(&process_leader)))),
                 Arc::new(SpinLock::new(BTreeMap::new())),
                 Arc::new(SpinLock::new(Path::from_existed_user(&self.cwd()))),
+                Arc::new(SpinLock::new(self.exe_path())),
             )
         };
 
@@ -285,6 +290,7 @@ impl TaskControlBlock {
             // 文件系统
             fd_table: SpinLock::new(fd_table),
             cwd,
+            exe_path,
 
             // 信号
             sig_pending,
@@ -317,6 +323,7 @@ impl TaskControlBlock {
     /// 将命令行参数个数 `argc` 作为返回值，考虑到系统调用异常时会统一修改 `a0` 寄存器
     pub fn execve(
         self: &Arc<Self>,
+        exe_path: String,
         elf_data: &[u8],
         args: Vec<String>,
         envs: Vec<String>,
@@ -325,6 +332,9 @@ impl TaskControlBlock {
         if !self.is_process_leader() {
             return Err(Errno::EINVAL);
         }
+
+        // 记录可执行文件路径，供 /proc/self/exe 使用
+        self.set_exe_path(exe_path);
 
         let (memory_set, _token, mut user_sp, entry_point, aux_vec) =
             MemorySet::from_elf_data(elf_data);
@@ -384,6 +394,9 @@ impl TaskControlBlock {
     pub fn cwd(&self) -> Arc<Path> {
         self.cwd.lock().clone()
     }
+    pub fn exe_path(&self) -> String {
+        self.exe_path.lock().clone()
+    }
     pub fn exit_code(&self) -> i32 {
         self.exit_code.load(Ordering::Relaxed)
     }
@@ -410,6 +423,9 @@ impl TaskControlBlock {
     }
     pub fn set_cwd(&self, path: Arc<Path>) {
         *self.cwd.lock() = path;
+    }
+    pub fn set_exe_path(&self, path: String) {
+        *self.exe_path.lock() = path;
     }
     pub fn set_exit_code(&self, exit_code: i32) {
         self.exit_code.swap(exit_code, Ordering::Relaxed);
