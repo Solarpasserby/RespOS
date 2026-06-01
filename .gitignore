@@ -4,8 +4,8 @@ img/
 testsuit/
 examples/
 .cargo-home/
-.claude/
 CLAUDE.md
+.claude/
 os/.cargo/
 user/.cargo/
 kernel-rv

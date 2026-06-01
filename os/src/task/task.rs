@@ -1,18 +1,19 @@
 // os/src/task/task.rs
-
 use super::INITPROC;
-use super::action::SignalActions;
 use super::aux::{AT_EXECFN, AT_NULL, AT_PLATFORM, AT_RANDOM, AuxHeader};
 use super::context::TaskContext;
 use super::kstack::KernelStack;
 use super::manager::TASK_MANAGER;
 use super::scheduler::remove_task;
-use super::signal::SignalFlags;
 use super::tid::{TidHandle, tid_alloc};
 use crate::fs::mount::init_root_fs;
 use crate::fs::{FdEntry, FdTable, Path};
 use crate::mm::{MemorySet, copy_to_user};
-use crate::mutex::{MutexGuard, NoopLock, SpinLock};
+use crate::mutex::SpinLock;
+use crate::signal::sig_handler::SigHandler;
+use crate::signal::sig_info::SigInfo;
+use crate::signal::sig_stack::SignalStack;
+use crate::signal::sig_struct::SigPending;
 use crate::syscall::{Errno, SysResult};
 use crate::trap::TrapContext;
 use alloc::collections::btree_map::BTreeMap;
@@ -22,19 +23,6 @@ use alloc::vec::Vec;
 use bitflags::bitflags;
 use core::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 use spin::RwLock;
-
-/// 对于信号机制的简单封装
-///
-/// TODO: 之后需要进行修改
-pub struct SignalStruct {
-    pub signals: SignalFlags,
-    pub signal_actions: SignalActions,
-    pub signal_mask: SignalFlags,
-    pub handling_sig: isize,
-    pub trap_ctx_backup: Option<TrapContext>,
-    pub frozen: bool,
-    pub killed: bool,
-}
 
 /// 线程 tid 地址信息，用于 pthread 线程退出同步。
 pub struct TidAddress {
@@ -77,8 +65,11 @@ pub struct TaskControlBlock {
     fd_table: SpinLock<Arc<FdTable>>,
     cwd: Arc<SpinLock<Arc<Path>>>,
 
-    // 信号处理（先保留原实现）
-    signal: Arc<SpinLock<SignalStruct>>,
+    //信号
+    sig_pending: SpinLock<SigPending>, // 本线程的信号队列 + 掩码（独享）
+    sig_stack: SpinLock<SignalStack>,  // 本线程的备用信号栈（独享）
+    sig_handler: Arc<SpinLock<SigHandler>>, // 线程组共享的 handler 注册表（共享）
+    sig_context_addr: AtomicUsize,     // 用户栈上 SigContext 的地址
 
     // 线程同步
     tid_address: SpinLock<TidAddress>,
@@ -118,16 +109,11 @@ impl TaskControlBlock {
             fd_table: SpinLock::new(FdTable::new()),
             cwd: Arc::new(SpinLock::new(Path::zero_init())),
 
-            // 信号处理（先保留原实现）
-            signal: Arc::new(SpinLock::new(SignalStruct {
-                signals: SignalFlags::empty(),
-                signal_actions: SignalActions::default(),
-                signal_mask: SignalFlags::empty(),
-                handling_sig: -1,
-                trap_ctx_backup: None,
-                frozen: false,
-                killed: false,
-            })),
+            //信号
+            sig_pending: SpinLock::new(SigPending::new()),
+            sig_stack: SpinLock::new(SignalStack::default()),
+            sig_handler: Arc::new(SpinLock::new(SigHandler::new())),
+            sig_context_addr: AtomicUsize::new(0),
 
             // 线程同步
             tid_address: SpinLock::new(TidAddress::new()),
@@ -177,16 +163,11 @@ impl TaskControlBlock {
             fd_table: SpinLock::new(FdTable::new()),
             cwd: Arc::new(SpinLock::new(init_root_fs())),
 
-            // 信号处理（先保留原实现）
-            signal: Arc::new(SpinLock::new(SignalStruct {
-                signals: SignalFlags::empty(),
-                signal_actions: SignalActions::default(),
-                signal_mask: SignalFlags::empty(),
-                handling_sig: -1,
-                trap_ctx_backup: None,
-                frozen: false,
-                killed: false,
-            })),
+            //信号
+            sig_pending: SpinLock::new(SigPending::new()),
+            sig_stack: SpinLock::new(SignalStack::default()),
+            sig_handler: Arc::new(SpinLock::new(SigHandler::new())),
+            sig_context_addr: AtomicUsize::new(0),
 
             // 线程同步
             tid_address: SpinLock::new(TidAddress::new()),
@@ -271,7 +252,19 @@ impl TaskControlBlock {
         } else {
             FdTable::from_existed_user(&self.fd_table.lock())
         };
-
+        let (sig_handler, sig_pending, sig_stack) = if is_thread {
+            (
+                self.sig_handler.clone(),              // 共享同一张 handler 表
+                SpinLock::new(SigPending::new()),      // 自己的队列
+                SpinLock::new(SignalStack::default()), // 自己的栈
+            )
+        } else {
+            (
+                Arc::new(SpinLock::new(SigHandler::new())), // 全新的表
+                SpinLock::new(SigPending::new()),
+                SpinLock::new(SignalStack::default()),
+            )
+        };
         let task_ctrl_block = Arc::new(TaskControlBlock {
             // 固定数据
             kernel_stack,
@@ -293,16 +286,11 @@ impl TaskControlBlock {
             fd_table: SpinLock::new(fd_table),
             cwd,
 
-            // 信号处理（先保留原实现）
-            signal: Arc::new(SpinLock::new(SignalStruct {
-                signals: SignalFlags::empty(),
-                signal_actions: self.signal.lock().signal_actions.clone(),
-                signal_mask: SignalFlags::empty(),
-                handling_sig: -1,
-                trap_ctx_backup: None,
-                frozen: false,
-                killed: false,
-            })),
+            // 信号
+            sig_pending,
+            sig_stack,
+            sig_handler,
+            sig_context_addr: AtomicUsize::new(0),
 
             // 线程同步
             tid_address: SpinLock::new(TidAddress::new()),
@@ -416,12 +404,6 @@ impl TaskControlBlock {
     pub fn is_process_leader(&self) -> bool {
         self.tid() == self.tgid()
     }
-    // 获取 siganl 的锁
-    // TODO: 临时使用
-    pub(crate) fn get_signal_inner(&self) -> MutexGuard<'_, SignalStruct, NoopLock> {
-        self.signal.lock()
-    }
-
     /* ======= 设置内部数据 ====== */
     pub fn set_tgid(&self, tgid: usize) {
         self.tgid.swap(tgid, Ordering::Relaxed);
@@ -499,6 +481,58 @@ impl TaskControlBlock {
         f: impl FnOnce(&mut BTreeMap<usize, Arc<TaskControlBlock>>) -> T,
     ) -> T {
         f(&mut self.children.lock())
+    }
+    // 只读查信号队列
+    pub fn op_sig_pending<T>(&self, f: impl FnOnce(&SigPending) -> T) -> T {
+        f(&self.sig_pending.lock())
+    }
+
+    // 可写改信号队列（加信号、改掩码）
+    pub fn op_sig_pending_mut<T>(&self, f: impl FnOnce(&mut SigPending) -> T) -> T {
+        f(&mut self.sig_pending.lock())
+    }
+
+    // 只读查 handler 表
+    pub fn op_sig_handler<T>(&self, f: impl FnOnce(&SigHandler) -> T) -> T {
+        f(&self.sig_handler.lock())
+    }
+
+    // 可写改 handler 表（sigaction）
+    pub fn op_sig_handler_mut<T>(&self, f: impl FnOnce(&mut SigHandler) -> T) -> T {
+        f(&mut self.sig_handler.lock())
+    }
+
+    // 取信号栈
+    pub fn sigstack(&self) -> Option<SignalStack> {
+        let stack = *self.sig_stack.lock();
+        if stack.ss_flags == 1 {
+            None
+        } else {
+            Some(stack)
+        }
+    }
+
+    // 信号入口：给线程发送信号
+    pub fn receive_siginfo(&self, siginfo: SigInfo, thread_level: bool) {
+        match thread_level {
+            true => {
+                self.op_sig_pending_mut(|pending| pending.add_signal(siginfo));
+            }
+            false => {
+                self.op_thread_group(|tg| {
+                    for task in tg.iter() {
+                        task.op_sig_pending_mut(|pending| pending.add_signal(siginfo));
+                    }
+                });
+            }
+        }
+    }
+    pub fn set_sig_context_addr(&self, addr: usize) {
+        self.sig_context_addr.store(addr, Ordering::Relaxed);
+    }
+
+    pub fn sig_context_addr(&self) -> usize {
+        self.sig_context_addr.load(Ordering::Relaxed)
     }
     pub fn op_thread_group<T>(&self, f: impl FnOnce(&ThreadGroup) -> T) -> T {
         f(&self.thread_group.lock())

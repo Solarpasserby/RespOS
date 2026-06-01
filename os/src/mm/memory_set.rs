@@ -6,12 +6,12 @@ use super::{PTEFlags, PageTable, PageTableEntry};
 use crate::arch::{sfence, write_mmu_token};
 use crate::config::{
     CLK_TCK, DL_INTERP_OFFSET, KERNEL_BASE, KERNEL_STACK_SIZE, MEMORY_END, MMAP_MIN_ADDR,
-    PAGE_SIZE, PAGE_SIZE_BITS, USER_STACK_SIZE, VIRTIO_MMIO,
+    PAGE_SIZE, PAGE_SIZE_BITS, TRAMPOLINE, TRAMPOLINE_CODE, USER_STACK_SIZE, VIRTIO_MMIO,
 };
 use crate::syscall::{Errno, SysResult};
 use crate::task::{
-    AuxHeader, AT_BASE, AT_CLKTCK, AT_EGID, AT_ENTRY, AT_EUID, AT_GID, AT_PAGESZ, AT_PHDR,
-    AT_PHENT, AT_PHNUM, AT_UID,
+    AT_BASE, AT_CLKTCK, AT_EGID, AT_ENTRY, AT_EUID, AT_GID, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM,
+    AT_UID, AuxHeader,
 };
 use crate::trap::PageFaultCause;
 use alloc::collections::BTreeMap;
@@ -119,6 +119,25 @@ impl MemorySet {
             0,
         );
     }
+
+    /// 将 sigreturn 跳板页映射到用户地址空间（TRAMPOLINE 虚拟地址）。
+    ///
+    /// 用户态信号处理函数返回后，会跳转到该页执行架构相关的 sigreturn
+    /// 系统调用入口代码。每个用户进程都需要此映射。
+    pub fn map_trampoline(&mut self) {
+        // 在用户空间分配一页并映射
+        self.push_empty_map_area(
+            MapArea::new(
+                VirtAddr::from(TRAMPOLINE),
+                VirtAddr::from(TRAMPOLINE + PAGE_SIZE),
+                MapType::Framed,
+                MapPermission::READ | MapPermission::EXECUTE | MapPermission::USER,
+            ),
+            Some(TRAMPOLINE_CODE),
+            0,
+        );
+    }
+
     /// 惰性插入逻辑段，只预留虚拟地址空间，不分配物理页（由 page fault handler 按需分配）
     pub fn insert_framed_area_va_lazy(
         &mut self,
@@ -142,6 +161,7 @@ impl MemorySet {
         self.areas.remove(idx);
         Ok(())
     }
+
     /// 删除与给定虚拟页区间重叠的映射，必要时裁剪或切分原逻辑段
     pub fn remove_area_with_overlap_range(&mut self, vpn_range: VPNRange) -> SysResult {
         let mut idx = 0;
@@ -498,6 +518,8 @@ impl MemorySet {
     pub fn from_elf_data(elf_data: &[u8]) -> (Self, usize, usize, usize, Vec<AuxHeader>) {
         let mut memory_set = Self::from_kernel_page_table();
 
+        // 在用户空间映射 sigreturn 跳板页
+        memory_set.map_trampoline();
         // 由于传入的是 elf 格式的数据，所以需要读取文件头来得到各段的地址，之后再做分配映射
         let elf = xmas_elf::ElfFile::new(elf_data).unwrap();
         let elf_header = elf.header;
@@ -596,8 +618,8 @@ impl MemorySet {
                         memory_set.push_empty_map_area(
                             map_area,
                             Some(
-                                &interp_data[ph.offset() as usize
-                                    ..(ph.offset() + ph.file_size()) as usize],
+                                &interp_data
+                                    [ph.offset() as usize..(ph.offset() + ph.file_size()) as usize],
                             ),
                             data_offset,
                         );
@@ -619,20 +641,53 @@ impl MemorySet {
 
         // —— 构建 aux 向量 ——
         let mut aux_vec: Vec<AuxHeader> = alloc::vec![
-            AuxHeader { aux_type: AT_PHDR,   value: ph_va },
-            AuxHeader { aux_type: AT_PHENT,  value: ph_entsize },
-            AuxHeader { aux_type: AT_PHNUM,  value: ph_count as usize },
-            AuxHeader { aux_type: AT_PAGESZ, value: PAGE_SIZE },
-            AuxHeader { aux_type: AT_ENTRY,  value: entry_point },
-            AuxHeader { aux_type: AT_UID,    value: 0 },
-            AuxHeader { aux_type: AT_EUID,   value: 0 },
-            AuxHeader { aux_type: AT_GID,    value: 0 },
-            AuxHeader { aux_type: AT_EGID,   value: 0 },
-            AuxHeader { aux_type: AT_CLKTCK, value: CLK_TCK },
+            AuxHeader {
+                aux_type: AT_PHDR,
+                value: ph_va
+            },
+            AuxHeader {
+                aux_type: AT_PHENT,
+                value: ph_entsize
+            },
+            AuxHeader {
+                aux_type: AT_PHNUM,
+                value: ph_count as usize
+            },
+            AuxHeader {
+                aux_type: AT_PAGESZ,
+                value: PAGE_SIZE
+            },
+            AuxHeader {
+                aux_type: AT_ENTRY,
+                value: entry_point
+            },
+            AuxHeader {
+                aux_type: AT_UID,
+                value: 0
+            },
+            AuxHeader {
+                aux_type: AT_EUID,
+                value: 0
+            },
+            AuxHeader {
+                aux_type: AT_GID,
+                value: 0
+            },
+            AuxHeader {
+                aux_type: AT_EGID,
+                value: 0
+            },
+            AuxHeader {
+                aux_type: AT_CLKTCK,
+                value: CLK_TCK
+            },
         ];
 
         if need_dl {
-            aux_vec.push(AuxHeader { aux_type: AT_BASE, value: DL_INTERP_OFFSET });
+            aux_vec.push(AuxHeader {
+                aux_type: AT_BASE,
+                value: DL_INTERP_OFFSET,
+            });
         }
 
         // 映射其余段
