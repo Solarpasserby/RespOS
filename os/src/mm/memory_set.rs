@@ -6,7 +6,7 @@ use super::{PTEFlags, PageTable, PageTableEntry};
 use crate::arch::{sfence, write_mmu_token};
 use crate::config::{
     CLK_TCK, DL_INTERP_OFFSET, KERNEL_BASE, KERNEL_STACK_SIZE, MEMORY_END, MMAP_MIN_ADDR,
-    PAGE_SIZE, USER_STACK_SIZE, VIRTIO_MMIO,
+    PAGE_SIZE, PAGE_SIZE_BITS, USER_STACK_SIZE, VIRTIO_MMIO,
 };
 use crate::syscall::{Errno, SysResult};
 use crate::task::{
@@ -371,6 +371,17 @@ impl MemorySet {
     /// 转译虚拟页号为物理页号
     pub fn translate(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
         self.page_table.translate(vpn)
+    }
+
+    /// 遍历所有映射区域，供外部观察者（如 /proc/self/smaps）使用。
+    ///
+    /// 闭包参数依次为：起始虚拟地址、结束虚拟地址、权限。
+    pub fn each_area(&self, mut f: impl FnMut(usize, usize, MapPermission)) {
+        for area in self.areas.iter() {
+            let start = area.vpn_range.get_start().0 << PAGE_SIZE_BITS;
+            let end = area.vpn_range.get_end().0 << PAGE_SIZE_BITS;
+            f(start, end, area.map_perm);
+        }
     }
 
     /// 回收内部地址空间

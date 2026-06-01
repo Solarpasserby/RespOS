@@ -116,6 +116,13 @@ pub fn trap_handler(cx: &mut TrapContext) {
             // 非法指令退出码
             exit_and_run_next(-3);
         }
+        Trap::Exception(Exception::Breakpoint) => {
+            println!(
+                "[kernel] Breakpoint in application at sepc={:#x}, kernel killed it.",
+                cx.sepc
+            );
+            exit_and_run_next(-4);
+        }
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
             set_next_ti_trigger();
             yield_current_task();
