@@ -31,6 +31,18 @@ use alloc::vec;
 use alloc::vec::Vec;
 use bitflags::bitflags;
 
+const PTE_V: usize = 1 << 0;
+const PTE_D: usize = 1 << 1;
+const PTE_PLV_USER: usize = 3 << 2;
+const PTE_MAT_CC: usize = 1 << 4;
+const PTE_G: usize = 1 << 6;
+const PTE_P: usize = 1 << 7;
+const PTE_W: usize = 1 << 8;
+const PTE_COW: usize = 1 << 9;
+const PTE_NR: usize = 1usize << 61;
+const PTE_NX: usize = 1usize << 62;
+const PTE_PPN_MASK: usize = ((1usize << PPN_WIDTH) - 1) << 12;
+
 pub struct PageTable {
     root_ppn: PhysPageNum,
     frames: Vec<FrameTracker>,
@@ -256,36 +268,32 @@ impl From<MapPermission> for PTEFlags {
 fn flags_to_la64(flags: PTEFlags) -> usize {
     let mut la64: usize = 0;
     if flags.contains(PTEFlags::VALID) {
-        la64 |= 1 << 0; // V
+        la64 |= PTE_V;
     }
     if flags.contains(PTEFlags::DIRTY) || flags.contains(PTEFlags::WRITE) {
-        la64 |= 1 << 1; // D
+        la64 |= PTE_D;
     }
-    // PLV: USER -> 3, otherwise -> 0
     if flags.contains(PTEFlags::USER) {
-        la64 |= 3 << 2;
+        la64 |= PTE_PLV_USER;
     }
-    // MAT: always coherent cached (1)
-    la64 |= 1 << 4;
+    la64 |= PTE_MAT_CC;
     if flags.contains(PTEFlags::GLOBAL) {
-        la64 |= 1 << 6;
+        la64 |= PTE_G;
     }
     if flags.intersects(PTEFlags::READ | PTEFlags::WRITE | PTEFlags::EXECUTE) {
-        la64 |= 1 << 7; // P: software present bit, kept for refill compatibility
+        la64 |= PTE_P;
     }
     if flags.contains(PTEFlags::WRITE) {
-        la64 |= 1 << 8; // W: software writable bit
+        la64 |= PTE_W;
     }
     if flags.contains(PTEFlags::COW) {
-        la64 |= 1 << 9;
+        la64 |= PTE_COW;
     }
-    // NR: No Read when READ flag absent
     if !flags.contains(PTEFlags::READ) {
-        la64 |= 1usize << 61;
+        la64 |= PTE_NR;
     }
-    // NX: No Execute when EXECUTE flag absent
     if !flags.contains(PTEFlags::EXECUTE) {
-        la64 |= 1usize << 62;
+        la64 |= PTE_NX;
     }
     la64
 }
@@ -293,25 +301,25 @@ fn flags_to_la64(flags: PTEFlags) -> usize {
 /// 将 LoongArch PTE bits 转换为通用 PTEFlags。
 fn flags_from_la64(bits: usize) -> PTEFlags {
     let mut flags = PTEFlags::empty();
-    if bits & (1 << 0) != 0 {
+    if bits & PTE_V != 0 {
         flags |= PTEFlags::VALID;
     }
-    if bits & (1 << 1) != 0 {
+    if bits & PTE_D != 0 {
         flags |= PTEFlags::DIRTY | PTEFlags::WRITE;
     }
-    if bits & (1usize << 61) == 0 {
+    if bits & PTE_NR == 0 {
         flags |= PTEFlags::READ;
     }
-    if bits & (1usize << 62) == 0 {
+    if bits & PTE_NX == 0 {
         flags |= PTEFlags::EXECUTE;
     }
     if (bits >> 2) & 3 == 3 {
         flags |= PTEFlags::USER;
     }
-    if bits & (1 << 6) != 0 {
+    if bits & PTE_G != 0 {
         flags |= PTEFlags::GLOBAL;
     }
-    if bits & (1 << 9) != 0 {
+    if bits & PTE_COW != 0 {
         flags |= PTEFlags::COW;
     }
     flags | PTEFlags::ACCESSED
@@ -320,7 +328,7 @@ fn flags_from_la64(bits: usize) -> PTEFlags {
 impl PageTableEntry {
     pub fn new_table(ppn: PhysPageNum) -> Self {
         Self {
-            bits: (ppn.0 << 12) | (1 << 0),
+            bits: (ppn.0 << 12) | PTE_V,
         }
     }
 
@@ -335,39 +343,39 @@ impl PageTableEntry {
     }
 
     pub fn ppn(&self) -> PhysPageNum {
-        PhysPageNum((self.bits >> 12) & ((1usize << PPN_WIDTH) - 1))
+        PhysPageNum((self.bits & PTE_PPN_MASK) >> 12)
     }
 
     pub fn flags(&self) -> PTEFlags {
-        flags_from_la64(self.bits & !(((1usize << PPN_WIDTH) - 1) << 12))
+        flags_from_la64(self.bits & !PTE_PPN_MASK)
     }
 
     pub fn is_valid(&self) -> bool {
-        self.bits & (1 << 0) != 0
+        self.bits & PTE_V != 0
     }
 
     pub fn readable(&self) -> bool {
-        self.bits & (1usize << 61) == 0
+        self.bits & PTE_NR == 0
     }
 
     pub fn writable(&self) -> bool {
-        self.bits & (1 << 1) != 0
+        self.bits & PTE_D != 0
     }
 
     pub fn executable(&self) -> bool {
-        self.bits & (1usize << 62) == 0
+        self.bits & PTE_NX == 0
     }
 
     /// COW 标志存储在软件位 [9]。
     pub fn is_cow(&self) -> bool {
-        self.bits & (1 << 9) != 0
+        self.bits & PTE_COW != 0
     }
 
     pub fn set_cow_bit(&mut self) {
-        self.bits |= 1 << 9;
+        self.bits |= PTE_COW;
     }
 
     pub fn clear_cow_bit(&mut self) {
-        self.bits &= !(1 << 9);
+        self.bits &= !PTE_COW;
     }
 }

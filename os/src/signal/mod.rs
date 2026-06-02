@@ -70,7 +70,7 @@ pub fn handle_signal() {
             // 保存当前寄存器快照到用户栈
             let sig_ctx = SigContext {
                 x: trap_cx.x,
-                sepc: trap_cx.sepc,
+                sepc: trap_cx.get_sepc(),
                 mask: old_mask,
                 info: 0, // 0 = 普通 handler；1 = SA_SIGINFO handler
             };

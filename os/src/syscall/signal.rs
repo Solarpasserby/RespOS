@@ -169,7 +169,7 @@ pub fn sys_sigreturn() -> SysResult<usize> {
     // 普通 handler（info == 0）：恢复寄存器和 sepc
     if sig_context.info == 0 {
         trap_cx.x = sig_context.x;
-        trap_cx.sepc = sig_context.sepc;
+        trap_cx.set_sepc(sig_context.sepc);
     }
     // TODO : info == 1，SA_SIGINFO 路径。
     // 恢复信号掩码

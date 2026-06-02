@@ -48,4 +48,14 @@ pub struct SigContext {
     pub info: usize,    // 标志是否存在SIGINFO
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+#[cfg(target_arch = "loongarch64")]
+pub struct SigContext {
+    pub x: [usize; 32], // 32 个通用寄存器的值
+    pub sepc: usize,    // 被中断的那条指令的地址
+    pub mask: SigSet,   // 记录原先的mask
+    pub info: usize,    // 标志是否存在SIGINFO
+}
+
 //SigContext 是内核给自己留的"作业进度存档"，UContext 是内核展示给用户看的"作业进度报告"。

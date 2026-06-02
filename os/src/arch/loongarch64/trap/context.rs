@@ -30,6 +30,9 @@ impl TrapContext {
     pub fn set_a0(&mut self, a0: usize) {
         self.x[4] = a0; // LoongArch a0 = r4
     }
+    pub fn get_sepc(&self) -> usize {
+        self.era
+    }
     pub fn set_sepc(&mut self, sepc: usize) {
         self.era = sepc;
     }
@@ -52,13 +55,20 @@ impl TrapContext {
         argv_base: usize,
         envp_base: usize,
         auxv_base: usize,
+        linux_abi: bool,
     ) -> Self {
         let mut regs = [0; 32];
-        // LoongArch ABI: a0=r4, a1=r5, a2=r6, a3=r7
-        regs[4] = argc;
-        regs[5] = argv_base;
-        regs[6] = envp_base;
-        regs[7] = auxv_base;
+        if linux_abi {
+            // Linux LoongArch 进程入口从用户栈读取 argc/argv/envp/auxv。
+            // glibc 的 _start 把 a0 当成 rtld_fini；静态程序这里必须传 0。
+            regs[4] = 0;
+        } else {
+            // LoongArch ABI: a0=r4, a1=r5, a2=r6, a3=r7
+            regs[4] = argc;
+            regs[5] = argv_base;
+            regs[6] = envp_base;
+            regs[7] = auxv_base;
+        }
         // PRMD: PPLV=3(User), PIE=1(异常返回后开启中断)
         let prmd = (3 << 0) | (1 << 2);
         let mut cx = Self {

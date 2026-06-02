@@ -1,11 +1,16 @@
-// os/src/arch/loongarch64/mod.rs
-// LoongArch 64 架构模块
+//! LoongArch64 架构适配层。
+//!
+//! 对外接口尽量和 `rv64` 保持一致：入口、trap、timer、task、页表和
+//! MMU token 都从这里导出。LoongArch 额外需要 PCI、TLB refill 和若干
+//! CSR 封装，因此会比 RISC-V 多出一些启动过渡代码。
 
 pub mod config;
 mod entry;
 pub mod interrupt;
 pub mod mm;
+// LoongArch virt 机器上的块设备经 PCI 暴露。
 pub mod pci;
+// LoongArch CSR 缺少成熟 crate 覆盖，这里保留本地寄存器封装。
 pub mod register;
 pub mod sbi;
 pub mod task;
@@ -21,8 +26,12 @@ global_asm!(include_str!("tlb_refill.S"));
 
 static KERNEL_MAPPING_ACTIVE: AtomicBool = AtomicBool::new(false);
 static LOW_DIRECT_MAP_ACTIVE: AtomicBool = AtomicBool::new(true);
+
+// QEMU 启动时先依赖低地址 DMW 直映运行；进入高地址共享内核模型前，
+// 需要一份只覆盖早期内核镜像和启动堆的临时页表作为过渡。
 const BOOT_MAP_SIZE: usize = 16 * 1024 * 1024;
 const BOOT_PTE_TABLES: usize = BOOT_MAP_SIZE / (512 * crate::config::PAGE_SIZE);
+
 const PTE_VALID: usize = 1 << 0;
 const PTE_DIRTY: usize = 1 << 1;
 const PTE_MAT_CC: usize = 1 << 4;
@@ -89,7 +98,7 @@ pub fn idle() -> ! {
 }
 
 #[inline]
-fn phys_addr<T>(ptr: *const T) -> usize {
+fn kernel_virt_to_phys<T>(ptr: *const T) -> usize {
     ptr as usize - crate::config::KERNEL_BASE
 }
 
@@ -110,7 +119,7 @@ fn leaf_pte(pa: usize) -> usize {
 }
 
 unsafe fn configure_mmu() {
-    let refill_entry_pa = __rfill as usize - crate::config::KERNEL_BASE;
+    let refill_entry_pa = kernel_virt_to_phys(__rfill as *const ());
     unsafe {
         register::mmu::write_tlbrentry(refill_entry_pa);
         register::mmu::write_asid(0);
@@ -125,10 +134,13 @@ pub fn enable_boot_paging() {
         return;
     }
     unsafe {
-        let pgd = phys_addr(core::ptr::addr_of!(BOOT_PGD.0) as *const _) as *mut [usize; 512];
-        let pud = phys_addr(core::ptr::addr_of!(BOOT_PUD.0) as *const _) as *mut [usize; 512];
-        let pmd = phys_addr(core::ptr::addr_of!(BOOT_PMD.0) as *const _) as *mut [usize; 512];
-        let ptes = phys_addr(core::ptr::addr_of!(BOOT_PTES) as *const _)
+        let pgd =
+            kernel_virt_to_phys(core::ptr::addr_of!(BOOT_PGD.0) as *const _) as *mut [usize; 512];
+        let pud =
+            kernel_virt_to_phys(core::ptr::addr_of!(BOOT_PUD.0) as *const _) as *mut [usize; 512];
+        let pmd =
+            kernel_virt_to_phys(core::ptr::addr_of!(BOOT_PMD.0) as *const _) as *mut [usize; 512];
+        let ptes = kernel_virt_to_phys(core::ptr::addr_of!(BOOT_PTES) as *const _)
             as *mut [BootPage; BOOT_PTE_TABLES];
 
         let base_vpn = crate::config::KERNEL_BASE >> crate::config::PAGE_SIZE_BITS;
@@ -138,11 +150,11 @@ pub fn enable_boot_paging() {
 
         core::ptr::write_volatile(
             (pgd as *mut usize).add(pgd_idx),
-            table_pte(phys_addr(core::ptr::addr_of!(BOOT_PUD) as *const _)),
+            table_pte(kernel_virt_to_phys(core::ptr::addr_of!(BOOT_PUD) as *const _)),
         );
         core::ptr::write_volatile(
             (pud as *mut usize).add(pud_idx),
-            table_pte(phys_addr(core::ptr::addr_of!(BOOT_PMD) as *const _)),
+            table_pte(kernel_virt_to_phys(core::ptr::addr_of!(BOOT_PMD) as *const _)),
         );
         for table in 0..BOOT_PTE_TABLES {
             let table_pa = ptes as usize + table * core::mem::size_of::<BootPage>();
@@ -156,7 +168,7 @@ pub fn enable_boot_paging() {
             }
         }
         configure_mmu();
-        let root = phys_addr(core::ptr::addr_of!(BOOT_PGD) as *const _);
+        let root = kernel_virt_to_phys(core::ptr::addr_of!(BOOT_PGD) as *const _);
         write_mmu_token(root);
 
         register::mmu::write_dmw1(0);

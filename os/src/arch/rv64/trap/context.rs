@@ -38,6 +38,9 @@ impl TrapContext {
     pub fn set_a0(&mut self, a0: usize) {
         self.x[10] = a0;
     }
+    pub fn get_sepc(&self) -> usize {
+        self.sepc
+    }
     pub fn set_sepc(&mut self, sepc: usize) {
         self.sepc = sepc;
     }
