@@ -74,7 +74,9 @@ __switch:
     ld.d        $t0, $a0, 112
     csrwr       $t0, 0x19        # PGDL
     csrwr       $t0, 0x1a        # PGDH
+    invtlb      0x0, $zero, $zero
     invtlb      0x3, $zero, $zero
+    ibar        0
 
     # 弹出 TaskContext，切换到新栈
     addi.d      $a0, $a0, 128

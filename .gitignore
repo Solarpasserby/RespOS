@@ -2,9 +2,12 @@
 
 img/*
 .cargo-home/
+examples/
+testsuit/
+review/
+.claude/
 CLAUDE.md
 os/.cargo/
 user/.cargo/
 kernel-rv
 kernel-la
-examples/*

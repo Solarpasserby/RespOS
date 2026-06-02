@@ -17,6 +17,9 @@
 #   ECFG   (0x4): 异常配置
 #   CRMD   (0x0): 当前模式
 #
+#   KSAVE0 (0x30): trap entry/restore 时交换用户 sp 和内核 sp
+#   KSAVE1 (0x31): 保存内核 tp，进入 Rust trap_handler 前恢复
+#
 # 上下文保存布局 (每个slot 8字节):
 #   sp + 0..31*8:   x1..x31 (跳过x0=zero)
 #   实际按 x0..x31 全部保存方便索引:
@@ -83,12 +86,20 @@ __trap_from_user:
     csrrd       $t0, 0x6           # ERA
     st.d        $t0, $sp, 264      # offset 33*8
 
+    # 用户态可以自由使用 tp。进入 Rust 内核前恢复内核 tp，避免
+    # trap_handler 在用户 tp 下运行。
+    csrrd       $tp, 0x31
+
     # 步骤5: 切换到内核上下文
     # 设置 CRMD: PLV=0(kernel), IE=0(disable interrupts)
     csrrd       $t0, 0x0           # CRMD
     bstrins.d   $t0, $zero, 1, 0   # PLV=0
     bstrins.d   $t0, $zero, 2, 2   # IE=0
     csrwr       $t0, 0x0
+
+    # 处理用户 trap 期间，内核态异常应进入 kernel trap 入口。
+    la.local    $t0, __trap_from_kernel
+    csrwr       $t0, 0xc
 
     # 步骤6: 调用 Rust trap_handler
     # 参数: a0 = &mut TrapContext (sp)
@@ -104,6 +115,19 @@ __restore:
     csrwr       $t0, 0x1           # PRMD
     ld.d        $t0, $sp, 264
     csrwr       $t0, 0x6           # ERA
+
+    # 返回用户态前，把普通异常入口切到用户 trap 保存路径。
+    la.local    $t0, __trap_from_user
+    csrwr       $t0, 0xc
+
+    # 即将恢复用户寄存器，先把当前内核 tp 留到 KSAVE1，供下次 trap entry 使用。
+    ori         $t0, $tp, 0
+    csrwr       $t0, 0x31
+
+    # 先保存下次 trap entry 要使用的内核栈顶。这个步骤会使用 $t0，
+    # 必须发生在恢复用户 $t0 之前，否则异步中断返回会破坏用户寄存器。
+    addi.d      $t0, $sp, 272      # t0 = kernel stack top
+    csrwr       $t0, 0x30          # KSAVE0 = kernel sp (下次 trap entry 时 csrwr 恢复)
 
     # 恢复通用寄存器
     ld.d        $ra, $sp, 8
@@ -136,10 +160,6 @@ __restore:
     ld.d        $s6, $sp, 232
     ld.d        $s7, $sp, 240
     ld.d        $s8, $sp, 248
-
-    # 弹出 TrapContext: 将内核栈指针保存到 KSAVE0 供下次 trap entry 使用
-    addi.d      $t0, $sp, 272      # t0 = kernel stack top
-    csrwr       $t0, 0x30          # KSAVE0 = kernel sp (下次 trap entry 时 csrwr 恢复)
 
     # 恢复用户 sp (从 x3 的位置，offset = 24)
     ld.d        $sp, $sp, 24       # sp = user sp

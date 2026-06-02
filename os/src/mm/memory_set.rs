@@ -474,13 +474,13 @@ impl MemorySet {
                     // COW 共享：标记父进程 PTE 为只读 + COW
                     let parent_pte = user_space.page_table.translate(vpn).unwrap();
                     let mut flags = parent_pte.flags();
-                    flags.remove(PTEFlags::WRITE);
+                    flags.remove(PTEFlags::WRITE | PTEFlags::DIRTY);
                     user_space.page_table.modify_pte(vpn, flags);
                     user_space.page_table.set_pte_cow(vpn);
 
                     // 子进程 PTE 同样为只读 + COW
                     let mut child_flags = PTEFlags::from_bits(area.map_perm.bits as usize).unwrap();
-                    child_flags.remove(PTEFlags::WRITE);
+                    child_flags.remove(PTEFlags::WRITE | PTEFlags::DIRTY);
                     memory_set.page_table.map(vpn, ppn, child_flags);
                     memory_set.page_table.set_pte_cow(vpn);
                 } else {

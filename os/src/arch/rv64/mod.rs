@@ -29,3 +29,12 @@ pub fn sfence() {
         asm!("sfence.vma", options(nostack));
     }
 }
+
+#[inline(always)]
+pub fn idle() -> ! {
+    loop {
+        unsafe {
+            asm!("wfi", options(nomem, nostack));
+        }
+    }
+}

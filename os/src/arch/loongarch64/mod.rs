@@ -5,6 +5,7 @@ pub mod config;
 mod entry;
 pub mod interrupt;
 pub mod mm;
+pub mod pci;
 pub mod register;
 pub mod sbi;
 pub mod task;
@@ -54,6 +55,7 @@ pub fn write_mmu_token(token: usize) {
         // 因此两个寄存器都要写入当前地址空间的 root。
         register::mmu::write_pgdl(token);
         register::mmu::write_pgdh(token);
+        register::mmu::write_asid(0);
     }
 }
 
@@ -81,6 +83,11 @@ pub fn enable_kernel_extensions() {
     }
 }
 
+#[inline(always)]
+pub fn idle() -> ! {
+    register::idle()
+}
+
 #[inline]
 fn phys_addr<T>(ptr: *const T) -> usize {
     ptr as usize - crate::config::KERNEL_BASE
@@ -106,6 +113,7 @@ unsafe fn configure_mmu() {
     let refill_entry_pa = __rfill as usize - crate::config::KERNEL_BASE;
     unsafe {
         register::mmu::write_tlbrentry(refill_entry_pa);
+        register::mmu::write_asid(0);
         register::mmu::configure_tlb_page_size();
         register::mmu::configure_page_walk();
     }

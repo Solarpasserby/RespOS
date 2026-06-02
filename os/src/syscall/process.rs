@@ -56,8 +56,7 @@ impl Default for RUsage {
 }
 
 pub fn sys_exit(exit_code: i32) -> ! {
-    exit_and_run_next(exit_code);
-    panic!("Unreachable in sys_exit!");
+    exit_and_run_next(exit_code)
 }
 
 pub fn sys_sched_yield() -> SysResult<usize> {

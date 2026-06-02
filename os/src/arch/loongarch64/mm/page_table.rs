@@ -154,7 +154,7 @@ impl PageTable {
         assert!(!pte.is_valid(), "vpn {:?} is mapped before mapping", vpn);
         *pte = PageTableEntry::new(
             ppn,
-            flags | PTEFlags::VALID | PTEFlags::ACCESSED | PTEFlags::DIRTY,
+            flags | PTEFlags::VALID | PTEFlags::ACCESSED,
         );
     }
 
@@ -181,7 +181,7 @@ impl PageTable {
         let was_cow = pte.is_cow();
         *pte = PageTableEntry::new(
             pte.ppn(),
-            flags | PTEFlags::VALID | PTEFlags::ACCESSED | PTEFlags::DIRTY,
+            flags | PTEFlags::VALID | PTEFlags::ACCESSED,
         );
         if was_cow {
             pte.set_cow_bit();

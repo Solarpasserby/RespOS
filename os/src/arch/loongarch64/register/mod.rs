@@ -292,6 +292,7 @@ pub mod mmu {
 
     const CSR_PGDL: usize = 0x19;
     const CSR_PGDH: usize = 0x1a;
+    const CSR_ASID: usize = 0x18;
     const CSR_PWCL: usize = 0x1c;
     const CSR_PWCH: usize = 0x1d;
     const CSR_STLBPS: usize = 0x1e;
@@ -318,6 +319,11 @@ pub mod mmu {
     #[inline(always)]
     pub unsafe fn write_pgdh(bits: usize) {
         write_csr!(CSR_PGDH, bits);
+    }
+
+    #[inline(always)]
+    pub unsafe fn write_asid(bits: usize) {
+        write_csr!(CSR_ASID, bits & 0x3ff);
     }
 
     #[inline(always)]
@@ -358,7 +364,9 @@ pub mod mmu {
     #[inline(always)]
     pub unsafe fn flush_tlb() {
         unsafe {
+            core::arch::asm!("invtlb 0x0, $r0, $r0", options(nostack));
             core::arch::asm!("invtlb 0x3, $r0, $r0", options(nostack));
+            core::arch::asm!("ibar 0", options(nostack));
         }
     }
 }

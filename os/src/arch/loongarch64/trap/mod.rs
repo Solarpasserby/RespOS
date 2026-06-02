@@ -3,9 +3,9 @@
 mod context;
 
 use super::register::{badv, ecfg, eentry, era, estat};
-use super::timer::set_next_ti_trigger;
+use super::{sbi::clear_timer_interrupt, timer::set_next_ti_trigger};
 use crate::syscall::*;
-use crate::task::{exit_and_run_next, handle_signals, yield_current_task};
+use crate::task::{current_task, exit_and_run_next, handle_signals, yield_current_task};
 use core::arch::global_asm;
 
 pub use context::TrapContext;
@@ -16,6 +16,18 @@ pub enum PageFaultCause {
     Instruction,
     Load,
     Store,
+}
+
+fn page_fault_cause(exception: estat::Exception) -> PageFaultCause {
+    match exception {
+        estat::Exception::PageInvalidFetch | estat::Exception::PageNonExecutable => {
+            PageFaultCause::Instruction
+        }
+        estat::Exception::PageInvalidStore | estat::Exception::PageModifyFault => {
+            PageFaultCause::Store
+        }
+        _ => PageFaultCause::Load,
+    }
 }
 
 global_asm!(include_str!("trap.S"));
@@ -36,7 +48,19 @@ pub fn init() {
 pub fn enable_timer_interrupt() {
     unsafe {
         ecfg::enable_timer_interrupt();
+        // Keep kernel-mode interrupts disabled. User contexts re-enable IE through PRMD.PIE
+        // when __restore executes ERTN.
+        super::register::crmd::set_interrupt_enabled(false);
     }
+}
+
+#[inline]
+fn read_badi() -> usize {
+    let bits: usize;
+    unsafe {
+        core::arch::asm!("csrrd {}, 0x8", out(reg) bits, options(nomem, nostack));
+    }
+    bits
 }
 
 /// 异常处理入口
@@ -44,6 +68,7 @@ pub fn enable_timer_interrupt() {
 pub fn trap_handler(cx: &mut TrapContext) {
     match estat::cause(estat::read()) {
         estat::Trap::Interrupt(estat::Interrupt::Timer) => {
+            clear_timer_interrupt();
             set_next_ti_trigger();
             yield_current_task();
         }
@@ -62,26 +87,39 @@ pub fn trap_handler(cx: &mut TrapContext) {
                 Err(err) => err.as_ret() as usize,
             };
         }
-        estat::Trap::Exception(
+        estat::Trap::Exception(exception @ (
             estat::Exception::PageInvalidFetch
             | estat::Exception::PageInvalidLoad
             | estat::Exception::PageInvalidStore
             | estat::Exception::PageModifyFault
             | estat::Exception::PageNonReadable
             | estat::Exception::PageNonExecutable
-            | estat::Exception::PagePrivilegeIllegal,
-        ) => {
+            | estat::Exception::PagePrivilegeIllegal
+        )) => {
             let badv = badv::read();
-            println!(
-                "[kernel] PageFault in application, cause = {:?}, era = {:#x}, bad addr = {:#x}, kernel killed it.",
-                estat::cause(estat::read()),
-                cx.era,
-                badv
-            );
-            exit_and_run_next(-2);
+            let result = current_task()
+                .expect("[kernel] current task is None.")
+                .op_memory_set_write(|memory_set| {
+                    memory_set.handle_page_fault(page_fault_cause(exception), badv)
+                });
+            if let Err(err) = result {
+                println!(
+                    "[kernel] PageFault in application, cause = {:?}, era = {:#x}, bad addr = {:#x}, err = {:?}, kernel killed it.",
+                    estat::cause(estat::read()),
+                    cx.era,
+                    badv,
+                    err
+                );
+                exit_and_run_next(-2);
+            }
         }
         estat::Trap::Exception(estat::Exception::IllegalInstruction) => {
-            println!("[kernel] IllegalInstruction in application, kernel killed it.");
+            let inst = read_badi();
+            let tid = current_task().map(|task| task.tid()).unwrap_or(usize::MAX);
+            println!(
+                "[kernel] IllegalInstruction in application, tid = {}, era = {:#x}, badi = {:#x}, kernel killed it.",
+                tid, cx.era, inst
+            );
             exit_and_run_next(-3);
         }
         cause => {

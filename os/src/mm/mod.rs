@@ -31,7 +31,8 @@ pub fn init() {
     init_frame_allocator();
     println!("success!");
     KERNEL_SPACE.lock().activate();
-    // TODO(loongarch64): close the low DMW after MMIO PTEs use the right uncached MAT.
+    #[cfg(target_arch = "loongarch64")]
+    crate::arch::disable_low_direct_map();
     // 注意此时已经启用了虚拟地址
 }
 
