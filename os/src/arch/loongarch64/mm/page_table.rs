@@ -152,10 +152,7 @@ impl PageTable {
     pub fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) {
         let pte = self.find_pte_create(vpn).unwrap();
         assert!(!pte.is_valid(), "vpn {:?} is mapped before mapping", vpn);
-        *pte = PageTableEntry::new(
-            ppn,
-            flags | PTEFlags::VALID | PTEFlags::ACCESSED,
-        );
+        *pte = PageTableEntry::new(ppn, flags | PTEFlags::VALID | PTEFlags::ACCESSED);
     }
 
     pub fn unmap(&mut self, vpn: VirtPageNum) {
@@ -179,10 +176,7 @@ impl PageTable {
         let pte = self.find_pte(vpn).unwrap();
         assert!(pte.is_valid(), "vpn {:?} is invalid in modify_pte", vpn);
         let was_cow = pte.is_cow();
-        *pte = PageTableEntry::new(
-            pte.ppn(),
-            flags | PTEFlags::VALID | PTEFlags::ACCESSED,
-        );
+        *pte = PageTableEntry::new(pte.ppn(), flags | PTEFlags::VALID | PTEFlags::ACCESSED);
         if was_cow {
             pte.set_cow_bit();
         }
@@ -207,7 +201,7 @@ pub struct PageTableEntry {
 }
 
 bitflags! {
-    pub struct PTEFlags: usize {
+    pub struct PTEFlags: u16 {
         const VALID    = 1 << 0;
         const READ     = 1 << 1;  // maps to !NR via conversion
         const WRITE    = 1 << 2;  // maps to D via conversion
@@ -254,7 +248,7 @@ impl PTEFlags {
 
 impl From<MapPermission> for PTEFlags {
     fn from(value: MapPermission) -> Self {
-        PTEFlags::from_bits(value.bits() as usize).unwrap()
+        PTEFlags::from_bits(value.bits()).unwrap()
     }
 }
 

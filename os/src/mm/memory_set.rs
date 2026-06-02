@@ -479,13 +479,13 @@ impl MemorySet {
                     user_space.page_table.set_pte_cow(vpn);
 
                     // 子进程 PTE 同样为只读 + COW
-                    let mut child_flags = PTEFlags::from_bits(area.map_perm.bits as usize).unwrap();
+                    let mut child_flags = PTEFlags::from_bits(area.map_perm.bits).unwrap();
                     child_flags.remove(PTEFlags::WRITE | PTEFlags::DIRTY);
                     memory_set.page_table.map(vpn, ppn, child_flags);
                     memory_set.page_table.set_pte_cow(vpn);
                 } else {
                     // 只读页直接共享，无需 COW
-                    let child_flags = PTEFlags::from_bits(area.map_perm.bits as usize).unwrap();
+                    let child_flags = PTEFlags::from_bits(area.map_perm.bits).unwrap();
                     memory_set.page_table.map(vpn, ppn, child_flags);
                 }
 

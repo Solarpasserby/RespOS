@@ -1,5 +1,5 @@
 # 架构选择: riscv64 | loongarch64
-ARCH ?= loongarch64
+ARCH ?= riscv64
 MODE ?= debug
 FEATURES ?=
 APP_DIR := src/bin
