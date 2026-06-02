@@ -381,7 +381,17 @@ impl MemorySet {
         assert!(pte.readable() || pte.executable() || pte.writable());
 
         write_mmu_token(token);
-        self.flush_tlb(); // 内存屏障，刷新 TLB，确保之后内存读写正确
+        self.flush_tlb();
+    }
+
+    #[cfg(target_arch = "loongarch64")]
+    pub fn activate(&self) {
+        let token = self.page_table.token();
+        write_mmu_token(token);
+        if !crate::arch::paging_enabled() {
+            crate::arch::enable_mmu();
+        }
+        self.flush_tlb();
     }
 
     /// 生成页表对应 `stap` 寄存器值
@@ -753,13 +763,13 @@ impl MemorySet {
                     // COW 共享：标记父进程 PTE 为只读 + COW
                     let parent_pte = user_space.page_table.translate(vpn).unwrap();
                     let mut flags = parent_pte.flags();
-                    flags.remove(PTEFlags::WRITE);
+                    flags.remove(PTEFlags::WRITE | PTEFlags::DIRTY);
                     user_space.page_table.modify_pte(vpn, flags);
                     user_space.page_table.set_pte_cow(vpn);
 
                     // 子进程 PTE 同样为只读 + COW
                     let mut child_flags = PTEFlags::from_bits(area.map_perm.bits).unwrap();
-                    child_flags.remove(PTEFlags::WRITE);
+                    child_flags.remove(PTEFlags::WRITE | PTEFlags::DIRTY);
                     memory_set.page_table.map(vpn, ppn, child_flags);
                     memory_set.page_table.set_pte_cow(vpn);
                 } else {

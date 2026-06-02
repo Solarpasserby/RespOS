@@ -9,9 +9,10 @@ use crate::trap::__restore;
 #[repr(C)]
 pub struct TaskContext {
     ra: usize, // 返回地址
-    tp: usize, // x4(tp)，仅按调用约定保存/恢复；用户态会将它用作 TLS 指针
+    tp: usize, // 线程指针寄存器，仅按调用约定保存/恢复
     // 调用约定被调用者保存的寄存器
     // 由于切换上下文总是以函数调用的形式实现，因而只作部分保存
+    // RISC-V: s0-s11；LoongArch: fp/s9 + s0-s8 + padding
     s: [usize; 12],
     // 现在页表切换不在异常处理后进行，而是切换任务（进程）后进行
     mmu_token: usize,

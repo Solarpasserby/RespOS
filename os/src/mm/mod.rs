@@ -25,9 +25,14 @@ pub use memory_set::{KERNEL_SPACE, MapPermission, MemorySet};
 
 /// 初始化内存管理，启用虚拟地址
 pub fn init() {
+    #[cfg(target_arch = "loongarch64")]
+    crate::arch::enable_boot_paging();
     init_heap();
     init_frame_allocator();
+    println!("success!");
     KERNEL_SPACE.lock().activate();
+    #[cfg(target_arch = "loongarch64")]
+    crate::arch::disable_low_direct_map();
     // 注意此时已经启用了虚拟地址
 }
 

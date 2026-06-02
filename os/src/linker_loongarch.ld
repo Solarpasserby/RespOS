@@ -1,8 +1,9 @@
-OUTPUT_ARCH(riscv)
+OUTPUT_ARCH(loongarch)
 ENTRY(_start)
-BASE_ADDRESS = 0xffffffc080200000;
-LOAD_ADDRESS = 0x80200000;
-KERNEL_OFFSET = BASE_ADDRESS - LOAD_ADDRESS;
+
+PHYS_ADDR = 0x00200000;
+BASE_ADDRESS = 0xffff800000200000;
+KERNEL_OFFSET = BASE_ADDRESS - PHYS_ADDR;
 
 SECTIONS
 {
@@ -13,6 +14,10 @@ SECTIONS
     .text : AT(ADDR(.text) - KERNEL_OFFSET) {
         *(.text.entry)
         . = ALIGN(4K);
+        srfill = .;
+        KEEP(*(.text.__rfill))
+        . = ALIGN(4K);
+        erfill = .;
         *(.text .text.*)
     }
 

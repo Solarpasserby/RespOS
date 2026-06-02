@@ -5,6 +5,7 @@
 #![feature(alloc_error_handler)]
 // TODO: 实现内核内部锁机制后立刻移除
 #![feature(sync_unsafe_cell)]
+#![feature(c_variadic)]
 
 extern crate alloc;
 
@@ -16,6 +17,7 @@ mod console;
 mod lang_item;
 
 pub mod arch;
+
 use arch::{config, sbi, timer, trap};
 
 pub mod drivers;
@@ -34,18 +36,19 @@ global_asm!(include_str!("link_app.S"));
 
 #[unsafe(no_mangle)]
 pub fn rust_main() -> ! {
-    clear_bss(); // 手动清理 .bss
+    clear_bss();
+    #[cfg(target_arch = "loongarch64")]
+    arch::enable_kernel_extensions();
 
-    // TODO: 单纯是为消除警告，后续需要对这些宏做一定修改
     error!("hello world");
     warn!("hello world");
     info!("hello world");
     debug!("hello world");
     trace!("hello world");
 
+    trap::init();
     mm::init();
     task::add_initproc();
-    trap::init();
     trap::enable_timer_interrupt();
     timer::set_next_ti_trigger();
 
@@ -55,6 +58,7 @@ pub fn rust_main() -> ! {
     panic!("unreachable!");
 }
 
+/// 使用 Rust 迭代器清零 BSS
 fn clear_bss() {
     unsafe extern "C" {
         unsafe fn sbss();

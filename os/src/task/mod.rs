@@ -32,11 +32,12 @@ pub use scheduler::{
 pub use task::{CloneFlags, TaskControlBlock};
 
 lazy_static! {
-    pub static ref INITPROC: Arc<TaskControlBlock> =
-        TaskControlBlock::init(get_app_data_by_name("initproc").unwrap());
+    pub static ref INITPROC: Arc<TaskControlBlock> = {
+        let data = get_app_data_by_name("initproc").unwrap();
+        TaskControlBlock::init(data)
+    };
 }
 
-#[cfg(target_arch = "riscv64")]
 pub fn add_initproc() {
     add_task(INITPROC.clone());
 }

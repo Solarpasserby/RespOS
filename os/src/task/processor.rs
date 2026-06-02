@@ -19,6 +19,11 @@ lazy_static! {
     pub static ref IDLE_TASK: Arc<TaskControlBlock> = Arc::new(TaskControlBlock::zero_init());
 }
 
+#[cfg(target_arch = "loongarch64")]
+lazy_static! {
+    pub static ref IDLE_TASK: Arc<TaskControlBlock> = Arc::new(TaskControlBlock::zero_init());
+}
+
 lazy_static! {
     pub static ref PROCESSOR: SpinNoIrqLock<Processor> = SpinNoIrqLock::new(Processor::new());
 }

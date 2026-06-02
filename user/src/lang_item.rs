@@ -26,7 +26,10 @@ fn panic_handler(panic_info: &core::panic::PanicInfo) -> ! {
 unsafe fn trace_and_print_user_stack() {
     let mut fp: *const usize;
     unsafe {
+        #[cfg(target_arch = "riscv64")]
         asm!("mv {}, fp", out(reg) fp);
+        #[cfg(target_arch = "loongarch64")]
+        asm!("or {}, $r22, $zero", out(reg) fp);
     }
 
     println!("----- start tracing ustack -----");

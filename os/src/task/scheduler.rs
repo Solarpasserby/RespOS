@@ -76,9 +76,9 @@ pub fn remove_thread_group(tgid: usize) {
 ///
 /// 调用者需要在调用前处理好当前任务的退出或状态变化。
 #[unsafe(no_mangle)]
-pub fn switch_to_next_task() {
+pub fn switch_to_next_task() -> ! {
     let Some(current) = current_task() else {
-        return;
+        crate::arch::idle();
     };
 
     if let Some(next_task) = fetch_task() {
@@ -91,6 +91,8 @@ pub fn switch_to_next_task() {
         }
         cleanup_dead_tasks();
     }
+
+    crate::arch::idle();
 }
 
 /// 主动让出当前任务。
@@ -155,9 +157,9 @@ fn switch_to_next_task_after_exit() {
 }
 
 #[unsafe(no_mangle)]
-pub fn exit_and_run_next(exit_code: i32) {
+pub fn exit_and_run_next(exit_code: i32) -> ! {
     let Some(task) = current_task() else {
-        return;
+        crate::arch::idle();
     };
     task_exit(task, exit_code);
     switch_to_next_task_after_exit();

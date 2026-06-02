@@ -70,8 +70,7 @@ impl Default for RUsage {
 ///
 /// 退出单个线程
 pub fn sys_exit(exit_code: i32) -> ! {
-    exit_and_run_next(exit_code);
-    panic!("Unreachable in sys_exit!");
+    exit_and_run_next(exit_code)
 }
 
 /// 系统调用 sys_exit_group

@@ -5,25 +5,35 @@ use std::io::{Result, Write};
 fn main() {
     println!("cargo:rerun-if-changed=../user/src/");
     println!("cargo:rerun-if-env-changed=PROFILE");
+    println!("cargo:rerun-if-env-changed=RESPOS_USER_TARGET");
     println!("cargo:rerun-if-env-changed=RESPOS_USER_PROFILE_DIR");
     println!("cargo:rerun-if-env-changed=RESPOS_APP_REBUILD_STAMP");
+
     insert_app_data().unwrap();
 }
 
 fn target_path() -> String {
     let profile = env::var("PROFILE").expect("PROFILE is not set by Cargo");
+    let user_target = env::var("RESPOS_USER_TARGET").unwrap_or_else(|_| {
+        let kernel_target = env::var("TARGET").expect("TARGET is not set by Cargo");
+        match kernel_target.as_str() {
+            "riscv64gc-unknown-none-elf" => String::from("riscv64gc-unknown-none-elf"),
+            "loongarch64-unknown-none" => String::from("loongarch64-unknown-none"),
+            other => other.to_string(),
+        }
+    });
     let profile_dir = env::var("RESPOS_USER_PROFILE_DIR").unwrap_or(profile);
-    format!("../user/target/riscv64gc-unknown-none-elf/{profile_dir}/")
+    format!("../user/target/{user_target}/{profile_dir}/")
 }
 
 fn insert_app_data() -> Result<()> {
     let mut f = File::create("src/link_app.S").unwrap();
     let target_path = target_path();
-    let rebuild_stamp = env::var("RESPOS_APP_REBUILD_STAMP").unwrap_or_else(|_| String::from("local"));
+    let rebuild_stamp =
+        env::var("RESPOS_APP_REBUILD_STAMP").unwrap_or_else(|_| String::from("local"));
     println!("cargo:rerun-if-changed={}", target_path);
     let mut apps: Vec<_> = read_dir("../user/src/bin")
         .unwrap()
-        // .into_iter()
         .map(|dir_entry| {
             let mut name_with_ext = dir_entry.unwrap().file_name().into_string().unwrap();
             name_with_ext.drain(name_with_ext.find('.').unwrap()..name_with_ext.len());
