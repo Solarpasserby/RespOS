@@ -100,7 +100,10 @@ impl FileOp for Pipe {
         Err(Errno::ESPIPE)
     }
     fn get_offset(&self) -> usize {
-        panic!("Cannot get offset from pipe!");
+        0
+    }
+    fn can_seek(&self) -> SysResult<()> {
+        Err(Errno::ESPIPE)
     }
     fn readable(&self) -> bool {
         self.readable

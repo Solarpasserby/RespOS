@@ -134,14 +134,14 @@ impl InodeOp for Ext4Inode {
         let path = file.get_path();
         let path = path.to_str().map_err(|_| Errno::EINVAL)?;
 
-        file.file_open(path, bindings::O_RDONLY)
-            .map_err(Self::map_lwext4_err)?;
+        if !file.is_open() {
+            file.file_open(path, bindings::O_RDWR)
+                .map_err(Self::map_lwext4_err)?;
+        }
+
         file.file_seek(off as i64, bindings::SEEK_SET)
             .map_err(Self::map_lwext4_err)?;
-        let read_size = file.file_read(buf).map_err(Self::map_lwext4_err)?;
-        file.file_close().map_err(Self::map_lwext4_err)?;
-
-        Ok(read_size)
+        file.file_read(buf).map_err(Self::map_lwext4_err)
     }
 
     fn write_at(&self, off: usize, buf: &[u8]) -> SysResult<usize> {
@@ -151,14 +151,14 @@ impl InodeOp for Ext4Inode {
         let path = file.get_path();
         let path = path.to_str().map_err(|_| Errno::EINVAL)?;
 
-        file.file_open(path, bindings::O_RDWR)
-            .map_err(Self::map_lwext4_err)?;
+        if !file.is_open() {
+            file.file_open(path, bindings::O_RDWR)
+                .map_err(Self::map_lwext4_err)?;
+        }
+
         file.file_seek(off as i64, bindings::SEEK_SET)
             .map_err(Self::map_lwext4_err)?;
-        let write_size = file.file_write(buf).map_err(Self::map_lwext4_err)?;
-        file.file_close().map_err(Self::map_lwext4_err)?;
-
-        Ok(write_size)
+        file.file_write(buf).map_err(Self::map_lwext4_err)
     }
 
     fn truncate(&self, size: usize) -> SysResult<usize> {
@@ -168,11 +168,13 @@ impl InodeOp for Ext4Inode {
         let path = file.get_path();
         let path = path.to_str().map_err(|_| Errno::EINVAL)?;
 
-        file.file_open(path, bindings::O_RDWR)
-            .map_err(Self::map_lwext4_err)?;
+        if !file.is_open() {
+            file.file_open(path, bindings::O_RDWR)
+                .map_err(Self::map_lwext4_err)?;
+        }
+
         file.file_truncate(size as u64)
             .map_err(Self::map_lwext4_err)?;
-        file.file_close().map_err(Self::map_lwext4_err)?;
 
         Ok(0)
     }
@@ -271,7 +273,8 @@ impl InodeOp for Ext4Inode {
                         bindings::O_RDWR | bindings::O_CREAT | bindings::O_TRUNC,
                     )
                     .map_err(Self::map_lwext4_err)?;
-                new_file.file_close().map_err(Self::map_lwext4_err)?;
+                // 不关闭文件，保持打开以支持 tmpfile/unlink 语义
+                // 文件会在 Ext4Inode Drop 时自动关闭
             }
             _ => return Err(Errno::ENOSYS),
         }

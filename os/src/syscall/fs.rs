@@ -86,9 +86,40 @@ pub fn sys_fstat(fd: usize, stat: *mut Stat) -> SysResult<usize> {
 }
 
 /// 系统调用 sys-lseek
-pub fn sys_lseek(fd: usize, offset: isize, whence: usize) -> SysResult<usize> {
-    let _ = (fd, offset, whence);
-    Err(Errno::ENOSYS)
+/// 功能：移动文件的**读写位置（书签）**
+pub fn sys_lseek(
+    fd: usize,     // 文件句柄（数字，代表哪个文件）
+    offset: isize, // 偏移量（跳多少）
+    whence: usize, // 从哪里开始跳（开头/当前/末尾）
+) -> SysResult<usize> {
+    // 定义三种跳转模式
+    const SEEK_SET: usize = 0; // 从文件开头跳
+    const SEEK_CUR: usize = 1; // 从当前位置跳
+    const SEEK_END: usize = 2; // 从文件末尾跳
+
+    // 1. 拿到当前进程
+    let task = current_task().expect("[kernel] current task is None.");
+
+    // 2. 根据 fd 找到进程打开的文件
+    let file = task.get_fd_entry(fd)?.file;
+
+    // 3. 检查文件是否支持 seek（pipe/stdin/stdout 会返回 ESPIPE）
+    file.can_seek()?;
+
+    // 4. 根据不同模式，计算新的位置
+    let new_offset: isize = match whence {
+        // 直接跳到 offset 位置
+        SEEK_SET => offset,
+        // 当前位置 + 偏移量（相对跳转）
+        SEEK_CUR => file.get_offset() as isize + offset,
+        // 文件末尾 + 偏移量
+        SEEK_END => file.get_stat()?.size as isize + offset,
+        // 无效模式，返回错误
+        _ => return Err(Errno::EINVAL),
+    };
+
+    // 5. 真正移动文件指针，并返回新位置
+    file.seek(new_offset)
 }
 
 /// 系统调用 sys-dup

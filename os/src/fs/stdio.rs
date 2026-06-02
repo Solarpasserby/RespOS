@@ -3,7 +3,7 @@
 use super::KStat;
 use super::vfs::{FileOp, InodeType, OpenFlags};
 use crate::sbi::console_getchar;
-use crate::syscall::SysResult;
+use crate::syscall::{Errno, SysResult};
 use crate::task::yield_current_task;
 use core::any::Any;
 
@@ -47,10 +47,13 @@ impl FileOp for Stdin {
         panic!("Cannot write to stdin!");
     }
     fn seek(&self, _offset: isize) -> SysResult<usize> {
-        panic!("Cannot seek stdin!");
+        Err(Errno::ESPIPE)
     }
     fn get_offset(&self) -> usize {
-        panic!("Cannot get offset from stdin!");
+        0
+    }
+    fn can_seek(&self) -> SysResult<()> {
+        Err(Errno::ESPIPE)
     }
     fn readable(&self) -> bool {
         true
@@ -83,10 +86,13 @@ impl FileOp for Stdout {
         Ok(buf.len())
     }
     fn seek(&self, _offset: isize) -> SysResult<usize> {
-        panic!("Cannot seek stdin!");
+        Err(Errno::ESPIPE)
     }
     fn get_offset(&self) -> usize {
-        panic!("Cannot get offset from stdout!");
+        0
+    }
+    fn can_seek(&self) -> SysResult<()> {
+        Err(Errno::ESPIPE)
     }
     fn readable(&self) -> bool {
         false

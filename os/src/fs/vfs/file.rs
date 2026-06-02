@@ -36,6 +36,10 @@ pub trait FileOp: Any + Send + Sync {
     fn get_stat(&self) -> SysResult<KStat>;
     fn readable(&self) -> bool;
     fn writable(&self) -> bool;
+    /// 检查文件是否支持 seek，不支持应返回 ESPIPE
+    fn can_seek(&self) -> SysResult<()> {
+        Ok(())
+    }
 }
 
 impl File {
