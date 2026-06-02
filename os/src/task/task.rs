@@ -1,16 +1,18 @@
 // os/src/task/task.rs
 use super::INITPROC;
+use super::aux::{AT_EXECFN, AT_NULL, AT_PLATFORM, AT_RANDOM, AuxHeader};
 use super::context::TaskContext;
 use super::kstack::KernelStack;
 use super::manager::TASK_MANAGER;
 use super::scheduler::remove_task;
 use super::tid::{TidHandle, tid_alloc};
-use crate::fs::{FdEntry, FdTable, Path, vfs::ROOT_DENTRY};
-use crate::mm::MemorySet;
+use crate::fs::mount::init_root_fs;
+use crate::fs::{FdEntry, FdTable, Path};
+use crate::mm::{MemorySet, copy_to_user};
 use crate::mutex::SpinLock;
 use crate::signal::sig_handler::SigHandler;
 use crate::signal::sig_info::SigInfo;
-use crate::signal::sig_stack::SignalStack;
+use crate::signal::sig_stack::{SS_DISABLE, SignalStack};
 use crate::signal::sig_struct::SigPending;
 use crate::signal::{SiField, Sig};
 use crate::syscall::{Errno, SysResult};
@@ -22,6 +24,23 @@ use alloc::vec::Vec;
 use bitflags::bitflags;
 use core::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 use spin::RwLock;
+
+/// 线程 tid 地址信息，用于 pthread 线程退出同步。
+pub struct TidAddress {
+    /// 当 CLONE_CHILD_SETTID 被设置时，新线程将其 TID 写入此地址。
+    pub set_child_tid: Option<usize>,
+    /// 线程退出时清零并做 futex wake 的用户空间地址。
+    pub clear_child_tid: Option<usize>,
+}
+
+impl TidAddress {
+    pub fn new() -> Self {
+        Self {
+            set_child_tid: None,
+            clear_child_tid: None,
+        }
+    }
+}
 
 /// 任务控制块——此处的任务是对一定资源和某个程序的抽象表述
 #[repr(C)]
@@ -46,12 +65,16 @@ pub struct TaskControlBlock {
     // 文件系统
     fd_table: SpinLock<Arc<FdTable>>,
     cwd: Arc<SpinLock<Arc<Path>>>,
+    exe_path: Arc<SpinLock<String>>,
 
     //信号
     sig_pending: SpinLock<SigPending>, // 本线程的信号队列 + 掩码（独享）
     sig_stack: SpinLock<SignalStack>,  // 本线程的备用信号栈（独享）
     sig_handler: Arc<SpinLock<SigHandler>>, // 线程组共享的 handler 注册表（共享）
     sig_context_addr: AtomicUsize,     // 用户栈上 SigContext 的地址
+
+    // 线程同步
+    tid_address: SpinLock<TidAddress>,
 }
 
 impl core::fmt::Debug for TaskControlBlock {
@@ -86,13 +109,17 @@ impl TaskControlBlock {
 
             // 文件系统
             fd_table: SpinLock::new(FdTable::new()),
-            cwd: Arc::new(SpinLock::new(Path::new(ROOT_DENTRY.clone()))),
+            cwd: Arc::new(SpinLock::new(Path::zero_init())),
+            exe_path: Arc::new(SpinLock::new(String::new())),
 
             //信号
             sig_pending: SpinLock::new(SigPending::new()),
             sig_stack: SpinLock::new(SignalStack::default()),
             sig_handler: Arc::new(SpinLock::new(SigHandler::new())),
             sig_context_addr: AtomicUsize::new(0),
+
+            // 线程同步
+            tid_address: SpinLock::new(TidAddress::new()),
         }
     }
 
@@ -104,7 +131,8 @@ impl TaskControlBlock {
         let tgid = tid.0;
         // 创建地址空间会拷贝内核页表，先创建内核栈生成页表映射，以保证任务切换后能正确访问内核栈
         let mut kernel_stack = KernelStack::new(&tid);
-        let (memory_set, token, user_sp, entry_point) = MemorySet::from_elf_data(elf_data);
+        let (memory_set, token, user_sp, entry_point, _aux_vec) =
+            MemorySet::from_elf_data(elf_data);
 
         let mut kernel_stack_top = kernel_stack.get_top(); // 由于栈是新建的，栈顶就是栈顶边界
         // 在栈上存储异常上下文，该数据不会从栈中弹出，固定位于栈最高位置
@@ -136,13 +164,17 @@ impl TaskControlBlock {
 
             // 文件系统
             fd_table: SpinLock::new(FdTable::new()),
-            cwd: Arc::new(SpinLock::new(Path::new(ROOT_DENTRY.clone()))),
+            cwd: Arc::new(SpinLock::new(init_root_fs())),
+            exe_path: Arc::new(SpinLock::new(String::new())),
 
             //信号
             sig_pending: SpinLock::new(SigPending::new()),
             sig_stack: SpinLock::new(SignalStack::default()),
             sig_handler: Arc::new(SpinLock::new(SigHandler::new())),
             sig_context_addr: AtomicUsize::new(0),
+
+            // 线程同步
+            tid_address: SpinLock::new(TidAddress::new()),
         });
 
         // 在线程组中添加该线程
@@ -152,7 +184,7 @@ impl TaskControlBlock {
             .add(task_ctrl_block.clone());
 
         // 初始化内核栈上的异常上下文
-        let trap_context = TrapContext::init_app_context(entry_point, user_sp, 0, 0, 0, 0);
+        let trap_context = TrapContext::init_app_context(entry_point, user_sp, 0, 0, 0, 0, false);
         // 初始化任务上下文
         let task_context = TaskContext::app_init_task_context(token);
 
@@ -169,7 +201,7 @@ impl TaskControlBlock {
     }
 
     /// 克隆父线程，创建子线程
-    pub fn fork(self: &Arc<Self>, flags: CloneFlags) -> Arc<Self> {
+    pub fn clone_(self: &Arc<Self>, flags: CloneFlags) -> Arc<Self> {
         let tid = tid_alloc();
 
         // 克隆内核栈
@@ -188,7 +220,7 @@ impl TaskControlBlock {
             .unwrap_or_else(|| self.clone());
 
         // 创建线程或是进程
-        let (tgid, thread_group, parent, children, cwd) = if is_thread {
+        let (tgid, thread_group, parent, children, cwd, exe_path) = if is_thread {
             // 创建线程，属于同一线程组
             (
                 self.tgid(),
@@ -196,6 +228,7 @@ impl TaskControlBlock {
                 self.parent.clone(),
                 self.children.clone(),
                 self.cwd.clone(),
+                self.exe_path.clone(),
             )
         } else {
             // 创建进程
@@ -205,6 +238,7 @@ impl TaskControlBlock {
                 Arc::new(SpinLock::new(Some(Arc::downgrade(&process_leader)))),
                 Arc::new(SpinLock::new(BTreeMap::new())),
                 Arc::new(SpinLock::new(Path::from_existed_user(&self.cwd()))),
+                Arc::new(SpinLock::new(self.exe_path())),
             )
         };
 
@@ -224,17 +258,18 @@ impl TaskControlBlock {
         } else {
             FdTable::from_existed_user(&self.fd_table.lock())
         };
+        let current_sig_mask = self.op_sig_pending(|pending| pending.mask);
         let (sig_handler, sig_pending, sig_stack) = if is_thread {
             (
                 self.sig_handler.clone(),              // 共享同一张 handler 表
-                SpinLock::new(SigPending::new()),      // 自己的队列
+                SpinLock::new(SigPending::with_mask(current_sig_mask)), // 自己的队列，继承当前 mask
                 SpinLock::new(SignalStack::default()), // 自己的栈
             )
         } else {
             (
-                Arc::new(SpinLock::new(SigHandler::new())), // 全新的表
-                SpinLock::new(SigPending::new()),
-                SpinLock::new(SignalStack::default()),
+                Arc::new(SpinLock::new(self.op_sig_handler(|handler| handler.clone()))),
+                SpinLock::new(SigPending::with_mask(current_sig_mask)),
+                SpinLock::new(*self.sig_stack.lock()),
             )
         };
         let task_ctrl_block = Arc::new(TaskControlBlock {
@@ -257,12 +292,16 @@ impl TaskControlBlock {
             // 文件系统
             fd_table: SpinLock::new(fd_table),
             cwd,
+            exe_path,
 
             // 信号
             sig_pending,
             sig_stack,
             sig_handler,
             sig_context_addr: AtomicUsize::new(0),
+
+            // 线程同步
+            tid_address: SpinLock::new(TidAddress::new()),
         });
 
         // 修改任务异常上下文
@@ -286,16 +325,22 @@ impl TaskControlBlock {
     /// 将命令行参数个数 `argc` 作为返回值，考虑到系统调用异常时会统一修改 `a0` 寄存器
     pub fn execve(
         self: &Arc<Self>,
+        exe_path: String,
         elf_data: &[u8],
         args: Vec<String>,
         envs: Vec<String>,
+        linux_abi: bool,
     ) -> SysResult<usize> {
         // 简化模型：只有进程 leader 可以 exec，避免非 leader exec 后父子关系和 tgid 语义混乱。
         if !self.is_process_leader() {
             return Err(Errno::EINVAL);
         }
 
-        let (memory_set, _token, mut user_sp, entry_point) = MemorySet::from_elf_data(elf_data);
+        // 记录可执行文件路径，供 /proc/self/exe 使用
+        self.set_exe_path(exe_path);
+
+        let (memory_set, _token, mut user_sp, entry_point, aux_vec) =
+            MemorySet::from_elf_data(elf_data);
 
         /* ===== 修改地址空间 ===== */
         let mut memory_set_guard = self.memory_set.write();
@@ -309,7 +354,7 @@ impl TaskControlBlock {
         /* ===== 修改用户栈数据 ===== */
         // 需保证页表已刷新，函数内部直接访存高度依赖
         let (argv_base, envp_base, auxv_base, stack_top) =
-            init_user_stack(args.as_slice(), envs.as_slice(), &mut user_sp);
+            init_user_stack(args.as_slice(), envs.as_slice(), aux_vec, &mut user_sp);
 
         /* ===== 修改异常上下文 ===== */
         let argc = args.len();
@@ -321,6 +366,7 @@ impl TaskControlBlock {
             argv_base,
             envp_base,
             auxv_base,
+            linux_abi,
         );
 
         /* ===== 修改线程组 ===== */
@@ -330,7 +376,9 @@ impl TaskControlBlock {
         // exec 保留 fd_table；后续可在这里处理 close-on-exec。
 
         /* ===== 修改信号处理 ===== */
-        // TODO: 信号完善
+        self.op_sig_handler_mut(|handler| handler.reset_user_handlers_for_exec());
+        self.op_sig_pending_mut(|pending| pending.clear_pending());
+        *self.sig_stack.lock() = SignalStack::default();
 
         Ok(argc)
     }
@@ -351,6 +399,9 @@ impl TaskControlBlock {
     }
     pub fn cwd(&self) -> Arc<Path> {
         self.cwd.lock().clone()
+    }
+    pub fn exe_path(&self) -> String {
+        self.exe_path.lock().clone()
     }
     pub fn exit_code(&self) -> i32 {
         self.exit_code.load(Ordering::Relaxed)
@@ -379,6 +430,9 @@ impl TaskControlBlock {
     pub fn set_cwd(&self, path: Arc<Path>) {
         *self.cwd.lock() = path;
     }
+    pub fn set_exe_path(&self, path: String) {
+        *self.exe_path.lock() = path;
+    }
     pub fn set_exit_code(&self, exit_code: i32) {
         self.exit_code.swap(exit_code, Ordering::Relaxed);
     }
@@ -404,6 +458,20 @@ impl TaskControlBlock {
     pub fn set_exited(&self) {
         *self.task_status.lock() = TaskStatus::Exited;
     }
+
+    // tid_address 设置
+    pub fn set_clear_child_tid(&self, addr: usize) {
+        self.tid_address.lock().clear_child_tid = (addr != 0).then_some(addr);
+    }
+
+    pub fn set_set_child_tid(&self, addr: usize) {
+        self.tid_address.lock().set_child_tid = Some(addr);
+    }
+
+    pub fn clear_child_tid_addr(&self) -> Option<usize> {
+        self.tid_address.lock().clear_child_tid
+    }
+
     // exec 时关闭线程组中除自身外的其它线程，只清理线程私有状态。
     pub fn close_other_threads_for_exec(&self) {
         let self_tid = self.tid();
@@ -459,7 +527,7 @@ impl TaskControlBlock {
     // 取信号栈
     pub fn sigstack(&self) -> Option<SignalStack> {
         let stack = *self.sig_stack.lock();
-        if stack.ss_flags == 1 {
+        if stack.ss_flags == SS_DISABLE || stack.ss_size == 0 {
             None
         } else {
             Some(stack)
@@ -473,11 +541,29 @@ impl TaskControlBlock {
                 self.op_sig_pending_mut(|pending| pending.add_signal(siginfo));
             }
             false => {
-                self.op_thread_group(|tg| {
+                let sig = crate::signal::Sig::from(siginfo.signo);
+                let target = self.op_thread_group(|tg| {
+                    let mut fallback = None;
+                    let mut leader = None;
                     for task in tg.iter() {
-                        task.op_sig_pending_mut(|pending| pending.add_signal(siginfo));
+                        if fallback.is_none() {
+                            fallback = Some(task.clone());
+                        }
+                        if task.is_process_leader() {
+                            leader = Some(task.clone());
+                        }
+                        let can_take_now = task.op_sig_pending(|pending| {
+                            !pending.mask.contain_signal(sig) || sig.is_kill_or_stop()
+                        });
+                        if can_take_now {
+                            return Some(task.clone());
+                        }
                     }
+                    leader.or(fallback)
                 });
+                if let Some(task) = target {
+                    task.op_sig_pending_mut(|pending| pending.add_signal(siginfo));
+                }
             }
         }
     }
@@ -541,18 +627,51 @@ impl TaskControlBlock {
     }
 }
 
+/// 线程退出
+///
+/// 修改线程退出码，随后移除线程并释放线程占有的资源
 fn exit_thread(task: Arc<TaskControlBlock>, exit_code: i32) {
+    if let Some(ctid) = task.clear_child_tid_addr() {
+        let zero: i32 = 0;
+        let _ = copy_to_user(ctid as *mut i32, &zero as *const i32, 1);
+        let _ = crate::task::futex::futex_wake(ctid, 1);
+    }
+
+    // 只有数据 线程组 和 TASK_MANAGER 持有对线程的引用，当引用归零时该线程占有的私有资源被释放
     task.op_thread_group_mut(|tg| tg.remove(&task.tid()));
     task.set_exited();
     task.set_exit_code(exit_code);
     TASK_MANAGER.remove(task.tid());
 }
 
-/// 进程退出。
+/// 线程退出 - 对外接口
 ///
-/// 当前简化模型中，sys_exit 退出整个线程组；只有进程 leader 会留在父进程
-/// children 中等待 wait4 回收，普通线程不会作为子进程暴露给父进程。
+/// - 设置当前线程退出状态
+/// - 处理 clear_child_tid
+/// - 释放线程私有资源
+/// - 从线程组中移除自己
+/// - 最后一个线程则进入进程级退出流程（目前未实现）
+/// TODO: 当前退出线程组主线程时会退出整个线程组，与 Linux 实现存在差异
 pub fn task_exit(task: Arc<TaskControlBlock>, exit_code: i32) {
+    // warn! {"[kernel] Thread exit. tid: {}, tgid: {}, thread_count: {}.", task.tid(), task.tgid(), task.op_thread_group(|tg| tg.iter().count())}
+
+    if task.is_process_leader() {
+        task_group_exit(task, exit_code);
+        return;
+    } else {
+        exit_thread(task, exit_code);
+    }
+}
+
+/// 进程退出
+///
+/// - 杀掉/停止线程组内所有线程
+/// - 关闭文件描述符
+/// - 释放地址空间
+/// - 释放信号处理、文件系统上下文等共享资源
+/// - 给父进程发送 SIGCHLD
+/// - 留下 exited 状态，等待父进程 wait 回收
+pub fn task_group_exit(task: Arc<TaskControlBlock>, exit_code: i32) {
     let tgid = task.tgid();
     let threads = task.op_thread_group(|tg| tg.iter().collect::<Vec<_>>());
     let leader = threads
@@ -607,11 +726,10 @@ pub fn task_exit(task: Arc<TaskControlBlock>, exit_code: i32) {
 fn init_user_stack(
     args_vec: &[String],
     envs_vec: &[String],
+    mut auxv: Vec<AuxHeader>,
     user_sp: &mut usize,
 ) -> (usize, usize, usize, usize) {
     const STACK_ALIGN: usize = 16;
-    const AT_NULL: usize = 0;
-    const AT_PAGESZ: usize = 6;
 
     #[inline(always)]
     fn align_down(addr: usize) -> usize {
@@ -650,12 +768,10 @@ fn init_user_stack(
         *stack_ptr
     }
 
-    fn push_auxv_to_stack(auxv: &[(usize, usize)], stack_ptr: &mut usize) -> usize {
-        push_usize_to_stack(0, stack_ptr);
-        push_usize_to_stack(AT_NULL, stack_ptr);
-        for &(key, value) in auxv.iter().rev() {
-            push_usize_to_stack(value, stack_ptr);
-            push_usize_to_stack(key, stack_ptr);
+    fn push_auxv_to_stack(auxv: &[AuxHeader], stack_ptr: &mut usize) -> usize {
+        for header in auxv.iter().rev() {
+            push_usize_to_stack(header.value, stack_ptr);
+            push_usize_to_stack(header.aux_type, stack_ptr);
         }
         *stack_ptr
     }
@@ -665,10 +781,61 @@ fn init_user_stack(
     // 字符串内容可以位于指针数组之上，argv/envp 数组保存实际地址。
     let envp = push_strings_to_stack(envs_vec, user_sp);
     let argv = push_strings_to_stack(args_vec, user_sp);
-    let auxv = [(AT_PAGESZ, crate::config::PAGE_SIZE)];
 
-    // 预留 padding，使压入 argc/argv/envp/auxv 后的最终 sp 仍保持 16 字节对齐。
-    let pointer_count = 1 + argv.len() + 1 + envp.len() + 1 + (auxv.len() + 1) * 2;
+    // —— 压入 AT_PLATFORM 字符串 ——
+    #[cfg(target_arch = "riscv64")]
+    let platform: &str = "RISC-V64";
+    #[cfg(target_arch = "loongarch64")]
+    let platform: &str = "loongarch64";
+    #[cfg(not(any(target_arch = "riscv64", target_arch = "loongarch64")))]
+    let platform: &str = "unknown";
+
+    *user_sp -= platform.len() + 1;
+    *user_sp -= *user_sp % core::mem::size_of::<usize>();
+    unsafe {
+        let ptr = *user_sp as *mut u8;
+        ptr.copy_from_nonoverlapping(platform.as_ptr(), platform.len());
+        ptr.add(platform.len()).write(0);
+    }
+    let platform_addr = *user_sp;
+
+    // —— 压入 16 字节随机数 ——
+    *user_sp -= 16;
+    let random_addr = *user_sp;
+    unsafe {
+        let random = random_addr as *mut u8;
+        let mut seed = random_addr ^ args_vec.len() ^ envs_vec.len().wrapping_shl(8);
+        for idx in 0..16 {
+            seed ^= seed << 7;
+            seed ^= seed >> 9;
+            seed ^= (idx + 1usize).wrapping_mul(0x9e37_79b9);
+            random.add(idx).write(seed as u8);
+        }
+    }
+
+    // —— 追加动态 aux 条目 ——
+    auxv.push(AuxHeader {
+        aux_type: AT_PLATFORM,
+        value: platform_addr,
+    });
+    auxv.push(AuxHeader {
+        aux_type: AT_RANDOM,
+        value: random_addr,
+    });
+    auxv.push(AuxHeader {
+        aux_type: AT_EXECFN,
+        value: argv[0],
+    });
+    auxv.push(AuxHeader {
+        aux_type: AT_NULL,
+        value: 0,
+    });
+
+    // 预留填充空间，使压入 argc/argv/envp/auxv 后的最终 sp 仍保持 16 字节对齐。
+    let pointer_count = 1                          // argc
+        + argv.len() + 1                           // argv[] + NULL
+        + envp.len() + 1                           // envp[] + NULL
+        + auxv.len() * 2; // auxv (type + value pairs)
     let pointer_bytes = pointer_count * core::mem::size_of::<usize>();
     let padding = (STACK_ALIGN - pointer_bytes % STACK_ALIGN) % STACK_ALIGN;
     *user_sp -= padding;

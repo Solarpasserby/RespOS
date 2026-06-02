@@ -1,9 +1,9 @@
-use super::{ read, write };
+use super::{read, write};
 use core::fmt::{self, Write};
 
 struct Stdout;
 
-const STDIN: usize  = 0;
+const STDIN: usize = 0;
 const STDOUT: usize = 1;
 
 pub fn getchar() -> u8 {

@@ -10,7 +10,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec;
 use core::str;
-use user_lib::{close, getdents64, open, O_DIRECTORY, O_RDONLY};
+use user_lib::{O_DIRECTORY, O_RDONLY, close, getdents64, open};
 
 const DIRENT64_HEADER_SIZE: usize = 19;
 const BUF_SIZE: usize = 8192;
@@ -64,7 +64,11 @@ pub fn main(argc: usize, argv: &[&str]) -> i32 {
 
     let fd = open(path, O_RDONLY | O_DIRECTORY, 0);
     if fd < 0 {
-        println!("ls: cannot open {}: {}", if argc == 2 { argv[1] } else { "." }, fd);
+        println!(
+            "ls: cannot open {}: {}",
+            if argc == 2 { argv[1] } else { "." },
+            fd
+        );
         return fd as i32;
     }
 

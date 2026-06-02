@@ -12,7 +12,9 @@ fn panic_handler(panic_info: &core::panic::PanicInfo) -> ! {
             location.line(),
             err
         );
-        unsafe { trace_and_print_user_stack(); }
+        unsafe {
+            trace_and_print_user_stack();
+        }
     } else {
         println!("Panicked: {}", err);
     }
@@ -23,7 +25,9 @@ fn panic_handler(panic_info: &core::panic::PanicInfo) -> ! {
 // 即显示调用栈，虽然只有地址
 unsafe fn trace_and_print_user_stack() {
     let mut fp: *const usize;
-    unsafe { asm!("mv {}, fp", out(reg) fp); }
+    unsafe {
+        asm!("mv {}, fp", out(reg) fp);
+    }
 
     println!("----- start tracing ustack -----");
     while fp != ptr::null() {

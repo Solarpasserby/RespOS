@@ -6,11 +6,10 @@
 #[macro_use]
 extern crate user_lib;
 
-use user_lib::{exec, fork, mkdir, wait, yield_};
+use user_lib::{exec, fork, wait, yield_};
 
 #[unsafe(no_mangle)]
 fn main() -> i32 {
-    mkdir("/tmp\0", 0o755);
     if fork() == 0 {
         #[cfg(feature = "eval")]
         {

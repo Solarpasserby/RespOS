@@ -53,7 +53,7 @@ pub fn sys_mmap(
     }
     let map_len = len.checked_add(PAGE_SIZE - 1).ok_or(Errno::ENOMEM)? & !(PAGE_SIZE - 1);
 
-    let prot = MMAPPROT::from_bits(prot as u32).ok_or(Errno::EINVAL)?;
+    let prot = MMapProt::from_bits(prot as u32).ok_or(Errno::EINVAL)?;
     let flags = MMAPFLAGS::from_bits(flags as u32).ok_or(Errno::EINVAL)?;
     let has_shared = flags.contains(MMAPFLAGS::MAP_SHARED);
     let has_private = flags.contains(MMAPFLAGS::MAP_PRIVATE);
@@ -148,8 +148,33 @@ pub fn sys_munmap(addr: usize, len: usize) -> SysResult<usize> {
     })
 }
 
+/// 系统调用 sys_mprotect
+///
+/// 修改指定地址范围的页表权限 (PROT_READ / PROT_WRITE / PROT_EXEC)。
+/// addr 必须页对齐, len 向上取整到页边界。
+pub fn sys_mprotect(addr: usize, len: usize, prot: u32) -> SysResult<usize> {
+    if addr % PAGE_SIZE != 0 || len == 0 {
+        return Err(Errno::EINVAL);
+    }
+
+    let prot = MMapProt::from_bits(prot).ok_or(Errno::EINVAL)?;
+    let map_len = len.checked_add(PAGE_SIZE - 1).ok_or(Errno::EINVAL)? & !(PAGE_SIZE - 1);
+    let end = addr.checked_add(map_len).ok_or(Errno::EINVAL)?;
+    let start_vpn = VirtAddr::from(addr).floor();
+    let end_vpn = VirtAddr::from(end).floor();
+    let remap_vpn_range = VPNRange::new(start_vpn, end_vpn);
+    let map_perm = MapPermission::from(prot);
+
+    let task = current_task().expect("[kernel] current task is None.");
+    task.op_memory_set_write(|memory_set| {
+        memory_set.remap_area_with_overlap_range(remap_vpn_range, map_perm)?;
+        memory_set.flush_tlb();
+        Ok(0)
+    })
+}
+
 bitflags! {
-    pub struct MMAPPROT: u32 {
+    pub struct MMapProt: u32 {
         // 可读
         const PROT_READ  = 1 << 0;
         // 可写
@@ -159,16 +184,16 @@ bitflags! {
     }
 }
 
-impl From<MMAPPROT> for MapPermission {
-    fn from(prot: MMAPPROT) -> Self {
+impl From<MMapProt> for MapPermission {
+    fn from(prot: MMapProt) -> Self {
         let mut map_permission = MapPermission::from_bits(0).unwrap();
-        if prot.contains(MMAPPROT::PROT_READ) {
+        if prot.contains(MMapProt::PROT_READ) {
             map_permission |= MapPermission::READ;
         }
-        if prot.contains(MMAPPROT::PROT_WRITE) {
+        if prot.contains(MMapProt::PROT_WRITE) {
             map_permission |= MapPermission::WRITE;
         }
-        if prot.contains(MMAPPROT::PROT_EXEC) {
+        if prot.contains(MMapProt::PROT_EXEC) {
             map_permission |= MapPermission::EXECUTE;
         }
         map_permission

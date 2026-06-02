@@ -2,11 +2,16 @@
 
 use super::time::TimeVal;
 use super::{Errno, SysResult};
+use crate::config::USER_STACK_SIZE;
 use crate::fs::{AT_FDCWD, path_open};
 use crate::loader::get_app_data_by_name;
-use crate::mm::{copy_cstr_from_user, copy_to_user, extract_cstrings_from_user};
+use crate::mm::{
+    MapPermission, VPNRange, VirtAddr, copy_cstr_from_user, copy_from_user, copy_to_user,
+    extract_cstrings_from_user,
+};
 use crate::task::{
-    CloneFlags, WaitOption, add_task, current_task, exit_and_run_next, yield_current_task,
+    CloneFlags, WaitOption, add_task, current_task, do_futex, exit_and_run_next,
+    exit_group_and_run_next, yield_current_task,
 };
 use alloc::vec::Vec;
 
@@ -29,6 +34,13 @@ pub struct RUsage {
     pub ru_nsignals: isize,
     pub ru_nvcsw: isize,
     pub ru_nivcsw: isize,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct RLimit {
+    pub cur: usize,
+    pub max: usize,
 }
 
 impl Default for RUsage {
@@ -54,57 +66,20 @@ impl Default for RUsage {
     }
 }
 
+/// 系统调用 sys_exit_group
+///
+/// 退出单个线程
 pub fn sys_exit(exit_code: i32) -> ! {
     exit_and_run_next(exit_code);
     panic!("Unreachable in sys_exit!");
 }
 
-/// 退出整个线程组，当前模型中等价于 sys_exit
+/// 系统调用 sys_exit_group
+///
+/// 退出整个线程组
 pub fn sys_exit_group(exit_code: i32) -> ! {
-    exit_and_run_next(exit_code);
+    exit_group_and_run_next(exit_code);
     panic!("Unreachable in sys_exit_group!");
-}
-
-#[repr(C)]
-#[derive(Copy, Clone)]
-struct Rlimit64 {
-    rlim_cur: u64,
-    rlim_max: u64,
-}
-
-/// prlimit64 最小 stub：查询时返回无限制，设置时直接忽略
-pub fn sys_prlimit64(
-    _pid: usize,
-    _resource: usize,
-    new_rlim: *const u8,
-    old_rlim: *mut u8,
-) -> SysResult<usize> {
-    const RLIM_INFINITY: u64 = !0u64;
-
-    if !old_rlim.is_null() {
-        let rlim = Rlimit64 {
-            rlim_cur: RLIM_INFINITY,
-            rlim_max: RLIM_INFINITY,
-        };
-        copy_to_user(old_rlim as *mut Rlimit64, &rlim as *const Rlimit64, 1)?;
-    }
-    // 忽略 new_rlim（musl 初始化时只查询，不设置）
-    let _ = new_rlim;
-    Ok(0)
-}
-
-/// set_tid_address: 记录 clear_child_tid 地址，返回当前 TID
-pub fn sys_set_tid_address(tidptr: usize) -> SysResult<usize> {
-    let task = current_task().expect("[kernel] current task is None.");
-    // TODO: 线程退出时需将 *tidptr 清零并 futex_wake
-    let _ = tidptr;
-    Ok(task.tid())
-}
-
-/// gettid: 返回当前线程 TID
-pub fn sys_gettid() -> SysResult<usize> {
-    let task = current_task().expect("[kernel] current task is None.");
-    Ok(task.tid())
 }
 
 pub fn sys_sched_yield() -> SysResult<usize> {
@@ -112,14 +87,90 @@ pub fn sys_sched_yield() -> SysResult<usize> {
     Ok(0)
 }
 
+pub fn sys_gettid() -> SysResult<usize> {
+    Ok(current_task()
+        .expect("[kernel] current task is None.")
+        .tid())
+}
+
+pub fn sys_prlimit64(
+    pid: usize,
+    resource: usize,
+    new_limit: *const RLimit,
+    old_limit: *mut RLimit,
+) -> SysResult<usize> {
+    const RLIMIT_STACK: usize = 3;
+    const RLIM_INFINITY: usize = usize::MAX;
+
+    // TODO[ABI-COMPAT]: 目前还没有按进程保存 rlimit。这里先返回 libc 启动所需的
+    // 稳定值，并在校验 new_limit 指针后接受设置请求。
+    if pid != 0
+        && pid
+            != current_task()
+                .expect("[kernel] current task is None.")
+                .tid()
+    {
+        return Err(Errno::ESRCH);
+    }
+
+    if !new_limit.is_null() {
+        let mut ignored = RLimit { cur: 0, max: 0 };
+        copy_from_user(&mut ignored as *mut RLimit, new_limit, 1)?;
+    }
+
+    if !old_limit.is_null() {
+        let limit = match resource {
+            RLIMIT_STACK => RLimit {
+                cur: USER_STACK_SIZE,
+                max: RLIM_INFINITY,
+            },
+            _ => RLimit {
+                cur: RLIM_INFINITY,
+                max: RLIM_INFINITY,
+            },
+        };
+        copy_to_user(old_limit, &limit as *const RLimit, 1)?;
+    }
+
+    Ok(0)
+}
+
+pub fn sys_getrandom(buf: *mut u8, buflen: usize, flags: usize) -> SysResult<usize> {
+    const GRND_NONBLOCK: usize = 0x0001;
+    const GRND_RANDOM: usize = 0x0002;
+    const GRND_INSECURE: usize = 0x0004;
+
+    if flags & !(GRND_NONBLOCK | GRND_RANDOM | GRND_INSECURE) != 0 {
+        return Err(Errno::EINVAL);
+    }
+    if buflen == 0 {
+        return Ok(0);
+    }
+
+    // TODO[ABI-COMPAT]: 这是为了 libc 测例提供的确定性兜底实现，不是密码学安全随机源。
+    let mut bytes = alloc::vec![0u8; buflen];
+    let mut seed = get_time_seed();
+    for (idx, byte) in bytes.iter_mut().enumerate() {
+        seed ^= seed << 7;
+        seed ^= seed >> 9;
+        seed ^= (idx as usize).wrapping_mul(0x9e37_79b9);
+        *byte = seed as u8;
+    }
+    copy_to_user(buf, bytes.as_ptr(), buflen)?;
+    Ok(buflen)
+}
+
+fn get_time_seed() -> usize {
+    crate::timer::get_time_ms() ^ 0x7265_7370_6f73
+}
+
 pub fn sys_clone(
     flags: usize,
     stack: usize,
-    _ptid: usize,
-    _tls: usize,
-    _ctid: usize,
+    ptid: usize,
+    tls: usize,
+    ctid: usize,
 ) -> SysResult<usize> {
-    // TODO[ABI-COMPAT]: 当前尚未支持 ptid/tls/ctid 等能力。
     let flags = CloneFlags::from_bits(flags as u32).ok_or(Errno::EINVAL)?;
 
     // 简化模型：CLONE_THREAD 表示真正线程，必须共享地址空间。
@@ -133,14 +184,57 @@ pub fn sys_clone(
 
     let current_task = current_task().expect("[kernel] current task is None.");
     // 此处发生任务复制
-    let new_task = current_task.fork(flags);
+    let new_task = current_task.clone_(flags);
     let new_tid = new_task.tid();
+
+    // CLONE_PARENT_SETTID: 在父进程地址空间写入子进程 tid
+    if flags.contains(CloneFlags::CLONE_PARENT_SETTID) && ptid != 0 {
+        let tid_val = new_tid as u32;
+        copy_to_user(ptid as *mut u32, &tid_val as *const u32, 1)?;
+    }
+
+    // CLONE_CHILD_SETTID: 子线程开始运行前在 ctid 写入自己的 tid。
+    // 对 CLONE_VM 线程，ctid 位于当前共享地址空间，可以直接写。
+    // 对 fork 这类非共享地址空间的 clone，ctid 属于子进程地址空间；
+    // 不能写到当前父进程地址空间，否则会污染 glibc 的 TLS/TCB。
+    if flags.contains(CloneFlags::CLONE_CHILD_SETTID) && ctid != 0 {
+        let tid_val = new_tid as u32;
+        if flags.contains(CloneFlags::CLONE_VM) {
+            copy_to_user(ctid as *mut u32, &tid_val as *const u32, 1)?;
+        } else {
+            let parent = current_task.clone();
+            new_task.op_memory_set_write(|memory_set| {
+                let end_addr = ctid
+                    .checked_add(core::mem::size_of::<u32>())
+                    .ok_or(Errno::EFAULT)?;
+                let start = VirtAddr::from(ctid).floor();
+                let end = VirtAddr::from(end_addr).ceil();
+                memory_set
+                    .ensure_user_page_access(VPNRange::new(start, end), MapPermission::WRITE)?;
+                memory_set.activate();
+                unsafe {
+                    (ctid as *mut u32).write(tid_val);
+                }
+                Ok::<(), Errno>(())
+            })?;
+            parent.op_memory_set_read(|memory_set| memory_set.activate());
+        }
+        new_task.set_set_child_tid(ctid);
+    }
+
+    // CLONE_CHILD_CLEARTID: 记录线程退出时清零并唤醒的地址
+    if flags.contains(CloneFlags::CLONE_CHILD_CLEARTID) && ctid != 0 {
+        new_task.set_clear_child_tid(ctid);
+    }
 
     // 修改新任务的异常上下文，修改栈指针和返回值。
     // x4(tp) 属于用户态 TLS，不能写成内核 TaskControlBlock 指针。
     let new_task_trap_cx = new_task.get_trap_cx();
     if stack != 0 {
         new_task_trap_cx.set_sp(stack);
+    }
+    if flags.contains(CloneFlags::CLONE_SETTLS) {
+        new_task_trap_cx.set_tp(tls);
     }
     new_task_trap_cx.set_a0(0);
 
@@ -161,12 +255,14 @@ pub fn sys_execve(path: *const u8, args: *const usize, envp: *const usize) -> Sy
 
     if let Ok(file) = path_open(AT_FDCWD, &path, 0, 0) {
         info!("[kernel] execute file in fs");
+        let exe_path = file.path().global_abs_path();
         let all_data = file.read_all()?;
-        Ok(task.execve(all_data.as_slice(), args_vec, envs_vec)?)
+        task.execve(exe_path, all_data.as_slice(), args_vec, envs_vec, true)?;
+        Ok(0)
     } else if !path.starts_with("/") {
         // 从内核中加载的应用程序
         if let Some(data) = get_app_data_by_name(path.as_str()) {
-            Ok(task.execve(data, args_vec, envs_vec)?)
+            Ok(task.execve(path.clone(), data, args_vec, envs_vec, false)?)
         } else {
             Err(Errno::ENOENT)
         }
@@ -226,6 +322,8 @@ pub fn sys_wait4(
                 children.remove(&child_tid);
             });
 
+            warn! {"[kernel] (wait4) parent:{}, child:{}.", task.tid(), child_tid};
+
             return Ok(child_tid);
         }
 
@@ -254,4 +352,58 @@ pub fn sys_getpid() -> SysResult<usize> {
 pub fn sys_getppid() -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
     Ok(task.op_parent(|parent| parent.as_ref().unwrap().upgrade().unwrap().tid()))
+}
+
+/// 系统调用 sys_set_tid_address
+///
+/// musl 初始化线程库时调用，设置 clear-child-tid 地址。
+/// 与 CLONE_CHILD_CLEARTID 配合，在线程退出时向该地址写入 0 并 futex wake，
+/// 以唤醒 wait4 / pthread_join 的调用者。
+pub fn sys_set_tid_address(tidptr: usize) -> SysResult<usize> {
+    let task = current_task().expect("[kernel] current task is None.");
+    task.set_clear_child_tid(tidptr);
+    Ok(task.tid())
+}
+
+/// 系统调用 sys_futex - 快速用户空间互斥锁
+///
+/// FUTEX_WAIT: 如果 *uaddr == val ，则阻塞当前任务；否则返回 EAGAIN
+/// FUTEX_WAKE: 唤醒最多 val 个阻塞在 uaddr 上的任务，返回实际唤醒数
+pub fn sys_futex(
+    uaddr: *const i32,
+    futex_op: usize,
+    val: usize,
+    timeout: usize,
+    uaddr2: usize,
+    val3: usize,
+) -> SysResult<usize> {
+    do_futex(uaddr as usize, futex_op, val, timeout, uaddr2, val3)
+}
+
+/// 系统调用 sys_set_robust_list - 设置线程的 robust futex 链表
+///
+/// glibc 线程初始化时无条件调用。当前内核不实现 robust futex，
+/// 直接返回成功即可。
+pub fn sys_set_robust_list() -> SysResult<usize> {
+    Ok(0)
+}
+
+/// 系统调用 sys_getuid - 获取实际用户 ID
+pub fn sys_getuid() -> SysResult<usize> {
+    Ok(0)
+}
+
+/// 系统调用 sys_geteuid - 获取有效用户 ID
+pub fn sys_geteuid() -> SysResult<usize> {
+    Ok(0)
+}
+
+/// 系统调用 sys_getgid - 获取实际组 ID
+pub fn sys_getgid() -> SysResult<usize> {
+    Ok(0)
+}
+
+/// 系统调用 sys_getegid - 获取有效组 ID
+pub fn sys_getegid() -> SysResult<usize> {
+    Ok(0)
 }

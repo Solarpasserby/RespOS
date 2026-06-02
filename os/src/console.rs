@@ -2,7 +2,10 @@
 
 //! 导入工具，打印和拼接字符串
 use crate::sbi::console_putchar;
-use core::fmt::{self, Arguments, Write};
+use core::{
+    fmt::{self, Arguments, Write},
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 /// 日志等级：定义 5 种消息级别
 #[derive(PartialEq, PartialOrd, Copy, Clone)]
@@ -16,6 +19,8 @@ pub enum LogLevel {
 
 /// 只显示指定级别 `Info` 以上的日志
 const LOG_LEVEL: LogLevel = LogLevel::Info;
+
+static LOG_SEQ: AtomicUsize = AtomicUsize::new(0);
 
 struct Stdout;
 /// 封装底层打印，把文字写到屏幕上
@@ -33,10 +38,11 @@ pub fn print(args: Arguments) {
 }
 
 /// 利用终端颜色码给日志加颜色
-fn print_color(color: u8, args: Arguments) {
+fn print_color(color: u8, seq: usize, args: Arguments) {
     // 开始颜色
     print(format_args!("\x1b[{}m", color));
-    // 内容
+    // 序号和内容
+    print(format_args!("[log:{}] ", seq));
     print(args);
     // 结束颜色
     print(format_args!("\x1b[0m\n"));
@@ -48,12 +54,14 @@ pub fn log(level: LogLevel, args: Arguments) {
         return;
     }
 
+    let seq = LOG_SEQ.fetch_add(1, Ordering::Relaxed);
+
     match level {
-        LogLevel::Error => print_color(31, args), // 红
-        LogLevel::Warn => print_color(93, args),  // 黄
-        LogLevel::Info => print_color(34, args),  // 蓝
-        LogLevel::Debug => print_color(32, args), // 绿
-        LogLevel::Trace => print_color(90, args), // 灰
+        LogLevel::Error => print_color(31, seq, args), // 红
+        LogLevel::Warn => print_color(93, seq, args),  // 黄
+        LogLevel::Info => print_color(34, seq, args),  // 蓝
+        LogLevel::Debug => print_color(32, seq, args), // 绿
+        LogLevel::Trace => print_color(90, seq, args), // 灰
     }
 }
 
