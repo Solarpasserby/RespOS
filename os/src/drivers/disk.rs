@@ -42,8 +42,6 @@ impl Disk {
 
     /// 读取单个块数据，返回读取的字节数
     pub fn read_one(&mut self, buf: &mut [u8]) -> DevResult<usize> {
-        // TODO： 没有引入 log 模块，计划之后添加以优化内核程序输出
-        // info!("block id: {}", self.block_id);
         let read_size = if self.offset == 0 && buf.len() >= BLOCK_SIZE {
             // 读取完整的块
             self.dev

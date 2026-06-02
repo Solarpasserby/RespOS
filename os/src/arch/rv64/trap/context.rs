@@ -1,6 +1,6 @@
 // os/src/trap/context.rs
 
-use riscv::register::sstatus::{self, SPP, Sstatus};
+use riscv::register::sstatus::{self, FS, SPP, Sstatus};
 
 /// 异常上下文
 ///
@@ -17,6 +17,9 @@ pub struct TrapContext {
     pub x: [usize; 32],
     pub sstatus: Sstatus,
     pub sepc: usize,
+    pub f: [usize; 32],
+    pub fcsr: usize,
+    _padding: usize,
 }
 
 impl TrapContext {
@@ -47,18 +50,32 @@ impl TrapContext {
         argv_base: usize,
         envp_base: usize,
         auxv_base: usize,
+        linux_abi: bool,
     ) -> Self {
+        unsafe {
+            sstatus::set_fs(FS::Dirty);
+        }
         let mut sstatus = sstatus::read(); // CSR sstatus
         sstatus.set_spp(SPP::User); //previous privilege mode: user mode
         let mut gerneal_regs = [0; 32];
-        gerneal_regs[10] = argc;
-        gerneal_regs[11] = argv_base;
-        gerneal_regs[12] = envp_base;
-        gerneal_regs[13] = auxv_base;
+        if linux_abi {
+            // Linux/RISC-V 进程入口从用户栈读取 argc/argv/envp/auxv。
+            // glibc 的 _start 会把 a0 当成 rtld_fini；静态程序这里必须传 0。
+            gerneal_regs[10] = 0;
+        } else {
+            // 内置教学程序使用本地运行时 ABI：通过寄存器传 argc/argv。
+            gerneal_regs[10] = argc;
+            gerneal_regs[11] = argv_base;
+            gerneal_regs[12] = envp_base;
+            gerneal_regs[13] = auxv_base;
+        }
         let mut cx = Self {
             x: gerneal_regs,
             sstatus,
             sepc: entry,
+            f: [0; 32],
+            fcsr: 0,
+            _padding: 0,
         };
         // 设置用户栈顶指针
         cx.set_sp(sp);

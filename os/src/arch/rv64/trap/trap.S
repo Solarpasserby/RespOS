@@ -7,6 +7,12 @@
 .macro LOAD_GP n
     ld x\n, \n*8(sp)
 .endm
+.macro SAVE_FP n
+    fsd f\n, (\n+34)*8(sp)
+.endm
+.macro LOAD_FP n
+    fld f\n, (\n+34)*8(sp)
+.endm
     # 将异常处理代码正常映射
     .section .text
     .globl __trap_from_user
@@ -20,8 +26,8 @@ __trap_from_user:
     # sp 得到的是内核栈指针，恢复上下文时在 sscratch 中放入这个地址
     #
     # 在栈上保存 TrapContext
-    addi sp, sp, -34*8
-    # 当前包括：x0-x31, sstatus, sepc
+    addi sp, sp, -68*8
+    # 当前包括：x0-x31、sstatus、sepc、f0-f31、fcsr 和对齐填充
     # x0 恒零不保存，保存 x1(ra)
     sd x1, 1*8(sp)
     # x2(sp) 为栈指针暂时跳过，保存 x3
@@ -40,6 +46,14 @@ __trap_from_user:
     csrr t1, sepc
     sd t0, 32*8(sp)
     sd t1, 33*8(sp)
+    # 保存浮点寄存器
+    frcsr t0
+    .set n, 0
+    .rept 32
+        SAVE_FP %n
+        .set n, n+1
+    .endr
+    sd t0, 66*8(sp)
     # 从 sscratch 中读取用户栈指针的值并保存
     csrr t2, sscratch
     sd t2, 2*8(sp)
@@ -69,6 +83,14 @@ __restore:
     ld t1, 33*8(sp)
     csrw sstatus, t0
     csrw sepc, t1
+    # 恢复浮点寄存器
+    ld t0, 66*8(sp)
+    fscsr t0
+    .set n, 0
+    .rept 32
+        LOAD_FP %n
+        .set n, n+1
+    .endr
     # 恢复通用寄存器
     ld x1, 1*8(sp)
     ld x3, 3*8(sp)
@@ -79,10 +101,10 @@ __restore:
         .set n, n+1
     .endr
     # 异常上下文出内核栈
-    addi sp, sp, 34*8
+    addi sp, sp, 68*8
     # sscratch 指向内核栈顶，sp 恢复为用户栈
     csrw sscratch, sp
-    ld sp, -32*8(sp)
+    ld sp, -66*8(sp)
     # 设置 sstatus 的 SPP 位为 0，表示返回用户态
     csrc sstatus, 8 
     # 返回到用户态

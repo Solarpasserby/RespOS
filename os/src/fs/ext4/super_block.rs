@@ -22,7 +22,7 @@ impl Ext4SuperBlock {
         let inner =
             Ext4BlockWrapper::<Disk>::new(disk).expect("failed to initialize EXT4 filesystem");
         // let page_cache = Some(PageCache::new_bare());
-        let root = Arc::new(Ext4Inode::new("/", Ext4InodeTypes::EXT4_DE_DIR));
+        let root = Ext4Inode::get_or_create(2, Ext4InodeTypes::EXT4_DE_DIR);
         Self { inner, root }
     }
 }

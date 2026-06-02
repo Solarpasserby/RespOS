@@ -5,6 +5,7 @@
 const SYSCALL_GETCWD: usize = 17;
 const SYSCALL_DUP: usize = 23;
 const SYSCALL_DUP3: usize = 24;
+const SYSCALL_FCNTL: usize = 25;
 const SYSCALL_MKDIRAT: usize = 34;
 const SYSCALL_UNLINKAT: usize = 35;
 const SYSCALL_LINKAT: usize = 37;
@@ -18,12 +19,21 @@ const SYSCALL_GETDENTS64: usize = 61;
 const SYSCALL_LSEEK: usize = 62;
 const SYSCALL_READ: usize = 63;
 const SYSCALL_WRITE: usize = 64;
+const SYSCALL_WRITEV: usize = 66;
 const SYSCALL_STAT: usize = 79;
 const SYSCALL_FSTAT: usize = 80;
+const SYSCALL_READLINKAT: usize = 78;
 const SYSCALL_EXIT: usize = 93;
+const SYSCALL_EXIT_GROUP: usize = 94;
+const SYSCALL_SET_TID_ADDRESS: usize = 96;
+const SYSCALL_FUTEX: usize = 98;
+const SYSCALL_SET_ROBUST_LIST: usize = 99;
 const SYSCALL_NANOSLEEP: usize = 101;
+const SYSCALL_CLOCK_GETTIME: usize = 113;
 const SYSCALL_SCHED_YIELD: usize = 124;
 const SYSCALL_KILL: usize = 129;
+const SYSCALL_TKILL: usize = 130;
+const SYSCALL_TGKILL: usize = 131;
 const SYSCALL_SIGACTION: usize = 134;
 const SYSCALL_SIGPROCMASK: usize = 135;
 const SYSCALL_SIGRETURN: usize = 139;
@@ -34,18 +44,26 @@ const SYSCALL_UNAME: usize = 160;
 const SYSCALL_GETTIMEOFDAY: usize = 169;
 const SYSCALL_GETPID: usize = 172;
 const SYSCALL_GETPPID: usize = 173;
+const SYSCALL_GETUID: usize = 174;
+const SYSCALL_GETEUID: usize = 175;
+const SYSCALL_GETGID: usize = 176;
+const SYSCALL_GETEGID: usize = 177;
+const SYSCALL_GETTID: usize = 178;
 const SYSCALL_BRK: usize = 214;
 const SYSCALL_MUNMAP: usize = 215;
 const SYSCALL_CLONE: usize = 220;
 const SYSCALL_EXECVE: usize = 221;
 const SYSCALL_MMAP: usize = 222;
+const SYSCALL_MPROTECT: usize = 226;
 const SYSCALL_WAIT4: usize = 260;
-// FIXME: 把系统调用号按大小排布
+const SYSCALL_PRLIMIT64: usize = 261;
+const SYSCALL_GETRANDOM: usize = 278;
 
 mod errno;
 mod fs;
 mod mm;
 mod process;
+mod signal;
 mod system;
 mod time;
 
@@ -53,16 +71,16 @@ pub use errno::*;
 use fs::*;
 use mm::*;
 use process::*;
+use signal::*;
 use system::*;
 use time::*;
-
-use crate::task::SignalAction;
 
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
     match syscall_id {
         SYSCALL_GETCWD => sys_getcwd(args[0] as *mut u8, args[1]),
         SYSCALL_DUP => sys_dup(args[0]),
         SYSCALL_DUP3 => sys_dup3(args[0], args[1], args[2]),
+        SYSCALL_FCNTL => sys_fcntl(args[0], args[1], args[2]),
         SYSCALL_MKDIRAT => sys_mkdirat(args[0] as isize, args[1] as *const u8, args[2]),
         SYSCALL_UNLINKAT => sys_unlinkat(args[0] as isize, args[1] as *const u8, args[2]),
         SYSCALL_LINKAT => sys_linkat(
@@ -88,26 +106,50 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         SYSCALL_LSEEK => sys_lseek(args[0], args[1] as isize, args[2]),
         SYSCALL_READ => sys_read(args[0], args[1] as *mut u8, args[2]),
         SYSCALL_WRITE => sys_write(args[0], args[1] as *mut u8, args[2]),
+        SYSCALL_WRITEV => sys_writev(args[0], args[1] as *const IoVec, args[2]),
         SYSCALL_STAT => sys_stat(args[0] as *const u8, args[1] as *mut crate::fs::Stat),
         SYSCALL_FSTAT => sys_fstat(args[0], args[1] as *mut crate::fs::Stat),
+        SYSCALL_READLINKAT => sys_readlinkat(
+            args[0] as isize,
+            args[1] as *const u8,
+            args[2] as *mut u8,
+            args[3],
+        ),
         SYSCALL_EXIT => sys_exit(args[0] as i32),
+        SYSCALL_EXIT_GROUP => sys_exit_group(args[0] as i32),
+        SYSCALL_SET_TID_ADDRESS => sys_set_tid_address(args[0]),
+        SYSCALL_SET_ROBUST_LIST => sys_set_robust_list(),
+        SYSCALL_FUTEX => sys_futex(
+            args[0] as *const i32,
+            args[1],
+            args[2],
+            args[3],
+            args[4],
+            args[5],
+        ),
         SYSCALL_NANOSLEEP => sys_nanosleep(args[0] as *const TimeVal, args[1] as *mut TimeVal),
+        SYSCALL_CLOCK_GETTIME => sys_clock_gettime(args[0], args[1] as *mut TimeSpec),
         SYSCALL_SCHED_YIELD => sys_sched_yield(),
         SYSCALL_SETPRIORITY => sys_setpriority(args[0], args[1], args[2] as isize),
         SYSCALL_TIMES => sys_times(args[0] as *mut Tms),
         SYSCALL_UNAME => sys_uname(args[0] as *mut UtsName),
         SYSCALL_KILL => sys_kill(args[0], args[1] as i32),
-        SYSCALL_SIGACTION => sys_sigaction(
-            args[0] as i32,
-            args[1] as *const SignalAction,
-            args[2] as *mut SignalAction,
-        ),
-        SYSCALL_SIGPROCMASK => sys_sigprocmask(args[0] as u32),
+        SYSCALL_TKILL => sys_tkill(args[0], args[1] as i32),
+        SYSCALL_TGKILL => sys_tgkill(args[0], args[1], args[2] as i32),
+        SYSCALL_SIGACTION => {
+            sys_sigaction(args[0] as i32, args[1] as *const u8, args[2] as *mut u8)
+        }
+        SYSCALL_SIGPROCMASK => sys_sigprocmask(args[0], args[1], args[2], args[3]),
         SYSCALL_SIGRETURN => sys_sigreturn(),
         SYSCALL_REBOOT => sys_reboot(),
         SYSCALL_GETTIMEOFDAY => sys_gettimeofday(args[0] as *mut TimeVal, args[1]),
         SYSCALL_GETPID => sys_getpid(),
         SYSCALL_GETPPID => sys_getppid(),
+        SYSCALL_GETUID => sys_getuid(),
+        SYSCALL_GETEUID => sys_geteuid(),
+        SYSCALL_GETGID => sys_getgid(),
+        SYSCALL_GETEGID => sys_getegid(),
+        SYSCALL_GETTID => sys_gettid(),
         SYSCALL_BRK => sys_brk(args[0]),
         SYSCALL_MUNMAP => sys_munmap(args[0], args[1]),
         SYSCALL_CLONE => sys_clone(args[0], args[1], args[2], args[3], args[4]),
@@ -124,12 +166,20 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
             args[4] as isize,
             args[5],
         ),
+        SYSCALL_MPROTECT => sys_mprotect(args[0], args[1], args[2] as u32),
         SYSCALL_WAIT4 => sys_wait4(
             args[0] as isize,
             args[1] as *mut i32,
             args[2],
             args[3] as *mut RUsage,
         ),
+        SYSCALL_PRLIMIT64 => sys_prlimit64(
+            args[0],
+            args[1],
+            args[2] as *const RLimit,
+            args[3] as *mut RLimit,
+        ),
+        SYSCALL_GETRANDOM => sys_getrandom(args[0] as *mut u8, args[1], args[2]),
         _ => Err(Errno::ENOSYS),
     }
 }

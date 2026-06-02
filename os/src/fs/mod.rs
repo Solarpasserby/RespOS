@@ -3,8 +3,9 @@
 pub mod ext4;
 mod fdtable;
 mod kstat;
-mod mount;
+pub mod mount;
 mod namei;
+pub mod proc;
 mod page_cache;
 mod path;
 mod pipe;

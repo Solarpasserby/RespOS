@@ -212,16 +212,21 @@ pub fn kill(pid: usize, signum: i32) -> isize {
     sys_kill(pid, signum)
 }
 
+#[repr(C)]
 pub struct SignalAction {
-    pub handler: usize,
-    pub mask: SignalFlags,
+    pub handler: usize,  // offset 0, 8 bytes — 信号处理函数指针
+    pub flags: u32,      // offset 8, 4 bytes — SA_* 标志位
+    pub restorer: usize, // offset 16, 8 bytes — 占位/对齐
+    pub mask: u64,       // offset 24, 8 bytes — 信号掩码 (SigSet 位图)
 }
 
 impl Default for SignalAction {
     fn default() -> Self {
         Self {
-            handler: 0,
-            mask: SignalFlags::empty(),
+            handler: 0,  // 默认：无处理函数
+            flags: 0,    // 默认无标志
+            restorer: 0, // 默认 0
+            mask: 0,     // 默认不屏蔽任何信号
         }
     }
 }
