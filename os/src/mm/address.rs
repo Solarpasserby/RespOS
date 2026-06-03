@@ -14,7 +14,7 @@ pub const VA_WIDTH: usize = 39;
 #[cfg(target_arch = "loongarch64")]
 pub const PA_WIDTH: usize = 48;
 #[cfg(target_arch = "loongarch64")]
-pub const VA_WIDTH: usize = 48;
+pub const VA_WIDTH: usize = 39;
 
 pub const PPN_WIDTH: usize = PA_WIDTH - PAGE_SIZE_BITS;
 pub const VPN_WIDTH: usize = VA_WIDTH - PAGE_SIZE_BITS;
@@ -202,7 +202,7 @@ impl PhysAddr {
         }
     }
 
-    #[cfg(not(target_arch = "loongarch64"))]
+    #[cfg(target_arch = "riscv64")]
     fn kernel_addr(self) -> usize {
         self.0 + KERNEL_BASE
     }

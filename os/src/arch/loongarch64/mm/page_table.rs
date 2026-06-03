@@ -1,10 +1,10 @@
 // os/src/arch/loongarch64/mm/page_table.rs
 //
-// LoongArch LA64 页表实现 (4级页表, 4KB 页)
+// LoongArch LA64 页表实现 (3级页表, 4KB 页)
 //
-// 地址结构 (48-bit VA):
-//   | PGD(9) | PUD(9) | PMD(9) | PTE(9) | Offset(12) |
-//   | 47..39 | 38..30 | 29..21 | 20..12 | 11..0      |
+// 地址结构 (39-bit VA):
+//   | PGD(9) | PMD(9) | PTE(9) | Offset(12) |
+//   | 38..30 | 29..21 | 20..12 | 11..0      |
 //
 // PTE 格式 (64-bit):
 //   | RPLV/NX/NR | Reserved | PPN[47:12] | Software | G/MAT/PLV/D/V |
@@ -62,7 +62,7 @@ impl PageTable {
         let kernel_page_table = &KERNEL_SPACE.lock().page_table;
         let kernel_root_ppn = kernel_page_table.root_ppn;
         let vpn = VirtPageNum::from(VirtAddr::from(KERNEL_BASE).floor().0);
-        let pgd_idx = (vpn.0 >> 27) & 0x1FF;
+        let pgd_idx = (vpn.0 >> 18) & 0x1FF;
         let dst = frame.ppn().get_pte_array();
         let src = kernel_root_ppn.get_pte_array();
         dst[pgd_idx..].copy_from_slice(&src[pgd_idx..]);
@@ -114,11 +114,10 @@ pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> &'static mut T {
         .get_mut()
 }
 
-fn get_vpn_indexes(vpn: VirtPageNum) -> [usize; 4] {
+fn get_vpn_indexes(vpn: VirtPageNum) -> [usize; 3] {
     let v = vpn.0;
     [
-        (v >> 27) & 0x1FF, // PGD: VA[47:39]
-        (v >> 18) & 0x1FF, // PUD: VA[38:30]
+        (v >> 18) & 0x1FF, // PGD: VA[38:30]
         (v >> 9) & 0x1FF,  // PMD: VA[29:21]
         v & 0x1FF,         // PTE: VA[20:12]
     ]
@@ -128,9 +127,9 @@ impl PageTable {
     fn find_pte_create(&mut self, vpn: VirtPageNum) -> Option<&mut PageTableEntry> {
         let idxs = get_vpn_indexes(vpn);
         let mut ppn = self.root_ppn;
-        for i in 0..4 {
+        for i in 0..3 {
             let pte = &mut ppn.get_pte_array()[idxs[i]];
-            if i == 3 {
+            if i == 2 {
                 return Some(pte);
             }
             if !pte.is_valid() {
@@ -146,9 +145,9 @@ impl PageTable {
     fn find_pte(&self, vpn: VirtPageNum) -> Option<&mut PageTableEntry> {
         let idxs = get_vpn_indexes(vpn);
         let mut ppn = self.root_ppn;
-        for i in 0..4 {
+        for i in 0..3 {
             let pte = &mut ppn.get_pte_array()[idxs[i]];
-            if i == 3 {
+            if i == 2 {
                 return Some(pte);
             }
             if !pte.is_valid() {
@@ -187,16 +186,18 @@ impl PageTable {
     pub fn modify_pte(&mut self, vpn: VirtPageNum, flags: PTEFlags) {
         let pte = self.find_pte(vpn).unwrap();
         assert!(pte.is_valid(), "vpn {:?} is invalid in modify_pte", vpn);
-        let was_cow = pte.is_cow();
         *pte = PageTableEntry::new(pte.ppn(), flags | PTEFlags::VALID | PTEFlags::ACCESSED);
-        if was_cow {
-            pte.set_cow_bit();
-        }
     }
 
     pub fn set_pte_cow(&mut self, vpn: VirtPageNum) {
         let pte = self.find_pte(vpn).unwrap();
         pte.set_cow_bit();
+    }
+
+    pub fn make_pte_cow(&mut self, vpn: VirtPageNum) {
+        let pte = self.find_pte(vpn).unwrap();
+        assert!(pte.is_valid(), "vpn {:?} is invalid in make_pte_cow", vpn);
+        pte.make_cow();
     }
 
     pub fn clear_pte_cow(&mut self, vpn: VirtPageNum) {
@@ -254,6 +255,9 @@ impl PTEFlags {
         if self.contains(PTEFlags::DIRTY) {
             ret.push_str("D");
         }
+        if self.contains(PTEFlags::COW) {
+            ret.push_str("COW");
+        }
         ret
     }
 }
@@ -280,7 +284,7 @@ fn flags_to_la64(flags: PTEFlags) -> usize {
     if flags.contains(PTEFlags::GLOBAL) {
         la64 |= PTE_G;
     }
-    if flags.intersects(PTEFlags::READ | PTEFlags::WRITE | PTEFlags::EXECUTE) {
+    if flags.contains(PTEFlags::VALID) {
         la64 |= PTE_P;
     }
     if flags.contains(PTEFlags::WRITE) {
@@ -304,8 +308,11 @@ fn flags_from_la64(bits: usize) -> PTEFlags {
     if bits & PTE_V != 0 {
         flags |= PTEFlags::VALID;
     }
+    if bits & PTE_W != 0 {
+        flags |= PTEFlags::WRITE;
+    }
     if bits & PTE_D != 0 {
-        flags |= PTEFlags::DIRTY | PTEFlags::WRITE;
+        flags |= PTEFlags::DIRTY;
     }
     if bits & PTE_NR == 0 {
         flags |= PTEFlags::READ;
@@ -372,7 +379,13 @@ impl PageTableEntry {
     }
 
     pub fn set_cow_bit(&mut self) {
+        self.bits &= !(PTE_W | PTE_D);
         self.bits |= PTE_COW;
+    }
+
+    pub fn make_cow(&mut self) {
+        self.bits &= !(PTE_W | PTE_D);
+        self.bits |= PTE_COW | PTE_P | PTE_V;
     }
 
     pub fn clear_cow_bit(&mut self) {

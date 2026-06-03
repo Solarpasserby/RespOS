@@ -1,9 +1,10 @@
 OUTPUT_ARCH(loongarch)
-ENTRY(_start)
+ENTRY(_start_phys)
 
 PHYS_ADDR = 0x00200000;
-BASE_ADDRESS = 0xffff800000200000;
+BASE_ADDRESS = 0xffffffc000200000;
 KERNEL_OFFSET = BASE_ADDRESS - PHYS_ADDR;
+_start_phys = PHYS_ADDR;
 
 SECTIONS
 {
@@ -12,7 +13,7 @@ SECTIONS
 
     stext = .;
     .text : AT(ADDR(.text) - KERNEL_OFFSET) {
-        *(.text.entry)
+        KEEP(*(.text.entry))
         . = ALIGN(4K);
         srfill = .;
         KEEP(*(.text.__rfill))

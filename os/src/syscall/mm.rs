@@ -1,7 +1,7 @@
 // os/src/syscall/mm.rs
 
 use super::{Errno, SysResult};
-use crate::config::{MMAP_MAX_ADDR, MMAP_MIN_ADDR, PAGE_SIZE};
+use crate::config::{MMAP_MIN_ADDR, PAGE_SIZE};
 use crate::mm::{MapPermission, VPNRange, VirtAddr};
 use crate::task::current_task;
 use bitflags::bitflags;
@@ -29,7 +29,11 @@ pub fn sys_brk(addr: usize) -> SysResult<usize> {
             );
         } else {
             // 惰性分配，惰态修改
-            memory_set.remap_area_lazy(heap_start.floor(), new_end.ceil())?;
+            let old_end = VirtAddr::from(memory_set.brk).ceil();
+            #[cfg(target_arch = "loongarch64")]
+            memory_set.remap_writable_area_eager_from_end(old_end, new_end.ceil())?;
+            #[cfg(target_arch = "riscv64")]
+            memory_set.remap_writable_area_lazy_from_end(old_end, new_end.ceil())?;
         }
 
         memory_set.brk = addr;
@@ -55,35 +59,36 @@ pub fn sys_mmap(
 
     let prot = MMapProt::from_bits(prot as u32).ok_or(Errno::EINVAL)?;
     let flags = MMAPFLAGS::from_bits(flags as u32).ok_or(Errno::EINVAL)?;
-    let has_shared = flags.contains(MMAPFLAGS::MAP_SHARED);
-    let has_private = flags.contains(MMAPFLAGS::MAP_PRIVATE);
-    if has_shared == has_private || flags.contains(MMAPFLAGS::MAP_FIXED) {
+    let shared_validate = flags.contains(MMAPFLAGS::MAP_SHARED_VALIDATE);
+    let has_shared = flags.contains(MMAPFLAGS::MAP_SHARED) || shared_validate;
+    let has_private = flags.contains(MMAPFLAGS::MAP_PRIVATE) && !shared_validate;
+    if has_shared == has_private {
         return Err(Errno::EINVAL);
     }
+    let replace = flags.contains(MMAPFLAGS::MAP_FIXED);
+    let noreplace = flags.contains(MMAPFLAGS::MAP_FIXED_NOREPLACE);
+    let fixed = replace || noreplace;
+    if fixed && (_addr % PAGE_SIZE != 0 || _addr == 0) {
+        return Err(Errno::EINVAL);
+    }
+    let fixed_addr = fixed.then_some(_addr);
 
     let mut permission = MapPermission::from(prot);
     permission |= MapPermission::USER;
 
     let task = current_task().expect("[kernel] current task is None.");
     if flags.contains(MMAPFLAGS::MAP_ANONYMOUS) {
-        // 匿名映射限制 fd 为 -1，offset 为 0
-        if fd != -1 || offset != 0 {
+        // 匿名映射忽略 fd，但 offset 必须为 0。
+        if offset != 0 {
             return Err(Errno::EINVAL);
         }
         task.op_memory_set_write(|memory_set| {
-            // start 可以保证是页对齐的
-            let start = memory_set.mmap_start;
-            let end = start.checked_add(map_len).ok_or(Errno::ENOMEM)?;
-            if end > MMAP_MAX_ADDR {
-                return Err(Errno::ENOMEM);
-            }
-            // 惰性分配
-            memory_set.insert_framed_area_va_lazy(
-                VirtAddr::from(start),
-                VirtAddr::from(end),
-                permission,
-            );
-            memory_set.mmap_start = end;
+            #[cfg(target_arch = "loongarch64")]
+            let start =
+                memory_set.mmap_framed(fixed_addr, map_len, permission, replace, noreplace)?;
+            #[cfg(target_arch = "riscv64")]
+            let start = memory_set
+                .mmap_lazy_anonymous(fixed_addr, map_len, permission, replace, noreplace)?;
             memory_set.flush_tlb();
             Ok(start)
         })
@@ -98,17 +103,8 @@ pub fn sys_mmap(
         }
 
         task.op_memory_set_write(|memory_set| {
-            let start = memory_set.mmap_start;
-            let end = start.checked_add(map_len).ok_or(Errno::ENOMEM)?;
-            if end > MMAP_MAX_ADDR {
-                return Err(Errno::ENOMEM);
-            }
-            memory_set.insert_framed_area_va(
-                VirtAddr::from(start),
-                VirtAddr::from(end),
-                permission,
-            );
-            memory_set.mmap_start = end;
+            let start =
+                memory_set.mmap_framed(fixed_addr, map_len, permission, replace, noreplace)?;
             memory_set.flush_tlb();
 
             let buf = unsafe { core::slice::from_raw_parts_mut(start as *mut u8, map_len) };
@@ -133,16 +129,9 @@ pub fn sys_munmap(addr: usize, len: usize) -> SysResult<usize> {
         return Err(Errno::EINVAL);
     }
     let map_len = len.checked_add(PAGE_SIZE - 1).ok_or(Errno::EINVAL)? & !(PAGE_SIZE - 1);
-    let end = addr.checked_add(map_len).ok_or(Errno::EINVAL)?;
-    if end > MMAP_MAX_ADDR {
-        return Err(Errno::ENOMEM);
-    }
-    let start_vpn = VirtAddr::from(addr).floor();
-    let end_vpn = VirtAddr::from(end).floor();
-    let unmap_vpn_range = VPNRange::new(start_vpn, end_vpn);
     let task = current_task().expect("[kernel] current task is None.");
     task.op_memory_set_write(|memory_set| {
-        memory_set.remove_area_with_overlap_range(unmap_vpn_range)?;
+        memory_set.munmap_range(addr, map_len)?;
         memory_set.flush_tlb();
         Ok(0)
     })
@@ -207,9 +196,25 @@ bitflags! {
         const MAP_SHARED = 1 << 0;
         /// MAP_PRIVATE 私有映射
         const MAP_PRIVATE = 1 << 1;
+        /// MAP_SHARED_VALIDATE 共享映射，并要求内核拒绝未知 flag。
+        const MAP_SHARED_VALIDATE = 0x03;
         /// MAP_FIXED 固定映射，固定映射到addr
         const MAP_FIXED = 1 << 4;
         /// MAP_ANONYMOUS 匿名映射，需要fd为 -1, offset为 0
         const MAP_ANONYMOUS = 1 << 5;
+        /// MAP_GROWSDOWN 栈类映射。当前实现不做自动增长，只接受该 flag。
+        const MAP_GROWSDOWN = 1 << 8;
+        /// MAP_DENYWRITE 历史兼容 flag，当前忽略。
+        const MAP_DENYWRITE = 1 << 11;
+        /// MAP_LOCKED 当前忽略。
+        const MAP_LOCKED = 1 << 13;
+        /// MAP_NORESERVE 当前忽略。
+        const MAP_NORESERVE = 1 << 14;
+        /// MAP_POPULATE 当前忽略。
+        const MAP_POPULATE = 1 << 15;
+        /// MAP_STACK 当前忽略。
+        const MAP_STACK = 1 << 17;
+        /// MAP_FIXED_NOREPLACE 固定映射，但不能覆盖已有映射。
+        const MAP_FIXED_NOREPLACE = 1 << 20;
     }
 }

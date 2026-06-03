@@ -14,12 +14,6 @@ use alloc::sync::Arc;
 use lazy_static::lazy_static;
 
 // 空闲任务
-#[cfg(target_arch = "riscv64")]
-lazy_static! {
-    pub static ref IDLE_TASK: Arc<TaskControlBlock> = Arc::new(TaskControlBlock::zero_init());
-}
-
-#[cfg(target_arch = "loongarch64")]
 lazy_static! {
     pub static ref IDLE_TASK: Arc<TaskControlBlock> = Arc::new(TaskControlBlock::zero_init());
 }

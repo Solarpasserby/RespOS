@@ -37,8 +37,6 @@ impl Default for UtsName {
         let machine = "riscv64";
         #[cfg(target_arch = "loongarch64")]
         let machine = "loongarch64";
-        #[cfg(not(any(target_arch = "riscv64", target_arch = "loongarch64")))]
-        let machine = "unknown";
 
         Self {
             sysname: Self::from_str("RespOS"),

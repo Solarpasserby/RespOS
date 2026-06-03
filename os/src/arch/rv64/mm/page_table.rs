@@ -180,6 +180,10 @@ impl PageTable {
         let pte = self.find_pte(vpn).unwrap();
         pte.set_cow_bit();
     }
+    pub fn make_pte_cow(&mut self, vpn: VirtPageNum) {
+        let pte = self.find_pte(vpn).unwrap();
+        pte.set_cow_bit();
+    }
     /// 清除页表项的 COW 标记位
     pub fn clear_pte_cow(&mut self, vpn: VirtPageNum) {
         let pte = self.find_pte(vpn).unwrap();

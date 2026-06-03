@@ -12,10 +12,6 @@ __rfill:
     csrwr   $t0, CSR_TLBRSAVE
 
     csrrd   $t0, CSR_PGD
-    lddir   $t0, $t0, 3
-    beqz    $t0, construct_invalid
-    addi.d  $t0, $t0, -1
-
     lddir   $t0, $t0, 2
     beqz    $t0, construct_invalid
     addi.d  $t0, $t0, -1

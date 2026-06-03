@@ -5,8 +5,9 @@ use super::frame_allocator::{FrameTracker, frame_alloc};
 use super::{PTEFlags, PageTable, PageTableEntry};
 use crate::arch::{sfence, write_mmu_token};
 use crate::config::{
-    CLK_TCK, DL_INTERP_OFFSET, KERNEL_BASE, KERNEL_STACK_SIZE, MEMORY_END, MMAP_MIN_ADDR,
-    PAGE_SIZE, PAGE_SIZE_BITS, TRAMPOLINE, TRAMPOLINE_CODE, USER_STACK_SIZE, VIRTIO_MMIO,
+    CLK_TCK, DL_INTERP_OFFSET, KERNEL_BASE, KERNEL_STACK_SIZE, MEMORY_END, MMAP_MAX_ADDR,
+    MMAP_MIN_ADDR, PAGE_SIZE, PAGE_SIZE_BITS, TRAMPOLINE, TRAMPOLINE_CODE, USER_STACK_SIZE,
+    VIRTIO_MMIO,
 };
 use crate::syscall::{Errno, SysResult};
 use crate::task::{
@@ -218,6 +219,87 @@ impl MemorySet {
         Ok(())
     }
 
+    /// 判断给定虚拟页区间是否与当前任一逻辑段重叠。
+    pub fn area_intersects(&self, vpn_range: &VPNRange) -> bool {
+        self.areas
+            .iter()
+            .any(|area| area.vpn_range.intersect_with(vpn_range))
+    }
+
+    /// 按 mmap 语义选择一段地址并插入匿名懒分配区域。
+    pub fn mmap_lazy_anonymous(
+        &mut self,
+        addr: Option<usize>,
+        map_len: usize,
+        map_perm: MapPermission,
+        replace: bool,
+        noreplace: bool,
+    ) -> SysResult<usize> {
+        let start = addr.unwrap_or(self.mmap_start);
+        let end = start.checked_add(map_len).ok_or(Errno::ENOMEM)?;
+        if end > MMAP_MAX_ADDR {
+            return Err(Errno::ENOMEM);
+        }
+
+        let vpn_range = VPNRange::new(VirtAddr::from(start).floor(), VirtAddr::from(end).ceil());
+        if noreplace && self.area_intersects(&vpn_range) {
+            return Err(Errno::EEXIST);
+        }
+        if replace {
+            self.remove_area_with_overlap_range(vpn_range)?;
+        }
+
+        self.insert_framed_area_va_lazy(VirtAddr::from(start), VirtAddr::from(end), map_perm);
+        if addr.is_none() {
+            self.mmap_start = end;
+        }
+        Ok(start)
+    }
+
+    /// 按 mmap 语义选择一段地址并插入已分配物理页的区域。
+    pub fn mmap_framed(
+        &mut self,
+        addr: Option<usize>,
+        map_len: usize,
+        map_perm: MapPermission,
+        replace: bool,
+        noreplace: bool,
+    ) -> SysResult<usize> {
+        let start = addr.unwrap_or(self.mmap_start);
+        let end = start.checked_add(map_len).ok_or(Errno::ENOMEM)?;
+        if end > MMAP_MAX_ADDR {
+            return Err(Errno::ENOMEM);
+        }
+
+        let vpn_range = VPNRange::new(VirtAddr::from(start).floor(), VirtAddr::from(end).ceil());
+        if noreplace && self.area_intersects(&vpn_range) {
+            return Err(Errno::EEXIST);
+        }
+        if replace {
+            self.remove_area_with_overlap_range(vpn_range)?;
+        }
+
+        self.insert_framed_area_va(VirtAddr::from(start), VirtAddr::from(end), map_perm);
+        if addr.is_none() {
+            self.mmap_start = end;
+        }
+        Ok(start)
+    }
+
+    /// 删除 mmap 区域，并在释放的是当前 mmap 尾部时回退下一次分配的起点。
+    pub fn munmap_range(&mut self, addr: usize, map_len: usize) -> SysResult {
+        let end = addr.checked_add(map_len).ok_or(Errno::EINVAL)?;
+        if end > MMAP_MAX_ADDR {
+            return Err(Errno::ENOMEM);
+        }
+        let vpn_range = VPNRange::new(VirtAddr::from(addr).floor(), VirtAddr::from(end).ceil());
+        self.remove_area_with_overlap_range(vpn_range)?;
+        if self.mmap_start == end {
+            self.mmap_start = addr;
+        }
+        Ok(())
+    }
+
     /// 惰性重映射：只修改 VPN 范围，不分配/释放物理页（由 page fault handler 按需处理）
     pub fn remap_area_lazy(
         &mut self,
@@ -248,6 +330,84 @@ impl MemorySet {
         area.vpn_range = VPNRange::new(vpn_start, new_vpn_end);
         Ok(())
     }
+
+    /// 调整以指定页为结尾的可写用户区域，供 brk 在遇到前置保护页后继续维护堆尾。
+    pub fn remap_writable_area_lazy_from_end(
+        &mut self,
+        old_vpn_end: VirtPageNum,
+        new_vpn_end: VirtPageNum,
+    ) -> SysResult {
+        let (idx, area) = self
+            .areas
+            .iter_mut()
+            .enumerate()
+            .rev()
+            .find(|(_, area)| {
+                area.vpn_range.get_end() == old_vpn_end
+                    && area
+                        .map_perm
+                        .contains(MapPermission::WRITE | MapPermission::USER)
+            })
+            .ok_or(Errno::EINVAL)?;
+
+        let vpn_start = area.vpn_range.get_start();
+        if vpn_start == new_vpn_end {
+            area.unmap(&mut self.page_table);
+            self.areas.remove(idx);
+            return Ok(());
+        }
+
+        if new_vpn_end < old_vpn_end {
+            for vpn in VPNRange::new(new_vpn_end, old_vpn_end) {
+                area.unmap_one(&mut self.page_table, vpn);
+            }
+        }
+        area.vpn_range = VPNRange::new(vpn_start, new_vpn_end);
+        Ok(())
+    }
+
+    /// 立即分配新增页的重映射版本，供 LoongArch 避开当前尚不稳定的用户堆 lazy fault 路径。
+    pub fn remap_writable_area_eager_from_end(
+        &mut self,
+        old_vpn_end: VirtPageNum,
+        new_vpn_end: VirtPageNum,
+    ) -> SysResult {
+        let (idx, area) = self
+            .areas
+            .iter_mut()
+            .enumerate()
+            .rev()
+            .find(|(_, area)| {
+                area.vpn_range.get_end() == old_vpn_end
+                    && area
+                        .map_perm
+                        .contains(MapPermission::WRITE | MapPermission::USER)
+            })
+            .ok_or(Errno::EINVAL)?;
+
+        let vpn_start = area.vpn_range.get_start();
+        if vpn_start == new_vpn_end {
+            area.unmap(&mut self.page_table);
+            self.areas.remove(idx);
+            return Ok(());
+        }
+
+        if new_vpn_end < old_vpn_end {
+            for vpn in VPNRange::new(new_vpn_end, old_vpn_end) {
+                area.unmap_one(&mut self.page_table, vpn);
+            }
+        }
+        area.vpn_range = VPNRange::new(vpn_start, new_vpn_end);
+        if new_vpn_end > old_vpn_end {
+            for vpn in VPNRange::new(old_vpn_end, new_vpn_end) {
+                if !area.data_frames.contains_key(&vpn) {
+                    area.map_one(&mut self.page_table, vpn)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// 修改与给定虚拟页区间重叠的映射权限，必要时裁剪或切分原逻辑段
     pub fn remap_area_with_overlap_range(
         &mut self,
@@ -765,19 +925,18 @@ impl MemorySet {
                     let mut flags = parent_pte.flags();
                     flags.remove(PTEFlags::WRITE | PTEFlags::DIRTY);
                     user_space.page_table.modify_pte(vpn, flags);
-                    user_space.page_table.set_pte_cow(vpn);
+                    user_space.page_table.make_pte_cow(vpn);
 
                     // 子进程 PTE 同样为只读 + COW
                     let mut child_flags = PTEFlags::from_bits(area.map_perm.bits).unwrap();
                     child_flags.remove(PTEFlags::WRITE | PTEFlags::DIRTY);
                     memory_set.page_table.map(vpn, ppn, child_flags);
-                    memory_set.page_table.set_pte_cow(vpn);
+                    memory_set.page_table.make_pte_cow(vpn);
                 } else {
                     // 只读页直接共享，无需 COW
                     let child_flags = PTEFlags::from_bits(area.map_perm.bits).unwrap();
                     memory_set.page_table.map(vpn, ppn, child_flags);
                 }
-
                 new_area.data_frames.insert(vpn, shared_frame);
             }
             memory_set.areas.push(new_area);

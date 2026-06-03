@@ -260,13 +260,15 @@ impl TaskControlBlock {
         let current_sig_mask = self.op_sig_pending(|pending| pending.mask);
         let (sig_handler, sig_pending, sig_stack) = if is_thread {
             (
-                self.sig_handler.clone(),              // 共享同一张 handler 表
+                self.sig_handler.clone(), // 共享同一张 handler 表
                 SpinLock::new(SigPending::with_mask(current_sig_mask)), // 自己的队列，继承当前 mask
                 SpinLock::new(SignalStack::default()), // 自己的栈
             )
         } else {
             (
-                Arc::new(SpinLock::new(self.op_sig_handler(|handler| handler.clone()))),
+                Arc::new(SpinLock::new(
+                    self.op_sig_handler(|handler| handler.clone()),
+                )),
                 SpinLock::new(SigPending::with_mask(current_sig_mask)),
                 SpinLock::new(*self.sig_stack.lock()),
             )
@@ -774,8 +776,6 @@ fn init_user_stack(
     let platform: &str = "RISC-V64";
     #[cfg(target_arch = "loongarch64")]
     let platform: &str = "loongarch64";
-    #[cfg(not(any(target_arch = "riscv64", target_arch = "loongarch64")))]
-    let platform: &str = "unknown";
 
     *user_sp -= platform.len() + 1;
     *user_sp -= *user_sp % core::mem::size_of::<usize>();

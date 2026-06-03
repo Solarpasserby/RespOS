@@ -1,7 +1,8 @@
 //! LoongArch 内存布局
 
-// 内核基地址：LA64 采用 48-bit canonical VA 时，高半区从这里开始。
-pub const KERNEL_BASE: usize = 0xffff_8000_0000_0000;
+// 内核基地址：当前按 39-bit VA / 三级页表组织，和 rv64 的高地址共享内核
+// 模型保持同一布局。
+pub const KERNEL_BASE: usize = 0xffff_ffc0_0000_0000;
 
 // 用户栈大小（每个用户程序）
 pub const USER_STACK_SIZE: usize = PAGE_SIZE << 7;
@@ -29,5 +30,5 @@ pub const CLK_TCK: usize = 100;
 
 /// 用户态 sigreturn 跳板页的虚拟地址。
 ///
-/// LA64 当前按 48-bit 用户低半区布局，保留低半区最高附近的一页给信号返回跳板。
-pub const TRAMPOLINE: usize = 0x0000_7fff_ffff_e000;
+/// 39-bit 用户低半区最高附近的一页保留给信号返回跳板。
+pub const TRAMPOLINE: usize = 0x0000_003f_ffff_e000;

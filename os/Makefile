@@ -63,7 +63,8 @@ OBJDUMP := rust-objdump --arch-name=loongarch64
 OBJCOPY := rust-objcopy --binary-architecture=loongarch64
 QEMU_NAME := qemu-system-loongarch64
 QEMU_MACHINE := virt
-# LA64 内核由 QEMU virt boot code 通过 -kernel 加载到 RAM。
+# LA64 内核链接在高地址，但 QEMU -kernel 会读取 ELF entry；
+# linker 将 entry 暴露为低物理入口，启动后再切到高地址共享内核。
 BOOTLOADER :=
 FS_IMG ?= ../img/sdcard-la.img
 DISK_IMG ?=

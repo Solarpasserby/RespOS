@@ -24,7 +24,6 @@ pub use entry::enter_main;
 
 global_asm!(include_str!("tlb_refill.S"));
 
-static KERNEL_MAPPING_ACTIVE: AtomicBool = AtomicBool::new(false);
 static LOW_DIRECT_MAP_ACTIVE: AtomicBool = AtomicBool::new(true);
 
 // QEMU 启动时先依赖低地址 DMW 直映运行；进入高地址共享内核模型前，
@@ -43,7 +42,6 @@ const PTE_WRITABLE: usize = 1 << 8;
 struct BootPage([usize; 512]);
 
 static mut BOOT_PGD: BootPage = BootPage([0; 512]);
-static mut BOOT_PUD: BootPage = BootPage([0; 512]);
 static mut BOOT_PMD: BootPage = BootPage([0; 512]);
 static mut BOOT_PTES: [BootPage; BOOT_PTE_TABLES] = [const { BootPage([0; 512]) }; BOOT_PTE_TABLES];
 
@@ -60,7 +58,7 @@ pub fn read_mmu_token() -> usize {
 pub fn write_mmu_token(token: usize) {
     unsafe {
         // 当前模型下用户低半区和内核高半区共享同一个根页表页。
-        // LoongArch 的硬件按 VA[47] 在 PGDL/PGDH 中选择根页表，
+        // LoongArch 的硬件按虚拟地址所在半区在 PGDL/PGDH 中选择根页表，
         // 因此两个寄存器都要写入当前地址空间的 root。
         register::mmu::write_pgdl(token);
         register::mmu::write_pgdh(token);
@@ -77,7 +75,7 @@ pub fn sfence() {
 
 #[inline]
 pub fn paging_enabled() -> bool {
-    KERNEL_MAPPING_ACTIVE.load(Ordering::Relaxed)
+    register::crmd::paging_enabled()
 }
 
 #[inline]
@@ -99,7 +97,33 @@ pub fn idle() -> ! {
 
 #[inline]
 fn kernel_virt_to_phys<T>(ptr: *const T) -> usize {
-    ptr as usize - crate::config::KERNEL_BASE
+    let addr = ptr as usize;
+    if addr >= crate::config::KERNEL_BASE {
+        addr - crate::config::KERNEL_BASE
+    } else {
+        addr
+    }
+}
+
+#[inline]
+pub unsafe fn jump_to_high_half(entry: usize) -> ! {
+    let target = if entry >= crate::config::KERNEL_BASE {
+        entry
+    } else {
+        entry + crate::config::KERNEL_BASE
+    };
+    unsafe {
+        core::arch::asm!(
+            "li.d    $t0, {kernel_base}",
+            "bgeu    $sp, $t0, 1f",
+            "add.d   $sp, $sp, $t0",
+            "1:",
+            "jr      {target}",
+            kernel_base = const crate::config::KERNEL_BASE,
+            target = in(reg) target,
+            options(noreturn)
+        );
+    }
 }
 
 #[inline]
@@ -136,24 +160,17 @@ pub fn enable_boot_paging() {
     unsafe {
         let pgd =
             kernel_virt_to_phys(core::ptr::addr_of!(BOOT_PGD.0) as *const _) as *mut [usize; 512];
-        let pud =
-            kernel_virt_to_phys(core::ptr::addr_of!(BOOT_PUD.0) as *const _) as *mut [usize; 512];
         let pmd =
             kernel_virt_to_phys(core::ptr::addr_of!(BOOT_PMD.0) as *const _) as *mut [usize; 512];
         let ptes = kernel_virt_to_phys(core::ptr::addr_of!(BOOT_PTES) as *const _)
             as *mut [BootPage; BOOT_PTE_TABLES];
 
         let base_vpn = crate::config::KERNEL_BASE >> crate::config::PAGE_SIZE_BITS;
-        let pgd_idx = (base_vpn >> 27) & 0x1ff;
-        let pud_idx = (base_vpn >> 18) & 0x1ff;
+        let pgd_idx = (base_vpn >> 18) & 0x1ff;
         let pmd_idx = (base_vpn >> 9) & 0x1ff;
 
         core::ptr::write_volatile(
             (pgd as *mut usize).add(pgd_idx),
-            table_pte(kernel_virt_to_phys(core::ptr::addr_of!(BOOT_PUD) as *const _)),
-        );
-        core::ptr::write_volatile(
-            (pud as *mut usize).add(pud_idx),
             table_pte(kernel_virt_to_phys(core::ptr::addr_of!(BOOT_PMD) as *const _)),
         );
         for table in 0..BOOT_PTE_TABLES {
@@ -171,9 +188,8 @@ pub fn enable_boot_paging() {
         let root = kernel_virt_to_phys(core::ptr::addr_of!(BOOT_PGD) as *const _);
         write_mmu_token(root);
 
-        register::mmu::write_dmw1(0);
         register::crmd::enable_paging();
-        KERNEL_MAPPING_ACTIVE.store(true, Ordering::Relaxed);
+        register::mmu::write_dmw1(0);
     }
 }
 
