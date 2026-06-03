@@ -635,7 +635,8 @@ fn exit_thread(task: Arc<TaskControlBlock>, exit_code: i32) {
     if let Some(ctid) = task.clear_child_tid_addr() {
         let zero: i32 = 0;
         let _ = copy_to_user(ctid as *mut i32, &zero as *const i32, 1);
-        let _ = crate::task::futex::futex_wake(ctid, 1);
+        let _ = crate::task::futex::futex_wake_private(ctid, 1);
+        let _ = crate::task::futex::futex_wake(ctid, 1, false);
     }
 
     // 只有数据 线程组 和 TASK_MANAGER 持有对线程的引用，当引用归零时该线程占有的私有资源被释放

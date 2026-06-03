@@ -1,6 +1,7 @@
 // os/src/vfs/file.rs
 
-use super::{InodeOp, LinuxDirent64};
+use super::{InodeOp, InodeType, LinuxDirent64};
+use crate::config::PAGE_SIZE;
 use crate::fs::{KStat, Path};
 use crate::syscall::{Errno, SysResult};
 use alloc::sync::Arc;
@@ -18,6 +19,105 @@ struct FileInner {
     offset: usize,
     path: Arc<Path>,
     flags: OpenFlags,
+    cache: Option<FileCache>,
+}
+
+struct FileCache {
+    len: usize,
+    pages: Vec<Option<Vec<u8>>>,
+}
+
+impl FileCache {
+    fn new(len: usize) -> Self {
+        let page_count = len.div_ceil(PAGE_SIZE);
+        Self {
+            len,
+            pages: (0..page_count).map(|_| None).collect(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn ensure_page_slots(&mut self, len: usize) {
+        let page_count = len.div_ceil(PAGE_SIZE);
+        while self.pages.len() < page_count {
+            self.pages.push(None);
+        }
+    }
+
+    fn extend_len(&mut self, len: usize) {
+        self.ensure_page_slots(len);
+        self.len = self.len.max(len);
+    }
+
+    fn ensure_page_loaded(
+        &mut self,
+        page_idx: usize,
+        inode: &Arc<dyn InodeOp>,
+        path: &str,
+    ) -> SysResult<()> {
+        if self.pages.get(page_idx).and_then(|page| page.as_ref()).is_some() {
+            return Ok(());
+        }
+
+        self.ensure_page_slots((page_idx + 1) * PAGE_SIZE);
+        let mut page = alloc::vec![0u8; PAGE_SIZE];
+        let page_start = page_idx * PAGE_SIZE;
+        if page_start < self.len {
+            match inode.read_at(path, page_start, &mut page) {
+                Ok(_) | Err(Errno::ENOENT) => {}
+                Err(err) => return Err(err),
+            }
+        }
+        self.pages[page_idx] = Some(page);
+        Ok(())
+    }
+
+    fn read_at(
+        &mut self,
+        offset: usize,
+        buf: &mut [u8],
+        inode: &Arc<dyn InodeOp>,
+        path: &str,
+    ) -> SysResult<usize> {
+        let mut copied = 0;
+        let mut pos = offset.min(self.len);
+        let end = self.len.min(offset.saturating_add(buf.len()));
+        while pos < end {
+            let page_idx = pos / PAGE_SIZE;
+            let page_off = pos % PAGE_SIZE;
+            let n = (end - pos).min(PAGE_SIZE - page_off);
+            self.ensure_page_loaded(page_idx, inode, path)?;
+            let page = self.pages[page_idx].as_ref().unwrap();
+            buf[copied..copied + n].copy_from_slice(&page[page_off..page_off + n]);
+            pos += n;
+            copied += n;
+        }
+        Ok(copied)
+    }
+
+    fn write_at(&mut self, offset: usize, buf: &[u8]) -> SysResult<usize> {
+        let end = offset.checked_add(buf.len()).ok_or(Errno::EINVAL)?;
+        self.extend_len(end);
+
+        let mut copied = 0;
+        let mut pos = offset;
+        while copied < buf.len() {
+            let page_idx = pos / PAGE_SIZE;
+            let page_off = pos % PAGE_SIZE;
+            let n = (buf.len() - copied).min(PAGE_SIZE - page_off);
+            if self.pages[page_idx].is_none() {
+                self.pages[page_idx] = Some(alloc::vec![0u8; PAGE_SIZE]);
+            }
+            let page = self.pages[page_idx].as_mut().unwrap();
+            page[page_off..page_off + n].copy_from_slice(&buf[copied..copied + n]);
+            pos += n;
+            copied += n;
+        }
+        Ok(buf.len())
+    }
 }
 
 /// 文件操作 trait
@@ -41,30 +141,46 @@ pub trait FileOp: Any + Send + Sync {
 impl File {
     pub fn new(path: Arc<Path>, inode: Arc<dyn InodeOp>, flags: OpenFlags) -> Self {
         let abs_path = path.abs_path();
+        let ty = inode.node_type();
         if flags.contains(OpenFlags::O_TRUNC)
             && flags.intersects(OpenFlags::O_WRONLY | OpenFlags::O_RDWR)
         {
             let _ = inode.truncate(&abs_path, 0);
         }
-        let offset = if flags.contains(OpenFlags::O_APPEND) {
+        let size = if ty == InodeType::Regular {
             inode.stat(&abs_path).map(|stat| stat.size).unwrap_or(0)
         } else {
             0
         };
+        let offset = if flags.contains(OpenFlags::O_APPEND) {
+            size
+        } else {
+            0
+        };
+        let cache = (ty == InodeType::Regular).then(|| FileCache::new(size));
         Self {
             inode,
             inner: Mutex::new(FileInner {
                 offset,
                 path,
                 flags,
+                cache,
             }),
         }
     }
 
     pub fn read_all(&self) -> SysResult<Vec<u8>> {
-        let stat = self.get_stat()?;
-        let size = stat.size;
-        let path = self.path().abs_path();
+        let mut inner = self.inner.lock();
+        let path = inner.path.abs_path();
+
+        if let Some(cache) = inner.cache.as_mut() {
+            let mut data = alloc::vec![0u8; cache.len()];
+            let n = cache.read_at(0, &mut data, &self.inode, &path)?;
+            data.truncate(n);
+            return Ok(data);
+        }
+
+        let size = self.inode.stat(&path)?.size;
 
         let mut data = alloc::vec![0u8; size];
         let mut offset = 0;
@@ -104,7 +220,12 @@ impl FileOp for File {
     fn read<'a>(&'a self, buf: &'a mut [u8]) -> SysResult<usize> {
         let mut inner = self.inner.lock();
         let path = inner.path.abs_path();
-        let n = self.inode.read_at(&path, inner.offset, buf)?;
+        let offset = inner.offset;
+        let n = if let Some(cache) = inner.cache.as_mut() {
+            cache.read_at(offset, buf, &self.inode, &path)?
+        } else {
+            self.inode.read_at(&path, offset, buf)?
+        };
         inner.offset += n;
         Ok(n)
     }
@@ -113,9 +234,24 @@ impl FileOp for File {
         let mut inner = self.inner.lock();
         let path = inner.path.abs_path();
         if inner.flags.contains(OpenFlags::O_APPEND) {
-            inner.offset = self.inode.stat(&path)?.size;
+            if let Some(cache) = inner.cache.as_ref() {
+                inner.offset = cache.len();
+            } else {
+                inner.offset = self.inode.stat(&path)?.size;
+            }
         }
-        let n = self.inode.write_at(&path, inner.offset, buf)?;
+
+        let offset = inner.offset;
+        let n = if let Some(cache) = inner.cache.as_mut() {
+            let n = cache.write_at(offset, buf)?;
+            match self.inode.write_at(&path, offset, buf) {
+                Ok(_) | Err(Errno::ENOENT) => {}
+                Err(err) => return Err(err),
+            }
+            n
+        } else {
+            self.inode.write_at(&path, offset, buf)?
+        };
         inner.offset += n;
         Ok(n)
     }
@@ -135,7 +271,14 @@ impl FileOp for File {
     }
 
     fn get_stat(&self) -> SysResult<KStat> {
-        self.inode.stat(&self.path().abs_path())
+        let inner = self.inner.lock();
+        if let Some(cache) = inner.cache.as_ref() {
+            return Ok(KStat {
+                size: cache.len(),
+                ty: InodeType::Regular,
+            });
+        }
+        self.inode.stat(&inner.path.abs_path())
     }
 
     fn readable(&self) -> bool {

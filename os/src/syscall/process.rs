@@ -167,10 +167,14 @@ pub fn sys_clone(
     flags: usize,
     stack: usize,
     ptid: usize,
-    tls: usize,
-    ctid: usize,
+    arg3: usize,
+    arg4: usize,
 ) -> SysResult<usize> {
     let flags = CloneFlags::from_bits(flags as u32).ok_or(Errno::EINVAL)?;
+    #[cfg(target_arch = "loongarch64")]
+    let (ctid, tls) = (arg3, arg4);
+    #[cfg(not(target_arch = "loongarch64"))]
+    let (tls, ctid) = (arg3, arg4);
 
     // 简化模型：CLONE_THREAD 表示真正线程，必须共享地址空间。
     // 不共享地址空间的可调度实体按新进程处理，而不是放进同一线程组。

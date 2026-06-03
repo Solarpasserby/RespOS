@@ -261,17 +261,17 @@ pub mod timer {
 
     #[inline(always)]
     pub fn read_time() -> usize {
-        let low: usize;
-        let high: usize;
+        let time: usize;
+        let _timer_id: usize;
         unsafe {
             core::arch::asm!(
                 "rdtime.d {}, {}",
-                out(reg) low,
-                out(reg) high,
+                out(reg) time,
+                out(reg) _timer_id,
                 options(nomem, nostack)
             );
         }
-        (high << 32) | (low & 0xffff_ffff)
+        time
     }
 
     #[inline(always)]

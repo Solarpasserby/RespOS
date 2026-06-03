@@ -13,18 +13,12 @@ lazy_static! {
 }
 
 /// futex 键，唯一标识一个 futex 等待地址。
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct FutexKey {
-    /// 地址空间标识：私有 futex 用 get_user_token() 的返回值区分。
-    pub mm_token: usize,
+    /// 私有 futex 使用线程组号；共享 futex 暂统一为 0。
+    pub scope: usize,
     /// 用户空间 futex 地址。
     pub uaddr: usize,
-}
-
-impl PartialEq for FutexKey {
-    fn eq(&self, other: &Self) -> bool {
-        self.mm_token == other.mm_token && self.uaddr == other.uaddr
-    }
 }
 
 /// 等待队列条目。

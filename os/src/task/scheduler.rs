@@ -90,6 +90,7 @@ pub fn switch_to_next_task() {
             __switch(next_task_kernel_stack, current_task_ptr);
         }
         cleanup_dead_tasks();
+        return;
     }
 
     crate::arch::idle();
