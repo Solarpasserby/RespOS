@@ -219,7 +219,12 @@ fn run_libctest_static() {
 
     for (i, test) in LIBC_STATIC_TESTS.iter().enumerate() {
         let name = strip_nul(test);
-        println!("[libctest {}/{}] {} :", i + 1, LIBC_STATIC_TESTS.len(), name);
+        println!(
+            "[libctest {}/{}] {} :",
+            i + 1,
+            LIBC_STATIC_TESTS.len(),
+            name
+        );
 
         let pid = fork();
         if pid == 0 {
@@ -246,10 +251,7 @@ fn run_libctest_static() {
         if waited < 0 {
             println!("[testrunner] wait failed for {}: {}", name, waited);
         } else if exit_code != 0 {
-            println!(
-                "[testrunner] {} exited with code {}",
-                name, exit_code
-            );
+            println!("[testrunner] {} exited with code {}", name, exit_code);
         }
     }
 

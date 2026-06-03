@@ -1,8 +1,8 @@
 use super::{Errno, SysResult};
 use crate::mm::{copy_from_user, copy_to_user};
 use crate::signal::sig_handler::SigAction;
-use crate::signal::sig_stack::SigContext;
-use crate::signal::{SiField, Sig, SigInfo, SigSet};
+use crate::signal::sig_struct::{FrameFlags, Sig, SigFrame, SigRTFrame, SigSet};
+use crate::signal::{SiField, SigInfo};
 use crate::task::{TASK_MANAGER, current_task, yield_current_task};
 use crate::timer::get_time_ms;
 
@@ -169,33 +169,67 @@ pub fn sys_sigprocmask(
 }
 
 pub fn sys_sigreturn() -> SysResult<usize> {
-    let task = current_task().expect("[kernel] current task is None.");
-
-    // 获取当前 trapframe（在 kernel stack 上）
+    let task = current_task().unwrap();
     let trap_cx = task.get_trap_cx();
 
-    // 从用户栈顶读取 SigContext
-    let sig_context_addr = task.sig_context_addr();
-    if sig_context_addr == 0 {
-        return Err(Errno::EFAULT); // 没注册过 handler 就调 sigreturn，拒绝
-    }
-    let sig_context_ptr = sig_context_addr as *const SigContext;
-    let mut sig_context: SigContext = unsafe { core::mem::zeroed() };
-    copy_from_user(&mut sig_context as *mut SigContext, sig_context_ptr, 1)?;
+    let sp = trap_cx.get_sp();
+    let flag_ptr = sp as *const FrameFlags;
+    let mut flag: FrameFlags = FrameFlags::default();
+    copy_from_user(&mut flag as *mut FrameFlags, flag_ptr, 1)?;
 
-    // 普通 handler（info == 0）：恢复寄存器和 sepc
-    if sig_context.info == 0 {
-        trap_cx.x = sig_context.x;
-        trap_cx.sepc = sig_context.sepc;
-    }
-    // TODO : info == 1，SA_SIGINFO 路径。
+    let restored_mask = if flag.is_rt() {
+        // RT 帧：读 SigRTFrame
+        let frame_ptr = sp as *const SigRTFrame;
+        let mut frame: SigRTFrame = unsafe { core::mem::zeroed() };
+        copy_from_user(&mut frame, frame_ptr, 1)?;
+        let ctx = frame.ucontext.uc_mcontext;
+        trap_cx.x = ctx.x;
+        trap_cx.sepc = ctx.sepc;
+        ctx.mask
+    } else {
+        // 普通帧：读 SigFrame
+        let frame_ptr = sp as *const SigFrame;
+        let mut frame: SigFrame = unsafe { core::mem::zeroed() };
+        copy_from_user(&mut frame, frame_ptr, 1)?;
+        let ctx = frame.sigcontext;
+        trap_cx.x = ctx.x;
+        trap_cx.sepc = ctx.sepc;
+        ctx.mask
+    };
+
     // 恢复信号掩码
-    task.op_sig_pending_mut(|pending| {
-        pending.mask = sig_context.mask;
-    });
+    task.op_sig_pending_mut(|pending| pending.mask = restored_mask);
 
-    Ok(trap_cx.x[10] as usize) // a0 作为返回值
+    Ok(trap_cx.x[10])
 }
+// pub fn sys_sigreturn() -> SysResult<usize> {
+//     let task = current_task().expect("[kernel] current task is None.");
+
+//     // 获取当前 trapframe（在 kernel stack 上）
+//     let trap_cx = task.get_trap_cx();
+
+//     // 从用户栈顶读取 SigContext
+//     let sig_context_addr = task.sig_context_addr();
+//     if sig_context_addr == 0 {
+//         return Err(Errno::EFAULT); // 没注册过 handler 就调 sigreturn，拒绝
+//     }
+//     let sig_context_ptr = sig_context_addr as *const SigContext;
+//     let mut sig_context: SigContext = unsafe { core::mem::zeroed() };
+//     copy_from_user(&mut sig_context as *mut SigContext, sig_context_ptr, 1)?;
+
+//     // 普通 handler（info == 0）：恢复寄存器和 sepc
+//     if sig_context.info == 0 {
+//         trap_cx.x = sig_context.x;
+//         trap_cx.sepc = sig_context.sepc;
+//     }
+//     // TODO : info == 1，SA_SIGINFO 路径。
+//     // 恢复信号掩码
+//     task.op_sig_pending_mut(|pending| {
+//         pending.mask = sig_context.mask;
+//     });
+
+//     Ok(trap_cx.x[10] as usize) // a0 作为返回值
+// }
 /// sigtimedwait: 等待 set 中的某个信号，带超时
 /// 1. 读入目标信号集
 /// 2. 临时屏蔽所有不感兴趣的信号（只放行 set 中的信号）

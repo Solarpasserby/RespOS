@@ -1,8 +1,49 @@
-use super::sig_info::SigInfo;
+use super::sig_info::{LinuxSigInfo, SigInfo};
+use super::sig_stack::{SigContext, UContext};
 use alloc::collections::btree_map::BTreeMap;
 use bitflags::bitflags;
 pub const MAX_SIGNUM: usize = 64;
 
+// 新增：帧标记，sigreturn 用它区分普通帧 vs RT 帧
+#[derive(Clone, Copy, Default)]
+#[repr(align(16))]
+#[repr(C)]
+pub struct FrameFlags(usize);
+
+impl FrameFlags {
+    pub fn normal_flag() -> Self {
+        FrameFlags(0x66666666)
+    }
+    pub fn rt_flag() -> Self {
+        FrameFlags(0x77777777)
+    }
+    pub fn is_normal(&self) -> bool {
+        self.0 == 0x66666666
+    }
+    pub fn is_rt(&self) -> bool {
+        self.0 == 0x77777777
+    }
+}
+
+// 新增：普通 handler 栈帧（无 SA_SIGINFO）
+
+#[derive(Clone, Copy)]
+#[repr(align(16))]
+#[repr(C)]
+pub struct SigFrame {
+    pub flag: FrameFlags,
+    pub sigcontext: SigContext, //内核现场寄存器快照，mcontext_t = sigcontext
+}
+
+// 新增：RT handler 栈帧（SA_SIGINFO 路径）
+#[derive(Clone, Copy)]
+#[repr(align(16))]
+#[repr(C)]
+pub struct SigRTFrame {
+    pub flag: FrameFlags,
+    pub ucontext: UContext, //被打断时 CPU + 栈 + 信号掩码现场（程序被打断在哪）
+    pub siginfo: LinuxSigInfo, //信号来源信息（从哪发、为啥发）
+}
 pub struct SigPending {
     pub pending: SigSet, // 接收信号位图
     pub mask: SigSet,    // 信号掩码

@@ -8,16 +8,16 @@ pub const SS_DISABLE: usize = 1;
 // 用户通过 sigaltstack() 系统调用设置这个栈。然后注册 handler 时带上 SA_ONSTACK flag，内核就会在 ss_sp 上跑 handler 而不是普通用户栈
 
 pub struct SignalStack {
-    pub ss_sp: usize,    // 栈底
-    pub ss_flags: usize, // 是否启用  0 = 启用，1 = 禁用（SS_DISABLE）
-    pub ss_size: usize,  // 栈大小
+    pub ss_sp: usize,   // 栈底
+    pub ss_flags: i32,  // 是否启用  0 = 启用，1 = 禁用（SS_DISABLE）
+    pub ss_size: usize, // 栈大小
 }
 
 impl Default for SignalStack {
     fn default() -> Self {
         SignalStack {
             ss_sp: 0,
-            ss_flags: SS_DISABLE,
+            ss_flags: SS_DISABLE as i32,
             ss_size: 0,
         }
     }
@@ -25,17 +25,27 @@ impl Default for SignalStack {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
+// pub struct UContext {
+//     // 保存具体机器状态的上下文信息，这是一个机器相关的表示，包含了处理器的寄存器状态等信息
+//     pub uc_mcontext: SigContext,
+//     // 标志位。目前只有一种情况：如果是 sigreturn 恢复的上下文，这个值为 1（表示这个 UContext是从信号处理中回来的）。大多数时候是 0
+//     pub uc_flags: usize,
+//     /// 指向前一个 UContext 的指针。信号是可以嵌套的：handler 运行期间又来了另一个信号 → 内核再压一个 SigContext →形成链表。uc_link 就是这个链表的指针，指向上一次的 UContext
+//     pub uc_link: usize,
+//     // 此上下文中阻塞的信号集
+//     pub uc_sigmask: SigSet,
+//     // 当前上下文使用的栈信息,包含栈的基址、大小等信息
+//     pub uc_stack: SignalStack,
+// }
+// 修正后：对齐 Linux RISC-V ABI（字段顺序与 musl libc 的 __ucontext 一致）
+#[repr(C)]
 pub struct UContext {
-    // 保存具体机器状态的上下文信息，这是一个机器相关的表示，包含了处理器的寄存器状态等信息
-    pub uc_mcontext: SigContext,
-    // 标志位。目前只有一种情况：如果是 sigreturn 恢复的上下文，这个值为 1（表示这个 UContext是从信号处理中回来的）。大多数时候是 0
-    pub uc_flags: usize,
-    /// 指向前一个 UContext 的指针。信号是可以嵌套的：handler 运行期间又来了另一个信号 → 内核再压一个 SigContext →形成链表。uc_link 就是这个链表的指针，指向上一次的 UContext
-    pub uc_link: usize,
-    // 此上下文中阻塞的信号集
-    pub uc_sigmask: SigSet,
-    // 当前上下文使用的栈信息,包含栈的基址、大小等信息
-    pub uc_stack: SignalStack,
+    pub uc_flags: usize,         // offset 0
+    pub uc_link: usize,          // offset 8
+    pub uc_stack: SignalStack,   // offset 16 (24 bytes)
+    pub uc_sigmask: SigSet,      // offset ~40 (8 bytes)
+    pub uc_sig: [usize; 16],     // offset ~48 (128 bytes, 填充 sigset_t 空间)
+    pub uc_mcontext: SigContext, // offset ~176 ← 这才是正确的 mcontext 位置！
 }
 
 #[repr(C)]
@@ -47,5 +57,3 @@ pub struct SigContext {
     pub mask: SigSet,   // 记录原先的mask
     pub info: usize,    // 标志是否存在SIGINFO
 }
-
-//SigContext 是内核给自己留的"作业进度存档"，UContext 是内核展示给用户看的"作业进度报告"。

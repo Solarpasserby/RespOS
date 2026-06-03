@@ -261,13 +261,15 @@ impl TaskControlBlock {
         let current_sig_mask = self.op_sig_pending(|pending| pending.mask);
         let (sig_handler, sig_pending, sig_stack) = if is_thread {
             (
-                self.sig_handler.clone(),              // 共享同一张 handler 表
+                self.sig_handler.clone(), // 共享同一张 handler 表
                 SpinLock::new(SigPending::with_mask(current_sig_mask)), // 自己的队列，继承当前 mask
                 SpinLock::new(SignalStack::default()), // 自己的栈
             )
         } else {
             (
-                Arc::new(SpinLock::new(self.op_sig_handler(|handler| handler.clone()))),
+                Arc::new(SpinLock::new(
+                    self.op_sig_handler(|handler| handler.clone()),
+                )),
                 SpinLock::new(SigPending::with_mask(current_sig_mask)),
                 SpinLock::new(*self.sig_stack.lock()),
             )
@@ -527,7 +529,7 @@ impl TaskControlBlock {
     // 取信号栈
     pub fn sigstack(&self) -> Option<SignalStack> {
         let stack = *self.sig_stack.lock();
-        if stack.ss_flags == SS_DISABLE || stack.ss_size == 0 {
+        if stack.ss_flags == (SS_DISABLE as i32) || stack.ss_size == 0 {
             None
         } else {
             Some(stack)

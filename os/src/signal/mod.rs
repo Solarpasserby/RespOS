@@ -7,9 +7,9 @@ use crate::mm::copy_to_user;
 
 use crate::task::{current_task, exit_and_run_next};
 use sig_handler::{SigAction, SigActionFlag};
-pub use sig_info::{SiField, SigInfo};
-use sig_stack::SigContext;
-pub use sig_struct::{MAX_SIGNUM, Sig, SigSet};
+pub use sig_info::{LinuxSigInfo, SiField, SigInfo};
+use sig_stack::{SigContext, SignalStack, UContext};
+pub use sig_struct::{FrameFlags, MAX_SIGNUM, Sig, SigFrame, SigRTFrame, SigSet};
 
 // 每次 trap 返回用户态前调用，处理一个未决信号。
 //信号是异步的——进程可能在任何时刻收到信号，但处理时机必须统一。内核选在每个 trap 返回用户态之前检查信号，
@@ -18,7 +18,7 @@ pub use sig_struct::{MAX_SIGNUM, Sig, SigSet};
 pub fn handle_signal() {
     let task = current_task().unwrap();
 
-    while let Some((sig, _siginfo)) = task.op_sig_pending_mut(|p| p.fetch_signal()) {
+    while let Some((sig, siginfo)) = task.op_sig_pending_mut(|p| p.fetch_signal()) {
         let old_mask = task.op_sig_pending(|p| p.mask);
         let action = task.op_sig_handler(|h| h.get(sig));
 
@@ -81,9 +81,83 @@ pub fn handle_signal() {
                 );
                 exit_and_run_next(sig.raw() & 0x7F);
             }
-            // TODO: SA_SIGINFO 路径（info == 1）
-            //   需要在用户栈上额外压入 LinuxSigInfo 和 UContext，
-            //   并把 handler 的 a1、a2 参数指向它们。
+
+            // 决定向用户栈压入什么：
+            if action.flags.contains(SigActionFlag::SA_SIGINFO) {
+                // ===== SA_SIGINFO 路径 =====
+                // handler 签名: void handler(int sig, siginfo_t *info, void *ucontext)
+
+                // 1. 制作 SigContext（寄存器快照）
+                let sig_context = SigContext {
+                    x: trap_cx.x,
+                    sepc: trap_cx.sepc,
+                    mask: old_mask,
+                    info: 1, // ← 标记 RT 帧，sigreturn 据此恢复
+                };
+
+                // 2. 创建 LinuxSigInfo（用户态可读的 siginfo_t）
+                user_sp -= core::mem::size_of::<LinuxSigInfo>();
+                user_sp &= !0xF; // 16 字节对齐
+                let siginfo_sp = user_sp;
+                trap_cx.set_a1(siginfo_sp); // a1 = siginfo_t *info
+                let linux_siginfo: LinuxSigInfo = siginfo.into();
+
+                // 3. 创建 UContext
+                user_sp -= core::mem::size_of::<UContext>();
+                user_sp &= !0xF;
+                let ucontext_sp = user_sp;
+                trap_cx.set_a2(ucontext_sp); // a2 = ucontext_t *uc
+                let ucontext = UContext {
+                    uc_flags: 0,
+                    uc_link: 0,
+                    uc_stack: SignalStack::default(),
+                    uc_sigmask: old_mask,
+                    uc_sig: [0; 16],
+                    uc_mcontext: sig_context,
+                };
+
+                // 4. 创建 FrameFlags（栈底标记，sigreturn 用来区分帧类型）
+                user_sp -= core::mem::size_of::<FrameFlags>();
+                user_sp &= !0xF;
+
+                // 5. 一次性 copy_to_user 整个 SigRTFrame
+                let sig_rt_frame = SigRTFrame {
+                    flag: FrameFlags::rt_flag(),
+                    ucontext,
+                    siginfo: linux_siginfo,
+                };
+                if copy_to_user(
+                    user_sp as *mut SigRTFrame,
+                    &sig_rt_frame as *const SigRTFrame,
+                    1,
+                )
+                .is_err()
+                {
+                    error!(
+                        "[handle_signal] copy_to_user failed for signal {}, terminating task",
+                        sig.raw()
+                    );
+                    exit_and_run_next(sig.raw() & 0x7F);
+                }
+            } else {
+                // ===== 普通路径
+                // 只是多了一个 FrameFlags 标记
+                user_sp -= core::mem::size_of::<FrameFlags>();
+                user_sp &= !0xF;
+
+                let sig_frame = SigFrame {
+                    flag: FrameFlags::normal_flag(),
+                    sigcontext: sig_ctx, // info = 0
+                };
+                if copy_to_user(user_sp as *mut SigFrame, &sig_frame as *const SigFrame, 1).is_err()
+                {
+                    error!(
+                        "[handle_signal] copy_to_user failed for signal {}, terminating task",
+                        sig.raw()
+                    );
+                    exit_and_run_next(sig.raw() & 0x7F);
+                }
+            }
 
             // TODO: SA_RESTART 路径
             //   被信号打断的系统调用应返回 ERESTARTSYS，由内核自动重试。
