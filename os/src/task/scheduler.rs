@@ -78,7 +78,7 @@ pub fn remove_thread_group(tgid: usize) {
 #[unsafe(no_mangle)]
 pub fn switch_to_next_task() {
     let Some(current) = current_task() else {
-        return;
+        crate::arch::idle();
     };
 
     if let Some(next_task) = fetch_task() {
@@ -90,7 +90,10 @@ pub fn switch_to_next_task() {
             __switch(next_task_kernel_stack, current_task_ptr);
         }
         cleanup_dead_tasks();
+        return;
     }
+
+    crate::arch::idle();
 }
 
 /// 主动让出当前任务。
@@ -137,9 +140,9 @@ pub fn blocking_and_run_next() {
     }
 }
 
-fn switch_to_next_task_after_exit() {
+fn switch_to_next_task_after_exit() -> ! {
     let Some(current) = current_task() else {
-        return;
+        panic!("Unreachable!");
     };
 
     if let Some(next_task) = fetch_task() {
@@ -152,12 +155,13 @@ fn switch_to_next_task_after_exit() {
             __switch(next_task_kernel_stack, current_task_ptr);
         }
     }
+    panic!("Unreachable!");
 }
 
 #[unsafe(no_mangle)]
-pub fn exit_and_run_next(exit_code: i32) {
+pub fn exit_and_run_next(exit_code: i32) -> ! {
     let Some(task) = current_task() else {
-        return;
+        crate::arch::idle();
     };
     task_exit(task, exit_code);
     switch_to_next_task_after_exit();

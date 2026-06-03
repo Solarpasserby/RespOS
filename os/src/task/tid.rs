@@ -14,7 +14,9 @@ pub struct TidHandle(pub usize);
 
 impl Drop for TidHandle {
     fn drop(&mut self) {
-        TID_ALLOCATOR.lock().dealloc(self.0);
+        // Keep task ids monotonic for now. Reusing a tid immediately after a
+        // thread exits can race with weak task-manager entries and futex wakeup
+        // paths that are still keyed by tid.
     }
 }
 
@@ -47,6 +49,7 @@ impl TidAllocator {
         }
     }
 
+    #[allow(dead_code)]
     pub fn dealloc(&mut self, tid: usize) {
         assert!(tid < self.current);
         assert!(

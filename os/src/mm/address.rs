@@ -5,11 +5,25 @@ use crate::config::{KERNEL_BASE, PAGE_SIZE, PAGE_SIZE_BITS};
 use core::fmt::{self, Debug, Formatter};
 use core::ops::Sub;
 
-// 使用 sv39 页表模式
-pub const PA_WIDTH_SV39: usize = 56;
-pub const VA_WIDTH_SV39: usize = 39;
-pub const PPN_WIDTH_SV39: usize = PA_WIDTH_SV39 - PAGE_SIZE_BITS;
-pub const VPN_WIDTH_SV39: usize = VA_WIDTH_SV39 - PAGE_SIZE_BITS;
+// 架构相关的地址宽度常量
+#[cfg(target_arch = "riscv64")]
+pub const PA_WIDTH: usize = 56;
+#[cfg(target_arch = "riscv64")]
+pub const VA_WIDTH: usize = 39;
+
+#[cfg(target_arch = "loongarch64")]
+pub const PA_WIDTH: usize = 48;
+#[cfg(target_arch = "loongarch64")]
+pub const VA_WIDTH: usize = 39;
+
+pub const PPN_WIDTH: usize = PA_WIDTH - PAGE_SIZE_BITS;
+pub const VPN_WIDTH: usize = VA_WIDTH - PAGE_SIZE_BITS;
+
+// 保留 SV39 名称供 rv64 页表代码使用
+pub use PA_WIDTH as PA_WIDTH_SV39;
+pub use PPN_WIDTH as PPN_WIDTH_SV39;
+pub use VA_WIDTH as VA_WIDTH_SV39;
+pub use VPN_WIDTH as VPN_WIDTH_SV39;
 
 /// 物理地址
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -51,22 +65,22 @@ impl Debug for PhysPageNum {
 
 impl From<usize> for PhysAddr {
     fn from(value: usize) -> Self {
-        Self(value & ((1 << PA_WIDTH_SV39) - 1))
+        Self(value & ((1 << PA_WIDTH) - 1))
     }
 }
 impl From<usize> for PhysPageNum {
     fn from(value: usize) -> Self {
-        Self(value & ((1 << PPN_WIDTH_SV39) - 1))
+        Self(value & ((1 << PPN_WIDTH) - 1))
     }
 }
 impl From<usize> for VirtAddr {
     fn from(value: usize) -> Self {
-        Self(value & ((1 << VA_WIDTH_SV39) - 1))
+        Self(value & ((1 << VA_WIDTH) - 1))
     }
 }
 impl From<usize> for VirtPageNum {
     fn from(value: usize) -> Self {
-        Self(value & ((1 << VPN_WIDTH_SV39) - 1))
+        Self(value & ((1 << VPN_WIDTH) - 1))
     }
 }
 
@@ -107,11 +121,10 @@ impl From<PhysPageNum> for usize {
         value.0
     }
 }
-// TODO: 此处做了修改，之后某些地址越界的问题可能是这里导致的
 impl From<VirtAddr> for usize {
     fn from(v: VirtAddr) -> Self {
-        // 符号拓展
-        (((v.0 << 25) as isize) >> 25) as usize
+        let shift = 64 - VA_WIDTH;
+        (((v.0 << shift) as isize) >> shift) as usize
     }
 }
 impl From<VirtPageNum> for usize {
@@ -180,12 +193,26 @@ impl VirtAddr {
 }
 
 impl PhysAddr {
+    #[cfg(target_arch = "loongarch64")]
+    fn kernel_addr(self) -> usize {
+        if crate::arch::paging_enabled() {
+            self.0 + KERNEL_BASE
+        } else {
+            self.0
+        }
+    }
+
+    #[cfg(target_arch = "riscv64")]
+    fn kernel_addr(self) -> usize {
+        self.0 + KERNEL_BASE
+    }
+
     pub fn get_mut<T>(&self) -> &'static mut T {
-        let ptr = (self.0 + KERNEL_BASE) as *mut T;
+        let ptr = self.kernel_addr() as *mut T;
         unsafe { ptr.as_mut().unwrap() }
     }
     pub fn get_ref<T>(&self) -> &'static T {
-        let ptr = (self.0 + KERNEL_BASE) as *const T;
+        let ptr = self.kernel_addr() as *const T;
         unsafe { ptr.as_ref().unwrap() }
     }
 }
@@ -194,21 +221,18 @@ impl PhysAddr {
 impl PhysPageNum {
     pub fn get_pte_array(&self) -> &'static mut [PageTableEntry] {
         let pa = PhysAddr::from(*self);
-        let va = VirtAddr::from(pa.0 + KERNEL_BASE);
-        let ptr = usize::from(va) as *mut PageTableEntry;
+        let ptr = pa.kernel_addr() as *mut PageTableEntry;
         unsafe { core::slice::from_raw_parts_mut(ptr, 512) }
     }
     pub fn get_bytes_array(&self) -> &'static mut [u8] {
         let pa = PhysAddr::from(*self);
-        let va = VirtAddr::from(pa.0 + KERNEL_BASE);
-        let ptr = usize::from(va) as *mut u8;
+        let ptr = pa.kernel_addr() as *mut u8;
         unsafe { core::slice::from_raw_parts_mut(ptr, 4096) }
     }
     /// Get mutable reference to T on `PhysPageNum`
     pub fn get_mut<T>(&self) -> &'static mut T {
         let pa = PhysAddr::from(*self);
-        let va = VirtAddr::from(pa.0 + KERNEL_BASE);
-        let ptr = usize::from(va) as *mut T;
+        let ptr = pa.kernel_addr() as *mut T;
         unsafe { &mut *ptr }
     }
 }
@@ -227,7 +251,7 @@ impl Sub for VirtPageNum {
     type Output = usize;
 
     fn sub(self, rhs: Self) -> Self::Output {
-        let sign_bit = 1usize << (VPN_WIDTH_SV39 - 1);
+        let sign_bit = 1usize << (VPN_WIDTH - 1);
         assert_eq!(
             self.0 & sign_bit,
             rhs.0 & sign_bit,

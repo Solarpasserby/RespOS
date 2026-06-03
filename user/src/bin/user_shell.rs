@@ -55,7 +55,6 @@ fn run_builtin_cd(command: &str) -> bool {
 const DIRENT64_HEADER_SIZE: usize = 19;
 
 const DT_DIR: u8 = 4; // InodeType::Directory as u8
-// const DT_REG: u8 = 8; // InodeType::Regular as u8
 
 fn run_builtin_runall(command: &str) -> bool {
     let mut parts = command.split_whitespace();
@@ -95,11 +94,10 @@ fn run_builtin_runall(command: &str) -> bool {
         }
         let d_type = buf[offset + 18];
         let name_start = offset + DIRENT64_HEADER_SIZE;
-        let name_end = name_start
-            + buf[name_start..offset + reclen]
-                .iter()
-                .position(|&ch| ch == 0)
-                .unwrap_or(offset + reclen - name_start);
+        let name_end = buf[name_start..offset + reclen]
+            .iter()
+            .position(|&ch| ch == 0)
+            .unwrap_or(offset + reclen);
         if name_end > name_start {
             if let Ok(name) = str::from_utf8(&buf[name_start..name_end]) {
                 if name != "." && name != ".." && d_type != DT_DIR {

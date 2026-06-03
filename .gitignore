@@ -4,6 +4,10 @@ img/
 testsuit/
 examples/
 .cargo-home/
+examples/
+testsuit/
+review/
+.claude/
 CLAUDE.md
 .claude/
 os/.cargo/

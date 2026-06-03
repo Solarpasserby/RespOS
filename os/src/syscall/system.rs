@@ -33,12 +33,17 @@ impl UtsName {
 
 impl Default for UtsName {
     fn default() -> Self {
+        #[cfg(target_arch = "riscv64")]
+        let machine = "riscv64";
+        #[cfg(target_arch = "loongarch64")]
+        let machine = "loongarch64";
+
         Self {
             sysname: Self::from_str("RespOS"),
             nodename: Self::from_str("LAPTOP"),
             release: Self::from_str("6.10.0-dev"), // 为运行 glibc 程序所设
             version: Self::from_str("Resp0S 0.1.0"),
-            machine: Self::from_str("riscv64"),
+            machine: Self::from_str(machine),
             domainname: Self::from_str("localdomain"),
         }
     }
