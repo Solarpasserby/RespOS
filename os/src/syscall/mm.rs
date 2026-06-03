@@ -84,8 +84,8 @@ pub fn sys_mmap(
         }
         task.op_memory_set_write(|memory_set| {
             #[cfg(target_arch = "loongarch64")]
-            let start =
-                memory_set.mmap_framed(fixed_addr, map_len, permission, replace, noreplace)?;
+            let start = memory_set
+                .mmap_lazy_anonymous(fixed_addr, map_len, permission, replace, noreplace)?;
             #[cfg(target_arch = "riscv64")]
             let start = memory_set
                 .mmap_lazy_anonymous(fixed_addr, map_len, permission, replace, noreplace)?;
@@ -160,6 +160,47 @@ pub fn sys_mprotect(addr: usize, len: usize, prot: u32) -> SysResult<usize> {
         memory_set.flush_tlb();
         Ok(0)
     })
+}
+
+/// 系统调用 sys_madvise
+///
+/// 当前内核没有页回收器，也没有 per-VMA 行为标志；这里先按 Linux ABI 接受 libc
+/// 常见 advice，尤其是 glibc pthread 栈缓存路径使用的 MADV_DONTNEED/MADV_FREE。
+pub fn sys_madvise(addr: usize, len: usize, advice: i32) -> SysResult<usize> {
+    if addr % PAGE_SIZE != 0 {
+        return Err(Errno::EINVAL);
+    }
+    if len == 0 {
+        return Ok(0);
+    }
+    let _end = addr.checked_add(len).ok_or(Errno::EINVAL)?;
+
+    match advice {
+        0  // MADV_NORMAL
+        | 1  // MADV_RANDOM
+        | 2  // MADV_SEQUENTIAL
+        | 3  // MADV_WILLNEED
+        | 4  // MADV_DONTNEED
+        | 8  // MADV_FREE
+        | 10 // MADV_DONTFORK
+        | 11 // MADV_DOFORK
+        | 12 // MADV_MERGEABLE
+        | 13 // MADV_UNMERGEABLE
+        | 14 // MADV_HUGEPAGE
+        | 15 // MADV_NOHUGEPAGE
+        | 16 // MADV_DONTDUMP
+        | 17 // MADV_DODUMP
+        | 18 // MADV_WIPEONFORK
+        | 19 // MADV_KEEPONFORK
+        | 20 // MADV_COLD
+        | 21 // MADV_PAGEOUT
+        | 22 // MADV_POPULATE_READ
+        | 23 // MADV_POPULATE_WRITE
+        | 25 // MADV_COLLAPSE
+        | 26 // MADV_GUARD_INSTALL
+        | 27 => Ok(0), // MADV_GUARD_REMOVE
+        _ => Err(Errno::EINVAL),
+    }
 }
 
 bitflags! {

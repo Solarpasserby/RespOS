@@ -15,6 +15,9 @@ use crate::task::{
 };
 use alloc::vec::Vec;
 
+#[cfg(target_arch = "loongarch64")]
+const LOONGARCH_PTHREAD_TRACE: bool = false;
+
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct RUsage {
@@ -190,6 +193,24 @@ pub fn sys_clone(
     let new_task = current_task.clone_(flags);
     let new_tid = new_task.tid();
 
+    #[cfg(target_arch = "loongarch64")]
+    if LOONGARCH_PTHREAD_TRACE && flags.contains(CloneFlags::CLONE_THREAD) {
+        let mut tls_head = 0usize;
+        let _ = copy_from_user(&mut tls_head as *mut usize, tls as *const usize, 1);
+        println!(
+            "[la-pthread-trace] clone parent_tid={} parent_tgid={} new_tid={} flags={:?} stack={:#x} ptid={:#x} ctid={:#x} tls={:#x} tls_head={:#x}",
+            current_task.tid(),
+            current_task.tgid(),
+            new_tid,
+            flags,
+            stack,
+            ptid,
+            ctid,
+            tls,
+            tls_head
+        );
+    }
+
     // CLONE_PARENT_SETTID: 在父进程地址空间写入子进程 tid
     if flags.contains(CloneFlags::CLONE_PARENT_SETTID) && ptid != 0 {
         let tid_val = new_tid as u32;
@@ -348,7 +369,7 @@ pub fn sys_setpriority(which: usize, who: usize, prio: isize) -> SysResult<usize
 /// 系统调用 sys-getpid
 pub fn sys_getpid() -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
-    Ok(task.tid())
+    Ok(task.tgid())
 }
 
 /// 系统调用 sys-getppid

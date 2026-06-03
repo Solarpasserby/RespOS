@@ -166,17 +166,26 @@ pub fn open_last_lookups(
     flags: usize,
     _mode: usize, // TODO: mode 变量未被使用
 ) -> SysResult<Arc<File>> {
+    let flags = OpenFlags::from(flags);
+
     // 目标为根目录或工作目录
     if nd.path_segments.is_empty() {
+        let path = Path::new(nd.mnt.clone(), nd.dentry.clone());
+        let inode = nd.dentry.get_inode();
+        if flags.contains(OpenFlags::O_TMPFILE) {
+            if inode.node_type() != InodeType::Directory {
+                return Err(Errno::ENOTDIR);
+            }
+            return Ok(Arc::new(File::new_tmpfile(path, inode, flags)));
+        }
         return Ok(Arc::new(File::new(
-            Path::new(nd.mnt.clone(), nd.dentry.clone()),
-            nd.dentry.get_inode(),
-            OpenFlags::from(flags),
+            path,
+            inode,
+            flags,
         )));
     }
 
     let name = nd.path_segments[nd.depth];
-    let flags = OpenFlags::from(flags);
 
     let dentry = if name == "." {
         nd.dentry.clone()
@@ -188,6 +197,16 @@ pub fn open_last_lookups(
             // 成功
             Ok(dentry) => {
                 let inode = dentry.get_inode();
+                if flags.contains(OpenFlags::O_TMPFILE) {
+                    if inode.node_type() != InodeType::Directory {
+                        return Err(Errno::ENOTDIR);
+                    }
+                    return Ok(Arc::new(File::new_tmpfile(
+                        Path::new(nd.mnt.clone(), dentry),
+                        inode,
+                        flags,
+                    )));
+                }
                 if flags.contains(OpenFlags::O_CREATE | OpenFlags::O_EXCL) {
                     return Err(Errno::EEXIST);
                 }

@@ -20,6 +20,7 @@ struct FileInner {
     path: Arc<Path>,
     flags: OpenFlags,
     cache: Option<FileCache>,
+    write_back: bool,
 }
 
 struct FileCache {
@@ -55,8 +56,7 @@ impl FileCache {
     fn ensure_page_loaded(
         &mut self,
         page_idx: usize,
-        inode: &Arc<dyn InodeOp>,
-        path: &str,
+        lower: Option<(&Arc<dyn InodeOp>, &str)>,
     ) -> SysResult<()> {
         if self.pages.get(page_idx).and_then(|page| page.as_ref()).is_some() {
             return Ok(());
@@ -65,7 +65,7 @@ impl FileCache {
         self.ensure_page_slots((page_idx + 1) * PAGE_SIZE);
         let mut page = alloc::vec![0u8; PAGE_SIZE];
         let page_start = page_idx * PAGE_SIZE;
-        if page_start < self.len {
+        if page_start < self.len && let Some((inode, path)) = lower {
             match inode.read_at(path, page_start, &mut page) {
                 Ok(_) | Err(Errno::ENOENT) => {}
                 Err(err) => return Err(err),
@@ -79,8 +79,7 @@ impl FileCache {
         &mut self,
         offset: usize,
         buf: &mut [u8],
-        inode: &Arc<dyn InodeOp>,
-        path: &str,
+        lower: Option<(&Arc<dyn InodeOp>, &str)>,
     ) -> SysResult<usize> {
         let mut copied = 0;
         let mut pos = offset.min(self.len);
@@ -89,7 +88,7 @@ impl FileCache {
             let page_idx = pos / PAGE_SIZE;
             let page_off = pos % PAGE_SIZE;
             let n = (end - pos).min(PAGE_SIZE - page_off);
-            self.ensure_page_loaded(page_idx, inode, path)?;
+            self.ensure_page_loaded(page_idx, lower)?;
             let page = self.pages[page_idx].as_ref().unwrap();
             buf[copied..copied + n].copy_from_slice(&page[page_off..page_off + n]);
             pos += n;
@@ -165,6 +164,20 @@ impl File {
                 path,
                 flags,
                 cache,
+                write_back: ty == InodeType::Regular,
+            }),
+        }
+    }
+
+    pub fn new_tmpfile(path: Arc<Path>, inode: Arc<dyn InodeOp>, flags: OpenFlags) -> Self {
+        Self {
+            inode,
+            inner: Mutex::new(FileInner {
+                offset: 0,
+                path,
+                flags,
+                cache: Some(FileCache::new(0)),
+                write_back: false,
             }),
         }
     }
@@ -172,10 +185,12 @@ impl File {
     pub fn read_all(&self) -> SysResult<Vec<u8>> {
         let mut inner = self.inner.lock();
         let path = inner.path.abs_path();
+        let write_back = inner.write_back;
 
         if let Some(cache) = inner.cache.as_mut() {
             let mut data = alloc::vec![0u8; cache.len()];
-            let n = cache.read_at(0, &mut data, &self.inode, &path)?;
+            let lower = write_back.then_some((&self.inode, path.as_str()));
+            let n = cache.read_at(0, &mut data, lower)?;
             data.truncate(n);
             return Ok(data);
         }
@@ -221,8 +236,9 @@ impl FileOp for File {
         let mut inner = self.inner.lock();
         let path = inner.path.abs_path();
         let offset = inner.offset;
+        let lower = inner.write_back.then_some((&self.inode, path.as_str()));
         let n = if let Some(cache) = inner.cache.as_mut() {
-            cache.read_at(offset, buf, &self.inode, &path)?
+            cache.read_at(offset, buf, lower)?
         } else {
             self.inode.read_at(&path, offset, buf)?
         };
@@ -242,11 +258,14 @@ impl FileOp for File {
         }
 
         let offset = inner.offset;
+        let write_back = inner.write_back;
         let n = if let Some(cache) = inner.cache.as_mut() {
             let n = cache.write_at(offset, buf)?;
-            match self.inode.write_at(&path, offset, buf) {
-                Ok(_) | Err(Errno::ENOENT) => {}
-                Err(err) => return Err(err),
+            if write_back {
+                match self.inode.write_at(&path, offset, buf) {
+                    Ok(_) | Err(Errno::ENOENT) => {}
+                    Err(err) => return Err(err),
+                }
             }
             n
         } else {
@@ -302,6 +321,7 @@ bitflags::bitflags! {
         const O_APPEND = 1 << 10;
         const O_DIRECTORY = 1 << 16;
         const O_CLOEXEC = 1 << 19;
+        const O_TMPFILE = 0x410000;
     }
 }
 

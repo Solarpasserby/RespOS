@@ -369,6 +369,7 @@ pub mod mmu {
     #[inline(always)]
     pub unsafe fn flush_tlb() {
         unsafe {
+            core::arch::asm!("dbar 0", options(nostack));
             core::arch::asm!("invtlb 0x0, $r0, $r0", options(nostack));
             core::arch::asm!("invtlb 0x3, $r0, $r0", options(nostack));
             core::arch::asm!("ibar 0", options(nostack));
