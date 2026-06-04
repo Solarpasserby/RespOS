@@ -22,7 +22,7 @@ use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use bitflags::bitflags;
-use core::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use spin::RwLock;
 
 /// 线程 tid 地址信息，用于 pthread 线程退出同步。
@@ -75,6 +75,11 @@ pub struct TaskControlBlock {
 
     // 线程同步
     tid_address: SpinLock<TidAddress>,
+    // ===== 新增：可中断状态标记 =====
+    // 标记当前线程是否处于"可被信号中断"的阻塞中（futex_wait / sigtimedwait / wait4）
+    interruptible: AtomicBool,
+    // 信号中断标记：当线程在 interruptible 状态下被信号唤醒时置为 true
+    interrupted: AtomicBool,
 }
 
 impl core::fmt::Debug for TaskControlBlock {
@@ -120,12 +125,17 @@ impl TaskControlBlock {
 
             // 线程同步
             tid_address: SpinLock::new(TidAddress::new()),
+
+            // 可中断状态
+            interruptible: AtomicBool::new(false),
+            interrupted: AtomicBool::new(false),
         }
     }
 
     /// 新建任务
     ///
     /// 事实上只有初始任务会借由这个方法产生
+    ///
     pub fn init(elf_data: &[u8]) -> Arc<Self> {
         let tid: TidHandle = tid_alloc();
         let tgid = tid.0;
@@ -175,6 +185,10 @@ impl TaskControlBlock {
 
             // 线程同步
             tid_address: SpinLock::new(TidAddress::new()),
+
+            // 可中断状态
+            interruptible: AtomicBool::new(false),
+            interrupted: AtomicBool::new(false),
         });
 
         // 在线程组中添加该线程
@@ -304,6 +318,10 @@ impl TaskControlBlock {
 
             // 线程同步
             tid_address: SpinLock::new(TidAddress::new()),
+
+            // 可中断状态
+            interruptible: AtomicBool::new(false),
+            interrupted: AtomicBool::new(false),
         });
 
         // 修改任务异常上下文
@@ -418,6 +436,47 @@ impl TaskControlBlock {
     }
     pub fn is_blocked(&self) -> bool {
         self.status() == TaskStatus::Blocked
+    }
+    // ===== 可中断状态管理 =====
+
+    /// 进入可中断的阻塞前调用
+    pub fn set_interruptible(&self, val: bool) {
+        self.interruptible.store(val, Ordering::Relaxed);
+    }
+
+    /// 是否处于可中断状态
+    fn is_interruptible(&self) -> bool {
+        self.interruptible.load(Ordering::Relaxed)
+    }
+
+    /// 信号中断唤醒后检查
+    pub fn is_interrupted(&self) -> bool {
+        self.interrupted.load(Ordering::Relaxed)
+    }
+
+    /// 清除中断标记（处理完 EINTR 后调用）
+    pub fn clear_interrupted(&self) {
+        self.interrupted.store(false, Ordering::Relaxed);
+    }
+
+    /// ★ 核心判断：当前线程是否应该被 pending 信号中断
+    /// 条件：
+    ///   1. 线程处于可中断状态 (interruptible == true)
+    ///   2. 存在 pending 信号没有被掩码屏蔽
+    ///   3. 该信号的处理程序不是 SIG_IGN（sa_handler != 1）
+    pub fn check_signal_interrupt(&self) -> bool {
+        use crate::signal::sig_handler::SIG_IGN;
+        if !self.is_interruptible() {
+            return false;
+        }
+        // find_signal 已经帮我们跳过了被 mask 屏蔽的信号
+        if let Some(sig) = self.op_sig_pending(|pending| pending.find_signal()) {
+            let action = self.op_sig_handler(|handler| handler.get(sig));
+            // sa_handler == SIG_IGN(1) → 信号被显式忽略，不需要打断
+            action.sa_handler != SIG_IGN
+        } else {
+            false
+        }
     }
     pub fn is_exited(&self) -> bool {
         self.status() == TaskStatus::Exited
@@ -537,17 +596,71 @@ impl TaskControlBlock {
     }
 
     // 信号入口：给线程发送信号
+    // pub fn receive_siginfo(&self, siginfo: SigInfo, thread_level: bool) {
+    //     let sig = crate::signal::Sig::from(siginfo.signo);
+    //     match thread_level {
+    //         true => {
+    //             self.op_sig_pending_mut(|pending| pending.add_signal(siginfo));
+    //             // SIGKILL/SIGSTOP 必须立即唤醒阻塞的线程，否则信号永远不会被处理
+    //             if sig.is_kill_or_stop() && self.is_blocked() {
+    //                 crate::task::scheduler::wakeup_task(self.tid());
+    //             }
+    //         }
+    //         false => {
+    //             let target = self.op_thread_group(|tg| {
+    //                 let mut fallback = None;
+    //                 let mut leader = None;
+    //                 for task in tg.iter() {
+    //                     if fallback.is_none() {
+    //                         fallback = Some(task.clone());
+    //                     }
+    //                     if task.is_process_leader() {
+    //                         leader = Some(task.clone());
+    //                     }
+    //                     let can_take_now = task.op_sig_pending(|pending| {
+    //                         !pending.mask.contain_signal(sig) || sig.is_kill_or_stop()
+    //                     });
+    //                     if can_take_now {
+    //                         return Some(task.clone());
+    //                     }
+    //                 }
+    //                 leader.or(fallback)
+    //             });
+    //             if let Some(task) = target {
+    //                 task.op_sig_pending_mut(|pending| pending.add_signal(siginfo));
+    //                 // SIGKILL/SIGSTOP 必须立即唤醒阻塞的线程
+    //                 if sig.is_kill_or_stop() && task.is_blocked() {
+    //                     crate::task::scheduler::wakeup_task(task.tid());
+    //                 }
+    //             }
+    //         }
+    //     }
+    // }
     pub fn receive_siginfo(&self, siginfo: SigInfo, thread_level: bool) {
         let sig = crate::signal::Sig::from(siginfo.signo);
+
         match thread_level {
+            // ===== 线程级信号 =====
             true => {
                 self.op_sig_pending_mut(|pending| pending.add_signal(siginfo));
-                // SIGKILL/SIGSTOP 必须立即唤醒阻塞的线程，否则信号永远不会被处理
-                if sig.is_kill_or_stop() && self.is_blocked() {
+
+                // ★ 改动：不只是 KILL/STOP 才唤醒，而是调用 check_signal_interrupt
+                if self.check_signal_interrupt() {
+                    self.interrupted.store(true, Ordering::Relaxed);
+                    if self.is_blocked() {
+                        crate::task::scheduler::wakeup_task(self.tid());
+                    }
+                }
+                // 保留原来的 KILL/STOP 立即唤醒逻辑作为兜底
+                else if sig.is_kill_or_stop() && self.is_blocked() {
+                    self.interrupted.store(true, Ordering::Relaxed);
                     crate::task::scheduler::wakeup_task(self.tid());
                 }
             }
+
+            // ===== 进程级信号 =====
             false => {
+                // 原来的逻辑：找线程组中第一个能接收的线程
                 let target = self.op_thread_group(|tg| {
                     let mut fallback = None;
                     let mut leader = None;
@@ -567,10 +680,18 @@ impl TaskControlBlock {
                     }
                     leader.or(fallback)
                 });
+
                 if let Some(task) = target {
                     task.op_sig_pending_mut(|pending| pending.add_signal(siginfo));
-                    // SIGKILL/SIGSTOP 必须立即唤醒阻塞的线程
-                    if sig.is_kill_or_stop() && task.is_blocked() {
+
+                    // ★ 改动：同样使用 check_signal_interrupt
+                    if task.check_signal_interrupt() {
+                        task.interrupted.store(true, Ordering::Relaxed);
+                        if task.is_blocked() {
+                            crate::task::scheduler::wakeup_task(task.tid());
+                        }
+                    } else if sig.is_kill_or_stop() && task.is_blocked() {
+                        task.interrupted.store(true, Ordering::Relaxed);
                         crate::task::scheduler::wakeup_task(task.tid());
                     }
                 }

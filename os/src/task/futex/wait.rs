@@ -1,6 +1,6 @@
 // os/src/task/futex/wait.rs
 
-use super::queue::{futex_hash_idx, FutexKey, FutexQ, FUTEX_QUEUES};
+use super::queue::{FUTEX_QUEUES, FutexKey, FutexQ, futex_hash_idx};
 use crate::mm::copy_from_user;
 use crate::syscall::{Errno, SysResult};
 use crate::task::scheduler::{prepare_current_task_blocked, switch_to_next_task, wakeup_task};
@@ -78,8 +78,23 @@ fn futex_wait_common(
     }
 
     trace_futex("wait", &key, expected_val, bitset as usize);
-    switch_to_next_task();
 
+    // ★ 标记可中断状态：信号到达时可以打断我
+    task.set_interruptible(true);
+    switch_to_next_task();
+    task.set_interruptible(false);
+    // ★ 醒来后检查：是 futex_wake 叫醒的，还是信号打断的？
+    if task.is_interrupted() {
+        task.clear_interrupted();
+        let mut queues = FUTEX_QUEUES.lock();
+        queues
+            .bucket_by_idx(hash_idx)
+            .retain(|q| !(q.tid == task.tid() && q.key == key));
+        trace_futex("wait-eintr", &key, expected_val, bitset as usize);
+        return Err(Errno::EINTR);
+    }
+
+    // 正常路径：被 futex_wake 唤醒
     let mut queues = FUTEX_QUEUES.lock();
     queues
         .bucket_by_idx(hash_idx)
@@ -88,12 +103,7 @@ fn futex_wait_common(
     Ok(0)
 }
 
-fn futex_wake_common(
-    uaddr: usize,
-    nr_wake: u32,
-    bitset: u32,
-    private: bool,
-) -> SysResult<usize> {
+fn futex_wake_common(uaddr: usize, nr_wake: u32, bitset: u32, private: bool) -> SysResult<usize> {
     if bitset == 0 {
         return Err(Errno::EINVAL);
     }
