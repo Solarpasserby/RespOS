@@ -156,23 +156,28 @@ pub fn sys_lseek(fd: usize, offset: isize, whence: usize) -> SysResult<usize> {
 
 /// 系统调用 sys-fcntl
 pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SysResult<usize> {
+    const F_DUPFD: usize = 0;
     const F_GETFD: usize = 1;
     const F_SETFD: usize = 2;
     const F_GETFL: usize = 3;
     const F_SETFL: usize = 4;
+    const F_DUPFD_CLOEXEC: usize = 1030;
 
     let task = current_task().expect("[kernel] current task is None.");
-    let mut fd_entry = task.get_fd_entry(fd)?;
+    let fd_entry = task.get_fd_entry(fd)?;
 
-    // TODO[ABI-COMPAT]: 目前还没有记录 close-on-exec 标志；F_SETFL 也暂时接受整组
-    // 已保存标志，而不是只允许修改 Linux 规定的可变标志位。
     match cmd {
+        F_DUPFD | F_DUPFD_CLOEXEC => {
+            // close-on-exec 尚未实现, F_DUPFD_CLOEXEC 与 F_DUPFD 暂时等效
+            task.alloc_fd_from(fd_entry, arg)
+        }
         F_GETFD => Ok(0),
         F_SETFD => Ok(0),
         F_GETFL => Ok(fd_entry.get_flags().bits() as usize),
         F_SETFL => {
-            fd_entry.set_flags(OpenFlags::from(arg));
-            task.set_fd(fd, fd_entry)?;
+            let mut entry = fd_entry;
+            entry.set_flags(OpenFlags::from(arg));
+            task.set_fd(fd, entry)?;
             Ok(0)
         }
         _ => Err(Errno::EINVAL),

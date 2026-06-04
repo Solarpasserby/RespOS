@@ -41,26 +41,46 @@ impl FdTable {
     // 找到一个空位分配 FdEntry，返回 FdTable 中 Fd 的下标
     pub fn alloc_fd(&self, fd_entry: FdEntry) -> SysResult<usize> {
         let mut table = self.table.lock();
-        let next_fd = self.next_fd.load(Ordering::Relaxed);
+        let min_fd = self.next_fd.load(Ordering::Relaxed);
+        Self::alloc_fd_locked(&mut table, fd_entry, min_fd, &self.next_fd)
+    }
 
+    /// 从 min_fd 开始找空位分配，用于 F_DUPFD
+    pub fn alloc_fd_from(&self, fd_entry: FdEntry, min_fd: usize) -> SysResult<usize> {
+        let mut table = self.table.lock();
+        Self::alloc_fd_locked(&mut table, fd_entry, min_fd, &self.next_fd)
+    }
+
+    fn alloc_fd_locked(
+        table: &mut Vec<Option<FdEntry>>,
+        fd_entry: FdEntry,
+        min_fd: usize,
+        next_fd: &AtomicUsize,
+    ) -> SysResult<usize> {
+        if min_fd >= FTB_RLIMIT {
+            return Err(Errno::EINVAL);
+        }
+        // 扩展表以容纳 min_fd
+        if min_fd >= table.len() {
+            table.resize_with(min_fd + 1, || None);
+        }
         if let Some((fd, it)) = table
             .iter_mut()
             .enumerate()
-            .skip(next_fd)
+            .skip(min_fd)
             .find(|(_, it)| it.is_none())
         {
             *it = Some(fd_entry);
-            let next_fd = Self::update_next_fd(&table, fd + 1);
-            self.next_fd.store(next_fd, Ordering::Relaxed);
+            let nf = Self::update_next_fd(table, fd + 1);
+            next_fd.store(nf, Ordering::Relaxed);
             return Ok(fd);
         }
         if table.len() >= FTB_RLIMIT {
             return Err(Errno::EMFILE);
         }
-
         let fd = table.len();
         table.push(Some(fd_entry));
-        self.next_fd.store(table.len(), Ordering::Relaxed);
+        next_fd.store(table.len(), Ordering::Relaxed);
         Ok(fd)
     }
 

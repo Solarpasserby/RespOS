@@ -586,6 +586,9 @@ impl TaskControlBlock {
     pub fn alloc_fd(&self, fd_entry: FdEntry) -> SysResult<usize> {
         self.fd_table.lock().alloc_fd(fd_entry)
     }
+    pub fn alloc_fd_from(&self, fd_entry: FdEntry, min_fd: usize) -> SysResult<usize> {
+        self.fd_table.lock().alloc_fd_from(fd_entry, min_fd)
+    }
     pub fn set_fd(&self, fd: usize, fd_entry: FdEntry) -> SysResult<Option<FdEntry>> {
         self.fd_table.lock().set_fd(fd, fd_entry)
     }
