@@ -14,6 +14,7 @@ use crate::task::{
     exit_group_and_run_next, yield_current_task,
 };
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 #[cfg(target_arch = "loongarch64")]
@@ -31,7 +32,12 @@ fn shebang_busybox_path(script_path: &str) -> &'static str {
     }
 }
 
-fn shebang_args(script_path: &str, data: &[u8], old_args: &[String]) -> Option<(String, Vec<String>)> {
+// 判断执行文件是否为 shell 脚本，若为 shell 脚本，则更改执行环境和参数
+fn shebang_args(
+    script_path: &str,
+    data: &[u8],
+    old_args: &[String],
+) -> Option<(String, Vec<String>)> {
     if !data.starts_with(b"#!") {
         return None;
     }
@@ -408,7 +414,8 @@ pub fn sys_wait4(
             }
 
             task.op_children_mut(|children| {
-                children.remove(&child_tid);
+                let child = children.remove(&child_tid).unwrap();
+                assert!(Arc::strong_count(&child) == 1, "task is danger!");
             });
 
             warn! {"[kernel] (wait4) parent:{}, child:{}.", task.tid(), child_tid};

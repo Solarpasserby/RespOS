@@ -14,9 +14,11 @@ pub struct TidHandle(pub usize);
 
 impl Drop for TidHandle {
     fn drop(&mut self) {
-        // Keep task ids monotonic for now. Reusing a tid immediately after a
-        // thread exits can race with weak task-manager entries and futex wakeup
-        // paths that are still keyed by tid.
+        // TODO：
+        // 暂时保持任务号单调递增。在线程退出后立刻复用 tid
+        // 可能与 task-manager 中的 weak 条目及 futex wakeup 路径
+        // 产生竞态——这些路径仍在使用 tid 作为索引键
+        // 之后可以考虑在进程回收时统一回收线程号
     }
 }
 

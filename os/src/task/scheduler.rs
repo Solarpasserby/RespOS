@@ -148,9 +148,9 @@ fn switch_to_next_task_after_exit() -> ! {
     if let Some(next_task) = fetch_task() {
         let next_task_kernel_stack = next_task.kstack();
         let current_task_ptr = Arc::as_ptr(&current) as usize;
-        defer_drop_task(current);
         next_task.set_running();
         PROCESSOR.lock().switch_to(next_task);
+        defer_drop_task(current);
         unsafe {
             __switch(next_task_kernel_stack, current_task_ptr);
         }
