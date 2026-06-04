@@ -538,12 +538,16 @@ impl TaskControlBlock {
 
     // 信号入口：给线程发送信号
     pub fn receive_siginfo(&self, siginfo: SigInfo, thread_level: bool) {
+        let sig = crate::signal::Sig::from(siginfo.signo);
         match thread_level {
             true => {
                 self.op_sig_pending_mut(|pending| pending.add_signal(siginfo));
+                // SIGKILL/SIGSTOP 必须立即唤醒阻塞的线程，否则信号永远不会被处理
+                if sig.is_kill_or_stop() && self.is_blocked() {
+                    crate::task::scheduler::wakeup_task(self.tid());
+                }
             }
             false => {
-                let sig = crate::signal::Sig::from(siginfo.signo);
                 let target = self.op_thread_group(|tg| {
                     let mut fallback = None;
                     let mut leader = None;
@@ -565,6 +569,10 @@ impl TaskControlBlock {
                 });
                 if let Some(task) = target {
                     task.op_sig_pending_mut(|pending| pending.add_signal(siginfo));
+                    // SIGKILL/SIGSTOP 必须立即唤醒阻塞的线程
+                    if sig.is_kill_or_stop() && task.is_blocked() {
+                        crate::task::scheduler::wakeup_task(task.tid());
+                    }
                 }
             }
         }
@@ -639,7 +647,8 @@ fn exit_thread(task: Arc<TaskControlBlock>, exit_code: i32) {
         let _ = crate::task::futex::futex_wake_private(ctid, 1);
         let _ = crate::task::futex::futex_wake(ctid, 1, false);
     }
-
+    // 添加这一行：先从调度器就绪队列中移除
+    remove_task(task.tid());
     // 只有数据 线程组 和 TASK_MANAGER 持有对线程的引用，当引用归零时该线程占有的私有资源被释放
     task.op_thread_group_mut(|tg| tg.remove(&task.tid()));
     task.set_exited();

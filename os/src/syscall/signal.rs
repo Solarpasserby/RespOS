@@ -259,9 +259,10 @@ pub fn sys_rt_sigtimedwait(
     // ----- 2. 临时屏蔽不感兴趣的信号 -----
     // 把 mask 改成 !wanted_set，这样只有 wanted_set中的信号不会被屏蔽，其他信号全部被屏蔽，handler 不会被打断bitflags 的 Not 需要手动：取全集异或
     let all_signals = SigSet::all();
-    let focus_mask = all_signals.difference(wanted_set);
+    let mut focus_mask = all_signals.difference(wanted_set);
     // 确保 SIGKILL 和 SIGSTOP 不被屏蔽（它们是强制信号）
-    // focus_mask 里本来就没有它们
+    focus_mask.remove_signal(Sig::SIGKILL);
+    focus_mask.remove_signal(Sig::SIGSTOP);
 
     let origin_mask = task.op_sig_pending_mut(|pending| pending.change_mask(focus_mask)); //修改掩码并保存原来的掩码
 

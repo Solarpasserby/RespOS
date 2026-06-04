@@ -155,6 +155,7 @@ fn switch_to_next_task_after_exit() -> ! {
             __switch(next_task_kernel_stack, current_task_ptr);
         }
     }
+
     panic!("Unreachable!");
 }
 
