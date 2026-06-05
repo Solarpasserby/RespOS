@@ -17,8 +17,12 @@ mod stat;
 
 use super::vfs::Dentry;
 use alloc::sync::Arc;
+use spin::Mutex;
 
 use dirs::{ProcDirInode, ProcSelfInode};
+
+/// 持有 /proc 根 dentry 的强引用，防止 Weak 引用失效导致 procfs 不可达。
+static PROC_ROOT: Mutex<Option<Arc<Dentry>>> = Mutex::new(None);
 
 /// 在根文件系统中创建 /proc/self/smaps 目录树。
 ///
@@ -37,4 +41,6 @@ pub fn init_procfs(root: Arc<Dentry>) {
         Arc::new(ProcSelfInode),
     ));
     proc_dentry.insert_child("self", self_dentry);
+
+    *PROC_ROOT.lock() = Some(proc_dentry);
 }

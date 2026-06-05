@@ -12,6 +12,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::any::Any;
 use null::NullInode;
+use spin::Mutex;
+
+/// 持有 /dev 根 dentry 的强引用，防止 Weak 引用失效导致 devfs 不可达。
+static DEV_ROOT: Mutex<Option<Arc<Dentry>>> = Mutex::new(None);
 
 // ── /dev ────────────────────────────────────────────────────────────
 
@@ -107,4 +111,6 @@ pub fn init_devfs(root: Arc<Dentry>) {
         Arc::new(NullInode),
     ));
     dev_dentry.insert_child("null", null_dentry);
+
+    *DEV_ROOT.lock() = Some(dev_dentry);
 }

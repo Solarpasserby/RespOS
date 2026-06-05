@@ -1,5 +1,5 @@
 
-    # generated rebuild stamp: local
+    # generated rebuild stamp: 1780672644663452950
     .align 3
     .section .data
     .global _app_num

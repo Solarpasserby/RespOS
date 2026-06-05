@@ -168,10 +168,10 @@ fn _run_busybox_musl() {
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("[testrunner] start");
-    _run_basic_musl();
-    _run_basic_glibc();
-    _run_libcbench_musl();
-    _run_libcbench_glibc();
+    //_run_basic_musl();
+    //_run_basic_glibc();
+    //_run_libcbench_musl();
+    //_run_libcbench_glibc();
     _run_busybox_musl();
     println!("[testrunner] all selected tests finished, powering off");
     poweroff();

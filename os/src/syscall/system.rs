@@ -3,7 +3,7 @@
 use super::SysResult;
 use crate::arch::sbi;
 use crate::config::{MEMORY_END, MEMORY_START, PAGE_SIZE};
-use crate::mm::frame_allocator::FRAME_ALLOCATOR;
+use crate::mm::free_frame_count;
 use crate::mm::copy_to_user;
 use crate::task::TASK_MANAGER;
 use crate::timer::get_time_ms;
@@ -89,7 +89,7 @@ pub fn sys_sysinfo(buf: *mut SysInfo) -> SysResult<usize> {
         uptime: get_time_ms() / 1000,
         loads: [0, 0, 0],
         totalram,
-        freeram: FRAME_ALLOCATOR.lock().free_frames() * PAGE_SIZE,
+        freeram: free_frame_count() * PAGE_SIZE,
         sharedram: 0,
         bufferram: 0,
         totalswap: 0,
