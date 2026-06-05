@@ -15,6 +15,11 @@ pub struct Stdin;
 ///Standard output
 pub struct Stdout;
 
+const STDIN_INO: u64 = 0x2000;
+const STDOUT_INO: u64 = 0x2001;
+const STDIO_DEV: u64 = 0x300;
+const CONSOLE_RDEV: u64 = (5 << 8) | 1;
+
 impl FileOp for Stdin {
     fn as_any(&self) -> &dyn Any {
         self
@@ -62,10 +67,11 @@ impl FileOp for Stdin {
         OpenFlags::empty()
     }
     fn get_stat(&self) -> SysResult<KStat> {
-        Ok(KStat {
-            size: 0,
-            ty: InodeType::CharDevice,
-        })
+        Ok(KStat::minimal(0, InodeType::CharDevice)
+            .with_dev(STDIO_DEV)
+            .with_ino(STDIN_INO)
+            .with_mode(0o666)
+            .with_rdev(CONSOLE_RDEV))
     }
 }
 
@@ -98,9 +104,10 @@ impl FileOp for Stdout {
         OpenFlags::empty()
     }
     fn get_stat(&self) -> SysResult<KStat> {
-        Ok(KStat {
-            size: 0,
-            ty: InodeType::CharDevice,
-        })
+        Ok(KStat::minimal(0, InodeType::CharDevice)
+            .with_dev(STDIO_DEV)
+            .with_ino(STDOUT_INO)
+            .with_mode(0o666)
+            .with_rdev(CONSOLE_RDEV))
     }
 }

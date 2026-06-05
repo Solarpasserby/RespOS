@@ -12,6 +12,7 @@ use spin::Mutex;
 use crate::fs::KStat;
 use crate::fs::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
 use crate::syscall::{Errno, SysResult};
+use crate::timer::TimeSpec;
 
 lazy_static! {
     static ref EXT4_INODE_CACHE: Mutex<HashMap<u64, Weak<dyn InodeOp>>> =
@@ -166,7 +167,52 @@ impl InodeOp for Ext4Inode {
         } else {
             0
         };
-        Ok(KStat { size, ty })
+        let ino = self.ino;
+
+        let c_path = CString::new(path).map_err(|_| Errno::EINVAL)?;
+        let c_path = c_path.into_raw();
+
+        let mut mode: u32 = 0;
+        let _ = unsafe { bindings::ext4_mode_get(c_path, &mut mode) };
+
+        let mut uid: u32 = 0;
+        let mut gid: u32 = 0;
+        let _ = unsafe { bindings::ext4_owner_get(c_path, &mut uid, &mut gid) };
+
+        let mut atime: u32 = 0;
+        let mut mtime: u32 = 0;
+        let mut ctime: u32 = 0;
+        let _ = unsafe { bindings::ext4_atime_get(c_path, &mut atime) };
+        let _ = unsafe { bindings::ext4_mtime_get(c_path, &mut mtime) };
+        let _ = unsafe { bindings::ext4_ctime_get(c_path, &mut ctime) };
+
+        unsafe { drop(CString::from_raw(c_path)) };
+
+        Ok(KStat {
+            dev: 0,
+            size,
+            ty,
+            ino,
+            nlink: 1,
+            uid,
+            gid,
+            rdev: 0,
+            mode,
+            blksize: crate::config::BLOCK_SIZE as u32,
+            blocks: KStat::blocks_for_size(size as u64),
+            atime: TimeSpec {
+                sec: atime as usize,
+                nsec: 0,
+            },
+            mtime: TimeSpec {
+                sec: mtime as usize,
+                nsec: 0,
+            },
+            ctime: TimeSpec {
+                sec: ctime as usize,
+                nsec: 0,
+            },
+        })
     }
 
     fn read_at(&self, path: &str, off: usize, buf: &mut [u8]) -> SysResult<usize> {

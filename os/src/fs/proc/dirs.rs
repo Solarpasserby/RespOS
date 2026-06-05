@@ -10,6 +10,12 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::any::Any;
 
+const PROC_ROOT_INO: u64 = 1;
+const PROC_SELF_INO: u64 = 2;
+const PROC_SELF_SMAPS_INO: u64 = 3;
+const PROC_SELF_EXE_INO: u64 = 4;
+const PROC_DEV: u64 = 0x100;
+
 // ── /proc ─────────────────────────────────────────────────────────
 
 pub(super) struct ProcDirInode;
@@ -24,10 +30,11 @@ impl InodeOp for ProcDirInode {
     }
 
     fn stat(&self, _path: &str) -> SysResult<KStat> {
-        Ok(KStat {
-            size: 0,
-            ty: InodeType::Directory,
-        })
+        Ok(KStat::minimal(0, InodeType::Directory)
+            .with_dev(PROC_DEV)
+            .with_ino(PROC_ROOT_INO)
+            .with_mode(0o555)
+            .with_nlink(2))
     }
 
     fn lookup(&self, _parent_path: &str, name: &str) -> SysResult<Arc<dyn InodeOp>> {
@@ -40,9 +47,9 @@ impl InodeOp for ProcDirInode {
 
     fn readdir(&self, _path: &str) -> SysResult<Vec<LinuxDirent64>> {
         Ok(vec![
-            dir_entry(1, b".\0"),
-            dir_entry(2, b"..\0"),
-            entry(InodeType::Directory, 3, b"self\0"),
+            dir_entry(PROC_ROOT_INO, 1, b".\0"),
+            dir_entry(2, 2, b"..\0"),
+            entry(PROC_SELF_INO, InodeType::Directory, 3, b"self\0"),
         ])
     }
 
@@ -85,10 +92,11 @@ impl InodeOp for ProcSelfInode {
     }
 
     fn stat(&self, _path: &str) -> SysResult<KStat> {
-        Ok(KStat {
-            size: 0,
-            ty: InodeType::Directory,
-        })
+        Ok(KStat::minimal(0, InodeType::Directory)
+            .with_dev(PROC_DEV)
+            .with_ino(PROC_SELF_INO)
+            .with_mode(0o555)
+            .with_nlink(2))
     }
 
     fn lookup(&self, _parent_path: &str, name: &str) -> SysResult<Arc<dyn InodeOp>> {
@@ -101,10 +109,10 @@ impl InodeOp for ProcSelfInode {
 
     fn readdir(&self, _path: &str) -> SysResult<Vec<LinuxDirent64>> {
         Ok(vec![
-            dir_entry(1, b".\0"),
-            dir_entry(2, b"..\0"),
-            entry(InodeType::Regular, 3, b"smaps\0"),
-            entry(InodeType::SymLink, 4, b"exe\0"),
+            dir_entry(PROC_SELF_INO, 1, b".\0"),
+            dir_entry(PROC_ROOT_INO, 2, b"..\0"),
+            entry(PROC_SELF_SMAPS_INO, InodeType::Regular, 3, b"smaps\0"),
+            entry(PROC_SELF_EXE_INO, InodeType::SymLink, 4, b"exe\0"),
         ])
     }
 
@@ -135,10 +143,22 @@ impl InodeOp for ProcSelfInode {
 
 // ── helpers ───────────────────────────────────────────────────────
 
-fn entry(ty: InodeType, off: i64, name: &[u8]) -> LinuxDirent64 {
+pub(super) fn proc_self_smaps_ino() -> u64 {
+    PROC_SELF_SMAPS_INO
+}
+
+pub(super) fn proc_self_exe_ino() -> u64 {
+    PROC_SELF_EXE_INO
+}
+
+pub(super) fn proc_dev() -> u64 {
+    PROC_DEV
+}
+
+fn entry(ino: u64, ty: InodeType, off: i64, name: &[u8]) -> LinuxDirent64 {
     let reclen = (19 + name.len() + 7) & !7;
     LinuxDirent64 {
-        d_ino: 0,
+        d_ino: ino,
         d_off: off,
         d_reclen: reclen as u16,
         d_type: ty as u8,
@@ -146,6 +166,6 @@ fn entry(ty: InodeType, off: i64, name: &[u8]) -> LinuxDirent64 {
     }
 }
 
-fn dir_entry(off: i64, name: &[u8]) -> LinuxDirent64 {
-    entry(InodeType::Directory, off, name)
+fn dir_entry(ino: u64, off: i64, name: &[u8]) -> LinuxDirent64 {
+    entry(ino, InodeType::Directory, off, name)
 }

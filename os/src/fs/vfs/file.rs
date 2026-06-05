@@ -58,14 +58,21 @@ impl FileCache {
         page_idx: usize,
         lower: Option<(&Arc<dyn InodeOp>, &str)>,
     ) -> SysResult<()> {
-        if self.pages.get(page_idx).and_then(|page| page.as_ref()).is_some() {
+        if self
+            .pages
+            .get(page_idx)
+            .and_then(|page| page.as_ref())
+            .is_some()
+        {
             return Ok(());
         }
 
         self.ensure_page_slots((page_idx + 1) * PAGE_SIZE);
         let mut page = alloc::vec![0u8; PAGE_SIZE];
         let page_start = page_idx * PAGE_SIZE;
-        if page_start < self.len && let Some((inode, path)) = lower {
+        if page_start < self.len
+            && let Some((inode, path)) = lower
+        {
             match inode.read_at(path, page_start, &mut page) {
                 Ok(_) | Err(Errno::ENOENT) => {}
                 Err(err) => return Err(err),
@@ -213,7 +220,26 @@ impl File {
     }
 
     pub fn readdir(&self) -> SysResult<Vec<LinuxDirent64>> {
-        self.inode.readdir(&self.path().abs_path())
+        let path = self.path();
+        let mut entries = self.inode.readdir(&path.abs_path())?;
+
+        if Arc::ptr_eq(&path.dentry, &path.mnt.root)
+            && let Some(mount) = crate::fs::mount::get_mount_by_vfsmount(&path.mnt)
+            && let Some(parent_ino) = mount
+                .mountpoint
+                .get_parent()
+                .and_then(|parent| parent.get_inode().stat(&parent.abs_path).ok())
+                .map(|stat| stat.ino)
+        {
+            for entry in &mut entries {
+                if entry.d_name == b"..\0" {
+                    entry.d_ino = parent_ino;
+                    break;
+                }
+            }
+        }
+
+        Ok(entries)
     }
 }
 
@@ -291,13 +317,18 @@ impl FileOp for File {
 
     fn get_stat(&self) -> SysResult<KStat> {
         let inner = self.inner.lock();
+        let path = inner.path.abs_path();
         if let Some(cache) = inner.cache.as_ref() {
-            return Ok(KStat {
-                size: cache.len(),
-                ty: InodeType::Regular,
-            });
+            let mut stat = match self.inode.stat(&path) {
+                Ok(stat) => stat,
+                Err(Errno::ENOENT) => KStat::minimal(0, InodeType::Regular),
+                Err(err) => return Err(err),
+            };
+            stat.size = cache.len();
+            stat.blocks = KStat::blocks_for_size(stat.size as u64);
+            return Ok(stat);
         }
-        self.inode.stat(&inner.path.abs_path())
+        self.inode.stat(&path)
     }
 
     fn readable(&self) -> bool {

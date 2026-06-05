@@ -2,6 +2,7 @@
 
 use super::super::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
 use super::super::KStat;
+use super::dirs::{proc_dev, proc_self_exe_ino};
 use crate::syscall::{Errno, SysResult};
 use crate::task::current_task;
 use alloc::string::String;
@@ -23,10 +24,10 @@ impl InodeOp for ProcExeInode {
     fn stat(&self, _path: &str) -> SysResult<KStat> {
         let task = current_task().expect("[procfs] no current task");
         let exe = task.exe_path();
-        Ok(KStat {
-            size: exe.len(),
-            ty: InodeType::SymLink,
-        })
+        Ok(KStat::minimal(exe.len(), InodeType::SymLink)
+            .with_dev(proc_dev())
+            .with_ino(proc_self_exe_ino())
+            .with_mode(0o777))
     }
 
     fn read_link(&self, _path: &str) -> SysResult<String> {

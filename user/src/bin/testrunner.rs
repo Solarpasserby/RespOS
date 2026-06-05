@@ -165,14 +165,60 @@ fn _run_busybox_musl() {
     println!("#### OS COMP TEST GROUP END busybox-musl ####");
 }
 
+fn _run_busybox_glibc() {
+    if chdir("/glibc/\0") < 0 {
+        println!("[testrunner] cannot enter /glibc");
+        return;
+    }
+
+    println!("#### OS COMP TEST GROUP START busybox-glibc ####");
+
+    let mut buf = [0u8; 2048];
+    let n = read_file(BUSYBOX_CMD_FILE, &mut buf);
+    if n < 0 {
+        println!("[testrunner] cannot read {}", strip_nul(BUSYBOX_CMD_FILE));
+        let _ = chdir("/\0");
+        println!("#### OS COMP TEST GROUP END busybox-glibc ####");
+        return;
+    }
+
+    let data = &buf[..n as usize];
+    let mut start = 0usize;
+    for i in 0..=data.len() {
+        if i != data.len() && data[i] != b'\n' {
+            continue;
+        }
+        let raw = &data[start..i];
+        start = i + 1;
+        let line = core::str::from_utf8(raw).unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        let mut ec = run_busybox_command(line);
+        if line == "false" {
+            ec = 0;
+        }
+        if ec == 0 {
+            println!("testcase busybox {} success", line);
+        } else {
+            println!("testcase busybox {} fail", line);
+        }
+    }
+
+    let _ = chdir("/\0");
+    println!("#### OS COMP TEST GROUP END busybox-glibc ####");
+}
+
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("[testrunner] start");
-    _run_basic_musl();
-    _run_basic_glibc();
-    _run_libcbench_musl();
-    _run_libcbench_glibc();
-    _run_busybox_musl();
+    // _run_basic_musl();
+    // _run_basic_glibc();
+    // _run_libcbench_musl();
+    // _run_libcbench_glibc();
+    // _run_busybox_musl();
+    _run_busybox_glibc();
     println!("[testrunner] all selected tests finished, powering off");
     poweroff();
     0

@@ -2,20 +2,13 @@
 
 use super::{Errno, SysResult};
 use crate::mm::{copy_from_user, copy_to_user};
-use crate::timer::get_time_ms;
+use crate::timer::{TimeSpec, get_time_ms};
 
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct TimeVal {
     pub sec: usize,
     pub usec: usize,
-}
-
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub struct TimeSpec {
-    pub sec: usize,
-    pub nsec: usize,
 }
 
 #[repr(C)]

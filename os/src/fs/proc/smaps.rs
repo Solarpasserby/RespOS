@@ -1,7 +1,8 @@
 // os/src/fs/proc/smaps.rs
 
-use super::super::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
 use super::super::KStat;
+use super::super::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
+use super::dirs::{proc_dev, proc_self_smaps_ino};
 use crate::mm::MapPermission;
 use crate::syscall::{Errno, SysResult};
 use crate::task::current_task;
@@ -24,10 +25,10 @@ impl InodeOp for SmapsInode {
 
     fn stat(&self, _path: &str) -> SysResult<KStat> {
         let size = generate_smaps().len();
-        Ok(KStat {
-            size,
-            ty: InodeType::Regular,
-        })
+        Ok(KStat::minimal(size, InodeType::Regular)
+            .with_dev(proc_dev())
+            .with_ino(proc_self_smaps_ino())
+            .with_mode(0o444))
     }
 
     fn read_at(&self, _path: &str, off: usize, buf: &mut [u8]) -> SysResult<usize> {
@@ -79,11 +80,7 @@ fn generate_smaps() -> String {
     task.op_memory_set_read(|mm| {
         mm.each_area(|start, end, perm| {
             let p = perm_to_smaps_str(perm);
-            let _ = writeln!(
-                result,
-                "{:016x}-{:016x} {} 00000000 00:00 0",
-                start, end, p
-            );
+            let _ = writeln!(result, "{:016x}-{:016x} {} 00000000 00:00 0", start, end, p);
             let _ = writeln!(result);
         });
     });

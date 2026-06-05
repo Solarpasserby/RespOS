@@ -8,6 +8,9 @@ use crate::task::current_task;
 use alloc::{format, string::String, sync::Arc, vec::Vec};
 
 pub const AT_FDCWD: isize = -100;
+pub const AT_NO_AUTOMOUNT: usize = 0x800;
+pub const AT_EMPTY_PATH: usize = 0x1000;
+pub const AT_SYMLINK_NOFOLLOW: usize = 0x100;
 
 /// 路径名解析状态量
 pub struct Nameidata<'a> {

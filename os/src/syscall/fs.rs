@@ -4,8 +4,8 @@ use super::{Errno, SysResult};
 use crate::fs::mount::{do_mount, do_umount2};
 use crate::fs::vfs::{File, InodeType, OpenFlags};
 use crate::fs::{
-    AT_FDCWD, FdEntry, Stat, filename_create, filename_link, filename_lookup, filename_unlink,
-    make_pipe, path_open,
+    AT_EMPTY_PATH, AT_FDCWD, AT_NO_AUTOMOUNT, AT_SYMLINK_NOFOLLOW, FdEntry, Stat,
+    filename_create, filename_link, filename_lookup, filename_unlink, make_pipe, path_open,
 };
 use crate::mm::{check_user_writable, copy_cstr_from_user, copy_from_user, copy_to_user};
 use crate::task::current_task;
@@ -102,15 +102,43 @@ pub fn sys_close(fd: usize) -> SysResult<usize> {
     Ok(0)
 }
 
-/// 系统调用 sys-stat
-pub fn sys_stat(path: *const u8, stat: *mut Stat) -> SysResult<usize> {
+/// 系统调用 sys-fstatat
+pub fn sys_fstatat(
+    dirfd: isize,
+    path: *const u8,
+    stat: *mut Stat,
+    flags: usize,
+) -> SysResult<usize> {
+    const FSTATAT_ALLOWED_FLAGS: usize =
+        AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_EMPTY_PATH;
+
+    if flags & !FSTATAT_ALLOWED_FLAGS != 0 {
+        return Err(Errno::EINVAL);
+    }
+
     let path = copy_cstr_from_user(path)?;
-    let resolved = filename_lookup(AT_FDCWD, path.as_str(), 0)?;
-    let stat_buf: Stat = resolved
-        .dentry
-        .get_inode()
-        .stat(&resolved.abs_path())?
-        .into();
+    let stat_buf: Stat = if path.is_empty() {
+        if flags & AT_EMPTY_PATH == 0 {
+            return Err(Errno::ENOENT);
+        }
+        if dirfd == AT_FDCWD {
+            let task = current_task().expect("[kernel] current task is None.");
+            let cwd = task.cwd();
+            cwd.dentry.get_inode().stat(&cwd.abs_path())?
+        } else {
+            if dirfd < 0 {
+                return Err(Errno::EBADF);
+            }
+            let task = current_task().expect("[kernel] current task is None.");
+            task.get_fd_entry(dirfd as usize)?.file.get_stat()?
+        }
+    } else {
+        // TODO[ABI-COMPAT]: namei currently does not follow symbolic links.
+        // When it does, AT_SYMLINK_NOFOLLOW should select lstat-style lookup.
+        let resolved = filename_lookup(dirfd, path.as_str(), 0)?;
+        resolved.dentry.get_inode().stat(&resolved.abs_path())?
+    }
+    .into();
     copy_to_user(stat, &stat_buf as *const Stat, 1)?;
     Ok(0)
 }
