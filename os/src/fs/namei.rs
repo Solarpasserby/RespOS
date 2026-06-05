@@ -3,6 +3,7 @@
 use super::Path;
 use super::mount::{VfsMount, get_mount_by_dentry, get_mount_by_vfsmount, root_path};
 use super::vfs::{Dentry, File, InodeType, OpenFlags};
+use crate::fs::ext4::Ext4Inode;
 use crate::syscall::{Errno, SysResult};
 use crate::task::current_task;
 use alloc::{format, string::String, sync::Arc, vec::Vec};
@@ -181,11 +182,7 @@ pub fn open_last_lookups(
             }
             return Ok(Arc::new(File::new_tmpfile(path, inode, flags)));
         }
-        return Ok(Arc::new(File::new(
-            path,
-            inode,
-            flags,
-        )));
+        return Ok(Arc::new(File::new(path, inode, flags)));
     }
 
     let name = nd.path_segments[nd.depth];
@@ -407,6 +404,71 @@ pub fn filename_link(olddirfd: isize, oldpath: &str, newdirfd: isize, newpath: &
         }
         Err(err) => Err(err),
     }
+}
+
+/// 路径基于 rename 系统调用。将 oldpath 重命名为 newpath 指定的新路径。
+///
+/// 仅处理新旧路径同在一个文件系统上的情况。
+pub fn filename_rename(
+    olddirfd: isize,
+    oldpath: &str,
+    newdirfd: isize,
+    newpath: &str,
+) -> SysResult {
+    if oldpath.is_empty() || newpath.is_empty() {
+        return Err(Errno::ENOENT);
+    }
+
+    let old = filename_lookup(olddirfd, oldpath, 0)?;
+
+    let mut nd = Nameidata::new_at(newdirfd, newpath)?;
+    link_path_walk(&mut nd)?;
+
+    if nd.path_segments.is_empty() {
+        return Err(Errno::EEXIST);
+    }
+
+    let name = nd.path_segments[nd.depth];
+    if name == "." || name == ".." {
+        return Err(Errno::EBUSY);
+    }
+
+    let new_abs = child_abs_path(&nd.dentry, name);
+
+    // 防止 ext4_frename 在目标为非空目录时产生嵌套语义，损坏文件系统。
+    if let Ok(existing) = lookup_dentry(&mut nd) {
+        let existing_ty = existing.get_inode().node_type();
+        if existing_ty != InodeType::Directory {
+            // 目标为非目录文件：交由 ext4_frename 替换
+        } else {
+            let entries = existing.get_inode().readdir(&existing.abs_path)?;
+            let has_content = entries
+                .iter()
+                .any(|e| e.d_name != b".\0" && e.d_name != b"..\0");
+            if has_content {
+                return Err(Errno::ENOTEMPTY);
+            }
+        }
+    }
+
+    Ext4Inode::file_rename(&old.abs_path(), &new_abs)?;
+
+    // 更新 VFS dentry 树：Arc<Dentry> 可能已被多个 Path/File 共享，不能原地可变修改。
+    // 这里为新路径创建新的 dentry，并从旧父目录移除旧名字。
+    let old_parent = old
+        .dentry
+        .get_parent()
+        .unwrap_or_else(|| old.dentry.clone());
+    old_parent.remove_child(old.dentry.abs_path.rsplit('/').next().unwrap_or(""));
+
+    let renamed_dentry = Arc::new(Dentry::new(
+        new_abs,
+        Some(nd.dentry.clone()),
+        old.dentry.get_inode(),
+    ));
+    nd.dentry.insert_child(name, renamed_dentry);
+
+    Ok(())
 }
 
 /// 路径解析主函数，循环解析每一层，定位到最后的目标

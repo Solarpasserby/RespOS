@@ -50,6 +50,37 @@ impl Default for UtsName {
     }
 }
 
+/// 系统调用 sys-syslog
+pub fn sys_syslog(action: usize, buf: *mut u8, len: isize) -> SysResult<usize> {
+    const SYSLOG_ACTION_CLOSE: usize = 0;
+    const SYSLOG_ACTION_OPEN: usize = 1;
+    const SYSLOG_ACTION_READ: usize = 2;
+    const SYSLOG_ACTION_READ_ALL: usize = 3;
+    const SYSLOG_ACTION_READ_CLEAR: usize = 4;
+    const SYSLOG_ACTION_CLEAR: usize = 5;
+    // const SYSLOG_ACTION_CONSOLE_OFF: usize = 6;
+    // const SYSLOG_ACTION_CONSOLE_ON: usize = 7;
+    // const SYSLOG_ACTION_CONSOLE_LEVEL: usize = 8;
+    // const SYSLOG_ACTION_SIZE_UNREAD: usize = 9;
+    const SYSLOG_ACTION_SIZE_BUFFER: usize = 10;
+
+    match action {
+        SYSLOG_ACTION_CLOSE | SYSLOG_ACTION_OPEN => Ok(0),
+        SYSLOG_ACTION_READ | SYSLOG_ACTION_READ_ALL | SYSLOG_ACTION_READ_CLEAR => {
+            if buf.is_null() || len <= 0 {
+                return Ok(0);
+            }
+            let msg = b"<5>RespOS kernel log buffer\n\0";
+            let n = (msg.len() - 1).min(len as usize);
+            copy_to_user(buf, msg.as_ptr(), n)?;
+            Ok(n)
+        }
+        SYSLOG_ACTION_CLEAR => Ok(0),
+        SYSLOG_ACTION_SIZE_BUFFER => Ok(4096),
+        _ => Err(super::Errno::ENOSYS),
+    }
+}
+
 /// 系统调用 sys-uname
 ///
 /// TODO：目前只做固定实现

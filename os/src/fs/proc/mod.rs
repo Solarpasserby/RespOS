@@ -14,6 +14,7 @@ mod smaps;
 
 use super::vfs::Dentry;
 use alloc::sync::Arc;
+use crate::fs::mount;
 
 use dirs::{ProcDirInode, ProcSelfInode};
 
@@ -27,11 +28,13 @@ pub fn init_procfs(root: Arc<Dentry>) {
         Arc::new(ProcDirInode),
     ));
     root.insert_child("proc", proc_dentry.clone());
+    mount::pin_vfs_dentry(proc_dentry.clone());
 
     let self_dentry = Arc::new(Dentry::new(
         "/proc/self".into(),
         Some(proc_dentry.clone()),
         Arc::new(ProcSelfInode),
     ));
-    proc_dentry.insert_child("self", self_dentry);
+    proc_dentry.insert_child("self", self_dentry.clone());
+    mount::pin_vfs_dentry(self_dentry);
 }

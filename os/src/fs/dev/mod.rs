@@ -19,6 +19,7 @@ use alloc::vec::Vec;
 use core::any::Any;
 use null::NullInode;
 
+use crate::fs::mount;
 use crate::syscall::{Errno, SysResult};
 
 // ── /dev ─────────────────────────────────────────────────────────────
@@ -108,5 +109,6 @@ pub fn init_devfs(root: Arc<Dentry>) {
         Some(root.clone()),
         Arc::new(DevDirInode),
     ));
-    root.insert_child("dev", dev_dentry);
+    root.insert_child("dev", dev_dentry.clone());
+    mount::pin_vfs_dentry(dev_dentry);
 }

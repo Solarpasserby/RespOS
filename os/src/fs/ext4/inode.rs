@@ -99,6 +99,17 @@ impl Ext4Inode {
         Ok(())
     }
 
+    pub(crate) fn file_rename(old_path: &str, new_path: &str) -> SysResult {
+        let _guard = EXT4_OP_LOCK.lock();
+        let c_old = CString::new(old_path).map_err(|_| Errno::EINVAL)?;
+        let c_new = CString::new(new_path).map_err(|_| Errno::EINVAL)?;
+        let ret = unsafe { bindings::ext4_frename(c_old.as_ptr(), c_new.as_ptr()) };
+        if ret != 0 {
+            return Err(Self::map_lwext4_err(ret));
+        }
+        Ok(())
+    }
+
     fn file_size(&self, path: &str) -> SysResult<usize> {
         let _guard = EXT4_OP_LOCK.lock();
         let file = &mut Ext4File::new(path, self.ty.clone());
@@ -427,7 +438,8 @@ impl InodeOp for Ext4Inode {
         let child_inode = valid_dentry.try_get_inode().ok_or(Errno::ENOENT)?;
         if child_inode.node_type() == InodeType::Directory {
             let entries = child_inode.readdir(child_abs_path)?;
-            if !entries.is_empty() {
+            let has_content = entries.iter().any(|e| e.d_name != b".\0" && e.d_name != b"..\0");
+            if has_content {
                 return Err(Errno::ENOTEMPTY);
             }
             let _guard = EXT4_OP_LOCK.lock();

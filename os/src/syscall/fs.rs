@@ -5,7 +5,7 @@ use crate::fs::mount::{do_mount, do_umount2};
 use crate::fs::vfs::{File, FileOp, InodeType, OpenFlags};
 use crate::fs::{
     AT_EMPTY_PATH, AT_FDCWD, AT_NO_AUTOMOUNT, AT_SYMLINK_NOFOLLOW, FdEntry, Stat, filename_create,
-    filename_link, filename_lookup, filename_unlink, make_pipe, path_open,
+    filename_link, filename_lookup, filename_rename, filename_unlink, make_pipe, path_open,
 };
 use crate::mm::{check_user_writable, copy_cstr_from_user, copy_from_user, copy_to_user};
 use crate::task::current_task;
@@ -364,6 +364,31 @@ pub fn sys_linkat(
     let oldpath = copy_cstr_from_user(oldpath)?;
     let newpath = copy_cstr_from_user(newpath)?;
     filename_link(olddirfd, oldpath.as_str(), newdirfd, newpath.as_str())?;
+    Ok(0)
+}
+
+/// 系统调用 sys-renameat2
+pub fn sys_renameat2(
+    olddirfd: isize,
+    oldpath: *const u8,
+    newdirfd: isize,
+    newpath: *const u8,
+    flags: usize,
+) -> SysResult<usize> {
+    const RENAME_NOREPLACE: usize = 1;
+    const RENAME_EXCHANGE: usize = 2;
+    const RENAME_ALLOWED_FLAGS: usize = RENAME_NOREPLACE | RENAME_EXCHANGE;
+
+    if flags & !RENAME_ALLOWED_FLAGS != 0 {
+        return Err(Errno::EINVAL);
+    }
+    if flags & RENAME_EXCHANGE != 0 {
+        return Err(Errno::ENOSYS);
+    }
+
+    let oldpath = copy_cstr_from_user(oldpath)?;
+    let newpath = copy_cstr_from_user(newpath)?;
+    filename_rename(olddirfd, oldpath.as_str(), newdirfd, newpath.as_str())?;
     Ok(0)
 }
 
