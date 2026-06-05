@@ -278,6 +278,37 @@ impl InodeOp for Ext4Inode {
         Ok(0)
     }
 
+    fn set_times(
+        &self,
+        path: &str,
+        atime: Option<TimeSpec>,
+        mtime: Option<TimeSpec>,
+    ) -> SysResult {
+        let _guard = EXT4_OP_LOCK.lock();
+        let c_path = CString::new(path).map_err(|_| Errno::EINVAL)?;
+        let c_path = c_path.as_ptr();
+
+        if let Some(atime) = atime {
+            let ret = unsafe { bindings::ext4_atime_set(c_path, atime.sec as u32) };
+            if ret != 0 {
+                return Err(Self::map_lwext4_err(ret));
+            }
+        }
+        if let Some(mtime) = mtime {
+            let ret = unsafe { bindings::ext4_mtime_set(c_path, mtime.sec as u32) };
+            if ret != 0 {
+                return Err(Self::map_lwext4_err(ret));
+            }
+        }
+
+        let now = crate::timer::get_time_ms() / 1000;
+        let ret = unsafe { bindings::ext4_ctime_set(c_path, now as u32) };
+        if ret != 0 {
+            return Err(Self::map_lwext4_err(ret));
+        }
+        Ok(())
+    }
+
     /// 查找与 name 匹配的子索引节点，约定 name 为常规文件名
     fn lookup(&self, parent_path: &str, name: &str) -> SysResult<Arc<dyn InodeOp>> {
         self.check_type(InodeType::Directory)?;

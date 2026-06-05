@@ -9,7 +9,11 @@ use crate::fs::{
 };
 use crate::mm::{check_user_writable, copy_cstr_from_user, copy_from_user, copy_to_user};
 use crate::task::current_task;
+use crate::timer::{TimeSpec, get_time_ms};
 use alloc::vec;
+
+const UTIME_NOW: usize = 1_073_741_823;
+const UTIME_OMIT: usize = 1_073_741_822;
 
 // 使用 mm 实现的 `copy_cstr_from_user`, `copy_from_user`, `copy_to_user` 来访问用户空间的数据
 
@@ -140,6 +144,114 @@ pub fn sys_fstatat(
     }
     .into();
     copy_to_user(stat, &stat_buf as *const Stat, 1)?;
+    Ok(0)
+}
+
+/// 检查 utimensat 传入的 timespec 是否合法。
+///
+/// Linux 约定 nsec 可以是正常纳秒值，也可以是两个特殊值：
+/// UTIME_NOW 表示使用当前时间，UTIME_OMIT 表示保持原值不变。
+fn validate_utimens_time(ts: TimeSpec) -> SysResult<TimeSpec> {
+    if ts.nsec == UTIME_NOW || ts.nsec == UTIME_OMIT || ts.nsec < 1_000_000_000 {
+        Ok(ts)
+    } else {
+        Err(Errno::EINVAL)
+    }
+}
+
+fn current_timespec() -> TimeSpec {
+    let ms = get_time_ms();
+    TimeSpec {
+        sec: ms / 1000,
+        nsec: (ms % 1000) * 1_000_000,
+    }
+}
+
+/// 将用户传入的 times[2] 解析为需要写入 inode 的 atime/mtime。
+///
+/// 返回值中的 None 表示该时间戳保持不变；Some 表示需要写入。
+/// times 为 NULL 时，atime 和 mtime 都设置为当前时间。
+fn resolve_utimens_times(
+    times: *const TimeSpec,
+) -> SysResult<(Option<TimeSpec>, Option<TimeSpec>)> {
+    if times.is_null() {
+        let now = current_timespec();
+        return Ok((Some(now), Some(now)));
+    }
+
+    let mut ts = [TimeSpec::default(); 2];
+    copy_from_user(ts.as_mut_ptr(), times, 2)?;
+    let atime = validate_utimens_time(ts[0])?;
+    let mtime = validate_utimens_time(ts[1])?;
+    let now = current_timespec();
+
+    let atime = match atime.nsec {
+        UTIME_OMIT => None,
+        UTIME_NOW => Some(now),
+        _ => Some(atime),
+    };
+    let mtime = match mtime.nsec {
+        UTIME_OMIT => None,
+        UTIME_NOW => Some(now),
+        _ => Some(mtime),
+    };
+    Ok((atime, mtime))
+}
+
+/// 系统调用 sys-utimensat
+///
+/// 修改文件的访问时间 atime 和修改时间 mtime，常见调用者是 touch。
+/// 当前 ext4 后端只保存秒级时间，因此纳秒字段只参与合法性和特殊值判断。
+pub fn sys_utimensat(
+    dirfd: isize,
+    path: *const u8,
+    times: *const TimeSpec,
+    flags: usize,
+) -> SysResult<usize> {
+    const UTIMENSAT_ALLOWED_FLAGS: usize = AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH;
+
+    if flags & !UTIMENSAT_ALLOWED_FLAGS != 0 {
+        return Err(Errno::EINVAL);
+    }
+
+    let (atime, mtime) = resolve_utimens_times(times)?;
+    if atime.is_none() && mtime.is_none() {
+        return Ok(0);
+    }
+
+    let path = copy_cstr_from_user(path)?;
+    // 空路径只有在 AT_EMPTY_PATH 下合法：此时修改 dirfd 指向的文件；
+    // 若 dirfd 是 AT_FDCWD，则修改当前工作目录。
+    if path.is_empty() {
+        if flags & AT_EMPTY_PATH == 0 {
+            return Err(Errno::ENOENT);
+        }
+        if dirfd == AT_FDCWD {
+            let task = current_task().expect("[kernel] current task is None.");
+            let cwd = task.cwd();
+            cwd.dentry
+                .get_inode()
+                .set_times(&cwd.abs_path(), atime, mtime)?;
+        } else {
+            if dirfd < 0 {
+                return Err(Errno::EBADF);
+            }
+            let task = current_task().expect("[kernel] current task is None.");
+            let file = task.get_fd_entry(dirfd as usize)?.file;
+            let file = file.as_any().downcast_ref::<File>().ok_or(Errno::EINVAL)?;
+            let path = file.path();
+            file.inode().set_times(&path.abs_path(), atime, mtime)?;
+        }
+    } else {
+        // TODO[ABI-COMPAT]: namei currently does not follow symbolic links.
+        // When it does, AT_SYMLINK_NOFOLLOW should select lstat-style lookup.
+        let resolved = filename_lookup(dirfd, path.as_str(), 0)?;
+        resolved
+            .dentry
+            .get_inode()
+            .set_times(&resolved.abs_path(), atime, mtime)?;
+    }
+
     Ok(0)
 }
 

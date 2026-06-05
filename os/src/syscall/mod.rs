@@ -22,6 +22,7 @@ const SYSCALL_WRITE: usize = 64;
 const SYSCALL_WRITEV: usize = 66;
 const SYSCALL_STAT: usize = 79;
 const SYSCALL_FSTAT: usize = 80;
+const SYSCALL_UTIMENSAT: usize = 88;
 const SYSCALL_READLINKAT: usize = 78;
 const SYSCALL_EXIT: usize = 93;
 const SYSCALL_EXIT_GROUP: usize = 94;
@@ -121,6 +122,12 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
             args[0] as isize,
             args[1] as *const u8,
             args[2] as *mut u8,
+            args[3],
+        ),
+        SYSCALL_UTIMENSAT => sys_utimensat(
+            args[0] as isize,
+            args[1] as *const u8,
+            args[2] as *const TimeSpec,
             args[3],
         ),
         SYSCALL_EXIT => sys_exit(args[0] as i32),

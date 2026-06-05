@@ -2,6 +2,7 @@
 
 use super::{Dentry, LinuxDirent64};
 use crate::fs::KStat;
+use crate::timer::TimeSpec;
 use crate::syscall::{Errno, SysResult};
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -17,6 +18,14 @@ pub trait InodeOp: Any + Send + Sync {
     fn read_at(&self, path: &str, off: usize, buf: &mut [u8]) -> SysResult<usize>;
     fn write_at(&self, path: &str, off: usize, buf: &[u8]) -> SysResult<usize>;
     fn truncate(&self, path: &str, size: usize) -> SysResult<usize>;
+    fn set_times(
+        &self,
+        _path: &str,
+        _atime: Option<TimeSpec>,
+        _mtime: Option<TimeSpec>,
+    ) -> SysResult {
+        Err(Errno::EINVAL)
+    }
 
     fn lookup(&self, parent_path: &str, name: &str) -> SysResult<Arc<dyn InodeOp>>;
     fn readdir(&self, path: &str) -> SysResult<Vec<LinuxDirent64>>;

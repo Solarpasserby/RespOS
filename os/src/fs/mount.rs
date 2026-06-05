@@ -8,6 +8,7 @@ use super::Path;
 use super::namei::{AT_FDCWD, filename_lookup, filename_lookup_no_follow_final_mount};
 use super::vfs::Dentry;
 use super::vfs::{InodeType, SuperBlockOp};
+use crate::fs::dev::init_devfs;
 use crate::fs::proc::init_procfs;
 use crate::syscall::{Errno, SysResult};
 use alloc::sync::{Arc, Weak};
@@ -265,6 +266,7 @@ pub fn init_root_fs() -> Arc<Path> {
     add_mount(root_mount);
 
     init_procfs(root_dentry.clone());
+    init_devfs(root_dentry.clone());
 
     Path::new(root_vfs_mount, root_dentry)
 }
