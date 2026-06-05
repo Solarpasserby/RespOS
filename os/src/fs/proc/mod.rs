@@ -10,7 +10,10 @@
 
 mod dirs;
 mod exe;
+mod meminfo;
+mod mounts;
 mod smaps;
+mod stat;
 
 use super::vfs::Dentry;
 use alloc::sync::Arc;

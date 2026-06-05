@@ -4,8 +4,8 @@ use super::{Errno, SysResult};
 use crate::fs::mount::{do_mount, do_umount2};
 use crate::fs::vfs::{File, InodeType, OpenFlags};
 use crate::fs::{
-    AT_FDCWD, FdEntry, Stat, filename_create, filename_link, filename_lookup, filename_unlink,
-    make_pipe, path_open,
+    AT_FDCWD, FdEntry, Stat, Statfs64, filename_create, filename_link, filename_lookup,
+    filename_unlink, make_pipe, path_open,
 };
 use crate::mm::{check_user_writable, copy_cstr_from_user, copy_from_user, copy_to_user};
 use crate::task::current_task;
@@ -121,6 +121,19 @@ pub fn sys_fstat(fd: usize, stat: *mut Stat) -> SysResult<usize> {
     let file = task.get_fd_entry(fd)?.file;
     let stat_buf: Stat = file.get_stat()?.into();
     copy_to_user(stat, &stat_buf as *const Stat, 1)?;
+    Ok(0)
+}
+
+/// 系统调用 sys-fstatfs
+pub fn sys_fstatfs(fd: usize, buf: *mut Statfs64) -> SysResult<usize> {
+    let task = current_task().expect("[kernel] current task is None.");
+    let file = task.get_fd_entry(fd)?.file;
+    let file = file
+        .as_any()
+        .downcast_ref::<File>()
+        .ok_or(Errno::EINVAL)?;
+    let statfs = file.path().mnt.fs.statfs()?;
+    copy_to_user(buf, &statfs as *const Statfs64, 1)?;
     Ok(0)
 }
 

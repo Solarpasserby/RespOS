@@ -10,6 +10,7 @@ use super::vfs::Dentry;
 use super::vfs::{InodeType, SuperBlockOp};
 use crate::drivers::{BlockDeviceImpl, Disk};
 use crate::fs::ext4::Ext4SuperBlock;
+use crate::fs::dev::init_devfs;
 use crate::fs::proc::init_procfs;
 use crate::syscall::{Errno, SysResult};
 use alloc::sync::{Arc, Weak};
@@ -268,6 +269,7 @@ pub fn init_root_fs() -> Arc<Path> {
     add_mount(root_mount);
 
     init_procfs(root_dentry.clone());
+    init_devfs(root_dentry.clone());
 
     Path::new(root_vfs_mount, root_dentry)
 }

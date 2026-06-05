@@ -11,6 +11,7 @@ const SYSCALL_UNLINKAT: usize = 35;
 const SYSCALL_LINKAT: usize = 37;
 const SYSCALL_UMOUNT2: usize = 39;
 const SYSCALL_MOUNT: usize = 40;
+const SYSCALL_FSTATFS: usize = 44;
 const SYSCALL_CHDIR: usize = 49;
 const SYSCALL_OPENAT: usize = 56;
 const SYSCALL_CLOSE: usize = 57;
@@ -58,6 +59,7 @@ const SYSCALL_MPROTECT: usize = 226;
 const SYSCALL_MADVISE: usize = 233;
 const SYSCALL_WAIT4: usize = 260;
 const SYSCALL_PRLIMIT64: usize = 261;
+const SYSCALL_SYSINFO: usize = 179;
 const SYSCALL_GETRANDOM: usize = 278;
 
 mod errno;
@@ -110,6 +112,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         SYSCALL_WRITEV => sys_writev(args[0], args[1] as *const IoVec, args[2]),
         SYSCALL_STAT => sys_stat(args[0] as *const u8, args[1] as *mut crate::fs::Stat),
         SYSCALL_FSTAT => sys_fstat(args[0], args[1] as *mut crate::fs::Stat),
+        SYSCALL_FSTATFS => sys_fstatfs(args[0], args[1] as *mut crate::fs::Statfs64),
         SYSCALL_READLINKAT => sys_readlinkat(
             args[0] as isize,
             args[1] as *const u8,
@@ -151,6 +154,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         SYSCALL_GETGID => sys_getgid(),
         SYSCALL_GETEGID => sys_getegid(),
         SYSCALL_GETTID => sys_gettid(),
+        SYSCALL_SYSINFO => sys_sysinfo(args[0] as *mut SysInfo),
         SYSCALL_BRK => sys_brk(args[0]),
         SYSCALL_MUNMAP => sys_munmap(args[0], args[1]),
         SYSCALL_CLONE => sys_clone(args[0], args[1], args[2], args[3], args[4]),

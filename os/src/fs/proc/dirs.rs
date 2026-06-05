@@ -3,7 +3,10 @@
 use super::super::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
 use super::super::KStat;
 use super::exe::ProcExeInode;
+use super::meminfo::MeminfoInode;
+use super::mounts::MountsInode;
 use super::smaps::SmapsInode;
+use super::stat::StatInode;
 use crate::syscall::{Errno, SysResult};
 use alloc::sync::Arc;
 use alloc::vec;
@@ -33,6 +36,8 @@ impl InodeOp for ProcDirInode {
     fn lookup(&self, _parent_path: &str, name: &str) -> SysResult<Arc<dyn InodeOp>> {
         if name == "self" {
             Ok(Arc::new(ProcSelfInode))
+        } else if name == "meminfo" {
+            Ok(Arc::new(MeminfoInode))
         } else {
             Err(Errno::ENOENT)
         }
@@ -43,6 +48,7 @@ impl InodeOp for ProcDirInode {
             dir_entry(1, b".\0"),
             dir_entry(2, b"..\0"),
             entry(InodeType::Directory, 3, b"self\0"),
+            entry(InodeType::Regular, 4, b"meminfo\0"),
         ])
     }
 
@@ -95,6 +101,8 @@ impl InodeOp for ProcSelfInode {
         match name {
             "smaps" => Ok(Arc::new(SmapsInode)),
             "exe" => Ok(Arc::new(ProcExeInode)),
+            "mounts" => Ok(Arc::new(MountsInode)),
+            "stat" => Ok(Arc::new(StatInode)),
             _ => Err(Errno::ENOENT),
         }
     }
@@ -105,6 +113,8 @@ impl InodeOp for ProcSelfInode {
             dir_entry(2, b"..\0"),
             entry(InodeType::Regular, 3, b"smaps\0"),
             entry(InodeType::SymLink, 4, b"exe\0"),
+            entry(InodeType::Regular, 5, b"mounts\0"),
+            entry(InodeType::Regular, 6, b"stat\0"),
         ])
     }
 

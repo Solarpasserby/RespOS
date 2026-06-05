@@ -1,6 +1,8 @@
 // os/src/vfs/super_block.rs
 
 use super::InodeOp;
+use crate::fs::Statfs64;
+use crate::syscall::{Errno, SysResult};
 use alloc::sync::Arc;
 
 pub trait SuperBlockOp: Send + Sync {
@@ -10,8 +12,7 @@ pub trait SuperBlockOp: Send + Sync {
     /// 将数据写回磁盘
     fn sync(&self);
 
-    // // 显示文件系统的信息
-    // fn fs_stat(&self) -> StatFs;
-    // /// 列出应用
-    // fn ls(&self);
+    fn statfs(&self) -> SysResult<Statfs64> {
+        Err(Errno::EINVAL)
+    }
 }

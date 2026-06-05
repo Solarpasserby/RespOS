@@ -90,6 +90,23 @@ impl From<KStat> for Stat {
     }
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct Statfs64 {
+    pub f_type: i64,
+    pub f_bsize: i64,
+    pub f_blocks: u64,
+    pub f_bfree: u64,
+    pub f_bavail: u64,
+    pub f_files: u64,
+    pub f_ffree: u64,
+    pub f_fsid: [i32; 2],
+    pub f_namelen: i64,
+    pub f_frsize: i64,
+    pub f_flags: i64,
+    pub f_spare: [usize; 4],
+}
+
 fn default_perm(ty: InodeType) -> u32 {
     match ty {
         InodeType::Directory => 0o755,
