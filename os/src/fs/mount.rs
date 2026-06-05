@@ -8,8 +8,6 @@ use super::Path;
 use super::namei::{AT_FDCWD, filename_lookup, filename_lookup_no_follow_final_mount};
 use super::vfs::Dentry;
 use super::vfs::{InodeType, SuperBlockOp};
-use crate::drivers::{BlockDeviceImpl, Disk};
-use crate::fs::ext4::Ext4SuperBlock;
 use crate::fs::proc::init_procfs;
 use crate::syscall::{Errno, SysResult};
 use alloc::sync::{Arc, Weak};
@@ -183,8 +181,7 @@ pub fn do_mount(source: &str, target: &str, fstype: &str, flags: usize) -> SysRe
     match fstype {
         "ext4" => {
             info!("[kernel] mount: {} on {} type ext4", source, target);
-            let disk = Disk::new(Arc::new(BlockDeviceImpl::new_device()));
-            let ext4_fs: Arc<dyn SuperBlockOp> = Arc::new(Ext4SuperBlock::new(disk));
+            let ext4_fs = crate::fs::ext4::super_block();
             let root_inode = ext4_fs.root_inode();
             let root_dentry = Arc::new(Dentry::new("/".into(), None, root_inode));
             let vfs_mount = VfsMount::new(root_dentry, ext4_fs, flags as i32);

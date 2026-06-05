@@ -74,26 +74,35 @@ pub fn main(argc: usize, argv: &[&str]) -> i32 {
 
     let fd = fd as usize;
     let mut buf = vec![0u8; BUF_SIZE];
-    let size = getdents64(fd, buf.as_mut_slice());
+
+    loop {
+        let size = getdents64(fd, buf.as_mut_slice());
+        if size < 0 {
+            close(fd);
+            println!("ls: getdents64 failed: {}", size);
+            return size as i32;
+        }
+        if size == 0 {
+            break;
+        }
+
+        let size = size as usize;
+        let mut offset = 0;
+        while offset + DIRENT64_HEADER_SIZE <= size {
+            let reclen = read_u16(&buf, offset + 16) as usize;
+            if reclen < DIRENT64_HEADER_SIZE || offset + reclen > size {
+                close(fd);
+                println!("ls: invalid dirent");
+                return -1;
+            }
+            print_entry_name(&buf[offset..offset + reclen]);
+            offset += reclen;
+        }
+    }
+
     let close_ret = close(fd);
     if close_ret < 0 {
         return close_ret as i32;
-    }
-    if size < 0 {
-        println!("ls: getdents64 failed: {}", size);
-        return size as i32;
-    }
-
-    let size = size as usize;
-    let mut offset = 0;
-    while offset + DIRENT64_HEADER_SIZE <= size {
-        let reclen = read_u16(&buf, offset + 16) as usize;
-        if reclen < DIRENT64_HEADER_SIZE || offset + reclen > size {
-            println!("ls: invalid dirent");
-            return -1;
-        }
-        print_entry_name(&buf[offset..offset + reclen]);
-        offset += reclen;
     }
     println!("");
     0

@@ -2,6 +2,7 @@
 
 use super::SysResult;
 use crate::arch::sbi;
+use crate::fs::ext4;
 use crate::mm::copy_to_user;
 
 #[repr(C)]
@@ -59,5 +60,6 @@ pub fn sys_uname(buf: *mut UtsName) -> SysResult<usize> {
 }
 
 pub fn sys_reboot() -> SysResult<usize> {
+    ext4::shutdown();
     sbi::shutdown(false);
 }

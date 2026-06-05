@@ -2,10 +2,10 @@
 
 use super::{Errno, SysResult};
 use crate::fs::mount::{do_mount, do_umount2};
-use crate::fs::vfs::{File, InodeType, OpenFlags};
+use crate::fs::vfs::{File, FileOp, InodeType, OpenFlags};
 use crate::fs::{
-    AT_EMPTY_PATH, AT_FDCWD, AT_NO_AUTOMOUNT, AT_SYMLINK_NOFOLLOW, FdEntry, Stat,
-    filename_create, filename_link, filename_lookup, filename_unlink, make_pipe, path_open,
+    AT_EMPTY_PATH, AT_FDCWD, AT_NO_AUTOMOUNT, AT_SYMLINK_NOFOLLOW, FdEntry, Stat, filename_create,
+    filename_link, filename_lookup, filename_unlink, make_pipe, path_open,
 };
 use crate::mm::{check_user_writable, copy_cstr_from_user, copy_from_user, copy_to_user};
 use crate::task::current_task;
@@ -109,14 +109,14 @@ pub fn sys_fstatat(
     stat: *mut Stat,
     flags: usize,
 ) -> SysResult<usize> {
-    const FSTATAT_ALLOWED_FLAGS: usize =
-        AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_EMPTY_PATH;
+    const FSTATAT_ALLOWED_FLAGS: usize = AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_EMPTY_PATH;
 
     if flags & !FSTATAT_ALLOWED_FLAGS != 0 {
         return Err(Errno::EINVAL);
     }
 
     let path = copy_cstr_from_user(path)?;
+    // info!("Path: {}.", path);
     let stat_buf: Stat = if path.is_empty() {
         if flags & AT_EMPTY_PATH == 0 {
             return Err(Errno::ENOENT);
@@ -169,7 +169,8 @@ pub fn sys_lseek(fd: usize, offset: isize, whence: usize) -> SysResult<usize> {
 
     let task = current_task().expect("[kernel] current task is None.");
     let file = task.get_fd_entry(fd)?.file;
-    if file.get_stat()?.ty != InodeType::Regular {
+    let ty = file.get_stat()?.ty;
+    if ty != InodeType::Regular && ty != InodeType::Directory {
         return Err(Errno::ESPIPE);
     }
 
@@ -337,26 +338,39 @@ pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> SysResult<usize
         return Err(Errno::ENOTDIR);
     };
 
-    let mut offset = 0;
+    let current_off = file.get_offset();
+    let mut written = 0;
+    let mut next_off = current_off;
     let mut buf = vec![0u8; count];
     let dirents = file.readdir()?;
     for dirent in dirents {
+        let dirent_off = usize::try_from(dirent.d_off).map_err(|_| Errno::EINVAL)?;
+        if dirent_off <= current_off {
+            continue;
+        }
+
         let dirent_size = dirent.d_reclen as usize;
         if dirent_size == 0 {
             return Err(Errno::EINVAL);
         }
-        if offset + dirent_size > count {
-            if offset == 0 {
+        if written + dirent_size > count {
+            if written == 0 {
                 return Err(Errno::EINVAL);
             }
             break;
         }
-        dirent.copy_to_buffer(&mut buf[offset..offset + dirent_size]);
-        offset += dirent_size;
+        dirent.copy_to_buffer(&mut buf[written..written + dirent_size]);
+        written += dirent_size;
+        next_off = dirent_off;
     }
-    copy_to_user(dirp, buf.as_ptr(), offset)?;
 
-    Ok(offset)
+    if written != 0 {
+        let next_off = isize::try_from(next_off).map_err(|_| Errno::EINVAL)?;
+        file.seek(next_off)?;
+        copy_to_user(dirp, buf.as_ptr(), written)?;
+    }
+
+    Ok(written)
 }
 
 /// 系统调用 sys-mount
