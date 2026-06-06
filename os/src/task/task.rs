@@ -8,7 +8,7 @@ use super::scheduler::remove_task;
 use super::tid::{TidHandle, tid_alloc};
 use crate::fs::mount::init_root_fs;
 use crate::fs::{FdEntry, FdTable, Path};
-use crate::mm::{MemorySet, copy_to_user};
+use crate::mm::{MemorySet, copy_from_user, copy_to_user};
 use crate::mutex::SpinLock;
 use crate::signal::sig_handler::SigHandler;
 use crate::signal::sig_info::SigInfo;
@@ -636,6 +636,26 @@ impl TaskControlBlock {
     //         }
     //     }
     // }
+    fn is_disabled_musl_sigcancel(&self, sig: Sig) -> bool {
+        if sig.raw() != 33 {
+            return false;
+        }
+
+        let tp = self.get_trap_cx().x[4];
+        if tp < 152 {
+            return false;
+        }
+
+        let mut cancel_state = 0u8;
+        copy_from_user(
+            &mut cancel_state as *mut u8,
+            (tp - 152) as *const u8,
+            1,
+        )
+        .is_ok()
+            && cancel_state == 1
+    }
+
     pub fn receive_siginfo(&self, siginfo: SigInfo, thread_level: bool) {
         let sig = crate::signal::Sig::from(siginfo.signo);
 
@@ -645,7 +665,7 @@ impl TaskControlBlock {
                 self.op_sig_pending_mut(|pending| pending.add_signal(siginfo));
 
                 // ★ 改动：不只是 KILL/STOP 才唤醒，而是调用 check_signal_interrupt
-                if self.check_signal_interrupt() {
+                if self.check_signal_interrupt() && !self.is_disabled_musl_sigcancel(sig) {
                     self.interrupted.store(true, Ordering::Relaxed);
                     if self.is_blocked() {
                         crate::task::scheduler::wakeup_task(self.tid());
@@ -685,7 +705,7 @@ impl TaskControlBlock {
                     task.op_sig_pending_mut(|pending| pending.add_signal(siginfo));
 
                     // ★ 改动：同样使用 check_signal_interrupt
-                    if task.check_signal_interrupt() {
+                    if task.check_signal_interrupt() && !task.is_disabled_musl_sigcancel(sig) {
                         task.interrupted.store(true, Ordering::Relaxed);
                         if task.is_blocked() {
                             crate::task::scheduler::wakeup_task(task.tid());

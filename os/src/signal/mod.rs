@@ -11,6 +11,24 @@ pub use sig_info::{LinuxSigInfo, SiField, SigInfo};
 use sig_stack::{SigContext, SignalStack, UContext};
 pub use sig_struct::{FrameFlags, MAX_SIGNUM, Sig, SigFrame, SigRTFrame, SigSet};
 
+#[cfg(target_arch = "riscv64")]
+fn make_sig_context(x: [usize; 32], pc: usize, mask: SigSet, info: usize) -> SigContext {
+    let mut gregs = [0usize; 32];
+    gregs[0] = pc;
+    gregs[1..].copy_from_slice(&x[1..]);
+    SigContext { gregs, mask, info }
+}
+
+#[cfg(target_arch = "loongarch64")]
+fn make_sig_context(x: [usize; 32], pc: usize, mask: SigSet, info: usize) -> SigContext {
+    SigContext {
+        x,
+        sepc: pc,
+        mask,
+        info,
+    }
+}
+
 // 每次 trap 返回用户态前调用，处理一个未决信号。
 //信号是异步的——进程可能在任何时刻收到信号，但处理时机必须统一。内核选在每个 trap 返回用户态之前检查信号，
 //此时 TrapContext已经准备好了，改它就能劫持返回路径。
@@ -68,12 +86,7 @@ pub fn handle_signal() {
             user_sp = (user_sp - ctx_size) & !0xF;
 
             // 保存当前寄存器快照到用户栈
-            let sig_ctx = SigContext {
-                x: trap_cx.x,
-                sepc: trap_cx.get_sepc(),
-                mask: old_mask,
-                info: 0, // 0 = 普通 handler；1 = SA_SIGINFO handler
-            };
+            let sig_ctx = make_sig_context(trap_cx.x, trap_cx.get_sepc(), old_mask, 0);
             if copy_to_user(user_sp as *mut SigContext, &sig_ctx as *const SigContext, 1).is_err() {
                 error!(
                     "[handle_signal] copy_to_user failed for signal {}, terminating task",
@@ -88,12 +101,7 @@ pub fn handle_signal() {
                 // handler 签名: void handler(int sig, siginfo_t *info, void *ucontext)
 
                 // 1. 制作 SigContext（寄存器快照）
-                let sig_context = SigContext {
-                    x: trap_cx.x,
-                    sepc: trap_cx.sepc,
-                    mask: old_mask,
-                    info: 1, // ← 标记 RT 帧，sigreturn 据此恢复
-                };
+                let sig_context = make_sig_context(trap_cx.x, trap_cx.get_sepc(), old_mask, 1);
 
                 // 2. 创建 LinuxSigInfo（用户态可读的 siginfo_t）
                 user_sp -= core::mem::size_of::<LinuxSigInfo>();

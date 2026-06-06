@@ -3,7 +3,9 @@
 use super::queue::{FUTEX_QUEUES, FutexKey, FutexQ, futex_hash_idx};
 use crate::mm::copy_from_user;
 use crate::syscall::{Errno, SysResult};
-use crate::task::scheduler::{prepare_current_task_blocked, switch_to_next_task, wakeup_task};
+use crate::task::scheduler::{
+    prepare_current_task_blocked, remove_task, switch_to_next_task, wakeup_task,
+};
 use crate::task::{current_task, futex::FUTEX_BITSET_MATCH_ANY};
 
 const FUTEX_TRACE: bool = false;
@@ -62,25 +64,63 @@ fn futex_wait_common(
             return Err(Errno::EAGAIN);
         }
 
+        // From here until the task is woken, signal delivery must be able to
+        // interrupt this futex wait. Set this before enqueueing so a cancel
+        // signal cannot arrive in the window before the task is blocked.
+        task.set_interruptible(true);
+
         queues.bucket_by_idx(hash_idx).push_back(FutexQ {
             key: key.clone(),
             tid: task.tid(),
             bitset,
         });
 
+        if task.check_signal_interrupt() {
+            task.clear_interrupted();
+            task.set_interruptible(false);
+            queues
+                .bucket_by_idx(hash_idx)
+                .retain(|q| !(q.tid == task.tid() && q.key == key));
+            trace_futex(
+                "wait-eintr-before-block",
+                &key,
+                expected_val,
+                bitset as usize,
+            );
+            return Err(Errno::EINTR);
+        }
+
         if !prepare_current_task_blocked() {
+            task.set_interruptible(false);
             queues
                 .bucket_by_idx(hash_idx)
                 .retain(|q| !(q.tid == task.tid() && q.key == key));
             trace_futex("wait-no-runner", &key, expected_val, bitset as usize);
             return Err(Errno::EAGAIN);
         }
+
+        let interrupted = task.is_interrupted() || task.check_signal_interrupt();
+        if interrupted {
+            task.clear_interrupted();
+            task.set_interruptible(false);
+            queues
+                .bucket_by_idx(hash_idx)
+                .retain(|q| !(q.tid == task.tid() && q.key == key));
+            wakeup_task(task.tid());
+            remove_task(task.tid());
+            task.set_running();
+            trace_futex(
+                "wait-eintr-after-block",
+                &key,
+                expected_val,
+                bitset as usize,
+            );
+            return Err(Errno::EINTR);
+        }
     }
 
     trace_futex("wait", &key, expected_val, bitset as usize);
 
-    // ★ 标记可中断状态：信号到达时可以打断我
-    task.set_interruptible(true);
     switch_to_next_task();
     task.set_interruptible(false);
     // ★ 醒来后检查：是 futex_wake 叫醒的，还是信号打断的？
