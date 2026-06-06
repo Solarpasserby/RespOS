@@ -158,6 +158,7 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SysResult<usize> {
     const F_SETFD: usize = 2;
     const F_GETFL: usize = 3;
     const F_SETFL: usize = 4;
+    const FD_CLOEXEC: usize = 1;
 
     let task = current_task().expect("[kernel] current task is None.");
     let mut fd_entry = task.get_fd_entry(fd)?;
@@ -165,7 +166,11 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SysResult<usize> {
     // TODO[ABI-COMPAT]: 目前还没有记录 close-on-exec 标志；F_SETFL 也暂时接受整组
     // 已保存标志，而不是只允许修改 Linux 规定的可变标志位。
     match cmd {
-        F_GETFD => Ok(0),
+        F_GETFD => Ok(if fd_entry.get_flags().contains(OpenFlags::O_CLOEXEC) {
+            FD_CLOEXEC
+        } else {
+            0
+        }),
         F_SETFD => Ok(0),
         F_GETFL => Ok(fd_entry.get_flags().bits() as usize),
         F_SETFL => {
