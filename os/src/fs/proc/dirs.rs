@@ -1,7 +1,7 @@
 // os/src/fs/proc/dirs.rs
 
-use super::super::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
 use super::super::KStat;
+use super::super::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
 use super::exe::ProcExeInode;
 use super::smaps::SmapsInode;
 use crate::syscall::{Errno, SysResult};

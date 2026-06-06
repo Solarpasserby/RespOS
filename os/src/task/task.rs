@@ -647,12 +647,7 @@ impl TaskControlBlock {
         }
 
         let mut cancel_state = 0u8;
-        copy_from_user(
-            &mut cancel_state as *mut u8,
-            (tp - 152) as *const u8,
-            1,
-        )
-        .is_ok()
+        copy_from_user(&mut cancel_state as *mut u8, (tp - 152) as *const u8, 1).is_ok()
             && cancel_state == 1
     }
 

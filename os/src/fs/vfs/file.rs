@@ -58,14 +58,21 @@ impl FileCache {
         page_idx: usize,
         lower: Option<(&Arc<dyn InodeOp>, &str)>,
     ) -> SysResult<()> {
-        if self.pages.get(page_idx).and_then(|page| page.as_ref()).is_some() {
+        if self
+            .pages
+            .get(page_idx)
+            .and_then(|page| page.as_ref())
+            .is_some()
+        {
             return Ok(());
         }
 
         self.ensure_page_slots((page_idx + 1) * PAGE_SIZE);
         let mut page = alloc::vec![0u8; PAGE_SIZE];
         let page_start = page_idx * PAGE_SIZE;
-        if page_start < self.len && let Some((inode, path)) = lower {
+        if page_start < self.len
+            && let Some((inode, path)) = lower
+        {
             match inode.read_at(path, page_start, &mut page) {
                 Ok(_) | Err(Errno::ENOENT) => {}
                 Err(err) => return Err(err),

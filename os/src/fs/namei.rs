@@ -178,11 +178,7 @@ pub fn open_last_lookups(
             }
             return Ok(Arc::new(File::new_tmpfile(path, inode, flags)));
         }
-        return Ok(Arc::new(File::new(
-            path,
-            inode,
-            flags,
-        )));
+        return Ok(Arc::new(File::new(path, inode, flags)));
     }
 
     let name = nd.path_segments[nd.depth];

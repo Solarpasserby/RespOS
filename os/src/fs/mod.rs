@@ -5,10 +5,10 @@ mod fdtable;
 mod kstat;
 pub mod mount;
 mod namei;
-pub mod proc;
 mod page_cache;
 mod path;
 mod pipe;
+pub mod proc;
 mod stdio;
 pub mod vfs;
 

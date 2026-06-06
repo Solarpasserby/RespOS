@@ -1,7 +1,7 @@
 // os/src/fs/proc/exe.rs
 
-use super::super::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
 use super::super::KStat;
+use super::super::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
 use crate::syscall::{Errno, SysResult};
 use crate::task::current_task;
 use alloc::string::String;

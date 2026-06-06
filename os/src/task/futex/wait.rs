@@ -7,6 +7,7 @@ use crate::task::scheduler::{
     prepare_current_task_blocked, remove_task, switch_to_next_task, wakeup_task,
 };
 use crate::task::{current_task, futex::FUTEX_BITSET_MATCH_ANY};
+use alloc::vec::Vec;
 
 const FUTEX_TRACE: bool = false;
 
@@ -169,12 +170,100 @@ fn futex_wake_common(uaddr: usize, nr_wake: u32, bitset: u32, private: bool) -> 
     Ok(woken)
 }
 
+fn futex_requeue_common(
+    uaddr: usize,
+    nr_wake: u32,
+    uaddr2: usize,
+    nr_requeue: u32,
+    private: bool,
+) -> SysResult<usize> {
+    if uaddr == 0 || uaddr2 == 0 {
+        return Err(Errno::EINVAL);
+    }
+
+    let source_key = futex_key(uaddr, private);
+    let target_key = futex_key(uaddr2, private);
+
+    if source_key == target_key {
+        return futex_wake(uaddr, nr_wake, private);
+    }
+
+    let source_idx = futex_hash_idx(uaddr);
+    let target_idx = futex_hash_idx(uaddr2);
+    let mut queues = FUTEX_QUEUES.lock();
+    let mut moved = Vec::new();
+    let mut affected = 0usize;
+    let mut woken = 0usize;
+    let mut requeued = 0usize;
+
+    {
+        let source_bucket = queues.bucket_by_idx(source_idx);
+        let mut idx = 0;
+        while idx < source_bucket.len() && woken < nr_wake as usize {
+            if source_bucket[idx].key == source_key {
+                let futex_q = source_bucket.remove(idx).unwrap();
+                wakeup_task(futex_q.tid);
+                woken += 1;
+                affected += 1;
+            } else {
+                idx += 1;
+            }
+        }
+
+        while idx < source_bucket.len() && requeued < nr_requeue as usize {
+            if source_bucket[idx].key == source_key {
+                let mut futex_q = source_bucket.remove(idx).unwrap();
+                futex_q.key = target_key.clone();
+                moved.push(futex_q);
+                requeued += 1;
+                affected += 1;
+            } else {
+                idx += 1;
+            }
+        }
+    }
+
+    if !moved.is_empty() {
+        let target_bucket = queues.bucket_by_idx(target_idx);
+        for futex_q in moved {
+            target_bucket.push_back(futex_q);
+        }
+    }
+
+    Ok(affected)
+}
+
 pub fn futex_wait(uaddr: usize, expected_val: u32, private: bool) -> SysResult<usize> {
     futex_wait_common(uaddr, expected_val, FUTEX_BITSET_MATCH_ANY, private)
 }
 
 pub fn futex_wake(uaddr: usize, nr_wake: u32, private: bool) -> SysResult<usize> {
     futex_wake_common(uaddr, nr_wake, FUTEX_BITSET_MATCH_ANY, private)
+}
+
+pub fn futex_requeue(
+    uaddr: usize,
+    nr_wake: u32,
+    uaddr2: usize,
+    nr_requeue: u32,
+    private: bool,
+) -> SysResult<usize> {
+    futex_requeue_common(uaddr, nr_wake, uaddr2, nr_requeue, private)
+}
+
+pub fn futex_cmp_requeue(
+    uaddr: usize,
+    nr_wake: u32,
+    uaddr2: usize,
+    nr_requeue: u32,
+    expected_val: u32,
+    private: bool,
+) -> SysResult<usize> {
+    let actual_val = read_futex_value(uaddr)?;
+    if actual_val != expected_val {
+        return Err(Errno::EAGAIN);
+    }
+    futex_requeue_common(uaddr, nr_wake, uaddr2, nr_requeue, private)
 }
 
 pub fn futex_wait_bitset(
