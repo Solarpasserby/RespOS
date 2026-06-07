@@ -142,6 +142,9 @@ pub trait FileOp: Any + Send + Sync {
     fn get_stat(&self) -> SysResult<KStat>;
     fn readable(&self) -> bool;
     fn writable(&self) -> bool;
+    fn is_tty(&self) -> bool {
+        false
+    }
 }
 
 impl File {

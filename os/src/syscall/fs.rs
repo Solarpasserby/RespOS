@@ -15,6 +15,11 @@ use alloc::vec;
 
 const UTIME_NOW: usize = 1_073_741_823;
 const UTIME_OMIT: usize = 1_073_741_822;
+const F_OK: usize = 0;
+const X_OK: usize = 1;
+const W_OK: usize = 2;
+const R_OK: usize = 4;
+const AT_EACCESS: usize = 0x200;
 
 // 使用 mm 实现的 `copy_cstr_from_user`, `copy_from_user`, `copy_to_user` 来访问用户空间的数据
 
@@ -271,6 +276,100 @@ pub fn sys_fstat(fd: usize, stat: *mut Stat) -> SysResult<usize> {
     Ok(0)
 }
 
+/// 系统调用 sys-faccessat
+///
+/// 按 dirfd + path 定位文件，并根据 mode 检查该路径是否存在、是否可读/可写/可执行。
+/// 它只回答“权限检查是否通过”，不会打开文件，也不会返回文件状态结构。
+/// 用户态的 access()/faccessat() 常用它在真正 exec/open 前做一次轻量探测，
+/// 例如 busybox which 会用 X_OK 判断 PATH 中的命令文件是否可执行。
+///
+/// mode 可以是 F_OK，或 R_OK/W_OK/X_OK 的组合：F_OK 只要求路径存在，
+/// 其它位会继续检查 inode mode 中至少有一类用户具备对应权限。
+/// dirfd 与相对路径的解释交给 namei；绝对路径会自然忽略 dirfd。
+/// flags 目前只接受 AT_EACCESS、AT_SYMLINK_NOFOLLOW 和 AT_EMPTY_PATH，
+/// 其中 AT_SYMLINK_NOFOLLOW 会让最后一级符号链接停在链接本身。
+///
+/// 当前内核还没有完整的 uid/gid 权限模型，这里先检查路径是否存在，
+/// 并用 inode mode 的基础权限位满足 busybox/coreutils 的可执行性探测。
+///
+/// TODO[ABI-COMPAT]: Linux access/faccessat 默认使用 real uid/gid，
+/// faccessat2 + AT_EACCESS 才使用 effective uid/gid；当前暂未区分。
+/// TODO[ABI-COMPAT]: 尚未实现 root/capability/ACL 等权限放宽规则。
+/// TODO[ABI-COMPAT]: 尚未检查路径中每一级目录的 search/execute 权限。
+/// TODO[ABI-COMPAT]: W_OK 对只读挂载、不可变文件等特殊状态的语义尚未实现。
+pub fn sys_faccessat(
+    dirfd: isize,
+    path: *const u8,
+    mode: usize,
+    flags: usize,
+) -> SysResult<usize> {
+    const FACCESSAT_ALLOWED_FLAGS: usize = AT_EACCESS | AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH;
+
+    if mode & !(R_OK | W_OK | X_OK) != 0 || flags & !FACCESSAT_ALLOWED_FLAGS != 0 {
+        return Err(Errno::EINVAL);
+    }
+
+    let path = copy_cstr_from_user(path)?;
+    let kstat = if path.is_empty() {
+        // TODO[ABI-COMPAT]: AT_EMPTY_PATH 是 faccessat2 扩展；
+        // 若未来同时暴露旧 faccessat，需要按 syscall 入口区分 flags 语义。
+        if flags & AT_EMPTY_PATH == 0 {
+            return Err(Errno::ENOENT);
+        }
+        if dirfd == AT_FDCWD {
+            let task = current_task().expect("[kernel] current task is None.");
+            let cwd = task.cwd();
+            cwd.dentry.get_inode().stat(&cwd.abs_path())?
+        } else {
+            if dirfd < 0 {
+                return Err(Errno::EBADF);
+            }
+            let task = current_task().expect("[kernel] current task is None.");
+            task.get_fd_entry(dirfd as usize)?.file.get_stat()?
+        }
+    } else {
+        // TODO[ABI-COMPAT]: AT_SYMLINK_NOFOLLOW 下 Linux 检查链接本身；
+        // 当前符号链接默认权限按 0777 处理，尚未覆盖特殊 LSM/ACL 行为。
+        let resolved = if flags & AT_SYMLINK_NOFOLLOW != 0 {
+            filename_lookup_no_follow_final_symlink(dirfd, path.as_str())?
+        } else {
+            filename_lookup(dirfd, path.as_str(), 0)?
+        };
+        resolved.dentry.get_inode().stat(&resolved.abs_path())?
+    };
+
+    if mode == F_OK {
+        return Ok(0);
+    }
+
+    let perm = access_perm_bits(kstat.ty, kstat.mode);
+    if mode & R_OK != 0 && perm & 0o444 == 0 {
+        return Err(Errno::EACCES);
+    }
+    if mode & W_OK != 0 && perm & 0o222 == 0 {
+        return Err(Errno::EACCES);
+    }
+    if mode & X_OK != 0 && perm & 0o111 == 0 {
+        return Err(Errno::EACCES);
+    }
+    Ok(0)
+}
+
+fn access_perm_bits(ty: InodeType, mode: u32) -> u32 {
+    let perm = mode & 0o777;
+    if perm != 0 {
+        return perm;
+    }
+    // TODO[ABI-COMPAT]: 虚拟文件系统暂缺稳定 mode 时使用默认权限兜底；
+    // 后续应由各 inode 后端返回更精确的权限位。
+    match ty {
+        InodeType::Directory => 0o755,
+        InodeType::Regular => 0o644,
+        InodeType::SymLink => 0o777,
+        _ => 0o666,
+    }
+}
+
 /// 系统调用 sys-statfs
 pub fn sys_statfs(path: *const u8, buf: *mut Statfs64) -> SysResult<usize> {
     let path = copy_cstr_from_user(path)?;
@@ -319,6 +418,44 @@ pub fn sys_lseek(fd: usize, offset: isize, whence: usize) -> SysResult<usize> {
         _ => return Err(Errno::EINVAL),
     };
     file.seek(new_offset as isize)
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+struct WinSize {
+    row: u16,
+    col: u16,
+    xpixel: u16,
+    ypixel: u16,
+}
+
+/// 系统调用 sys-ioctl
+///
+/// ioctl 是设备相关的杂项控制入口，真实 Linux 会按文件对应的驱动分发。
+/// 这里先补 BusyBox/musl 常见的终端窗口大小探测：stdio 在第一次输出时
+/// 可能用 TIOCGWINSZ 判断终端宽度和行缓冲策略，od 的格式化输出也会经过这条路径。
+///
+/// TODO[ABI-COMPAT]: 终端 TCGETS/TCSETS、RTC、块设备、网络设备等 ioctl
+/// 需要下沉到具体 FileOp/设备驱动中实现，不能长期放在 syscall 层硬编码。
+pub fn sys_ioctl(fd: usize, request: usize, arg: usize) -> SysResult<usize> {
+    const TIOCGWINSZ: usize = 0x5413;
+
+    let task = current_task().expect("[kernel] current task is None.");
+    let fd_entry = task.get_fd_entry(fd)?;
+
+    match request {
+        TIOCGWINSZ if fd_entry.file.is_tty() => {
+            let winsize = WinSize {
+                row: 24,
+                col: 80,
+                xpixel: 0,
+                ypixel: 0,
+            };
+            copy_to_user(arg as *mut WinSize, &winsize as *const WinSize, 1)?;
+            Ok(0)
+        }
+        _ => Err(Errno::ENOTTY),
+    }
 }
 
 /// 系统调用 sys-fcntl

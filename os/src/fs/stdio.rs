@@ -63,6 +63,9 @@ impl FileOp for Stdin {
     fn writable(&self) -> bool {
         false
     }
+    fn is_tty(&self) -> bool {
+        true
+    }
     fn get_flags(&self) -> OpenFlags {
         OpenFlags::empty()
     }
@@ -98,6 +101,9 @@ impl FileOp for Stdout {
         false
     }
     fn writable(&self) -> bool {
+        true
+    }
+    fn is_tty(&self) -> bool {
         true
     }
     fn get_flags(&self) -> OpenFlags {

@@ -53,12 +53,11 @@ impl Ext4Inode {
         }
     }
 
-    fn dirent_name_eq(raw_name: &[u8], expected: &str) -> bool {
-        let len = raw_name
-            .iter()
-            .position(|&b| b == 0)
-            .unwrap_or(raw_name.len());
-        raw_name[..len] == *expected.as_bytes()
+    fn dirent_name_eq(raw_name: &[u8], name_len: usize, expected: &str) -> bool {
+        if name_len > raw_name.len() {
+            return false;
+        }
+        raw_name[..name_len] == *expected.as_bytes()
     }
 
     fn check_type(&self, expected: InodeType) -> SysResult<()> {
@@ -184,7 +183,7 @@ impl Ext4Inode {
             }
 
             let dirent = unsafe { &*dirent };
-            if Self::dirent_name_eq(&dirent.name, name) {
+            if Self::dirent_name_eq(&dirent.name, dirent.name_length as usize, name) {
                 let child_path = Self::child_path(parent_path, name);
                 let ty = Self::inode_mode_type(&child_path)
                     .unwrap_or_else(|| Ext4InodeTypes::from(dirent.inode_type as usize));

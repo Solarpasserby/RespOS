@@ -8,7 +8,7 @@ extern crate alloc;
 
 use alloc::string::String;
 use user_lib::{
-    O_RDONLY, chdir, close, exec, exit, fork, link, mkdir, open, poweroff, read, waitpid,
+    O_RDONLY, chdir, close, exec, exit, fork, link, mkdir, open, poweroff, read, unlink, waitpid,
 };
 
 const BUSYBOX_PATH: &str = "/musl/busybox\0";
@@ -125,8 +125,14 @@ fn run_busybox_command(line: &str) -> i32 {
 
 fn ensure_busybox_applet_links() {
     let _ = mkdir("/bin\0", 0o755);
+    cleanup_busybox_applet_links();
     let _ = link("/musl/busybox\0", "/bin/ls\0");
     let _ = link("/musl/busybox\0", "/bin/sleep\0");
+}
+
+fn cleanup_busybox_applet_links() {
+    let _ = unlink("/bin/ls\0");
+    let _ = unlink("/bin/sleep\0");
 }
 
 fn _run_busybox_musl() {
@@ -143,6 +149,7 @@ fn _run_busybox_musl() {
     if n < 0 {
         println!("[testrunner] cannot read {}", strip_nul(BUSYBOX_CMD_FILE));
         let _ = chdir("/\0");
+        cleanup_busybox_applet_links();
         println!("#### OS COMP TEST GROUP END busybox-musl ####");
         return;
     }
@@ -172,6 +179,7 @@ fn _run_busybox_musl() {
     }
 
     let _ = chdir("/\0");
+    cleanup_busybox_applet_links();
     println!("#### OS COMP TEST GROUP END busybox-musl ####");
 }
 
