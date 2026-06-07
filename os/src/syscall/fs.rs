@@ -86,6 +86,33 @@ pub fn sys_writev(fd: usize, iov: *const IoVec, iovcnt: usize) -> SysResult<usiz
     Ok(total)
 }
 
+pub fn sys_readv(fd: usize, iov: *const IoVec, iovcnt: usize) -> SysResult<usize> {
+    const IOV_MAX: usize = 1024;
+    if iovcnt > IOV_MAX {
+        return Err(Errno::EINVAL);
+    }
+
+    let mut total: usize = 0;
+    for idx in 0..iovcnt {
+        let mut item = IoVec {
+            base: core::ptr::null_mut(),
+            len: 0,
+        };
+        unsafe {
+            copy_from_user(&mut item as *mut IoVec, iov.add(idx), 1)?;
+        }
+        if item.len == 0 {
+            continue;
+        }
+        let read = sys_read(fd, item.base, item.len)?;
+        total = total.checked_add(read).ok_or(Errno::EINVAL)?;
+        if read < item.len {
+            break;
+        }
+    }
+    Ok(total)
+}
+
 /// 系统调用 sys-open
 pub fn sys_openat(dirfd: isize, path: *const u8, flags: usize, mode: usize) -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
