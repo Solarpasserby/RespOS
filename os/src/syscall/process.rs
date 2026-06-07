@@ -13,10 +13,52 @@ use crate::task::{
     CloneFlags, WaitOption, add_task, current_task, do_futex, exit_and_run_next,
     exit_group_and_run_next, yield_current_task,
 };
+use alloc::string::String;
 use alloc::vec::Vec;
 
 #[cfg(target_arch = "loongarch64")]
 const LOONGARCH_PTHREAD_TRACE: bool = false;
+
+fn is_elf(data: &[u8]) -> bool {
+    data.len() >= 4 && data[..4] == [0x7f, b'E', b'L', b'F']
+}
+
+fn shebang_busybox_path(script_path: &str) -> &'static str {
+    if script_path.starts_with("/glibc/") {
+        "/glibc/busybox"
+    } else {
+        "/musl/busybox"
+    }
+}
+
+fn shebang_args(script_path: &str, data: &[u8], old_args: &[String]) -> Option<(String, Vec<String>)> {
+    if !data.starts_with(b"#!") {
+        return None;
+    }
+
+    let end = data.iter().position(|&c| c == b'\n').unwrap_or(data.len());
+    let line = core::str::from_utf8(&data[2..end]).ok()?.trim();
+    let mut parts = line.split_whitespace();
+    let interp = parts.next()?;
+    let interp_arg = parts.next();
+
+    let shell_path = if interp == "/bin/sh" || interp == "/usr/bin/sh" || interp == "/busybox" {
+        shebang_busybox_path(script_path)
+    } else {
+        interp
+    };
+
+    let mut args = Vec::new();
+    args.push(String::from("busybox"));
+    if let Some(arg) = interp_arg {
+        args.push(String::from(arg));
+    } else {
+        args.push(String::from("sh"));
+    }
+    args.push(String::from(script_path));
+    args.extend(old_args.iter().skip(1).cloned());
+    Some((String::from(shell_path), args))
+}
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -278,14 +320,37 @@ pub fn sys_execve(path: *const u8, args: *const usize, envp: *const usize) -> Sy
     let task = current_task().expect("[kernel] current task is None.");
 
     if let Ok(file) = path_open(AT_FDCWD, &path, 0, 0) {
-        info!("[kernel] execute file in fs");
+        // info!("[kernel] execute file in fs");
         let exe_path = file.path().global_abs_path();
         let all_data = file.read_all()?;
+
+        if !is_elf(all_data.as_slice()) {
+            if let Some((shell_path, shell_args)) =
+                shebang_args(exe_path.as_str(), all_data.as_slice(), args_vec.as_slice())
+            {
+                let shell_file = path_open(AT_FDCWD, shell_path.as_str(), 0, 0)?;
+                let shell_exe_path = shell_file.path().global_abs_path();
+                let shell_data = shell_file.read_all()?;
+                task.execve(
+                    shell_exe_path,
+                    shell_data.as_slice(),
+                    shell_args,
+                    envs_vec,
+                    true,
+                )?;
+                return Ok(0);
+            }
+            return Err(Errno::ENOEXEC);
+        }
+
         task.execve(exe_path, all_data.as_slice(), args_vec, envs_vec, true)?;
         Ok(0)
     } else if !path.starts_with("/") {
         // 从内核中加载的应用程序
         if let Some(data) = get_app_data_by_name(path.as_str()) {
+            if !is_elf(data) {
+                return Err(Errno::ENOEXEC);
+            }
             Ok(task.execve(path.clone(), data, args_vec, envs_vec, false)?)
         } else {
             Err(Errno::ENOENT)

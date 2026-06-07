@@ -1,20 +1,18 @@
-// os/src/fs/proc/smaps.rs
+// os/src/fs/proc/meminfo.rs
 
 use super::super::KStat;
 use super::super::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
-use super::dirs::{proc_dev, proc_self_smaps_ino};
-use crate::mm::MapPermission;
+use super::dirs::{proc_dev, proc_meminfo_ino};
 use crate::syscall::{Errno, SysResult};
-use crate::task::current_task;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
 use core::fmt::Write;
 
-pub(super) struct SmapsInode;
+pub(super) struct MeminfoInode;
 
-impl InodeOp for SmapsInode {
+impl InodeOp for MeminfoInode {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -24,15 +22,15 @@ impl InodeOp for SmapsInode {
     }
 
     fn stat(&self, _path: &str) -> SysResult<KStat> {
-        let size = generate_smaps().len();
+        let size = generate_meminfo().len();
         Ok(KStat::minimal(size, InodeType::Regular)
             .with_dev(proc_dev())
-            .with_ino(proc_self_smaps_ino())
+            .with_ino(proc_meminfo_ino())
             .with_mode(0o444))
     }
 
     fn read_at(&self, _path: &str, off: usize, buf: &mut [u8]) -> SysResult<usize> {
-        let content = generate_smaps();
+        let content = generate_meminfo();
         let bytes = content.as_bytes();
         if off >= bytes.len() {
             return Ok(0);
@@ -70,35 +68,18 @@ impl InodeOp for SmapsInode {
     }
 }
 
-fn generate_smaps() -> String {
-    let task = match current_task() {
-        Some(t) => t,
-        None => return String::new(),
-    };
+fn generate_meminfo() -> String {
+    let free_frames = crate::mm::free_frame_count();
+    let page_size = crate::config::PAGE_SIZE;
+    let mem_total = crate::config::MEMORY_END - crate::config::MEMORY_START;
+    let mem_free = free_frames * page_size;
+    let heap_used = crate::mm::heap_allocated();
 
     let mut result = String::new();
-    task.op_memory_set_read(|mm| {
-        mm.each_area(|start, end, perm| {
-            let p = perm_to_smaps_str(perm);
-            let _ = writeln!(result, "{:016x}-{:016x} {} 00000000 00:00 0", start, end, p);
-            let _ = writeln!(result);
-        });
-    });
+    let _ = writeln!(result, "MemTotal:       {:8} kB", mem_total / 1024);
+    let _ = writeln!(result, "MemFree:        {:8} kB", mem_free / 1024);
+    let _ = writeln!(result, "MemAvailable:   {:8} kB", mem_free / 1024);
+    let _ = writeln!(result, "Cached:         {:8} kB", 0);
+    let _ = writeln!(result, "KernelHeap:     {:8} kB", heap_used / 1024);
     result
-}
-
-fn perm_to_smaps_str(perm: MapPermission) -> &'static str {
-    let r = perm.contains(MapPermission::READ);
-    let w = perm.contains(MapPermission::WRITE);
-    let x = perm.contains(MapPermission::EXECUTE);
-    match (r, w, x) {
-        (true, true, true) => "rwxp",
-        (true, true, false) => "rw-p",
-        (true, false, true) => "r-xp",
-        (true, false, false) => "r--p",
-        (false, true, true) => "-wxp",
-        (false, true, false) => "-w-p",
-        (false, false, true) => "--xp",
-        _ => "---p",
-    }
 }

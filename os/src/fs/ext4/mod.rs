@@ -12,7 +12,7 @@ pub use inode::*;
 pub use super_block::*;
 
 lazy_static! {
-    static ref SUPER_BLOCK: Arc<dyn SuperBlockOp> = {
+    static ref SUPER_BLOCK: Arc<Ext4SuperBlock> = {
         Arc::new(Ext4SuperBlock::new(Disk::new(Arc::new(
             BlockDeviceImpl::new_device(),
         ))))
@@ -25,4 +25,8 @@ pub fn root_inode() -> Arc<dyn InodeOp> {
 
 pub fn super_block() -> Arc<dyn SuperBlockOp> {
     SUPER_BLOCK.clone()
+}
+
+pub fn shutdown() {
+    SUPER_BLOCK.shutdown();
 }

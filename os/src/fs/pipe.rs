@@ -9,6 +9,9 @@ use alloc::sync::Arc;
 use core::any::Any;
 use spin::Mutex;
 
+const PIPE_INO: u64 = 0x1000;
+const PIPE_DEV: u64 = 0x200;
+
 pub struct Pipe {
     buffer: Arc<Mutex<PipeRingBuffer>>,
     readable: bool,
@@ -112,10 +115,10 @@ impl FileOp for Pipe {
         OpenFlags::empty()
     }
     fn get_stat(&self) -> SysResult<KStat> {
-        Ok(KStat {
-            size: 0,
-            ty: InodeType::Fifo,
-        })
+        Ok(KStat::minimal(0, InodeType::Fifo)
+            .with_dev(PIPE_DEV)
+            .with_ino(PIPE_INO)
+            .with_mode(0o666))
     }
 }
 

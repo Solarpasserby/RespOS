@@ -1,6 +1,7 @@
 // os/src/ext4/inode.rs
 
 use alloc::ffi::CString;
+use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::any::Any;
@@ -12,10 +13,12 @@ use spin::Mutex;
 use crate::fs::KStat;
 use crate::fs::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
 use crate::syscall::{Errno, SysResult};
+use crate::timer::TimeSpec;
 
 lazy_static! {
     static ref EXT4_INODE_CACHE: Mutex<HashMap<u64, Weak<dyn InodeOp>>> =
         Mutex::new(HashMap::new());
+    static ref EXT4_OP_LOCK: Mutex<()> = Mutex::new(());
 }
 
 pub struct Ext4Inode {
@@ -50,12 +53,11 @@ impl Ext4Inode {
         }
     }
 
-    fn dirent_name_eq(raw_name: &[u8], expected: &str) -> bool {
-        let len = raw_name
-            .iter()
-            .position(|&b| b == 0)
-            .unwrap_or(raw_name.len());
-        raw_name[..len] == *expected.as_bytes()
+    fn dirent_name_eq(raw_name: &[u8], name_len: usize, expected: &str) -> bool {
+        if name_len > raw_name.len() {
+            return false;
+        }
+        raw_name[..name_len] == *expected.as_bytes()
     }
 
     fn check_type(&self, expected: InodeType) -> SysResult<()> {
@@ -87,6 +89,7 @@ impl Ext4Inode {
     }
 
     fn file_link(old_path: &str, hardlink_path: &str) -> SysResult {
+        let _guard = EXT4_OP_LOCK.lock();
         let old_path = CString::new(old_path).map_err(|_| Errno::EINVAL)?;
         let new_path = CString::new(hardlink_path).map_err(|_| Errno::EINVAL)?;
         let ret = unsafe { bindings::ext4_flink(old_path.as_ptr(), new_path.as_ptr()) };
@@ -96,7 +99,54 @@ impl Ext4Inode {
         Ok(())
     }
 
+    fn file_symlink(target: &str, path: &str) -> SysResult {
+        let _guard = EXT4_OP_LOCK.lock();
+        // lwext4 负责选择 fast symlink 或普通数据块存储；VFS 层只传入目标字符串和新路径。
+        let target = CString::new(target).map_err(|_| Errno::EINVAL)?;
+        let path = CString::new(path).map_err(|_| Errno::EINVAL)?;
+        let ret = unsafe { bindings::ext4_fsymlink(target.as_ptr(), path.as_ptr()) };
+        if ret != 0 {
+            return Err(Self::map_lwext4_err(ret));
+        }
+        Ok(())
+    }
+
+    fn file_readlink(path: &str) -> SysResult<String> {
+        const MAX_LINK_TARGET: usize = 4096;
+
+        let _guard = EXT4_OP_LOCK.lock();
+        let path = CString::new(path).map_err(|_| Errno::EINVAL)?;
+        // ext4_readlink 返回裸字节和读取长度，不保证 C 字符串结尾，因此按 rcnt 截断。
+        let mut buf = Vec::from([0u8; MAX_LINK_TARGET]);
+        let mut read_len = 0usize;
+        let ret = unsafe {
+            bindings::ext4_readlink(
+                path.as_ptr(),
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+                &mut read_len,
+            )
+        };
+        if ret != 0 {
+            return Err(Self::map_lwext4_err(ret));
+        }
+        buf.truncate(read_len);
+        String::from_utf8(buf).map_err(|_| Errno::EINVAL)
+    }
+
+    pub(crate) fn file_rename(old_path: &str, new_path: &str) -> SysResult {
+        let _guard = EXT4_OP_LOCK.lock();
+        let c_old = CString::new(old_path).map_err(|_| Errno::EINVAL)?;
+        let c_new = CString::new(new_path).map_err(|_| Errno::EINVAL)?;
+        let ret = unsafe { bindings::ext4_frename(c_old.as_ptr(), c_new.as_ptr()) };
+        if ret != 0 {
+            return Err(Self::map_lwext4_err(ret));
+        }
+        Ok(())
+    }
+
     fn file_size(&self, path: &str) -> SysResult<usize> {
+        let _guard = EXT4_OP_LOCK.lock();
         let file = &mut Ext4File::new(path, self.ty.clone());
         file.file_open(path, bindings::O_RDONLY)
             .map_err(Self::map_lwext4_err)?;
@@ -113,6 +163,7 @@ impl Ext4Inode {
     }
 
     fn lookup_dirent(parent_path: &str, name: &str) -> SysResult<(u64, Ext4InodeTypes)> {
+        let _guard = EXT4_OP_LOCK.lock();
         let c_path = CString::new(parent_path).map_err(|_| Errno::EINVAL)?;
         let c_path = c_path.into_raw();
         let mut dir: bindings::ext4_dir = unsafe { core::mem::zeroed() };
@@ -132,11 +183,11 @@ impl Ext4Inode {
             }
 
             let dirent = unsafe { &*dirent };
-            if Self::dirent_name_eq(&dirent.name, name) {
-                found = Some((
-                    dirent.inode as u64,
-                    Ext4InodeTypes::from(dirent.inode_type as usize),
-                ));
+            if Self::dirent_name_eq(&dirent.name, dirent.name_length as usize, name) {
+                let child_path = Self::child_path(parent_path, name);
+                let ty = Self::inode_mode_type(&child_path)
+                    .unwrap_or_else(|| Ext4InodeTypes::from(dirent.inode_type as usize));
+                found = Some((dirent.inode as u64, ty));
                 break;
             }
         }
@@ -147,6 +198,20 @@ impl Ext4Inode {
         }
 
         found.ok_or(Errno::ENOENT)
+    }
+
+    fn inode_mode_type(path: &str) -> Option<Ext4InodeTypes> {
+        let c_path = CString::new(path).ok()?;
+        let c_path = c_path.into_raw();
+        let mut mode = 0;
+        let ret = unsafe { bindings::ext4_mode_get(c_path, &mut mode) };
+        unsafe {
+            drop(CString::from_raw(c_path));
+        }
+        if ret != 0 {
+            return None;
+        }
+        Some(Ext4InodeTypes::from((mode & 0o170000) as usize))
     }
 }
 
@@ -161,17 +226,65 @@ impl InodeOp for Ext4Inode {
 
     fn stat(&self, path: &str) -> SysResult<KStat> {
         let ty = self.node_type();
-        let size = if ty == InodeType::Regular {
-            self.file_size(path)?
-        } else {
-            0
+        let size = match ty {
+            InodeType::Regular => self.file_size(path)?,
+            // lstat(symlink) 的 st_size 是链接目标字符串长度，不是目标文件大小。
+            InodeType::SymLink => Self::file_readlink(path)?.len(),
+            _ => 0,
         };
-        Ok(KStat { size, ty })
+        let ino = self.ino;
+
+        let _guard = EXT4_OP_LOCK.lock();
+        let c_path = CString::new(path).map_err(|_| Errno::EINVAL)?;
+        let c_path = c_path.into_raw();
+
+        let mut mode: u32 = 0;
+        let _ = unsafe { bindings::ext4_mode_get(c_path, &mut mode) };
+
+        let mut uid: u32 = 0;
+        let mut gid: u32 = 0;
+        let _ = unsafe { bindings::ext4_owner_get(c_path, &mut uid, &mut gid) };
+
+        let mut atime: u32 = 0;
+        let mut mtime: u32 = 0;
+        let mut ctime: u32 = 0;
+        let _ = unsafe { bindings::ext4_atime_get(c_path, &mut atime) };
+        let _ = unsafe { bindings::ext4_mtime_get(c_path, &mut mtime) };
+        let _ = unsafe { bindings::ext4_ctime_get(c_path, &mut ctime) };
+
+        unsafe { drop(CString::from_raw(c_path)) };
+
+        Ok(KStat {
+            dev: 0,
+            size,
+            ty,
+            ino,
+            nlink: 1,
+            uid,
+            gid,
+            rdev: 0,
+            mode,
+            blksize: crate::config::BLOCK_SIZE as u32,
+            blocks: KStat::blocks_for_size(size as u64),
+            atime: TimeSpec {
+                sec: atime as usize,
+                nsec: 0,
+            },
+            mtime: TimeSpec {
+                sec: mtime as usize,
+                nsec: 0,
+            },
+            ctime: TimeSpec {
+                sec: ctime as usize,
+                nsec: 0,
+            },
+        })
     }
 
     fn read_at(&self, path: &str, off: usize, buf: &mut [u8]) -> SysResult<usize> {
         self.check_type(InodeType::Regular)?;
 
+        let _guard = EXT4_OP_LOCK.lock();
         let file = &mut Ext4File::new(path, self.ty.clone());
         file.file_open(path, bindings::O_RDONLY)
             .map_err(Self::map_lwext4_err)?;
@@ -186,6 +299,7 @@ impl InodeOp for Ext4Inode {
     fn write_at(&self, path: &str, off: usize, buf: &[u8]) -> SysResult<usize> {
         self.check_type(InodeType::Regular)?;
 
+        let _guard = EXT4_OP_LOCK.lock();
         let file = &mut Ext4File::new(path, self.ty.clone());
         file.file_open(path, bindings::O_RDWR)
             .map_err(Self::map_lwext4_err)?;
@@ -200,6 +314,7 @@ impl InodeOp for Ext4Inode {
     fn truncate(&self, path: &str, size: usize) -> SysResult<usize> {
         self.check_type(InodeType::Regular)?;
 
+        let _guard = EXT4_OP_LOCK.lock();
         let file = &mut Ext4File::new(path, self.ty.clone());
         file.file_open(path, bindings::O_RDWR)
             .map_err(Self::map_lwext4_err)?;
@@ -208,6 +323,32 @@ impl InodeOp for Ext4Inode {
         file.file_close().map_err(Self::map_lwext4_err)?;
 
         Ok(0)
+    }
+
+    fn set_times(&self, path: &str, atime: Option<TimeSpec>, mtime: Option<TimeSpec>) -> SysResult {
+        let _guard = EXT4_OP_LOCK.lock();
+        let c_path = CString::new(path).map_err(|_| Errno::EINVAL)?;
+        let c_path = c_path.as_ptr();
+
+        if let Some(atime) = atime {
+            let ret = unsafe { bindings::ext4_atime_set(c_path, atime.sec as u32) };
+            if ret != 0 {
+                return Err(Self::map_lwext4_err(ret));
+            }
+        }
+        if let Some(mtime) = mtime {
+            let ret = unsafe { bindings::ext4_mtime_set(c_path, mtime.sec as u32) };
+            if ret != 0 {
+                return Err(Self::map_lwext4_err(ret));
+            }
+        }
+
+        let now = crate::timer::get_time_ms() / 1000;
+        let ret = unsafe { bindings::ext4_ctime_set(c_path, now as u32) };
+        if ret != 0 {
+            return Err(Self::map_lwext4_err(ret));
+        }
+        Ok(())
     }
 
     /// 查找与 name 匹配的子索引节点，约定 name 为常规文件名
@@ -225,6 +366,7 @@ impl InodeOp for Ext4Inode {
     fn readdir(&self, path: &str) -> SysResult<Vec<LinuxDirent64>> {
         self.check_type(InodeType::Directory)?;
 
+        let _guard = EXT4_OP_LOCK.lock();
         let c_path = CString::new(path).map_err(|_| Errno::EINVAL)?;
         let c_path = c_path.into_raw();
         let mut dir: bindings::ext4_dir = unsafe { core::mem::zeroed() };
@@ -274,30 +416,42 @@ impl InodeOp for Ext4Inode {
 
         let path = Self::child_path(parent_path, name);
         let ext4_ty = Ext4InodeTypes::from(ty);
-        let file = &mut Ext4File::new(parent_path, self.ty.clone());
+        {
+            let _guard = EXT4_OP_LOCK.lock();
+            let file = &mut Ext4File::new(parent_path, self.ty.clone());
 
-        if file.check_inode_exist(&path, ext4_ty.clone()) {
-            return Err(Errno::EEXIST);
+            if file.check_inode_exist(&path, ext4_ty.clone()) {
+                return Err(Errno::EEXIST);
+            }
+
+            let new_file = &mut Ext4File::new(&path, ext4_ty.clone());
+
+            match ext4_ty {
+                Ext4InodeTypes::EXT4_DE_DIR => {
+                    new_file.dir_mk(&path).map_err(Self::map_lwext4_err)?;
+                }
+                Ext4InodeTypes::EXT4_DE_REG_FILE => {
+                    new_file
+                        .file_open(
+                            &path,
+                            bindings::O_RDWR | bindings::O_CREAT | bindings::O_TRUNC,
+                        )
+                        .map_err(Self::map_lwext4_err)?;
+                    new_file.file_close().map_err(Self::map_lwext4_err)?;
+                }
+                _ => return Err(Errno::ENOSYS),
+            }
         }
 
-        let new_file = &mut Ext4File::new(&path, ext4_ty.clone());
+        self.lookup(parent_path, name)
+    }
 
-        match ext4_ty {
-            Ext4InodeTypes::EXT4_DE_DIR => {
-                new_file.dir_mk(&path).map_err(Self::map_lwext4_err)?;
-            }
-            Ext4InodeTypes::EXT4_DE_REG_FILE => {
-                new_file
-                    .file_open(
-                        &path,
-                        bindings::O_RDWR | bindings::O_CREAT | bindings::O_TRUNC,
-                    )
-                    .map_err(Self::map_lwext4_err)?;
-                new_file.file_close().map_err(Self::map_lwext4_err)?;
-            }
-            _ => return Err(Errno::ENOSYS),
-        }
+    fn symlink(&self, target: &str, parent_path: &str, name: &str) -> SysResult<Arc<dyn InodeOp>> {
+        self.check_type(InodeType::Directory)?;
 
+        let path = Self::child_path(parent_path, name);
+        Self::file_symlink(target, &path)?;
+        // 创建后重新 lookup，复用现有 inode cache/type 修正逻辑。
         self.lookup(parent_path, name)
     }
 
@@ -324,18 +478,29 @@ impl InodeOp for Ext4Inode {
         let child_inode = valid_dentry.try_get_inode().ok_or(Errno::ENOENT)?;
         if child_inode.node_type() == InodeType::Directory {
             let entries = child_inode.readdir(child_abs_path)?;
-            if !entries.is_empty() {
+            let has_content = entries
+                .iter()
+                .any(|e| e.d_name != b".\0" && e.d_name != b"..\0");
+            if has_content {
                 return Err(Errno::ENOTEMPTY);
             }
+            let _guard = EXT4_OP_LOCK.lock();
             let file = &mut Ext4File::new(child_abs_path, self.ty.clone());
             file.dir_rm(child_abs_path).map_err(Self::map_lwext4_err)?;
         } else {
             // lwext4_rust 包中 `file_remove` 的语义是 unlink 而非删除文件
+            let _guard = EXT4_OP_LOCK.lock();
             let file = &mut Ext4File::new(child_abs_path, child_inode.node_type().into());
             file.file_remove(child_abs_path)
                 .map_err(Self::map_lwext4_err)?;
         };
         Ok(())
+    }
+
+    fn read_link(&self, path: &str) -> SysResult<String> {
+        // readlinkat 必须作用在 symlink inode 自身，传到这里的 path 不应已经被 namei 跟随。
+        self.check_type(InodeType::SymLink)?;
+        Self::file_readlink(path)
     }
 }
 

@@ -1,102 +1,242 @@
 #![no_std]
 #![no_main]
+#![allow(unused)]
 
 #[macro_use]
 extern crate user_lib;
+extern crate alloc;
 
-use user_lib::{chdir, exec, exit, fork, poweroff, waitpid};
+use alloc::string::String;
+use user_lib::{
+    O_RDONLY, chdir, close, exec, exit, fork, link, mkdir, open, poweroff, read, unlink, waitpid,
+};
 
-const BASIC_TESTS: &[&str] = &[
-    "brk\0",
-    "chdir\0",
-    "clone\0",
-    "close\0",
-    "dup2\0",
-    "dup\0",
-    "execve\0",
-    "exit\0",
-    "fork\0",
-    "fstat\0",
-    "getcwd\0",
-    "getdents\0",
-    "getpid\0",
-    "getppid\0",
-    "gettimeofday\0",
-    "mkdir_\0",
-    "mmap\0",
-    "mount\0",
-    "munmap\0",
-    "openat\0",
-    "open\0",
-    "pipe\0",
-    "read\0",
-    "sleep\0",
-    "times\0",
-    "umount\0",
-    "uname\0",
-    "unlink\0",
-    "wait\0",
-    "waitpid\0",
-    "write\0",
-    "yield\0",
-];
+const BUSYBOX_PATH: &str = "/musl/busybox\0";
+const GLIBC_BUSYBOX_PATH: &str = "/glibc/busybox\0";
+const BASIC_SCRIPT: &str = "basic_testcode.sh\0";
+const LIBCBENCH_SCRIPT: &str = "libcbench_testcode.sh\0";
+const BUSYBOX_CMD_FILE: &str = "busybox_cmd.txt\0";
 
 fn strip_nul(s: &str) -> &str {
     &s[..s.len() - 1]
 }
 
-fn run_program(path: &str) -> i32 {
-    println!("Testing {} :", strip_nul(path));
-
-    let pid = fork();
-    if pid == 0 {
-        let argv = [path.as_ptr(), core::ptr::null()];
-        let ret = exec(path, &argv);
-        println!("[testrunner] exec {} failed: {}", strip_nul(path), ret);
-        exit(-1);
-        unreachable!();
-    }
-
-    if pid < 0 {
-        println!("[testrunner] fork failed");
-        return -1;
-    }
-
-    let mut exit_code = 0;
-    let waited = waitpid(pid as usize, &mut exit_code);
-    if waited < 0 {
-        println!("[testrunner] wait failed: {}", waited);
-        return -1;
-    }
-    exit_code
-}
-
-fn run_basic_musl() {
-    println!("#### OS COMP TEST GROUP START basic-musl ####");
-    if chdir("/musl/basic\0") < 0 {
-        println!("[testrunner] skip basic-musl: cannot enter /musl/basic");
-        println!("#### OS COMP TEST GROUP END basic-musl ####");
+fn run_shell_script(workdir: &str, shell_path: &str, script_path: &str) {
+    if chdir(workdir) < 0 {
+        println!("[testrunner] cannot enter {}", strip_nul(workdir));
         return;
     }
 
-    for test in BASIC_TESTS {
-        let exit_code = run_program(test);
-        if exit_code != 0 {
+    let pid = fork();
+    if pid == 0 {
+        let argv: &[*const u8] = &[
+            "busybox\0".as_ptr(),
+            "sh\0".as_ptr(),
+            script_path.as_ptr(),
+            core::ptr::null(),
+        ];
+        let ret = exec(shell_path, argv);
+        println!(
+            "[testrunner] exec {} sh {} failed: {}",
+            strip_nul(shell_path),
+            strip_nul(script_path),
+            ret
+        );
+        exit(-1);
+    }
+
+    if pid < 0 {
+        println!("[testrunner] fork {} failed", strip_nul(script_path));
+    } else {
+        let mut ec = 0;
+        let waited = waitpid(pid as usize, &mut ec);
+        if waited < 0 {
+            println!(
+                "[testrunner] wait {} failed: {}",
+                strip_nul(script_path),
+                waited
+            );
+        } else if ec != 0 {
             println!(
                 "[testrunner] {} exited with code {}",
-                strip_nul(test),
-                exit_code
+                strip_nul(script_path),
+                ec
             );
         }
     }
+
     let _ = chdir("/\0");
-    println!("#### OS COMP TEST GROUP END basic-musl ####");
+}
+
+fn _run_basic_musl() {
+    run_shell_script("/musl/\0", BUSYBOX_PATH, BASIC_SCRIPT);
+}
+
+fn _run_basic_glibc() {
+    run_shell_script("/glibc/\0", GLIBC_BUSYBOX_PATH, BASIC_SCRIPT);
+}
+
+fn _run_libcbench_musl() {
+    run_shell_script("/musl/\0", BUSYBOX_PATH, LIBCBENCH_SCRIPT);
+}
+
+fn _run_libcbench_glibc() {
+    run_shell_script("/glibc/\0", GLIBC_BUSYBOX_PATH, LIBCBENCH_SCRIPT);
+}
+
+fn read_file(path: &str, buf: &mut [u8]) -> isize {
+    let fd = open(path, O_RDONLY, 0);
+    if fd < 0 {
+        return fd;
+    }
+    let n = read(fd as usize, buf);
+    let _ = close(fd as usize);
+    n
+}
+
+fn run_busybox_command(line: &str) -> i32 {
+    let mut command = String::from("./busybox ");
+    command.push_str(line);
+    command.push('\0');
+
+    let pid = fork();
+    if pid == 0 {
+        let argv: &[*const u8] = &[
+            "busybox\0".as_ptr(),
+            "sh\0".as_ptr(),
+            "-c\0".as_ptr(),
+            command.as_ptr(),
+            core::ptr::null(),
+        ];
+        let ret = exec(BUSYBOX_PATH, argv);
+        println!("[testrunner] exec busybox command failed: {}", ret);
+        exit(-1);
+    }
+
+    if pid < 0 {
+        return -1;
+    }
+    let mut ec = 0;
+    if waitpid(pid as usize, &mut ec) < 0 {
+        return -1;
+    }
+    ec
+}
+
+fn ensure_busybox_applet_links() {
+    let _ = mkdir("/bin\0", 0o755);
+    cleanup_busybox_applet_links();
+    let _ = link("/musl/busybox\0", "/bin/ls\0");
+    let _ = link("/musl/busybox\0", "/bin/sleep\0");
+}
+
+fn cleanup_busybox_applet_links() {
+    let _ = unlink("/bin/ls\0");
+    let _ = unlink("/bin/sleep\0");
+}
+
+fn _run_busybox_musl() {
+    if chdir("/musl/\0") < 0 {
+        println!("[testrunner] cannot enter /musl");
+        return;
+    }
+    ensure_busybox_applet_links();
+
+    println!("#### OS COMP TEST GROUP START busybox-musl ####");
+
+    let mut buf = [0u8; 2048];
+    let n = read_file(BUSYBOX_CMD_FILE, &mut buf);
+    if n < 0 {
+        println!("[testrunner] cannot read {}", strip_nul(BUSYBOX_CMD_FILE));
+        let _ = chdir("/\0");
+        cleanup_busybox_applet_links();
+        println!("#### OS COMP TEST GROUP END busybox-musl ####");
+        return;
+    }
+
+    let data = &buf[..n as usize];
+    let mut start = 0usize;
+    for i in 0..=data.len() {
+        if i != data.len() && data[i] != b'\n' {
+            continue;
+        }
+        let raw = &data[start..i];
+        start = i + 1;
+        let line = core::str::from_utf8(raw).unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        let mut ec = run_busybox_command(line);
+        if line == "false" {
+            ec = 0;
+        }
+        if ec == 0 {
+            println!("testcase busybox {} success", line);
+        } else {
+            println!("testcase busybox {} fail", line);
+        }
+    }
+
+    let _ = chdir("/\0");
+    cleanup_busybox_applet_links();
+    println!("#### OS COMP TEST GROUP END busybox-musl ####");
+}
+
+fn _run_busybox_glibc() {
+    if chdir("/glibc/\0") < 0 {
+        println!("[testrunner] cannot enter /glibc");
+        return;
+    }
+
+    println!("#### OS COMP TEST GROUP START busybox-glibc ####");
+
+    let mut buf = [0u8; 2048];
+    let n = read_file(BUSYBOX_CMD_FILE, &mut buf);
+    if n < 0 {
+        println!("[testrunner] cannot read {}", strip_nul(BUSYBOX_CMD_FILE));
+        let _ = chdir("/\0");
+        println!("#### OS COMP TEST GROUP END busybox-glibc ####");
+        return;
+    }
+
+    let data = &buf[..n as usize];
+    let mut start = 0usize;
+    for i in 0..=data.len() {
+        if i != data.len() && data[i] != b'\n' {
+            continue;
+        }
+        let raw = &data[start..i];
+        start = i + 1;
+        let line = core::str::from_utf8(raw).unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        let mut ec = run_busybox_command(line);
+        if line == "false" {
+            ec = 0;
+        }
+        if ec == 0 {
+            println!("testcase busybox {} success", line);
+        } else {
+            println!("testcase busybox {} fail", line);
+        }
+    }
+
+    let _ = chdir("/\0");
+    println!("#### OS COMP TEST GROUP END busybox-glibc ####");
 }
 
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("[testrunner] start");
-    run_basic_musl();
+    // _run_basic_musl();
+    // _run_basic_glibc();
+    // _run_libcbench_musl();
+    // _run_libcbench_glibc();
+    _run_busybox_musl();
+    // _run_busybox_glibc();
     println!("[testrunner] all selected tests finished, powering off");
     poweroff();
     0

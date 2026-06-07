@@ -1,5 +1,6 @@
 // os/src/fs/mod.rs
 
+pub mod dev;
 pub mod ext4;
 mod fdtable;
 mod kstat;

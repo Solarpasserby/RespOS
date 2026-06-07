@@ -1,55 +1,52 @@
-// os/src/fs/proc/exe.rs
+// os/src/fs/dev/null.rs
 
-use super::super::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
 use super::super::KStat;
-use super::dirs::{proc_dev, proc_self_exe_ino};
+use super::super::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
+use super::{DEVFS_DEV, NULL_INO, NULL_RDEV};
 use crate::syscall::{Errno, SysResult};
-use crate::task::current_task;
-use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
 
-pub(super) struct ProcExeInode;
+pub(super) struct NullInode;
 
-impl InodeOp for ProcExeInode {
+impl InodeOp for NullInode {
     fn as_any(&self) -> &dyn Any {
         self
     }
 
     fn node_type(&self) -> InodeType {
-        InodeType::SymLink
+        InodeType::CharDevice
     }
 
     fn stat(&self, _path: &str) -> SysResult<KStat> {
-        let task = current_task().expect("[procfs] no current task");
-        let exe = task.exe_path();
-        Ok(KStat::minimal(exe.len(), InodeType::SymLink)
-            .with_dev(proc_dev())
-            .with_ino(proc_self_exe_ino())
-            .with_mode(0o777))
-    }
-
-    fn read_link(&self, _path: &str) -> SysResult<String> {
-        let task = current_task().expect("[procfs] no current task");
-        Ok(task.exe_path())
+        Ok(KStat::minimal(0, InodeType::CharDevice)
+            .with_dev(DEVFS_DEV)
+            .with_ino(NULL_INO)
+            .with_mode(0o666)
+            .with_rdev(NULL_RDEV))
     }
 
     fn read_at(&self, _path: &str, _off: usize, _buf: &mut [u8]) -> SysResult<usize> {
-        Err(Errno::EACCES)
+        Ok(0)
     }
-    fn write_at(&self, _path: &str, _off: usize, _buf: &[u8]) -> SysResult<usize> {
-        Err(Errno::EACCES)
+
+    fn write_at(&self, _path: &str, _off: usize, buf: &[u8]) -> SysResult<usize> {
+        Ok(buf.len())
     }
+
     fn truncate(&self, _path: &str, _size: usize) -> SysResult<usize> {
-        Err(Errno::EACCES)
+        Ok(0)
     }
+
     fn lookup(&self, _parent_path: &str, _name: &str) -> SysResult<Arc<dyn InodeOp>> {
         Err(Errno::ENOTDIR)
     }
+
     fn readdir(&self, _path: &str) -> SysResult<Vec<LinuxDirent64>> {
         Err(Errno::ENOTDIR)
     }
+
     fn create(
         &self,
         _parent_path: &str,
@@ -58,9 +55,11 @@ impl InodeOp for ProcExeInode {
     ) -> SysResult<Arc<dyn InodeOp>> {
         Err(Errno::EACCES)
     }
+
     fn link(&self, _old_path: &str, _bare_dentry: Arc<Dentry>) -> SysResult {
         Err(Errno::EACCES)
     }
+
     fn unlink(&self, _valid_dentry: Arc<Dentry>) -> SysResult {
         Err(Errno::EACCES)
     }

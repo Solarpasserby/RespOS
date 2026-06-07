@@ -15,6 +15,8 @@ pub enum Errno {
     EIO = 5,
     /// 参数列表过长。
     E2BIG = 7,
+    /// 可执行文件格式错误。
+    ENOEXEC = 8,
     /// 无效的文件描述符。
     EBADF = 9,
     /// 没有子进程。
@@ -61,6 +63,8 @@ pub enum Errno {
     ENOSYS = 38,
     /// 目录非空。
     ENOTEMPTY = 39,
+    /// 符号链接层数过多，通常表示符号链接循环。
+    ELOOP = 40,
     /// 我不知道。
     EIDONTKNONW = 114514,
 }
@@ -86,6 +90,7 @@ impl Errno {
             Errno::EINTR => "Interrupted system call",
             Errno::EIO => "Input/output error",
             Errno::E2BIG => "Argument list too long",
+            Errno::ENOEXEC => "Exec format error",
             Errno::EBADF => "Bad file descriptor",
             Errno::ECHILD => "No child processes",
             Errno::EAGAIN => "Resource temporarily unavailable",
@@ -109,6 +114,7 @@ impl Errno {
             Errno::ENAMETOOLONG => "File name too long",
             Errno::ENOSYS => "Function not implemented",
             Errno::ENOTEMPTY => "Directory not empty",
+            Errno::ELOOP => "Too many levels of symbolic links",
             Errno::EIDONTKNONW => "I don't know which is proper",
         }
     }

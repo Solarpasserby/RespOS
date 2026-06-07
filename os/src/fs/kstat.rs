@@ -5,12 +5,74 @@ use crate::config::BLOCK_SIZE;
 use crate::timer::TimeSpec;
 
 /// 内核对文件状态的描述
-///
-/// 当前实现相当简陋
 #[derive(Clone, Debug)]
 pub struct KStat {
+    pub dev: u64,
     pub size: usize,
     pub ty: InodeType,
+    pub ino: u64,
+    pub nlink: u32,
+    pub uid: u32,
+    pub gid: u32,
+    pub rdev: u64,
+    pub mode: u32,
+    pub blksize: u32,
+    pub blocks: u64,
+    pub atime: TimeSpec,
+    pub mtime: TimeSpec,
+    pub ctime: TimeSpec,
+}
+
+impl KStat {
+    const STAT_BLOCK_SIZE: u64 = 512;
+
+    pub fn minimal(size: usize, ty: InodeType) -> Self {
+        Self {
+            dev: 0,
+            size,
+            ty,
+            ino: 0,
+            nlink: 1,
+            uid: 0,
+            gid: 0,
+            rdev: 0,
+            mode: 0,
+            blksize: BLOCK_SIZE as u32,
+            blocks: Self::blocks_for_size(size as u64),
+            atime: TimeSpec::default(),
+            mtime: TimeSpec::default(),
+            ctime: TimeSpec::default(),
+        }
+    }
+
+    pub fn with_ino(mut self, ino: u64) -> Self {
+        self.ino = ino;
+        self
+    }
+
+    pub fn with_dev(mut self, dev: u64) -> Self {
+        self.dev = dev;
+        self
+    }
+
+    pub fn with_mode(mut self, mode: u32) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    pub fn with_nlink(mut self, nlink: u32) -> Self {
+        self.nlink = nlink;
+        self
+    }
+
+    pub fn with_rdev(mut self, rdev: u64) -> Self {
+        self.rdev = rdev;
+        self
+    }
+
+    pub fn blocks_for_size(size: u64) -> u64 {
+        size.div_ceil(Self::STAT_BLOCK_SIZE)
+    }
 }
 
 // #[repr(C)]
@@ -64,29 +126,61 @@ pub struct Stat {
 /// 简单实现 [`KStat`] 到 [`Stat`] 的转换
 impl From<KStat> for Stat {
     fn from(kstat: KStat) -> Self {
-        let st_mode = ((kstat.ty as u32) << 12) | default_perm(kstat.ty);
+        let st_mode = file_type_mode(kstat.ty) | file_perm_mode(kstat.ty, kstat.mode);
         let st_size = kstat.size as u64;
-        let st_blksize = BLOCK_SIZE as u32;
-        let st_blocks = st_size.div_ceil(BLOCK_SIZE as u64);
+        let st_blksize = kstat.blksize;
+        let st_blocks = kstat.blocks;
 
         Self {
-            st_dev: 0,
-            st_ino: 0,
+            st_dev: kstat.dev,
+            st_ino: kstat.ino,
             st_mode,
-            st_nlink: 1,
-            st_uid: 0,
-            st_gid: 0,
-            st_rdev: 0,
+            st_nlink: kstat.nlink.max(1),
+            st_uid: kstat.uid,
+            st_gid: kstat.gid,
+            st_rdev: kstat.rdev,
             __pad: 0,
             st_size,
             st_blksize,
             __pad2: 0,
             st_blocks,
-            st_atime: TimeSpec::default(),
-            st_mtime: TimeSpec::default(),
-            st_ctime: TimeSpec::default(),
+            st_atime: kstat.atime,
+            st_mtime: kstat.mtime,
+            st_ctime: kstat.ctime,
             unused: 0,
         }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct Statfs64 {
+    pub f_type: i64,
+    pub f_bsize: i64,
+    pub f_blocks: u64,
+    pub f_bfree: u64,
+    pub f_bavail: u64,
+    pub f_files: u64,
+    pub f_ffree: u64,
+    pub f_fsid: [i32; 2],
+    pub f_namelen: i64,
+    pub f_frsize: i64,
+    pub f_flags: i64,
+    pub f_spare: [usize; 4],
+}
+
+fn file_type_mode(ty: InodeType) -> u32 {
+    (ty as u32) << 12
+}
+
+fn file_perm_mode(ty: InodeType, mode: u32) -> u32 {
+    const S_IFMT: u32 = 0o170000;
+    if mode & S_IFMT != 0 {
+        mode & !S_IFMT
+    } else if mode != 0 {
+        mode
+    } else {
+        default_perm(ty)
     }
 }
 
@@ -94,6 +188,7 @@ fn default_perm(ty: InodeType) -> u32 {
     match ty {
         InodeType::Directory => 0o755,
         InodeType::Regular => 0o644,
+        InodeType::SymLink => 0o777,
         _ => 0o666,
     }
 }

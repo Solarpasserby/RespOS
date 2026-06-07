@@ -1,20 +1,19 @@
-// os/src/fs/proc/smaps.rs
+// os/src/fs/proc/mounts.rs
 
-use super::super::KStat;
 use super::super::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
-use super::dirs::{proc_dev, proc_self_smaps_ino};
-use crate::mm::MapPermission;
+use super::super::{KStat, Path};
+use super::dirs::{proc_dev, proc_mounts_ino};
+use crate::fs::mount::{Mount, get_mount_by_vfsmount, path_global_abs_path, root_path};
 use crate::syscall::{Errno, SysResult};
-use crate::task::current_task;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
 use core::fmt::Write;
 
-pub(super) struct SmapsInode;
+pub(super) struct MountsInode;
 
-impl InodeOp for SmapsInode {
+impl InodeOp for MountsInode {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -24,15 +23,15 @@ impl InodeOp for SmapsInode {
     }
 
     fn stat(&self, _path: &str) -> SysResult<KStat> {
-        let size = generate_smaps().len();
+        let size = generate_mounts().len();
         Ok(KStat::minimal(size, InodeType::Regular)
             .with_dev(proc_dev())
-            .with_ino(proc_self_smaps_ino())
+            .with_ino(proc_mounts_ino())
             .with_mode(0o444))
     }
 
     fn read_at(&self, _path: &str, off: usize, buf: &mut [u8]) -> SysResult<usize> {
-        let content = generate_smaps();
+        let content = generate_mounts();
         let bytes = content.as_bytes();
         if off >= bytes.len() {
             return Ok(0);
@@ -70,35 +69,45 @@ impl InodeOp for SmapsInode {
     }
 }
 
-fn generate_smaps() -> String {
-    let task = match current_task() {
-        Some(t) => t,
-        None => return String::new(),
-    };
-
+fn generate_mounts() -> String {
     let mut result = String::new();
-    task.op_memory_set_read(|mm| {
-        mm.each_area(|start, end, perm| {
-            let p = perm_to_smaps_str(perm);
-            let _ = writeln!(result, "{:016x}-{:016x} {} 00000000 00:00 0", start, end, p);
-            let _ = writeln!(result);
-        });
-    });
+    let root = root_path();
+    if let Some(root_mount) = get_mount_by_vfsmount(&root.mnt) {
+        collect_mount(&root_mount, &mut result);
+    }
     result
 }
 
-fn perm_to_smaps_str(perm: MapPermission) -> &'static str {
-    let r = perm.contains(MapPermission::READ);
-    let w = perm.contains(MapPermission::WRITE);
-    let x = perm.contains(MapPermission::EXECUTE);
-    match (r, w, x) {
-        (true, true, true) => "rwxp",
-        (true, true, false) => "rw-p",
-        (true, false, true) => "r-xp",
-        (true, false, false) => "r--p",
-        (false, true, true) => "-wxp",
-        (false, true, false) => "-w-p",
-        (false, false, true) => "--xp",
-        _ => "---p",
+fn collect_mount(mount: &Arc<Mount>, result: &mut String) {
+    let dev = "none";
+    let target = mount_point_path(mount);
+    let fstype = mount_fstype(mount);
+    let opts = if mount.vfs_mount.flags & 1 != 0 {
+        "ro"
+    } else {
+        "rw"
+    };
+    let _ = writeln!(result, "{} {} {} {} 0 0", dev, target, fstype, opts);
+
+    for child in mount.children.lock().iter() {
+        collect_mount(child, result);
+    }
+}
+
+fn mount_fstype(mount: &Arc<Mount>) -> &'static str {
+    match mount.vfs_mount.fs.statfs().map(|stat| stat.f_type).ok() {
+        Some(0xEF53) => "ext4",
+        Some(0x9fa0) => "proc",
+        Some(0x1373) => "devfs",
+        _ => "unknown",
+    }
+}
+
+fn mount_point_path(mount: &Arc<Mount>) -> String {
+    if let Some(parent) = mount.parent.as_ref().and_then(|w| w.upgrade()) {
+        let mp = Path::new(parent.vfs_mount.clone(), mount.mountpoint.clone());
+        path_global_abs_path(&mp)
+    } else {
+        "/".into()
     }
 }

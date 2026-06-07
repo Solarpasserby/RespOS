@@ -3,11 +3,17 @@
 use super::Path;
 use super::mount::{VfsMount, get_mount_by_dentry, get_mount_by_vfsmount, root_path};
 use super::vfs::{Dentry, File, InodeType, OpenFlags};
+use crate::fs::ext4::Ext4Inode;
 use crate::syscall::{Errno, SysResult};
 use crate::task::current_task;
 use alloc::{format, string::String, sync::Arc, vec::Vec};
 
 pub const AT_FDCWD: isize = -100;
+pub const AT_NO_AUTOMOUNT: usize = 0x800;
+pub const AT_EMPTY_PATH: usize = 0x1000;
+pub const AT_SYMLINK_NOFOLLOW: usize = 0x100;
+
+const MAX_SYMLINK_FOLLOWS: usize = 40;
 
 /// 路径名解析状态量
 pub struct Nameidata<'a> {
@@ -178,11 +184,7 @@ pub fn open_last_lookups(
             }
             return Ok(Arc::new(File::new_tmpfile(path, inode, flags)));
         }
-        return Ok(Arc::new(File::new(
-            path,
-            inode,
-            flags,
-        )));
+        return Ok(Arc::new(File::new(path, inode, flags)));
     }
 
     let name = nd.path_segments[nd.depth];
@@ -246,6 +248,25 @@ pub fn path_open(dirfd: isize, path: &str, flags: usize, mode: usize) -> SysResu
     if path.is_empty() {
         return Err(Errno::ENOENT);
     }
+    let open_flags = OpenFlags::from(flags);
+    if !open_flags.contains(OpenFlags::O_CREATE) {
+        let path = filename_lookup(dirfd, path, 0)?;
+        let inode = path.dentry.get_inode();
+        if open_flags.contains(OpenFlags::O_TMPFILE) {
+            if inode.node_type() != InodeType::Directory {
+                return Err(Errno::ENOTDIR);
+            }
+            return Ok(Arc::new(File::new_tmpfile(path, inode, open_flags)));
+        }
+        if open_flags.contains(OpenFlags::O_DIRECTORY) && inode.node_type() != InodeType::Directory
+        {
+            return Err(Errno::ENOTDIR);
+        }
+        return Ok(Arc::new(File::new(path, inode, open_flags)));
+    }
+
+    // TODO[ABI-COMPAT]: O_CREAT 路径仍沿用旧的 parent-walk 流程；
+    // 若最后一级已经存在且是符号链接，Linux 默认应继续跟随到目标。
     let mut nd = Nameidata::new_at(dirfd, path)?;
     link_path_walk(&mut nd)?;
     open_last_lookups(&mut nd, flags, mode)
@@ -283,41 +304,164 @@ pub fn filename_create(dirfd: isize, path: &str, ty: InodeType, _mode: usize) ->
     }
 }
 
+pub fn filename_symlink(dirfd: isize, target: &str, newpath: &str) -> SysResult {
+    if target.is_empty() || newpath.is_empty() {
+        return Err(Errno::ENOENT);
+    }
+
+    // symlinkat 的 linkpath 需要按“父目录 + 新名字”解析：
+    // 中间路径仍正常解析，最后一级必须不存在。
+    let mut nd = Nameidata::new_at(dirfd, newpath)?;
+    link_path_walk(&mut nd)?;
+
+    // 不能把根目录或当前工作目录本身替换成一个新的符号链接目录项。
+    if nd.path_segments.is_empty() {
+        return Err(Errno::EEXIST);
+    }
+
+    let name = nd.path_segments[nd.depth];
+    // "." 和 ".." 不是普通文件名，不能作为新符号链接的名字。
+    if name == "." || name == ".." {
+        return Err(Errno::EEXIST);
+    }
+
+    match lookup_dentry(&mut nd) {
+        Ok(_) => Err(Errno::EEXIST),
+        Err(Errno::ENOENT) => {
+            let parent_inode = nd.dentry.get_inode();
+            // 目标字符串原样写入 symlink inode；相对路径到真正解析时再以链接所在目录为基准解释。
+            let inode = parent_inode.symlink(target, &nd.dentry.abs_path, name)?;
+            install_child_dentry(&nd.dentry, name, inode);
+            Ok(())
+        }
+        Err(err) => Err(err),
+    }
+}
+
 /// 根据路径查询文件
 pub fn filename_lookup(dirfd: isize, path: &str, _mode: usize) -> SysResult<Arc<Path>> {
-    filename_lookup_maybe_follow_final_mount(dirfd, path, true)
+    // 默认 lookup 语义和 Linux 一致：跟随最后一级符号链接，也允许穿过最终挂载点。
+    resolve_path(dirfd, path, true, true)
 }
 
 pub fn filename_lookup_no_follow_final_mount(dirfd: isize, path: &str) -> SysResult<Arc<Path>> {
-    filename_lookup_maybe_follow_final_mount(dirfd, path, false)
+    // umount 等场景需要定位挂载点本身，因此最后一级不能穿过 mount。
+    resolve_path(dirfd, path, true, false)
 }
 
-fn filename_lookup_maybe_follow_final_mount(
+pub fn filename_lookup_no_follow_final_symlink(dirfd: isize, path: &str) -> SysResult<Arc<Path>> {
+    // readlinkat/lstat 需要拿到 symlink inode 自身；中间路径中的 symlink 仍要正常跟随。
+    resolve_path(dirfd, path, false, true)
+}
+
+fn resolve_path(
     dirfd: isize,
     path: &str,
+    follow_final_symlink: bool,
     follow_final_mount: bool,
 ) -> SysResult<Arc<Path>> {
     if path.is_empty() {
         return Err(Errno::ENOENT);
     }
-    let mut nd = Nameidata::new_at(dirfd, path)?;
-    link_path_walk(&mut nd)?;
+    // dirfd 只决定相对路径的起点；绝对路径会在 Nameidata::new_from_path 中切回 root_path。
+    let base = base_path_from_dirfd(dirfd, path)?;
+    resolve_path_from(base, path, follow_final_symlink, follow_final_mount, 0)
+}
 
-    // 目标为根目录或工作目录
+fn resolve_path_from(
+    base: Arc<Path>,
+    path: &str,
+    follow_final_symlink: bool,
+    follow_final_mount: bool,
+    symlink_follows: usize,
+) -> SysResult<Arc<Path>> {
+    // 限制 symlink 展开次数，防止 a -> b -> a 这种循环把内核拖进无限递归。
+    if symlink_follows > MAX_SYMLINK_FOLLOWS {
+        return Err(Errno::ELOOP);
+    }
+
+    let mut nd = Nameidata::new_from_path(path, base);
+    // 空 segment 表示路径就是起点本身，例如 "/" 或相对路径中的空字符串。
     if nd.path_segments.is_empty() {
         return Ok(Path::new(nd.mnt.clone(), nd.dentry.clone()));
     }
 
-    let name = nd.path_segments[nd.depth];
-    if name == "." {
-        Ok(Path::new(nd.mnt.clone(), nd.dentry.clone()))
-    } else if name == ".." {
-        follow_dotdot(&mut nd);
-        Ok(Path::new(nd.mnt.clone(), nd.dentry.clone()))
-    } else {
-        let child_dentry = lookup_dentry_maybe_follow_mount(&mut nd, follow_final_mount)?;
-        Ok(Path::new(nd.mnt.clone(), child_dentry))
+    while nd.depth < nd.path_segments.len() {
+        let name = nd.path_segments[nd.depth];
+        let is_last = nd.depth + 1 == nd.path_segments.len();
+
+        // "." 不改变当前位置；如果它是最后一级，直接返回当前 path。
+        if name == "." {
+            if is_last {
+                return Ok(Path::new(nd.mnt.clone(), nd.dentry.clone()));
+            }
+            nd.depth += 1;
+            continue;
+        }
+
+        // ".." 需要考虑 mount root，follow_dotdot 会在跨挂载点时退回父 mount 的挂载点。
+        if name == ".." {
+            follow_dotdot(&mut nd);
+            if is_last {
+                return Ok(Path::new(nd.mnt.clone(), nd.dentry.clone()));
+            }
+            nd.depth += 1;
+            continue;
+        }
+
+        // 如果 child 是相对 symlink，后续解析必须以“链接所在目录”为起点。
+        // 因此先保存当前目录 path，再去 lookup child。
+        let symlink_base = Path::new(nd.mnt.clone(), nd.dentry.clone());
+        // 中间路径必须穿过 mount；最后一级是否穿过 mount 由调用者决定。
+        let child = lookup_dentry_maybe_follow_mount(&mut nd, !is_last || follow_final_mount)?;
+        let child_path = Path::new(nd.mnt.clone(), child.clone());
+        let inode = child.get_inode();
+
+        // 中间 symlink 一定要展开；最后一级是否展开由 follow_final_symlink 决定。
+        if inode.node_type() == InodeType::SymLink && (!is_last || follow_final_symlink) {
+            let target = inode.read_link(&child_path.abs_path())?;
+            // target 替换当前 symlink，其余未解析 segment 继续拼到 target 后面。
+            let next_path = join_symlink_target(&target, &nd.path_segments[nd.depth + 1..]);
+            let next_base = if target.starts_with('/') {
+                // 绝对 symlink 目标从全局 root 开始解析。
+                root_path()
+            } else {
+                // 相对 symlink 目标从 symlink 所在目录开始解析。
+                symlink_base
+            };
+            return resolve_path_from(
+                next_base,
+                &next_path,
+                follow_final_symlink,
+                follow_final_mount,
+                symlink_follows + 1,
+            );
+        }
+
+        if is_last {
+            // 最后一级不是需要展开的 symlink，当前 child 就是解析结果。
+            return Ok(child_path);
+        }
+
+        nd.dentry = child;
+        nd.depth += 1;
     }
+
+    Ok(Path::new(nd.mnt.clone(), nd.dentry.clone()))
+}
+
+fn join_symlink_target(target: &str, rest: &[&str]) -> String {
+    let mut path = String::from(target);
+    for segment in rest {
+        // 保留 target 本身的绝对/相对形式，只负责把剩余 segment 接到后面。
+        if path.is_empty() || path.ends_with('/') {
+            path.push_str(segment);
+        } else {
+            path.push('/');
+            path.push_str(segment);
+        }
+    }
+    path
 }
 
 /// 根据路径删除一个目录项。
@@ -404,6 +548,71 @@ pub fn filename_link(olddirfd: isize, oldpath: &str, newdirfd: isize, newpath: &
         }
         Err(err) => Err(err),
     }
+}
+
+/// 路径基于 rename 系统调用。将 oldpath 重命名为 newpath 指定的新路径。
+///
+/// 仅处理新旧路径同在一个文件系统上的情况。
+pub fn filename_rename(
+    olddirfd: isize,
+    oldpath: &str,
+    newdirfd: isize,
+    newpath: &str,
+) -> SysResult {
+    if oldpath.is_empty() || newpath.is_empty() {
+        return Err(Errno::ENOENT);
+    }
+
+    let old = filename_lookup(olddirfd, oldpath, 0)?;
+
+    let mut nd = Nameidata::new_at(newdirfd, newpath)?;
+    link_path_walk(&mut nd)?;
+
+    if nd.path_segments.is_empty() {
+        return Err(Errno::EEXIST);
+    }
+
+    let name = nd.path_segments[nd.depth];
+    if name == "." || name == ".." {
+        return Err(Errno::EBUSY);
+    }
+
+    let new_abs = child_abs_path(&nd.dentry, name);
+
+    // 防止 ext4_frename 在目标为非空目录时产生嵌套语义，损坏文件系统。
+    if let Ok(existing) = lookup_dentry(&mut nd) {
+        let existing_ty = existing.get_inode().node_type();
+        if existing_ty != InodeType::Directory {
+            // 目标为非目录文件：交由 ext4_frename 替换
+        } else {
+            let entries = existing.get_inode().readdir(&existing.abs_path)?;
+            let has_content = entries
+                .iter()
+                .any(|e| e.d_name != b".\0" && e.d_name != b"..\0");
+            if has_content {
+                return Err(Errno::ENOTEMPTY);
+            }
+        }
+    }
+
+    Ext4Inode::file_rename(&old.abs_path(), &new_abs)?;
+
+    // 更新 VFS dentry 树：Arc<Dentry> 可能已被多个 Path/File 共享，不能原地可变修改。
+    // 这里为新路径创建新的 dentry，并从旧父目录移除旧名字。
+    let old_parent = old
+        .dentry
+        .get_parent()
+        .unwrap_or_else(|| old.dentry.clone());
+    old_parent.remove_child(old.dentry.abs_path.rsplit('/').next().unwrap_or(""));
+
+    let renamed_dentry = Arc::new(Dentry::new(
+        new_abs,
+        Some(nd.dentry.clone()),
+        old.dentry.get_inode(),
+    ));
+    nd.dentry.insert_child(name, renamed_dentry);
+
+    Ok(())
 }
 
 /// 路径解析主函数，循环解析每一层，定位到最后的目标

@@ -8,14 +8,26 @@ use super::Path;
 use super::namei::{AT_FDCWD, filename_lookup, filename_lookup_no_follow_final_mount};
 use super::vfs::Dentry;
 use super::vfs::{InodeType, SuperBlockOp};
-use crate::drivers::{BlockDeviceImpl, Disk};
-use crate::fs::ext4::Ext4SuperBlock;
+use crate::fs::dev::init_devfs;
 use crate::fs::proc::init_procfs;
 use crate::syscall::{Errno, SysResult};
 use alloc::sync::{Arc, Weak};
+use alloc::vec;
 use alloc::vec::Vec;
 use lazy_static::lazy_static;
 use spin::Mutex;
+
+lazy_static! {
+    /// 挂载树
+    static ref MOUNT_TREE: Mutex<MountTree> = Mutex::new(MountTree::new());
+    /// 虚拟 dentry 锚点。`Dentry::children` 使用 `Weak`，只在启动阶段写入。
+    static ref VFS_DENTRY_ANCHORS: Mutex<Vec<Arc<Dentry>>> = Mutex::new(vec![]);
+}
+
+/// 将虚拟文件系统的 dentry 固定，防止 `Weak` 引用过期。
+pub fn pin_vfs_dentry(dentry: Arc<Dentry>) {
+    VFS_DENTRY_ANCHORS.lock().push(dentry);
+}
 
 /// 代表一个被挂载的文件系统实例（类比 Linux `struct vfsmount`）。
 pub struct VfsMount {
@@ -47,10 +59,6 @@ impl MountTree {
             mount_table: Vec::new(),
         }
     }
-}
-
-lazy_static! {
-    static ref MOUNT_TREE: Mutex<MountTree> = Mutex::new(MountTree::new());
 }
 
 /// 占位文件系统，仅用于 VfsMount::zero_init()
@@ -183,8 +191,7 @@ pub fn do_mount(source: &str, target: &str, fstype: &str, flags: usize) -> SysRe
     match fstype {
         "ext4" => {
             info!("[kernel] mount: {} on {} type ext4", source, target);
-            let disk = Disk::new(Arc::new(BlockDeviceImpl::new_device()));
-            let ext4_fs: Arc<dyn SuperBlockOp> = Arc::new(Ext4SuperBlock::new(disk));
+            let ext4_fs = crate::fs::ext4::super_block();
             let root_inode = ext4_fs.root_inode();
             let root_dentry = Arc::new(Dentry::new("/".into(), None, root_inode));
             let vfs_mount = VfsMount::new(root_dentry, ext4_fs, flags as i32);
@@ -268,6 +275,7 @@ pub fn init_root_fs() -> Arc<Path> {
     add_mount(root_mount);
 
     init_procfs(root_dentry.clone());
+    init_devfs(root_dentry.clone());
 
     Path::new(root_vfs_mount, root_dentry)
 }
