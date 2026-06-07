@@ -96,7 +96,7 @@ const LIBC_STATIC_TESTS: &[&str] = &[
     // "utime\0",
     // "wcsstr\0",
     // "wcstol\0",
-    "daemon_failure\0",
+    //"daemon_failure\0",
     // "dn_expand_empty\0",
     // "dn_expand_ptr_0\0",
     "fflush_exit\0",

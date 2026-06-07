@@ -35,6 +35,38 @@ pub fn sys_read(fd: usize, buf: *mut u8, len: usize) -> SysResult<usize> {
     Ok(ret)
 }
 
+pub fn sys_pread64(fd: usize, buf: *mut u8, len: usize, offset: isize) -> SysResult<usize> {
+    if offset < 0 {
+        return Err(Errno::EINVAL);
+    }
+    if len == 0 {
+        return Ok(0);
+    }
+    check_user_writable(buf, len)?;
+
+    let task = current_task().expect("[kernel] current task is None.");
+    let file = task.get_fd_entry(fd)?.file;
+    if !file.readable() {
+        return Err(Errno::EBADF);
+    }
+    file.can_seek()?;
+
+    let old_offset = file.get_offset();
+    file.seek(offset)?;
+    let mut kbuf = alloc::vec![0u8; len];
+    let ret = file.read(kbuf.as_mut_slice());
+    let restore_ret = file.seek(old_offset as isize);
+
+    match (ret, restore_ret) {
+        (Ok(read_len), Ok(_)) => {
+            copy_to_user(buf, kbuf.as_ptr(), read_len)?;
+            Ok(read_len)
+        }
+        (Err(err), _) => Err(err),
+        (_, Err(err)) => Err(err),
+    }
+}
+
 /// 系统调用 sys-write
 pub fn sys_write(fd: usize, buf: *mut u8, len: usize) -> SysResult<usize> {
     if len == 0 {
