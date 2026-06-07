@@ -14,6 +14,16 @@ const CR: usize = 0x0d;
 pub struct Stdin;
 ///Standard output
 pub struct Stdout;
+/// Null character device.
+pub struct DevNull {
+    flags: OpenFlags,
+}
+
+impl DevNull {
+    pub fn new(flags: OpenFlags) -> Self {
+        Self { flags }
+    }
+}
 
 impl FileOp for Stdin {
     fn as_any(&self) -> &dyn Any {
@@ -103,6 +113,52 @@ impl FileOp for Stdout {
     fn get_flags(&self) -> OpenFlags {
         OpenFlags::empty()
     }
+    fn get_stat(&self) -> SysResult<KStat> {
+        Ok(KStat {
+            size: 0,
+            ty: InodeType::CharDevice,
+        })
+    }
+}
+
+impl FileOp for DevNull {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn read<'a>(&'a self, _buf: &'a mut [u8]) -> SysResult<usize> {
+        Ok(0)
+    }
+
+    fn write<'a>(&'a self, buf: &'a [u8]) -> SysResult<usize> {
+        Ok(buf.len())
+    }
+
+    fn seek(&self, _offset: isize) -> SysResult<usize> {
+        Err(Errno::ESPIPE)
+    }
+
+    fn get_offset(&self) -> usize {
+        0
+    }
+
+    fn can_seek(&self) -> SysResult<()> {
+        Err(Errno::ESPIPE)
+    }
+
+    fn readable(&self) -> bool {
+        !self.flags.contains(OpenFlags::O_WRONLY)
+    }
+
+    fn writable(&self) -> bool {
+        self.flags
+            .intersects(OpenFlags::O_WRONLY | OpenFlags::O_RDWR)
+    }
+
+    fn get_flags(&self) -> OpenFlags {
+        self.flags
+    }
+
     fn get_stat(&self) -> SysResult<KStat> {
         Ok(KStat {
             size: 0,

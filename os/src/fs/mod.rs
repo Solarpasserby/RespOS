@@ -17,4 +17,4 @@ pub use kstat::*;
 pub use namei::*;
 pub use path::*;
 pub use pipe::*;
-use stdio::*;
+pub use stdio::*;

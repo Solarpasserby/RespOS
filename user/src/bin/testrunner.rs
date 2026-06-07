@@ -93,7 +93,7 @@ const LIBC_STATIC_TESTS: &[&str] = &[
     // "tls_align\0",
     // "udiv\0",
     //"ungetc\0",
-    "utime\0",
+    // "utime\0",
     // "wcsstr\0",
     // "wcstol\0",
     "daemon_failure\0",

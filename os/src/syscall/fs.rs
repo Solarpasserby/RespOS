@@ -2,15 +2,15 @@
 
 use super::{Errno, SysResult};
 use crate::fs::mount::{do_mount, do_umount2};
-use crate::fs::vfs::{File, InodeType, OpenFlags};
+use crate::fs::vfs::{File, FileOp, InodeType, OpenFlags};
 use crate::fs::{
-    AT_FDCWD, FdEntry, KStat, Stat, filename_create, filename_link, filename_lookup,
+    AT_FDCWD, DevNull, FdEntry, KStat, Stat, filename_create, filename_link, filename_lookup,
     filename_unlink, make_pipe, path_open,
 };
 use crate::mm::{check_user_writable, copy_cstr_from_user, copy_from_user, copy_to_user};
 use crate::task::current_task;
 use crate::timer::{TimeSpec, get_time_ms};
-use alloc::vec;
+use alloc::{sync::Arc, vec};
 
 // 使用 mm 实现的 `copy_cstr_from_user`, `copy_from_user`, `copy_to_user` 来访问用户空间的数据
 
@@ -118,7 +118,12 @@ pub fn sys_readv(fd: usize, iov: *const IoVec, iovcnt: usize) -> SysResult<usize
 pub fn sys_openat(dirfd: isize, path: *const u8, flags: usize, mode: usize) -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
     let path = copy_cstr_from_user(path)?;
-    let file = path_open(dirfd, path.as_str(), flags, mode)?;
+    let open_flags = OpenFlags::from(flags);
+    let file: Arc<dyn FileOp> = if path == "/dev/null" {
+        Arc::new(DevNull::new(open_flags))
+    } else {
+        path_open(dirfd, path.as_str(), flags, mode)?
+    };
     let fd = task.alloc_fd(FdEntry::new(file, flags.into()))?;
     Ok(fd)
 }
