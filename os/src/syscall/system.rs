@@ -2,8 +2,11 @@
 
 use super::SysResult;
 use crate::arch::sbi;
+use crate::config::{MEMORY_END, MEMORY_START, PAGE_SIZE};
 use crate::fs::ext4;
-use crate::mm::copy_to_user;
+use crate::mm::{copy_to_user, free_frame_count};
+use crate::task::TASK_MANAGER;
+use crate::timer::get_time_ms;
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -20,6 +23,23 @@ pub struct UtsName {
     pub machine: [u8; 65],
     // 域名
     pub domainname: [u8; 65],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SysInfo {
+    pub uptime: usize,
+    pub loads: [usize; 3],
+    pub totalram: usize,
+    pub freeram: usize,
+    pub sharedram: usize,
+    pub bufferram: usize,
+    pub totalswap: usize,
+    pub freeswap: usize,
+    pub procs: u16,
+    pub totalhigh: usize,
+    pub freehigh: usize,
+    pub mem_unit: u32,
 }
 
 impl UtsName {
@@ -93,4 +113,24 @@ pub fn sys_uname(buf: *mut UtsName) -> SysResult<usize> {
 pub fn sys_reboot() -> SysResult<usize> {
     ext4::shutdown();
     sbi::shutdown(false);
+}
+
+pub fn sys_sysinfo(buf: *mut SysInfo) -> SysResult<usize> {
+    let totalram = MEMORY_END.saturating_sub(MEMORY_START);
+    let info = SysInfo {
+        uptime: get_time_ms() / 1000,
+        loads: [0, 0, 0],
+        totalram,
+        freeram: free_frame_count() * PAGE_SIZE,
+        sharedram: 0,
+        bufferram: 0,
+        totalswap: 0,
+        freeswap: 0,
+        procs: TASK_MANAGER.len() as u16,
+        totalhigh: 0,
+        freehigh: 0,
+        mem_unit: 1,
+    };
+    copy_to_user(buf, &info as *const SysInfo, 1)?;
+    Ok(0)
 }

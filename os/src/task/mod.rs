@@ -29,6 +29,7 @@ pub use scheduler::{
     exit_group_and_run_next, fetch_task, prepare_current_task_blocked, remove_task,
     remove_thread_group, switch_to_next_task, wakeup_task, yield_current_task,
 };
+pub use task::TaskStatus;
 pub use task::{CloneFlags, TaskControlBlock};
 
 lazy_static! {

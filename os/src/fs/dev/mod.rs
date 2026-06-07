@@ -7,19 +7,20 @@
 mod null;
 
 const DEVFS_DEV: u64 = 0x400;
+const DEVFS_SUPER_MAGIC: i64 = 0x1373;
 const DEV_DIR_INO: u64 = 1;
 const NULL_INO: u64 = 2;
 const NULL_RDEV: u64 = (1 << 8) | 3;
 
-use super::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
-use super::KStat;
+use super::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64, SuperBlockOp};
+use super::{KStat, Statfs64};
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::any::Any;
 use null::NullInode;
 
-use crate::fs::mount;
+use crate::fs::mount::{self, Mount, VfsMount, get_mount_by_dentry};
 use crate::syscall::{Errno, SysResult};
 
 // ── /dev ─────────────────────────────────────────────────────────────
@@ -83,6 +84,31 @@ impl InodeOp for DevDirInode {
     }
 }
 
+struct DevSuperBlock;
+
+impl SuperBlockOp for DevSuperBlock {
+    fn root_inode(&self) -> Arc<dyn InodeOp> {
+        Arc::new(DevDirInode)
+    }
+
+    fn sync(&self) {}
+
+    fn statfs(&self) -> SysResult<Statfs64> {
+        Ok(Statfs64 {
+            f_type: DEVFS_SUPER_MAGIC,
+            f_bsize: crate::config::PAGE_SIZE as i64,
+            f_blocks: 0,
+            f_bfree: 0,
+            f_bavail: 0,
+            f_files: 2,
+            f_ffree: 0,
+            f_namelen: 255,
+            f_frsize: crate::config::PAGE_SIZE as i64,
+            ..Default::default()
+        })
+    }
+}
+
 // ── helpers ───────────────────────────────────────────────────────────
 
 fn entry(ino: u64, ty: InodeType, off: i64, name: &[u8]) -> LinuxDirent64 {
@@ -104,11 +130,17 @@ fn dir_entry(ino: u64, off: i64, name: &[u8]) -> LinuxDirent64 {
 
 /// 在根文件系统中创建 /dev/null 目录树。
 pub fn init_devfs(root: Arc<Dentry>) {
-    let dev_dentry = Arc::new(Dentry::new(
+    let dev_mountpoint = Arc::new(Dentry::new(
         "/dev".into(),
         Some(root.clone()),
         Arc::new(DevDirInode),
     ));
-    root.insert_child("dev", dev_dentry.clone());
-    mount::pin_vfs_dentry(dev_dentry);
+    root.insert_child("dev", dev_mountpoint.clone());
+    mount::pin_vfs_dentry(dev_mountpoint.clone());
+
+    let dev_root = Arc::new(Dentry::new("/".into(), None, Arc::new(DevDirInode)));
+    mount::pin_vfs_dentry(dev_root.clone());
+    let dev_mount = VfsMount::new(dev_root, Arc::new(DevSuperBlock), 0);
+    let parent_mount = get_mount_by_dentry(&root).expect("[devfs] root mount is not initialized");
+    mount::add_mount(Mount::new_child(dev_mountpoint, dev_mount, parent_mount));
 }

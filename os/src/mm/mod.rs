@@ -23,6 +23,14 @@ pub use frame_allocator::{FrameTracker, frame_alloc};
 use heap_allocator::init_heap;
 pub use memory_set::{KERNEL_SPACE, MapPermission, MemorySet};
 
+pub fn free_frame_count() -> usize {
+    frame_allocator::FRAME_ALLOCATOR.lock().free_frames()
+}
+
+pub fn heap_allocated() -> usize {
+    unsafe { heap_allocator::HEAP_ALLOCATOR.lock().stats_alloc_user() }
+}
+
 /// 初始化内存管理，启用虚拟地址
 pub fn init() {
     #[cfg(target_arch = "loongarch64")]

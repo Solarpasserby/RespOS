@@ -1,7 +1,7 @@
 // os/src/fs/dev/null.rs
 
-use super::super::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
 use super::super::KStat;
+use super::super::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
 use super::{DEVFS_DEV, NULL_INO, NULL_RDEV};
 use crate::syscall::{Errno, SysResult};
 use alloc::sync::Arc;

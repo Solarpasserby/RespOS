@@ -101,6 +101,10 @@ impl StackFrameAllocator {
         self.current = l.0;
         self.end = r.0;
     }
+
+    pub fn free_frames(&self) -> usize {
+        (self.end - self.current) + self.recycled.len()
+    }
 }
 
 /// 初始化物理页帧分配器
