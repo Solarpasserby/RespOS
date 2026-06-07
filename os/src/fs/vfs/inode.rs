@@ -2,8 +2,8 @@
 
 use super::{Dentry, LinuxDirent64};
 use crate::fs::KStat;
-use crate::timer::TimeSpec;
 use crate::syscall::{Errno, SysResult};
+use crate::timer::TimeSpec;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -31,6 +31,15 @@ pub trait InodeOp: Any + Send + Sync {
     fn readdir(&self, path: &str) -> SysResult<Vec<LinuxDirent64>>;
 
     fn create(&self, parent_path: &str, name: &str, ty: InodeType) -> SysResult<Arc<dyn InodeOp>>;
+
+    fn symlink(
+        &self,
+        _target: &str,
+        _parent_path: &str,
+        _name: &str,
+    ) -> SysResult<Arc<dyn InodeOp>> {
+        Err(Errno::ENOSYS)
+    }
 
     fn link(&self, old_path: &str, bare_dentry: Arc<Dentry>) -> SysResult;
     fn unlink(&self, valid_dentry: Arc<Dentry>) -> SysResult;

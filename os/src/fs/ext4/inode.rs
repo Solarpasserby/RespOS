@@ -1,6 +1,7 @@
 // os/src/ext4/inode.rs
 
 use alloc::ffi::CString;
+use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::any::Any;
@@ -99,6 +100,41 @@ impl Ext4Inode {
         Ok(())
     }
 
+    fn file_symlink(target: &str, path: &str) -> SysResult {
+        let _guard = EXT4_OP_LOCK.lock();
+        // lwext4 负责选择 fast symlink 或普通数据块存储；VFS 层只传入目标字符串和新路径。
+        let target = CString::new(target).map_err(|_| Errno::EINVAL)?;
+        let path = CString::new(path).map_err(|_| Errno::EINVAL)?;
+        let ret = unsafe { bindings::ext4_fsymlink(target.as_ptr(), path.as_ptr()) };
+        if ret != 0 {
+            return Err(Self::map_lwext4_err(ret));
+        }
+        Ok(())
+    }
+
+    fn file_readlink(path: &str) -> SysResult<String> {
+        const MAX_LINK_TARGET: usize = 4096;
+
+        let _guard = EXT4_OP_LOCK.lock();
+        let path = CString::new(path).map_err(|_| Errno::EINVAL)?;
+        // ext4_readlink 返回裸字节和读取长度，不保证 C 字符串结尾，因此按 rcnt 截断。
+        let mut buf = Vec::from([0u8; MAX_LINK_TARGET]);
+        let mut read_len = 0usize;
+        let ret = unsafe {
+            bindings::ext4_readlink(
+                path.as_ptr(),
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+                &mut read_len,
+            )
+        };
+        if ret != 0 {
+            return Err(Self::map_lwext4_err(ret));
+        }
+        buf.truncate(read_len);
+        String::from_utf8(buf).map_err(|_| Errno::EINVAL)
+    }
+
     pub(crate) fn file_rename(old_path: &str, new_path: &str) -> SysResult {
         let _guard = EXT4_OP_LOCK.lock();
         let c_old = CString::new(old_path).map_err(|_| Errno::EINVAL)?;
@@ -191,10 +227,11 @@ impl InodeOp for Ext4Inode {
 
     fn stat(&self, path: &str) -> SysResult<KStat> {
         let ty = self.node_type();
-        let size = if ty == InodeType::Regular {
-            self.file_size(path)?
-        } else {
-            0
+        let size = match ty {
+            InodeType::Regular => self.file_size(path)?,
+            // lstat(symlink) 的 st_size 是链接目标字符串长度，不是目标文件大小。
+            InodeType::SymLink => Self::file_readlink(path)?.len(),
+            _ => 0,
         };
         let ino = self.ino;
 
@@ -289,12 +326,7 @@ impl InodeOp for Ext4Inode {
         Ok(0)
     }
 
-    fn set_times(
-        &self,
-        path: &str,
-        atime: Option<TimeSpec>,
-        mtime: Option<TimeSpec>,
-    ) -> SysResult {
+    fn set_times(&self, path: &str, atime: Option<TimeSpec>, mtime: Option<TimeSpec>) -> SysResult {
         let _guard = EXT4_OP_LOCK.lock();
         let c_path = CString::new(path).map_err(|_| Errno::EINVAL)?;
         let c_path = c_path.as_ptr();
@@ -415,6 +447,15 @@ impl InodeOp for Ext4Inode {
         self.lookup(parent_path, name)
     }
 
+    fn symlink(&self, target: &str, parent_path: &str, name: &str) -> SysResult<Arc<dyn InodeOp>> {
+        self.check_type(InodeType::Directory)?;
+
+        let path = Self::child_path(parent_path, name);
+        Self::file_symlink(target, &path)?;
+        // 创建后重新 lookup，复用现有 inode cache/type 修正逻辑。
+        self.lookup(parent_path, name)
+    }
+
     fn link(&self, old_path: &str, bare_dentry: Arc<Dentry>) -> SysResult {
         // 调用者保证参数合法
         // if self.node_type() == InodeType::Directory {
@@ -438,7 +479,9 @@ impl InodeOp for Ext4Inode {
         let child_inode = valid_dentry.try_get_inode().ok_or(Errno::ENOENT)?;
         if child_inode.node_type() == InodeType::Directory {
             let entries = child_inode.readdir(child_abs_path)?;
-            let has_content = entries.iter().any(|e| e.d_name != b".\0" && e.d_name != b"..\0");
+            let has_content = entries
+                .iter()
+                .any(|e| e.d_name != b".\0" && e.d_name != b"..\0");
             if has_content {
                 return Err(Errno::ENOTEMPTY);
             }
@@ -453,6 +496,12 @@ impl InodeOp for Ext4Inode {
                 .map_err(Self::map_lwext4_err)?;
         };
         Ok(())
+    }
+
+    fn read_link(&self, path: &str) -> SysResult<String> {
+        // readlinkat 必须作用在 symlink inode 自身，传到这里的 path 不应已经被 namei 跟随。
+        self.check_type(InodeType::SymLink)?;
+        Self::file_readlink(path)
     }
 }
 

@@ -5,8 +5,8 @@ use crate::fs::mount::{do_mount, do_umount2};
 use crate::fs::vfs::{File, FileOp, InodeType, OpenFlags};
 use crate::fs::{
     AT_EMPTY_PATH, AT_FDCWD, AT_NO_AUTOMOUNT, AT_SYMLINK_NOFOLLOW, FdEntry, Stat, Statfs64,
-    filename_create, filename_link, filename_lookup, filename_rename, filename_unlink, make_pipe,
-    path_open,
+    filename_create, filename_link, filename_lookup, filename_lookup_no_follow_final_symlink,
+    filename_rename, filename_symlink, filename_unlink, make_pipe, path_open,
 };
 use crate::mm::{check_user_writable, copy_cstr_from_user, copy_from_user, copy_to_user};
 use crate::task::current_task;
@@ -138,9 +138,12 @@ pub fn sys_fstatat(
             task.get_fd_entry(dirfd as usize)?.file.get_stat()?
         }
     } else {
-        // TODO[ABI-COMPAT]: namei currently does not follow symbolic links.
-        // When it does, AT_SYMLINK_NOFOLLOW should select lstat-style lookup.
-        let resolved = filename_lookup(dirfd, path.as_str(), 0)?;
+        // 默认 stat 跟随最终 symlink；带 AT_SYMLINK_NOFOLLOW 时退化为 lstat 语义。
+        let resolved = if flags & AT_SYMLINK_NOFOLLOW != 0 {
+            filename_lookup_no_follow_final_symlink(dirfd, path.as_str())?
+        } else {
+            filename_lookup(dirfd, path.as_str(), 0)?
+        };
         resolved.dentry.get_inode().stat(&resolved.abs_path())?
     }
     .into();
@@ -244,9 +247,12 @@ pub fn sys_utimensat(
             file.inode().set_times(&path.abs_path(), atime, mtime)?;
         }
     } else {
-        // TODO[ABI-COMPAT]: namei currently does not follow symbolic links.
-        // When it does, AT_SYMLINK_NOFOLLOW should select lstat-style lookup.
-        let resolved = filename_lookup(dirfd, path.as_str(), 0)?;
+        // utimensat 同样根据 AT_SYMLINK_NOFOLLOW 决定修改链接本身还是链接目标。
+        let resolved = if flags & AT_SYMLINK_NOFOLLOW != 0 {
+            filename_lookup_no_follow_final_symlink(dirfd, path.as_str())?
+        } else {
+            filename_lookup(dirfd, path.as_str(), 0)?
+        };
         resolved
             .dentry
             .get_inode()
@@ -262,6 +268,15 @@ pub fn sys_fstat(fd: usize, stat: *mut Stat) -> SysResult<usize> {
     let file = task.get_fd_entry(fd)?.file;
     let stat_buf: Stat = file.get_stat()?.into();
     copy_to_user(stat, &stat_buf as *const Stat, 1)?;
+    Ok(0)
+}
+
+/// 系统调用 sys-statfs
+pub fn sys_statfs(path: *const u8, buf: *mut Statfs64) -> SysResult<usize> {
+    let path = copy_cstr_from_user(path)?;
+    let resolved = filename_lookup(AT_FDCWD, path.as_str(), 0)?;
+    let statfs = resolved.mnt.fs.statfs()?;
+    copy_to_user(buf, &statfs as *const Statfs64, 1)?;
     Ok(0)
 }
 
@@ -357,6 +372,14 @@ pub fn sys_dup3(fd_src: usize, fd_dst: usize, flags: usize) -> SysResult<usize> 
 pub fn sys_mkdirat(dirfd: isize, path: *const u8, mode: usize) -> SysResult<usize> {
     let path = copy_cstr_from_user(path)?;
     filename_create(dirfd, path.as_str(), InodeType::Directory, mode)?;
+    Ok(0)
+}
+
+/// 系统调用 sys-symlinkat
+pub fn sys_symlinkat(target: *const u8, newdirfd: isize, linkpath: *const u8) -> SysResult<usize> {
+    let target = copy_cstr_from_user(target)?;
+    let linkpath = copy_cstr_from_user(linkpath)?;
+    filename_symlink(newdirfd, target.as_str(), linkpath.as_str())?;
     Ok(0)
 }
 
@@ -554,7 +577,8 @@ pub fn sys_readlinkat(
     bufsize: usize,
 ) -> SysResult<usize> {
     let path_str = copy_cstr_from_user(path)?;
-    let target_path = filename_lookup(dirfd, &path_str, 0)?;
+    // readlinkat 读取的是最后一级 symlink inode 的 payload，不能先跟随到目标文件。
+    let target_path = filename_lookup_no_follow_final_symlink(dirfd, &path_str)?;
     let inode = target_path.dentry.get_inode();
     let link = inode.read_link(&target_path.abs_path())?;
     let bytes = link.as_bytes();

@@ -7,7 +7,9 @@ extern crate user_lib;
 extern crate alloc;
 
 use alloc::string::String;
-use user_lib::{O_RDONLY, chdir, close, exec, exit, fork, open, poweroff, read, waitpid};
+use user_lib::{
+    O_RDONLY, chdir, close, exec, exit, fork, link, mkdir, open, poweroff, read, waitpid,
+};
 
 const BUSYBOX_PATH: &str = "/musl/busybox\0";
 const GLIBC_BUSYBOX_PATH: &str = "/glibc/busybox\0";
@@ -121,11 +123,18 @@ fn run_busybox_command(line: &str) -> i32 {
     ec
 }
 
+fn ensure_busybox_applet_links() {
+    let _ = mkdir("/bin\0", 0o755);
+    let _ = link("/musl/busybox\0", "/bin/ls\0");
+    let _ = link("/musl/busybox\0", "/bin/sleep\0");
+}
+
 fn _run_busybox_musl() {
     if chdir("/musl/\0") < 0 {
         println!("[testrunner] cannot enter /musl");
         return;
     }
+    ensure_busybox_applet_links();
 
     println!("#### OS COMP TEST GROUP START busybox-musl ####");
 
