@@ -4,8 +4,8 @@ use super::{Errno, SysResult};
 use crate::fs::mount::{do_mount, do_umount2};
 use crate::fs::vfs::{File, InodeType, OpenFlags};
 use crate::fs::{
-    AT_FDCWD, FdEntry, Stat, filename_create, filename_link, filename_lookup, filename_unlink,
-    make_pipe, path_open,
+    AT_FDCWD, FdEntry, KStat, Stat, filename_create, filename_link, filename_lookup,
+    filename_unlink, make_pipe, path_open,
 };
 use crate::mm::{check_user_writable, copy_cstr_from_user, copy_from_user, copy_to_user};
 use crate::task::current_task;
@@ -102,15 +102,41 @@ pub fn sys_close(fd: usize) -> SysResult<usize> {
     Ok(0)
 }
 
-/// 系统调用 sys-stat
-pub fn sys_stat(path: *const u8, stat: *mut Stat) -> SysResult<usize> {
+pub fn sys_fstatat(
+    dirfd: isize,
+    path: *const u8,
+    stat: *mut Stat,
+    flags: usize,
+) -> SysResult<usize> {
+    const AT_SYMLINK_NOFOLLOW: usize = 0x100;
+    const AT_EMPTY_PATH: usize = 0x1000;
+
+    if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
+        return Err(Errno::EINVAL);
+    }
+
     let path = copy_cstr_from_user(path)?;
-    let resolved = filename_lookup(AT_FDCWD, path.as_str(), 0)?;
-    let stat_buf: Stat = resolved
-        .dentry
-        .get_inode()
-        .stat(&resolved.abs_path())?
-        .into();
+    if path.is_empty() {
+        if flags & AT_EMPTY_PATH != 0 {
+            return sys_fstat(dirfd as usize, stat);
+        }
+        return Err(Errno::ENOENT);
+    }
+
+    let stat_buf: Stat = if path == "/dev/null" {
+        KStat {
+            size: 0,
+            ty: InodeType::CharDevice,
+        }
+        .into()
+    } else {
+        let resolved = filename_lookup(dirfd, path.as_str(), 0)?;
+        resolved
+            .dentry
+            .get_inode()
+            .stat(&resolved.abs_path())?
+            .into()
+    };
     copy_to_user(stat, &stat_buf as *const Stat, 1)?;
     Ok(0)
 }

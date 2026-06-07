@@ -10,6 +10,7 @@ review/
 .claude/
 CLAUDE.md
 .claude/
+os/src/link_app.S
 os/.cargo/
 user/.cargo/
 kernel-rv
