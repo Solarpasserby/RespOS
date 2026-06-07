@@ -9,6 +9,7 @@ use crate::fs::{
 };
 use crate::mm::{check_user_writable, copy_cstr_from_user, copy_from_user, copy_to_user};
 use crate::task::current_task;
+use crate::timer::{TimeSpec, get_time_ms};
 use alloc::vec;
 
 // 使用 mm 实现的 `copy_cstr_from_user`, `copy_from_user`, `copy_to_user` 来访问用户空间的数据
@@ -172,8 +173,77 @@ pub fn sys_fstatat(
 pub fn sys_fstat(fd: usize, stat: *mut Stat) -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
     let file = task.get_fd_entry(fd)?.file;
-    let stat_buf: Stat = file.get_stat()?.into();
+    let mut stat_buf: Stat = file.get_stat()?.into();
+    if let Some(file) = file.as_any().downcast_ref::<File>() {
+        let (atime, mtime, ctime) = file.timestamps();
+        stat_buf.st_atime = atime;
+        stat_buf.st_mtime = mtime;
+        stat_buf.st_ctime = ctime;
+    }
     copy_to_user(stat, &stat_buf as *const Stat, 1)?;
+    Ok(0)
+}
+
+fn current_timespec() -> TimeSpec {
+    let ms = get_time_ms();
+    TimeSpec {
+        sec: ms / 1000,
+        nsec: (ms % 1000) * 1_000_000,
+    }
+}
+
+fn parse_utimens_time(time: TimeSpec, now: TimeSpec) -> SysResult<Option<TimeSpec>> {
+    const UTIME_NOW: usize = 0x3fffffff;
+    const UTIME_OMIT: usize = 0x3ffffffe;
+
+    match time.nsec {
+        UTIME_NOW => Ok(Some(now)),
+        UTIME_OMIT => Ok(None),
+        0..=999_999_999 => Ok(Some(time)),
+        _ => Err(Errno::EINVAL),
+    }
+}
+
+pub fn sys_utimensat(
+    dirfd: isize,
+    path: *const u8,
+    times: *const TimeSpec,
+    flags: usize,
+) -> SysResult<usize> {
+    const AT_SYMLINK_NOFOLLOW: usize = 0x100;
+    const AT_EMPTY_PATH: usize = 0x1000;
+
+    if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
+        return Err(Errno::EINVAL);
+    }
+
+    let now = current_timespec();
+    let (atime, mtime) = if times.is_null() {
+        (Some(now), Some(now))
+    } else {
+        let mut raw_times = [TimeSpec::default(); 2];
+        copy_from_user(raw_times.as_mut_ptr(), times, 2)?;
+        (
+            parse_utimens_time(raw_times[0], now)?,
+            parse_utimens_time(raw_times[1], now)?,
+        )
+    };
+
+    if path.is_null() {
+        let task = current_task().expect("[kernel] current task is None.");
+        let file = task.get_fd_entry(dirfd as usize)?.file;
+        if let Some(file) = file.as_any().downcast_ref::<File>() {
+            file.set_timestamps(atime, mtime);
+        }
+        return Ok(0);
+    }
+
+    let path = copy_cstr_from_user(path)?;
+    if path.starts_with("/dev/null/") {
+        return Err(Errno::ENOTDIR);
+    }
+
+    let _ = filename_lookup(dirfd, path.as_str(), 0)?;
     Ok(0)
 }
 

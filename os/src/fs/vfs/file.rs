@@ -4,6 +4,7 @@ use super::{InodeOp, InodeType, LinuxDirent64};
 use crate::config::PAGE_SIZE;
 use crate::fs::{KStat, Path};
 use crate::syscall::{Errno, SysResult};
+use crate::timer::TimeSpec;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
@@ -21,6 +22,9 @@ struct FileInner {
     flags: OpenFlags,
     cache: Option<FileCache>,
     write_back: bool,
+    atime: TimeSpec,
+    mtime: TimeSpec,
+    ctime: TimeSpec,
 }
 
 struct FileCache {
@@ -177,6 +181,9 @@ impl File {
                 flags,
                 cache,
                 write_back: ty == InodeType::Regular,
+                atime: TimeSpec::default(),
+                mtime: TimeSpec::default(),
+                ctime: TimeSpec::default(),
             }),
         }
     }
@@ -190,6 +197,9 @@ impl File {
                 flags,
                 cache: Some(FileCache::new(0)),
                 write_back: false,
+                atime: TimeSpec::default(),
+                mtime: TimeSpec::default(),
+                ctime: TimeSpec::default(),
             }),
         }
     }
@@ -236,6 +246,22 @@ impl File {
 
     pub fn path(&self) -> Arc<Path> {
         self.inner.lock().path.clone()
+    }
+
+    pub fn timestamps(&self) -> (TimeSpec, TimeSpec, TimeSpec) {
+        let inner = self.inner.lock();
+        (inner.atime, inner.mtime, inner.ctime)
+    }
+
+    pub fn set_timestamps(&self, atime: Option<TimeSpec>, mtime: Option<TimeSpec>) {
+        let mut inner = self.inner.lock();
+        if let Some(atime) = atime {
+            inner.atime = atime;
+        }
+        if let Some(mtime) = mtime {
+            inner.mtime = mtime;
+        }
+        inner.ctime = mtime.or(atime).unwrap_or(inner.ctime);
     }
 }
 
