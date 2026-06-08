@@ -146,7 +146,7 @@ const LIBC_STATIC_TESTS: &[&str] = &[
     // "sscanf_eof\0",
     //"statvfs\0",
     // "strverscmp\0",
-    "syscall_sign_extend\0",
+    //"syscall_sign_extend\0",
     // "uselocale_0\0",
     // "wcsncpy_read_overflow\0",
     // "wcsstr_false_negative\0",

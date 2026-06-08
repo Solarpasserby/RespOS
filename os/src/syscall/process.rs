@@ -408,10 +408,35 @@ pub fn sys_futex(
 }
 
 /// 系统调用 sys_set_robust_list - 设置线程的 robust futex 链表
-///
-/// glibc 线程初始化时无条件调用。当前内核不实现 robust futex，
-/// 直接返回成功即可。
-pub fn sys_set_robust_list() -> SysResult<usize> {
+pub fn sys_set_robust_list(head: usize, len: usize) -> SysResult<usize> {
+    const ROBUST_LIST_HEAD_SIZE: usize = core::mem::size_of::<usize>() * 3;
+    if len != ROBUST_LIST_HEAD_SIZE {
+        return Err(Errno::EINVAL);
+    }
+    let task = current_task().expect("[kernel] current task is None.");
+    task.set_robust_list(head, len);
+    Ok(0)
+}
+
+pub fn sys_get_robust_list(
+    pid: usize,
+    head_ptr: *mut usize,
+    len_ptr: *mut usize,
+) -> SysResult<usize> {
+    const ROBUST_LIST_HEAD_SIZE: usize = core::mem::size_of::<usize>() * 3;
+
+    let task = current_task().expect("[kernel] current task is None.");
+    if pid != 0 && pid != task.tid() {
+        return Err(Errno::ESRCH);
+    }
+
+    let head = task.robust_list().map(|(head, _)| head).unwrap_or(0);
+    let len = task
+        .robust_list()
+        .map(|(_, len)| len)
+        .unwrap_or(ROBUST_LIST_HEAD_SIZE);
+    copy_to_user(head_ptr, &head as *const usize, 1)?;
+    copy_to_user(len_ptr, &len as *const usize, 1)?;
     Ok(0)
 }
 

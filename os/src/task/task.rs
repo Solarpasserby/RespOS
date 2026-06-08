@@ -31,6 +31,10 @@ pub struct TidAddress {
     pub set_child_tid: Option<usize>,
     /// 线程退出时清零并做 futex wake 的用户空间地址。
     pub clear_child_tid: Option<usize>,
+    /// set_robust_list 注册的 robust_list_head 地址。
+    pub robust_list_head: Option<usize>,
+    /// robust_list_head 结构长度。
+    pub robust_list_len: usize,
 }
 
 impl TidAddress {
@@ -38,6 +42,8 @@ impl TidAddress {
         Self {
             set_child_tid: None,
             clear_child_tid: None,
+            robust_list_head: None,
+            robust_list_len: 0,
         }
     }
 }
@@ -532,6 +538,17 @@ impl TaskControlBlock {
     pub fn clear_child_tid_addr(&self) -> Option<usize> {
         self.tid_address.lock().clear_child_tid
     }
+    pub fn set_robust_list(&self, head: usize, len: usize) {
+        let mut tid_address = self.tid_address.lock();
+        tid_address.robust_list_head = (head != 0).then_some(head);
+        tid_address.robust_list_len = len;
+    }
+    pub fn robust_list(&self) -> Option<(usize, usize)> {
+        let tid_address = self.tid_address.lock();
+        tid_address
+            .robust_list_head
+            .map(|head| (head, tid_address.robust_list_len))
+    }
 
     // exec 时关闭线程组中除自身外的其它线程，只清理线程私有状态。
     pub fn close_other_threads_for_exec(&self) {
@@ -798,6 +815,99 @@ fn exit_thread(task: Arc<TaskControlBlock>, exit_code: i32) {
     TASK_MANAGER.remove(task.tid());
 }
 
+fn exit_robust_list(task: &Arc<TaskControlBlock>) {
+    const ROBUST_LIST_HEAD_SIZE: usize = core::mem::size_of::<usize>() * 3;
+    const FUTEX_WAITERS: u32 = 0x8000_0000;
+    const FUTEX_OWNER_DIED: u32 = 0x4000_0000;
+    const FUTEX_TID_MASK: u32 = 0x3fff_ffff;
+    const ROBUST_LIST_LIMIT: usize = 2048;
+
+    let Some((head, len)) = task.robust_list() else {
+        return;
+    };
+    if len != ROBUST_LIST_HEAD_SIZE {
+        return;
+    }
+
+    let mut first_entry = 0usize;
+    let mut futex_offset = 0isize;
+    let mut pending = 0usize;
+    if copy_from_user(&mut first_entry as *mut usize, head as *const usize, 1).is_err()
+        || copy_from_user(
+            &mut futex_offset as *mut isize,
+            (head + core::mem::size_of::<usize>()) as *const isize,
+            1,
+        )
+        .is_err()
+        || copy_from_user(
+            &mut pending as *mut usize,
+            (head + core::mem::size_of::<usize>() * 2) as *const usize,
+            1,
+        )
+        .is_err()
+    {
+        return;
+    }
+
+    let mut entry = first_entry;
+    for _ in 0..ROBUST_LIST_LIMIT {
+        if entry == 0 || entry == head {
+            break;
+        }
+        handle_robust_entry(
+            task.tid(),
+            entry,
+            futex_offset,
+            FUTEX_WAITERS,
+            FUTEX_OWNER_DIED,
+            FUTEX_TID_MASK,
+        );
+
+        let mut next = 0usize;
+        if copy_from_user(&mut next as *mut usize, entry as *const usize, 1).is_err() {
+            break;
+        }
+        entry = next;
+    }
+
+    if pending != 0 {
+        handle_robust_entry(
+            task.tid(),
+            pending,
+            futex_offset,
+            FUTEX_WAITERS,
+            FUTEX_OWNER_DIED,
+            FUTEX_TID_MASK,
+        );
+    }
+}
+
+fn handle_robust_entry(
+    tid: usize,
+    entry: usize,
+    futex_offset: isize,
+    futex_waiters: u32,
+    futex_owner_died: u32,
+    futex_tid_mask: u32,
+) {
+    let Some(futex_addr) = entry.checked_add_signed(futex_offset) else {
+        return;
+    };
+
+    let mut value = 0u32;
+    if copy_from_user(&mut value as *mut u32, futex_addr as *const u32, 1).is_err() {
+        return;
+    }
+    if value & futex_tid_mask != tid as u32 {
+        return;
+    }
+
+    let new_value = (value & futex_waiters) | futex_owner_died;
+    let _ = copy_to_user(futex_addr as *mut u32, &new_value as *const u32, 1);
+    let _ = crate::task::futex::futex_wake(futex_addr, 1, true);
+    let _ = crate::task::futex::futex_wake(futex_addr, 1, false);
+}
+
 /// 线程退出 - 对外接口
 ///
 /// - 设置当前线程退出状态
@@ -809,6 +919,7 @@ fn exit_thread(task: Arc<TaskControlBlock>, exit_code: i32) {
 pub fn task_exit(task: Arc<TaskControlBlock>, exit_code: i32) {
     // warn! {"[kernel] Thread exit. tid: {}, tgid: {}, thread_count: {}.", task.tid(), task.tgid(), task.op_thread_group(|tg| tg.iter().count())}
 
+    exit_robust_list(&task);
     if task.is_process_leader() {
         task_group_exit(task, exit_code);
         return;
