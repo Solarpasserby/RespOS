@@ -524,17 +524,37 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SysResult<usize> {
     const F_GETFL: usize = 3;
     const F_SETFL: usize = 4;
     const F_DUPFD_CLOEXEC: usize = 1030;
+    const FD_CLOEXEC: usize = 1;
 
     let task = current_task().expect("[kernel] current task is None.");
     let fd_entry = task.get_fd_entry(fd)?;
 
     match cmd {
-        F_DUPFD | F_DUPFD_CLOEXEC => {
-            // close-on-exec 尚未实现, F_DUPFD_CLOEXEC 与 F_DUPFD 暂时等效
-            task.alloc_fd_from(fd_entry, arg)
+        F_DUPFD => task.alloc_fd_from(fd_entry, arg),
+        F_DUPFD_CLOEXEC => {
+            let mut entry = fd_entry;
+            entry.set_flags(entry.get_flags() | OpenFlags::O_CLOEXEC);
+            task.alloc_fd_from(entry, arg)
         }
-        F_GETFD => Ok(0),
-        F_SETFD => Ok(0),
+        F_GETFD => {
+            if fd_entry.get_flags().contains(OpenFlags::O_CLOEXEC) {
+                Ok(FD_CLOEXEC)
+            } else {
+                Ok(0)
+            }
+        }
+        F_SETFD => {
+            let mut entry = fd_entry;
+            let mut flags = entry.get_flags();
+            if arg & FD_CLOEXEC != 0 {
+                flags |= OpenFlags::O_CLOEXEC;
+            } else {
+                flags.remove(OpenFlags::O_CLOEXEC);
+            }
+            entry.set_flags(flags);
+            task.set_fd(fd, entry)?;
+            Ok(0)
+        }
         F_GETFL => Ok(fd_entry.get_flags().bits() as usize),
         F_SETFL => {
             let mut entry = fd_entry;

@@ -6,6 +6,7 @@
 //! - `zero`  — `/dev/zero`，读取返回零字节，写入丢弃
 
 mod null;
+mod shm;
 mod zero;
 
 const DEVFS_DEV: u64 = 0x400;
@@ -13,6 +14,7 @@ const DEVFS_SUPER_MAGIC: i64 = 0x1373;
 const DEV_DIR_INO: u64 = 1;
 const NULL_INO: u64 = 2;
 const ZERO_INO: u64 = 3;
+const SHM_DIR_INO: u64 = 4;
 const NULL_RDEV: u64 = (1 << 8) | 3;
 const ZERO_RDEV: u64 = (1 << 8) | 5;
 
@@ -23,6 +25,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::any::Any;
 use null::NullInode;
+use shm::shm_dir;
 use zero::ZeroInode;
 
 use crate::fs::mount::{self, Mount, VfsMount, get_mount_by_dentry};
@@ -53,6 +56,7 @@ impl InodeOp for DevDirInode {
         match name {
             "null" => Ok(Arc::new(NullInode)),
             "zero" => Ok(Arc::new(ZeroInode)),
+            "shm" => Ok(shm_dir()),
             _ => Err(Errno::ENOENT),
         }
     }
@@ -63,6 +67,7 @@ impl InodeOp for DevDirInode {
             dir_entry(2, 2, b"..\0"),
             entry(NULL_INO, InodeType::CharDevice, 3, b"null\0"),
             entry(ZERO_INO, InodeType::CharDevice, 4, b"zero\0"),
+            entry(SHM_DIR_INO, InodeType::Directory, 5, b"shm\0"),
         ])
     }
 
@@ -107,7 +112,7 @@ impl SuperBlockOp for DevSuperBlock {
             f_blocks: 0,
             f_bfree: 0,
             f_bavail: 0,
-            f_files: 3,
+            f_files: 4,
             f_ffree: 0,
             f_namelen: 255,
             f_frsize: crate::config::PAGE_SIZE as i64,
