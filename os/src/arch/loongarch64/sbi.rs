@@ -4,7 +4,7 @@
 // RISC-V 通过 SBI ecall 调用固件服务，LoongArch 因为直接运行在裸机（-bios），
 // 所以这里直接访问 UART，并通过本地 register 模块操作 CSR。
 
-use super::register;
+use super::{config::GED_REG_BASE, register};
 
 const UART_BASE: usize = 0x1fe0_01e0;
 // NS16550 寄存器偏移
@@ -13,6 +13,13 @@ const UART_RBR: usize = UART_BASE + 0; // Receiver Buffer Register
 const UART_LSR: usize = UART_BASE + 5; // Line Status Register
 const LSR_RX_READY: u8 = 1 << 0; // Data Ready
 const LSR_TX_EMPTY: u8 = 1 << 5; // Transmitter Holding Register Empty
+const ACPI_GED_REG_BASE: usize = GED_REG_BASE + 0x1c;
+const ACPI_GED_REG_SLEEP_CTL: usize = ACPI_GED_REG_BASE;
+const ACPI_GED_REG_RESET: usize = ACPI_GED_REG_BASE + 2;
+const ACPI_GED_SLP_TYP_S5: u8 = 0x05;
+const ACPI_GED_SLP_TYP_SHIFT: u8 = 2;
+const ACPI_GED_SLP_EN: u8 = 0x20;
+const ACPI_GED_RESET_VALUE: u8 = 0x42;
 
 #[inline]
 fn mmio_addr(addr: usize) -> usize {
@@ -63,6 +70,17 @@ pub fn clear_timer_interrupt() {
 }
 
 /// 关闭机器
-pub fn shutdown(_failure: bool) -> ! {
+pub fn shutdown(failure: bool) -> ! {
+    unsafe {
+        if failure {
+            core::ptr::write_volatile(
+                mmio_addr(ACPI_GED_REG_RESET) as *mut u8,
+                ACPI_GED_RESET_VALUE,
+            );
+        } else {
+            let s5_poweroff = ACPI_GED_SLP_EN | (ACPI_GED_SLP_TYP_S5 << ACPI_GED_SLP_TYP_SHIFT);
+            core::ptr::write_volatile(mmio_addr(ACPI_GED_REG_SLEEP_CTL) as *mut u8, s5_poweroff);
+        }
+    }
     register::idle()
 }

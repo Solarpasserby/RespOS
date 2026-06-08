@@ -12,7 +12,7 @@ pub const KERNEL_STACK_TOP: usize = 0xffff_ffff_ffff_f000;
 pub const KERNEL_STACK_SIZE: usize = (PAGE_SIZE << 4) - PAGE_SIZE; // 60 KiB
 
 // 内核堆大小
-pub const KERNEL_HEAP_SIZE: usize = 8 * 1024 * 1024;
+pub const KERNEL_HEAP_SIZE: usize = 16 * 1024 * 1024;
 
 // 文件映射和匿名映射区域
 pub const MMAP_MIN_ADDR: usize = 0x0000_0020_0000_0000;

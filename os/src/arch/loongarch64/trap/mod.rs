@@ -88,8 +88,16 @@ fn handle_user_page_fault(cx: &TrapContext, exception: estat::Exception) {
 }
 
 fn handle_user_syscall(cx: &mut TrapContext) {
+    let syscall_id = cx.syscall_id();
+    let syscall_args = cx.syscall_args();
     cx.era += 4;
-    cx.x[4] = match syscall(cx.syscall_id(), cx.syscall_args()) {
+
+    let ret = syscall(syscall_id, syscall_args);
+    if syscall_id == SYSCALL_SIGRETURN && ret.is_ok() {
+        return;
+    }
+
+    cx.x[4] = match ret {
         Ok(ret) => ret,
         Err(err) => err.as_ret() as usize,
     };
