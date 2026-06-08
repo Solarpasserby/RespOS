@@ -1,6 +1,7 @@
 // os/src/syscall/fs.rs
 
 use super::{Errno, SysResult};
+use crate::config::BLOCK_SIZE;
 use crate::fs::mount::{do_mount, do_umount2};
 use crate::fs::vfs::{File, FileOp, InodeType, OpenFlags};
 use crate::fs::{
@@ -92,6 +93,46 @@ pub struct IoVec {
     pub len: usize,
 }
 
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct StatFs {
+    pub f_type: usize,
+    pub f_bsize: usize,
+    pub f_blocks: u64,
+    pub f_bfree: u64,
+    pub f_bavail: u64,
+    pub f_files: u64,
+    pub f_ffree: u64,
+    pub f_fsid: [i32; 2],
+    pub f_namelen: usize,
+    pub f_frsize: usize,
+    pub f_flags: usize,
+    pub f_spare: [usize; 4],
+}
+
+impl Default for StatFs {
+    fn default() -> Self {
+        const EXT4_SUPER_MAGIC: usize = 0xef53;
+        const BLOCKS: u64 = 1024 * 1024;
+        const FILES: u64 = 65536;
+
+        Self {
+            f_type: EXT4_SUPER_MAGIC,
+            f_bsize: BLOCK_SIZE,
+            f_blocks: BLOCKS,
+            f_bfree: BLOCKS / 2,
+            f_bavail: BLOCKS / 2,
+            f_files: FILES,
+            f_ffree: FILES / 2,
+            f_fsid: [0; 2],
+            f_namelen: 255,
+            f_frsize: BLOCK_SIZE,
+            f_flags: 0,
+            f_spare: [0; 4],
+        }
+    }
+}
+
 pub fn sys_writev(fd: usize, iov: *const IoVec, iovcnt: usize) -> SysResult<usize> {
     const IOV_MAX: usize = 1024;
     if iovcnt > IOV_MAX {
@@ -144,6 +185,27 @@ pub fn sys_readv(fd: usize, iov: *const IoVec, iovcnt: usize) -> SysResult<usize
         }
     }
     Ok(total)
+}
+
+pub fn sys_statfs(path: *const u8, buf: *mut StatFs) -> SysResult<usize> {
+    let path = copy_cstr_from_user(path)?;
+    if path.is_empty() {
+        return Err(Errno::ENOENT);
+    }
+    let _ = filename_lookup(AT_FDCWD, path.as_str(), 0)?;
+
+    let stat = StatFs::default();
+    copy_to_user(buf, &stat as *const StatFs, 1)?;
+    Ok(0)
+}
+
+pub fn sys_fstatfs(fd: usize, buf: *mut StatFs) -> SysResult<usize> {
+    let task = current_task().expect("[kernel] current task is None.");
+    let _ = task.get_fd_entry(fd)?;
+
+    let stat = StatFs::default();
+    copy_to_user(buf, &stat as *const StatFs, 1)?;
+    Ok(0)
 }
 
 /// 系统调用 sys-open
