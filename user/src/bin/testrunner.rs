@@ -247,7 +247,7 @@ fn main() -> i32 {
     // _run_libcbench_glibc(); // Passed
     // _run_busybox_musl();
     // _run_busybox_glibc();
-    // _run_static_musl();
+    _run_static_musl();
     println!("[testrunner] all selected tests finished, powering off");
     poweroff();
     0
