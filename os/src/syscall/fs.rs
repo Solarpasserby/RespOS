@@ -5,8 +5,8 @@ use crate::config::BLOCK_SIZE;
 use crate::fs::mount::{do_mount, do_umount2};
 use crate::fs::vfs::{File, FileOp, InodeType, OpenFlags};
 use crate::fs::{
-    AT_FDCWD, DevNull, FdEntry, KStat, Stat, filename_create, filename_link, filename_lookup,
-    filename_unlink, make_pipe, path_open,
+    AT_FDCWD, DevNull, DevZero, FdEntry, KStat, Stat, filename_create, filename_link,
+    filename_lookup, filename_unlink, make_pipe, path_open,
 };
 use crate::mm::{check_user_writable, copy_cstr_from_user, copy_from_user, copy_to_user};
 use crate::task::current_task;
@@ -213,10 +213,10 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: usize, mode: usize) -> S
     let task = current_task().expect("[kernel] current task is None.");
     let path = copy_cstr_from_user(path)?;
     let open_flags = OpenFlags::from(flags);
-    let file: Arc<dyn FileOp> = if path == "/dev/null" {
-        Arc::new(DevNull::new(open_flags))
-    } else {
-        path_open(dirfd, path.as_str(), flags, mode)?
+    let file: Arc<dyn FileOp> = match path.as_str() {
+        "/dev/null" => Arc::new(DevNull::new(open_flags)),
+        "/dev/zero" => Arc::new(DevZero::new(open_flags)),
+        _ => path_open(dirfd, path.as_str(), flags, mode)?,
     };
     let fd = task.alloc_fd(FdEntry::new(file, flags.into()))?;
     Ok(fd)
