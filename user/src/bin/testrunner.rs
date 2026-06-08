@@ -241,13 +241,14 @@ fn _run_busybox_glibc() {
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("[testrunner] start");
-    // _run_basic_musl(); // umount 有些问题
-    // _run_basic_glibc(); // umount 有些问题
-    // _run_libcbench_musl(); // Passed
-    // _run_libcbench_glibc(); // Passed
-    // _run_busybox_musl();
-    // _run_busybox_glibc();
+    _run_basic_musl(); // umount 有些问题
+    _run_basic_glibc(); // umount 有些问题
+    _run_libcbench_musl(); // Passed
+    _run_libcbench_glibc(); // Passed
+    _run_busybox_musl();
+    _run_busybox_glibc();
     _run_static_musl();
+    _run_static_glibc();
     println!("[testrunner] all selected tests finished, powering off");
     poweroff();
     0
