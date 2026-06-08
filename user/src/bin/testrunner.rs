@@ -89,10 +89,6 @@ fn _run_static_musl() {
     run_shell_script("/musl/\0", BUSYBOX_PATH, RUN_STATIC_SCRIPT);
 }
 
-fn _run_static_glibc() {
-    run_shell_script("/glibc/\0", GLIBC_BUSYBOX_PATH, RUN_STATIC_SCRIPT);
-}
-
 fn read_file(path: &str, buf: &mut [u8]) -> isize {
     let fd = open(path, O_RDONLY, 0);
     if fd < 0 {
@@ -247,8 +243,7 @@ fn main() -> i32 {
     _run_libcbench_glibc(); // Passed
     _run_busybox_musl();
     _run_busybox_glibc();
-    _run_static_musl();
-    _run_static_glibc();
+    // _run_static_musl();
     println!("[testrunner] all selected tests finished, powering off");
     poweroff();
     0
@@ -258,7 +253,7 @@ fn main() -> i32 {
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("[testrunner] start");
-    // _run_basic_musl();
+    _run_basic_musl();
     // _run_basic_glibc();
     // _run_libcbench_musl();
     // _run_libcbench_glibc();

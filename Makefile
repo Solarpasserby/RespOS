@@ -1,4 +1,9 @@
-MODE ?= debug
+SHELL := /bin/bash
+.SHELLFLAGS := -o pipefail -c
+
+MODE ?= release
+RV_MODE ?= $(MODE)
+LA_MODE ?= debug
 MEM ?= 128M
 SMP ?= 1
 RV_FS_IMG ?= img/sdcard-rv.img
@@ -11,25 +16,39 @@ QEMU_LA ?= qemu-system-loongarch64
 RV_TARGET := riscv64gc-unknown-none-elf
 LA_TARGET := loongarch64-unknown-none
 
-TESTRUNNER_LOG ?= testrunner_output.log
+RV_OUTPUT ?= rv-output.txt
+LA_OUTPUT ?= la-output.txt
 
-ifeq ($(MODE),debug)
-	CARGO_TARGET_DIR := debug
-	CARGO_BUILD_ARG :=
-else ifeq ($(MODE),release)
-	CARGO_TARGET_DIR := release
-	CARGO_BUILD_ARG := --release
-else ifeq ($(MODE),release-debug)
-	CARGO_TARGET_DIR := release-debug
-	CARGO_BUILD_ARG := --profile release-debug
+ifeq ($(RV_MODE),debug)
+	RV_CARGO_TARGET_DIR := debug
+	RV_CARGO_BUILD_ARG :=
+else ifeq ($(RV_MODE),release)
+	RV_CARGO_TARGET_DIR := release
+	RV_CARGO_BUILD_ARG := --release
+else ifeq ($(RV_MODE),release-debug)
+	RV_CARGO_TARGET_DIR := release-debug
+	RV_CARGO_BUILD_ARG := --profile release-debug
 else
-	$(error Unsupported MODE '$(MODE)'. Use MODE=debug, MODE=release, or MODE=release-debug)
+	$(error Unsupported RV_MODE '$(RV_MODE)'. Use debug, release, or release-debug)
+endif
+
+ifeq ($(LA_MODE),debug)
+	LA_CARGO_TARGET_DIR := debug
+	LA_CARGO_BUILD_ARG :=
+else ifeq ($(LA_MODE),release)
+	LA_CARGO_TARGET_DIR := release
+	LA_CARGO_BUILD_ARG := --release
+else ifeq ($(LA_MODE),release-debug)
+	LA_CARGO_TARGET_DIR := release-debug
+	LA_CARGO_BUILD_ARG := --profile release-debug
+else
+	$(error Unsupported LA_MODE '$(LA_MODE)'. Use debug, release, or release-debug)
 endif
 
 KERNEL_RV := kernel-rv
 KERNEL_LA := kernel-la
-RV_ELF := os/target/$(RV_TARGET)/$(CARGO_TARGET_DIR)/os
-LA_ELF := os/target/$(LA_TARGET)/$(CARGO_TARGET_DIR)/os
+RV_ELF := os/target/$(RV_TARGET)/$(RV_CARGO_TARGET_DIR)/os
+LA_ELF := os/target/$(LA_TARGET)/$(LA_CARGO_TARGET_DIR)/os
 
 RV_QEMU_DISK_ARGS :=
 ifneq ($(wildcard $(RV_DISK_IMG)),)
@@ -58,18 +77,18 @@ prepare-la-cargo-config:
 	cp user/cargo/config-loongarch64.toml user/.cargo/config.toml
 
 build-rv: prepare-rv-cargo-config
-	$(MAKE) -C user build ARCH=riscv64 MODE=$(MODE) FEATURES=eval
-	cd os && RESPOS_USER_PROFILE_DIR=$(CARGO_TARGET_DIR) \
+	$(MAKE) -C user build ARCH=riscv64 MODE=$(RV_MODE) FEATURES=eval
+	cd os && RESPOS_USER_PROFILE_DIR=$(RV_CARGO_TARGET_DIR) \
 		RESPOS_USER_TARGET=$(RV_TARGET) \
-		RESPOS_APP_REBUILD_STAMP=$$(date +%s%N) cargo build $(CARGO_BUILD_ARG)
+		RESPOS_APP_REBUILD_STAMP=$$(date +%s%N) cargo build $(RV_CARGO_BUILD_ARG)
 	rust-objcopy --set-start=0x80200000 $(RV_ELF) $(KERNEL_RV)
 	@rust-readobj -h -l $(KERNEL_RV) | awk '/Entry:/ || /VirtualAddress:/ || /PhysicalAddress:/ { print }'
 
 build-la: prepare-la-cargo-config
-	$(MAKE) -C user build ARCH=loongarch64 MODE=$(MODE) FEATURES=eval
-	cd os && RESPOS_USER_PROFILE_DIR=$(CARGO_TARGET_DIR) \
+	$(MAKE) -C user build ARCH=loongarch64 MODE=$(LA_MODE) FEATURES=eval
+	cd os && RESPOS_USER_PROFILE_DIR=$(LA_CARGO_TARGET_DIR) \
 		RESPOS_USER_TARGET=$(LA_TARGET) \
-		RESPOS_APP_REBUILD_STAMP=$$(date +%s%N) cargo build $(CARGO_BUILD_ARG)
+		RESPOS_APP_REBUILD_STAMP=$$(date +%s%N) cargo build $(LA_CARGO_BUILD_ARG)
 	cp $(LA_ELF) $(KERNEL_LA)
 	@rust-readobj -h -l $(KERNEL_LA) | awk '/Entry:/ || /VirtualAddress:/ || /PhysicalAddress:/ { print }'
 
@@ -86,7 +105,7 @@ rv: build-rv
 		-device virtio-net-device,netdev=net \
 		-netdev user,id=net \
 		-rtc base=utc \
-		$(RV_QEMU_DISK_ARGS) 2>&1 | tee $(TESTRUNNER_LOG)
+		$(RV_QEMU_DISK_ARGS) |& tee $(RV_OUTPUT)
 
 la: build-la
 	$(QEMU_LA) -machine virt \
@@ -100,7 +119,7 @@ la: build-la
 		-device virtio-net-pci,netdev=net0 \
 		-netdev user,id=net0,hostfwd=tcp::5555-:5555,hostfwd=udp::5555-:5555 \
 		-rtc base=utc \
-		$(LA_QEMU_DISK_ARGS) 2>&1 | tee $(TESTRUNNER_LOG)
+		$(LA_QEMU_DISK_ARGS) |& tee $(LA_OUTPUT)
 
 check-submit: all
 	@file $(KERNEL_RV)
