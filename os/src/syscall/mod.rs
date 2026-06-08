@@ -47,7 +47,7 @@ const SYSCALL_TGKILL: usize = 131;
 const SYSCALL_SIGACTION: usize = 134;
 const SYSCALL_SIGPROCMASK: usize = 135;
 const SYSCALL_RT_SIGTIMEDWAIT: usize = 137;
-const SYSCALL_SIGRETURN: usize = 139;
+pub const SYSCALL_SIGRETURN: usize = 139;
 const SYSCALL_SETPRIORITY: usize = 140;
 const SYSCALL_REBOOT: usize = 142;
 const SYSCALL_TIMES: usize = 153;
@@ -81,6 +81,7 @@ const SYSCALL_WAIT4: usize = 260;
 const SYSCALL_PRLIMIT64: usize = 261;
 const SYSCALL_RENAMEAT2: usize = 276;
 const SYSCALL_GETRANDOM: usize = 278;
+const SYSCALL_STATX: usize = 291;
 
 mod errno;
 mod fs;
@@ -271,6 +272,13 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
             args[4],
         ),
         SYSCALL_GETRANDOM => sys_getrandom(args[0] as *mut u8, args[1], args[2]),
+        SYSCALL_STATX => sys_statx(
+            args[0] as isize,
+            args[1] as *const u8,
+            args[2],
+            args[3] as u32,
+            args[4] as *mut Statx,
+        ),
         _ => Err(Errno::ENOSYS),
     }
 }
