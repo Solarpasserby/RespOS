@@ -5,6 +5,7 @@ SMP ?= 1
 FS_IMG ?= img/sdcard-rv.img
 DISK_IMG ?= disk.img
 QEMU ?= qemu-system-riscv64
+TESTRUNNER_LOG ?= testrunner_output.log
 
 ifeq ($(MODE),debug)
 	CARGO_TARGET_DIR := debug
@@ -56,7 +57,7 @@ rv: build-rv
 		-device virtio-net-device,netdev=net \
 		-netdev user,id=net \
 		-rtc base=utc \
-		$(QEMU_DISK_ARGS)
+		$(QEMU_DISK_ARGS) 2>&1 | tee $(TESTRUNNER_LOG)
 
 check-submit: build-rv
 	@file $(KERNEL_RV)
