@@ -16,3 +16,5 @@ user/.cargo/
 kernel-rv
 kernel-la
 testrunner_output.log
+rv-output.txt
+la-output.txt

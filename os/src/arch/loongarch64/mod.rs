@@ -28,7 +28,7 @@ static LOW_DIRECT_MAP_ACTIVE: AtomicBool = AtomicBool::new(true);
 
 // QEMU 启动时先依赖低地址 DMW 直映运行；进入高地址共享内核模型前，
 // 需要一份只覆盖早期内核镜像和启动堆的临时页表作为过渡。
-const BOOT_MAP_SIZE: usize = 16 * 1024 * 1024;
+const BOOT_MAP_SIZE: usize = 32 * 1024 * 1024;
 const BOOT_PTE_TABLES: usize = BOOT_MAP_SIZE / (512 * crate::config::PAGE_SIZE);
 
 const PTE_VALID: usize = 1 << 0;

@@ -4,14 +4,13 @@ use super::{Errno, SysResult};
 use crate::fs::mount::{do_mount, do_umount2};
 use crate::fs::vfs::{File, FileOp, InodeType, OpenFlags};
 use crate::fs::{
-    AT_EMPTY_PATH, AT_FDCWD, AT_NO_AUTOMOUNT, AT_SYMLINK_NOFOLLOW, FdEntry, Stat, Statfs64,
+    AT_EMPTY_PATH, AT_FDCWD, AT_NO_AUTOMOUNT, AT_SYMLINK_NOFOLLOW, FdEntry, KStat, Stat, Statfs64,
     filename_create, filename_link, filename_lookup, filename_lookup_no_follow_final_symlink,
     filename_rename, filename_symlink, filename_unlink, make_pipe, path_open,
 };
 use crate::mm::{check_user_writable, copy_cstr_from_user, copy_from_user, copy_to_user};
 use crate::task::current_task;
 use crate::timer::{TimeSpec, get_time_ms};
-use alloc::vec;
 
 const UTIME_NOW: usize = 1_073_741_823;
 const UTIME_OMIT: usize = 1_073_741_822;
@@ -20,6 +19,7 @@ const X_OK: usize = 1;
 const W_OK: usize = 2;
 const R_OK: usize = 4;
 const AT_EACCESS: usize = 0x200;
+const AT_STATX_SYNC_TYPE: usize = 0x6000;
 
 // 使用 mm 实现的 `copy_cstr_from_user`, `copy_from_user`, `copy_to_user` 来访问用户空间的数据
 
@@ -192,8 +192,13 @@ pub fn sys_fstatat(
     }
 
     let path = copy_cstr_from_user(path)?;
-    // info!("Path: {}.", path);
-    let stat_buf: Stat = if path.is_empty() {
+    let stat_buf: Stat = stat_at(dirfd, path.as_str(), flags)?.into();
+    copy_to_user(stat, &stat_buf as *const Stat, 1)?;
+    Ok(0)
+}
+
+fn stat_at(dirfd: isize, path: &str, flags: usize) -> SysResult<KStat> {
+    let kstat = if path.is_empty() {
         if flags & AT_EMPTY_PATH == 0 {
             return Err(Errno::ENOENT);
         }
@@ -211,14 +216,106 @@ pub fn sys_fstatat(
     } else {
         // 默认 stat 跟随最终 symlink；带 AT_SYMLINK_NOFOLLOW 时退化为 lstat 语义。
         let resolved = if flags & AT_SYMLINK_NOFOLLOW != 0 {
-            filename_lookup_no_follow_final_symlink(dirfd, path.as_str())?
+            filename_lookup_no_follow_final_symlink(dirfd, path)?
         } else {
-            filename_lookup(dirfd, path.as_str(), 0)?
+            filename_lookup(dirfd, path, 0)?
         };
         resolved.dentry.get_inode().stat(&resolved.abs_path())?
+    };
+    Ok(kstat)
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct StatxTimestamp {
+    sec: i64,
+    nsec: u32,
+    _pad: i32,
+}
+
+impl From<TimeSpec> for StatxTimestamp {
+    fn from(ts: TimeSpec) -> Self {
+        Self {
+            sec: ts.sec as i64,
+            nsec: ts.nsec as u32,
+            _pad: 0,
+        }
     }
-    .into();
-    copy_to_user(stat, &stat_buf as *const Stat, 1)?;
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct Statx {
+    stx_mask: u32,
+    stx_blksize: u32,
+    stx_attributes: u64,
+    stx_nlink: u32,
+    stx_uid: u32,
+    stx_gid: u32,
+    stx_mode: u16,
+    _spare0: [u16; 1],
+    stx_ino: u64,
+    stx_size: u64,
+    stx_blocks: u64,
+    stx_attributes_mask: u64,
+    stx_atime: StatxTimestamp,
+    stx_btime: StatxTimestamp,
+    stx_ctime: StatxTimestamp,
+    stx_mtime: StatxTimestamp,
+    stx_rdev_major: u32,
+    stx_rdev_minor: u32,
+    stx_dev_major: u32,
+    stx_dev_minor: u32,
+    stx_mnt_id: u64,
+    stx_dio_mem_align: u32,
+    stx_dio_offset_align: u32,
+    _spare3: [u64; 12],
+}
+
+impl From<KStat> for Statx {
+    fn from(kstat: KStat) -> Self {
+        const STATX_BASIC_STATS: u32 = 0x0000_07ff;
+        let stat: Stat = kstat.into();
+        Self {
+            stx_mask: STATX_BASIC_STATS,
+            stx_blksize: stat.st_blksize,
+            stx_nlink: stat.st_nlink,
+            stx_uid: stat.st_uid,
+            stx_gid: stat.st_gid,
+            stx_mode: stat.st_mode as u16,
+            stx_ino: stat.st_ino,
+            stx_size: stat.st_size,
+            stx_blocks: stat.st_blocks,
+            stx_atime: stat.st_atime.into(),
+            stx_ctime: stat.st_ctime.into(),
+            stx_mtime: stat.st_mtime.into(),
+            ..Default::default()
+        }
+    }
+}
+
+/// 系统调用 sys-statx
+///
+/// LoongArch 的 musl/busybox 会优先用 statx 实现 stat/lstat/access 前的
+/// metadata 查询。这里先提供 basic stats，使它与现有 fstatat 共享路径解析。
+pub fn sys_statx(
+    dirfd: isize,
+    path: *const u8,
+    flags: usize,
+    mask: u32,
+    buf: *mut Statx,
+) -> SysResult<usize> {
+    const STATX_RESERVED: u32 = 0x8000_0000;
+    const STATX_ALLOWED_FLAGS: usize =
+        AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_EMPTY_PATH | AT_STATX_SYNC_TYPE;
+
+    if mask & STATX_RESERVED != 0 || flags & !STATX_ALLOWED_FLAGS != 0 {
+        return Err(Errno::EINVAL);
+    }
+
+    let path = copy_cstr_from_user(path)?;
+    let statx: Statx = stat_at(dirfd, path.as_str(), flags)?.into();
+    copy_to_user(buf, &statx as *const Statx, 1)?;
     Ok(0)
 }
 
@@ -727,7 +824,6 @@ pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> SysResult<usize
     if count == 0 {
         return Ok(0);
     }
-    check_user_writable(dirp, count)?;
 
     let task = current_task().expect("[kernel] current task is None.");
     let file = task.get_fd_entry(fd)?.get_file();
@@ -740,7 +836,6 @@ pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> SysResult<usize
     let current_off = file.get_offset();
     let mut written = 0;
     let mut next_off = current_off;
-    let mut buf = vec![0u8; count];
     let dirents = file.readdir()?;
     for dirent in dirents {
         let dirent_off = usize::try_from(dirent.d_off).map_err(|_| Errno::EINVAL)?;
@@ -758,7 +853,10 @@ pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> SysResult<usize
             }
             break;
         }
-        dirent.copy_to_buffer(&mut buf[written..written + dirent_size]);
+        let mut record = alloc::vec![0u8; dirent_size];
+        dirent.copy_to_buffer(&mut record);
+        let dst = unsafe { dirp.add(written) };
+        copy_to_user(dst, record.as_ptr(), dirent_size)?;
         written += dirent_size;
         next_off = dirent_off;
     }
@@ -766,7 +864,6 @@ pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> SysResult<usize
     if written != 0 {
         let next_off = isize::try_from(next_off).map_err(|_| Errno::EINVAL)?;
         file.seek(next_off)?;
-        copy_to_user(dirp, buf.as_ptr(), written)?;
     }
 
     Ok(written)
