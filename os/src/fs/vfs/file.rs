@@ -70,12 +70,12 @@ impl FileCache {
         self.ensure_page_slots((page_idx + 1) * PAGE_SIZE);
         let mut page = alloc::vec![0u8; PAGE_SIZE];
         let page_start = page_idx * PAGE_SIZE;
-        if page_start < self.len
-            && let Some((inode, path)) = lower
-        {
-            match inode.read_at(path, page_start, &mut page) {
-                Ok(_) | Err(Errno::ENOENT) => {}
-                Err(err) => return Err(err),
+        if page_start < self.len {
+            if let Some((inode, path)) = lower {
+                match inode.read_at(path, page_start, &mut page) {
+                    Ok(_) | Err(Errno::ENOENT) => {}
+                    Err(err) => return Err(err),
+                }
             }
         }
         self.pages[page_idx] = Some(page);
@@ -228,18 +228,20 @@ impl File {
         let path = self.path();
         let mut entries = self.inode.readdir(&path.abs_path())?;
 
-        if Arc::ptr_eq(&path.dentry, &path.mnt.root)
-            && let Some(mount) = crate::fs::mount::get_mount_by_vfsmount(&path.mnt)
-            && let Some(parent_ino) = mount
-                .mountpoint
-                .get_parent()
-                .and_then(|parent| parent.get_inode().stat(&parent.abs_path).ok())
-                .map(|stat| stat.ino)
-        {
-            for entry in &mut entries {
-                if entry.d_name == b"..\0" {
-                    entry.d_ino = parent_ino;
-                    break;
+        if Arc::ptr_eq(&path.dentry, &path.mnt.root) {
+            if let Some(mount) = crate::fs::mount::get_mount_by_vfsmount(&path.mnt) {
+                if let Some(parent_ino) = mount
+                    .mountpoint
+                    .get_parent()
+                    .and_then(|parent| parent.get_inode().stat(&parent.abs_path).ok())
+                    .map(|stat| stat.ino)
+                {
+                    for entry in &mut entries {
+                        if entry.d_name == b"..\0" {
+                            entry.d_ino = parent_ino;
+                            break;
+                        }
+                    }
                 }
             }
         }
