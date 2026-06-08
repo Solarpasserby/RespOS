@@ -44,6 +44,36 @@ pub fn sys_read(fd: usize, buf: *mut u8, len: usize) -> SysResult<usize> {
     Ok(ret)
 }
 
+pub fn sys_pread64(fd: usize, buf: *mut u8, len: usize, offset: isize) -> SysResult<usize> {
+    if offset < 0 {
+        return Err(Errno::EINVAL);
+    }
+    if len == 0 {
+        return Ok(0);
+    }
+    check_user_writable(buf, len)?;
+
+    let task = current_task().expect("[kernel] current task is None.");
+    let file = task.get_fd_entry(fd)?.file;
+    if !file.readable() {
+        return Err(Errno::EBADF);
+    }
+    let old_offset = file.get_offset();
+    file.seek(offset)?;
+    let mut kbuf = alloc::vec![0u8; len];
+    let ret = file.read(kbuf.as_mut_slice());
+    let restore_ret = file.seek(old_offset as isize);
+
+    match (ret, restore_ret) {
+        (Ok(read_len), Ok(_)) => {
+            copy_to_user(buf, kbuf.as_ptr(), read_len)?;
+            Ok(read_len)
+        }
+        (Err(err), _) => Err(err),
+        (_, Err(err)) => Err(err),
+    }
+}
+
 /// 系统调用 sys-write
 pub fn sys_write(fd: usize, buf: *mut u8, len: usize) -> SysResult<usize> {
     if len == 0 {
@@ -81,15 +111,50 @@ pub fn sys_writev(fd: usize, iov: *const IoVec, iovcnt: usize) -> SysResult<usiz
             base: core::ptr::null_mut(),
             len: 0,
         };
-        unsafe {
-            copy_from_user(&mut item as *mut IoVec, iov.add(idx), 1)?;
+        let iov_ret = unsafe { copy_from_user(&mut item as *mut IoVec, iov.add(idx), 1) };
+        if let Err(err) = iov_ret {
+            return if total > 0 { Ok(total) } else { Err(err) };
         }
         if item.len == 0 {
             continue;
         }
-        let written = sys_write(fd, item.base, item.len)?;
+        let written = match sys_write(fd, item.base, item.len) {
+            Ok(written) => written,
+            Err(err) => return if total > 0 { Ok(total) } else { Err(err) },
+        };
         total = total.checked_add(written).ok_or(Errno::EINVAL)?;
         if written < item.len {
+            break;
+        }
+    }
+    Ok(total)
+}
+
+pub fn sys_readv(fd: usize, iov: *const IoVec, iovcnt: usize) -> SysResult<usize> {
+    const IOV_MAX: usize = 1024;
+    if iovcnt > IOV_MAX {
+        return Err(Errno::EINVAL);
+    }
+
+    let mut total: usize = 0;
+    for idx in 0..iovcnt {
+        let mut item = IoVec {
+            base: core::ptr::null_mut(),
+            len: 0,
+        };
+        let iov_ret = unsafe { copy_from_user(&mut item as *mut IoVec, iov.add(idx), 1) };
+        if let Err(err) = iov_ret {
+            return if total > 0 { Ok(total) } else { Err(err) };
+        }
+        if item.len == 0 {
+            continue;
+        }
+        let read = match sys_read(fd, item.base, item.len) {
+            Ok(read) => read,
+            Err(err) => return if total > 0 { Ok(total) } else { Err(err) },
+        };
+        total = total.checked_add(read).ok_or(Errno::EINVAL)?;
+        if read < item.len {
             break;
         }
     }
@@ -297,12 +362,7 @@ pub fn sys_fstat(fd: usize, stat: *mut Stat) -> SysResult<usize> {
 /// TODO[ABI-COMPAT]: 尚未实现 root/capability/ACL 等权限放宽规则。
 /// TODO[ABI-COMPAT]: 尚未检查路径中每一级目录的 search/execute 权限。
 /// TODO[ABI-COMPAT]: W_OK 对只读挂载、不可变文件等特殊状态的语义尚未实现。
-pub fn sys_faccessat(
-    dirfd: isize,
-    path: *const u8,
-    mode: usize,
-    flags: usize,
-) -> SysResult<usize> {
+pub fn sys_faccessat(dirfd: isize, path: *const u8, mode: usize, flags: usize) -> SysResult<usize> {
     const FACCESSAT_ALLOWED_FLAGS: usize = AT_EACCESS | AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH;
 
     if mode & !(R_OK | W_OK | X_OK) != 0 || flags & !FACCESSAT_ALLOWED_FLAGS != 0 {

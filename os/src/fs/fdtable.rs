@@ -13,6 +13,8 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 pub struct FdTable {
     pub table: SpinLock<Vec<Option<FdEntry>>>,
     next_fd: AtomicUsize,
+    nofile_cur: AtomicUsize,
+    nofile_max: AtomicUsize,
 }
 
 impl FdTable {
@@ -25,6 +27,8 @@ impl FdTable {
         Arc::new(FdTable {
             table: SpinLock::new(vec![Some(stdin), Some(stdout), Some(stderr)]),
             next_fd: AtomicUsize::new(3),
+            nofile_cur: AtomicUsize::new(FTB_RLIMIT),
+            nofile_max: AtomicUsize::new(FTB_RLIMIT),
         })
     }
 
@@ -38,28 +42,50 @@ impl FdTable {
         self.next_fd.store(3, Ordering::Relaxed);
     }
 
+    pub fn nofile_limit(&self) -> (usize, usize) {
+        (
+            self.nofile_cur.load(Ordering::Relaxed),
+            self.nofile_max.load(Ordering::Relaxed),
+        )
+    }
+
+    pub fn set_nofile_limit(&self, cur: usize, max: usize) -> SysResult {
+        if cur > max || max > FTB_RLIMIT {
+            return Err(Errno::EINVAL);
+        }
+        self.nofile_cur.store(cur, Ordering::Relaxed);
+        self.nofile_max.store(max, Ordering::Relaxed);
+        Ok(())
+    }
+
     // 找到一个空位分配 FdEntry，返回 FdTable 中 Fd 的下标
     pub fn alloc_fd(&self, fd_entry: FdEntry) -> SysResult<usize> {
         let mut table = self.table.lock();
         let min_fd = self.next_fd.load(Ordering::Relaxed);
-        Self::alloc_fd_locked(&mut table, fd_entry, min_fd, &self.next_fd)
+        let limit = self.nofile_cur.load(Ordering::Relaxed).min(FTB_RLIMIT);
+        if min_fd >= limit {
+            return Err(Errno::EMFILE);
+        }
+        Self::alloc_fd_locked(&mut table, fd_entry, min_fd, limit, &self.next_fd)
     }
 
     /// 从 min_fd 开始找空位分配，用于 F_DUPFD
     pub fn alloc_fd_from(&self, fd_entry: FdEntry, min_fd: usize) -> SysResult<usize> {
         let mut table = self.table.lock();
-        Self::alloc_fd_locked(&mut table, fd_entry, min_fd, &self.next_fd)
+        let limit = self.nofile_cur.load(Ordering::Relaxed).min(FTB_RLIMIT);
+        if min_fd >= limit {
+            return Err(Errno::EINVAL);
+        }
+        Self::alloc_fd_locked(&mut table, fd_entry, min_fd, limit, &self.next_fd)
     }
 
     fn alloc_fd_locked(
         table: &mut Vec<Option<FdEntry>>,
         fd_entry: FdEntry,
         min_fd: usize,
+        limit: usize,
         next_fd: &AtomicUsize,
     ) -> SysResult<usize> {
-        if min_fd >= FTB_RLIMIT {
-            return Err(Errno::EINVAL);
-        }
         // 扩展表以容纳 min_fd
         if min_fd >= table.len() {
             table.resize_with(min_fd + 1, || None);
@@ -68,6 +94,7 @@ impl FdTable {
             .iter_mut()
             .enumerate()
             .skip(min_fd)
+            .take(limit.saturating_sub(min_fd))
             .find(|(_, it)| it.is_none())
         {
             *it = Some(fd_entry);
@@ -75,7 +102,7 @@ impl FdTable {
             next_fd.store(nf, Ordering::Relaxed);
             return Ok(fd);
         }
-        if table.len() >= FTB_RLIMIT {
+        if table.len() >= limit {
             return Err(Errno::EMFILE);
         }
         let fd = table.len();
@@ -85,7 +112,8 @@ impl FdTable {
     }
 
     pub fn set_fd(&self, fd: usize, fd_entry: FdEntry) -> SysResult<Option<FdEntry>> {
-        if fd >= FTB_RLIMIT {
+        let limit = self.nofile_cur.load(Ordering::Relaxed).min(FTB_RLIMIT);
+        if fd >= limit {
             return Err(Errno::EBADF);
         }
         let mut table = self.table.lock();
@@ -148,6 +176,8 @@ impl FdTable {
         Arc::new(Self {
             table: SpinLock::new(table.clone()),
             next_fd: AtomicUsize::new(next_fd),
+            nofile_cur: AtomicUsize::new(fd_table.nofile_cur.load(Ordering::Relaxed)),
+            nofile_max: AtomicUsize::new(fd_table.nofile_max.load(Ordering::Relaxed)),
         })
     }
 }

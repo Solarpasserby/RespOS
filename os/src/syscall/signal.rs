@@ -1,9 +1,45 @@
 use super::{Errno, SysResult};
 use crate::mm::{copy_from_user, copy_to_user};
 use crate::signal::sig_handler::SigAction;
-use crate::signal::sig_stack::SigContext;
-use crate::signal::{SiField, Sig, SigInfo, SigSet};
-use crate::task::{TASK_MANAGER, current_task};
+use crate::signal::sig_struct::{FrameFlags, Sig, SigFrame, SigRTFrame, SigSet};
+use crate::signal::{SiField, SigInfo};
+use crate::task::{TASK_MANAGER, current_task, yield_current_task};
+use crate::timer::get_time_ms;
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct UserTimeSpec {
+    tv_sec: u64,  // 实际 C 里是 time_t (long)，64位系统 8 字节
+    tv_nsec: u64, // long，8 字节
+}
+
+impl UserTimeSpec {
+    fn to_ms(&self) -> u64 {
+        self.tv_sec * 1000 + self.tv_nsec / 1_000_000
+    }
+    fn is_zero(&self) -> bool {
+        self.tv_sec == 0 && self.tv_nsec == 0
+    }
+}
+
+#[cfg(target_arch = "riscv64")]
+fn restore_sig_context(
+    trap_cx: &mut crate::arch::trap::TrapContext,
+    ctx: crate::signal::sig_stack::SigContext,
+) {
+    trap_cx.x[0] = 0;
+    trap_cx.x[1..].copy_from_slice(&ctx.gregs[1..]);
+    trap_cx.set_sepc(ctx.gregs[0]);
+}
+
+#[cfg(target_arch = "loongarch64")]
+fn restore_sig_context(
+    trap_cx: &mut crate::arch::trap::TrapContext,
+    ctx: crate::signal::sig_stack::SigContext,
+) {
+    trap_cx.x = ctx.x;
+    trap_cx.set_sepc(ctx.sepc);
+}
 
 pub fn sys_kill(pid: usize, signum: i32) -> SysResult<usize> {
     // TODO[ABI-COMPAT]: 还没有实现负 pid 和进程组信号发送语义。
@@ -152,30 +188,168 @@ pub fn sys_sigprocmask(
 }
 
 pub fn sys_sigreturn() -> SysResult<usize> {
-    let task = current_task().expect("[kernel] current task is None.");
-
-    // 获取当前 trapframe（在 kernel stack 上）
+    let task = current_task().unwrap();
     let trap_cx = task.get_trap_cx();
 
-    // 从用户栈顶读取 SigContext
-    let sig_context_addr = task.sig_context_addr();
-    if sig_context_addr == 0 {
-        return Err(Errno::EFAULT); // 没注册过 handler 就调 sigreturn，拒绝
-    }
-    let sig_context_ptr = sig_context_addr as *const SigContext;
-    let mut sig_context: SigContext = unsafe { core::mem::zeroed() };
-    copy_from_user(&mut sig_context as *mut SigContext, sig_context_ptr, 1)?;
+    let sp = trap_cx.get_sp();
+    let flag_ptr = sp as *const FrameFlags;
+    let mut flag: FrameFlags = FrameFlags::default();
+    copy_from_user(&mut flag as *mut FrameFlags, flag_ptr, 1)?;
 
-    // 普通 handler（info == 0）：恢复寄存器和 sepc
-    if sig_context.info == 0 {
-        trap_cx.x = sig_context.x;
-        trap_cx.set_sepc(sig_context.sepc);
-    }
-    // TODO : info == 1，SA_SIGINFO 路径。
+    let restored_mask = if flag.is_rt() {
+        // RT 帧：读 SigRTFrame
+        let frame_ptr = sp as *const SigRTFrame;
+        let mut frame: SigRTFrame = unsafe { core::mem::zeroed() };
+        copy_from_user(&mut frame, frame_ptr, 1)?;
+        let ctx = frame.ucontext.uc_mcontext;
+        restore_sig_context(trap_cx, ctx);
+        frame.ucontext.uc_sigmask
+    } else {
+        // 普通帧：读 SigFrame
+        let frame_ptr = sp as *const SigFrame;
+        let mut frame: SigFrame = unsafe { core::mem::zeroed() };
+        copy_from_user(&mut frame, frame_ptr, 1)?;
+        let ctx = frame.sigcontext;
+        let restored_mask = ctx.mask;
+        restore_sig_context(trap_cx, ctx);
+        restored_mask
+    };
+
     // 恢复信号掩码
-    task.op_sig_pending_mut(|pending| {
-        pending.mask = sig_context.mask;
-    });
+    task.op_sig_pending_mut(|pending| pending.mask = restored_mask);
 
-    Ok(trap_cx.x[10] as usize) // a0 作为返回值
+    Ok(trap_cx.get_a0())
+}
+// pub fn sys_sigreturn() -> SysResult<usize> {
+//     let task = current_task().expect("[kernel] current task is None.");
+
+//     // 获取当前 trapframe（在 kernel stack 上）
+//     let trap_cx = task.get_trap_cx();
+
+//     // 从用户栈顶读取 SigContext
+//     let sig_context_addr = task.sig_context_addr();
+//     if sig_context_addr == 0 {
+//         return Err(Errno::EFAULT); // 没注册过 handler 就调 sigreturn，拒绝
+//     }
+//     let sig_context_ptr = sig_context_addr as *const SigContext;
+//     let mut sig_context: SigContext = unsafe { core::mem::zeroed() };
+//     copy_from_user(&mut sig_context as *mut SigContext, sig_context_ptr, 1)?;
+
+//     // 普通 handler（info == 0）：恢复寄存器和 sepc
+//     if sig_context.info == 0 {
+//         trap_cx.x = sig_context.x;
+//         trap_cx.sepc = sig_context.sepc;
+//     }
+//     // TODO : info == 1，SA_SIGINFO 路径。
+//     // 恢复信号掩码
+//     task.op_sig_pending_mut(|pending| {
+//         pending.mask = sig_context.mask;
+//     });
+
+//     Ok(trap_cx.x[10] as usize) // a0 作为返回值
+// }
+/// sigtimedwait: 等待 set 中的某个信号，带超时
+/// 1. 读入目标信号集
+/// 2. 检查是否有已挂起的信号 → 有则立即返回
+/// 3. 挂起等待（轮询方式，直到信号到达或超时）
+pub fn sys_rt_sigtimedwait(
+    set_ptr: usize,     // 等待的信号集合的指针
+    info_ptr: usize,    // 收到信号后把收到的信号的详细信息放在这里
+    timeout_ptr: usize, // 最多可以等待的时间
+    sigsetsize: usize,
+) -> SysResult<usize> {
+    if sigsetsize != core::mem::size_of::<SigSet>() {
+        return Err(Errno::EINVAL);
+    }
+    // ----- 1. 从用户态读入目标信号集 -----
+    let mut wanted_set = SigSet::empty();
+    copy_from_user(&mut wanted_set as *mut SigSet, set_ptr as *const SigSet, 1)?;
+    // SIGKILL 和 SIGSTOP 不可被 sigtimedwait 等待
+    wanted_set.remove_signal(Sig::SIGKILL);
+    wanted_set.remove_signal(Sig::SIGSTOP);
+
+    let task = current_task().expect("[kernel] current task is None.");
+
+    info!(
+        "[sys_rt_sigtimedwait] wanted_set: {:?}, timeout_ptr: {:#x}",
+        wanted_set, timeout_ptr
+    );
+
+    // ----- 2. 检查是否已有挂起的感兴趣信号 -----
+    // rt_sigtimedwait 消费 set 中的 pending signal；调用方通常已经用
+    // sigprocmask 阻塞这些信号。这里不能临时解屏蔽 wanted_set，否则
+    // 普通信号派发可能先调用 handler 并消费掉待等待的信号。
+    if let Some((sig, siginfo)) =
+        task.op_sig_pending_mut(|pending| pending.fetch_signal_from_set(wanted_set))
+    {
+        // 如果用户传了 info 指针，把 siginfo 拷贝出去
+        if info_ptr != 0 {
+            copy_to_user(info_ptr as *mut SigInfo, &siginfo as *const SigInfo, 1)?;
+        }
+
+        info!("[sys_rt_sigtimedwait] immediate return signal: {:?}", sig);
+        return Ok(sig.raw() as usize);
+    }
+
+    // ----- 3. 需要等待 -----
+    if timeout_ptr != 0 {
+        // 3a. 有限等待
+        let mut timeout = UserTimeSpec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        copy_from_user(
+            &mut timeout as *mut UserTimeSpec,
+            timeout_ptr as *const UserTimeSpec,
+            1,
+        )?;
+        if timeout.tv_nsec >= 1_000_000_000 {
+            return Err(Errno::EINVAL);
+        }
+
+        // timeout == 0 → 立即轮询返回 EAGAIN
+        if timeout.is_zero() {
+            return Err(Errno::EAGAIN);
+        }
+
+        let total_ms = timeout.to_ms() as usize;
+        let start_ms = get_time_ms();
+
+        loop {
+            // 检查信号
+            if let Some((sig, siginfo)) =
+                task.op_sig_pending_mut(|pending| pending.fetch_signal_from_set(wanted_set))
+            {
+                if info_ptr != 0 {
+                    copy_to_user(info_ptr as *mut SigInfo, &siginfo as *const SigInfo, 1)?;
+                }
+                info!("[sys_rt_sigtimedwait] received signal: {:?}", sig);
+                return Ok(sig.raw() as usize);
+            }
+
+            // 检查超时
+            if get_time_ms() - start_ms >= total_ms {
+                info!("[sys_rt_sigtimedwait] timeout");
+                return Err(Errno::EAGAIN);
+            }
+
+            // 让出 CPU
+            yield_current_task();
+        }
+    } else {
+        // 3b. 无限等待
+        info!("[sys_rt_sigtimedwait] waiting indefinitely");
+        loop {
+            if let Some((sig, siginfo)) =
+                task.op_sig_pending_mut(|pending| pending.fetch_signal_from_set(wanted_set))
+            {
+                if info_ptr != 0 {
+                    copy_to_user(info_ptr as *mut SigInfo, &siginfo as *const SigInfo, 1)?;
+                }
+                info!("[sys_rt_sigtimedwait] received signal: {:?}", sig);
+                return Ok(sig.raw() as usize);
+            }
+            yield_current_task();
+        }
+    }
 }

@@ -3,14 +3,18 @@
 //! 虚拟 devfs 设备文件系统。
 //!
 //! - `null`  — `/dev/null`，丢弃写入，读取始终返回 EOF
+//! - `zero`  — `/dev/zero`，读取返回零字节，写入丢弃
 
 mod null;
+mod zero;
 
 const DEVFS_DEV: u64 = 0x400;
 const DEVFS_SUPER_MAGIC: i64 = 0x1373;
 const DEV_DIR_INO: u64 = 1;
 const NULL_INO: u64 = 2;
+const ZERO_INO: u64 = 3;
 const NULL_RDEV: u64 = (1 << 8) | 3;
+const ZERO_RDEV: u64 = (1 << 8) | 5;
 
 use super::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64, SuperBlockOp};
 use super::{KStat, Statfs64};
@@ -19,6 +23,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::any::Any;
 use null::NullInode;
+use zero::ZeroInode;
 
 use crate::fs::mount::{self, Mount, VfsMount, get_mount_by_dentry};
 use crate::syscall::{Errno, SysResult};
@@ -47,6 +52,7 @@ impl InodeOp for DevDirInode {
     fn lookup(&self, _parent_path: &str, name: &str) -> SysResult<Arc<dyn InodeOp>> {
         match name {
             "null" => Ok(Arc::new(NullInode)),
+            "zero" => Ok(Arc::new(ZeroInode)),
             _ => Err(Errno::ENOENT),
         }
     }
@@ -56,6 +62,7 @@ impl InodeOp for DevDirInode {
             dir_entry(DEV_DIR_INO, 1, b".\0"),
             dir_entry(2, 2, b"..\0"),
             entry(NULL_INO, InodeType::CharDevice, 3, b"null\0"),
+            entry(ZERO_INO, InodeType::CharDevice, 4, b"zero\0"),
         ])
     }
 
@@ -100,7 +107,7 @@ impl SuperBlockOp for DevSuperBlock {
             f_blocks: 0,
             f_bfree: 0,
             f_bavail: 0,
-            f_files: 2,
+            f_files: 3,
             f_ffree: 0,
             f_namelen: 255,
             f_frsize: crate::config::PAGE_SIZE as i64,
@@ -128,7 +135,7 @@ fn dir_entry(ino: u64, off: i64, name: &[u8]) -> LinuxDirent64 {
 
 // ── init ──────────────────────────────────────────────────────────────
 
-/// 在根文件系统中创建 /dev/null 目录树。
+/// 在根文件系统中挂载 devfs，提供最小字符设备目录树。
 pub fn init_devfs(root: Arc<Dentry>) {
     let dev_mountpoint = Arc::new(Dentry::new(
         "/dev".into(),

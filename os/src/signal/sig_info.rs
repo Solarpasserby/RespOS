@@ -23,6 +23,75 @@ pub enum SiField {
     Kill { tid: usize }, //这里填的是发送者身份，不一定是线程号
 }
 
+// SiField 补全方法
+impl SiField {
+    /// 内核 SiField -> Linux siginfo._pad
+    pub fn to_array(&self) -> [i32; 29] {
+        let mut arr = [0i32; 29];
+
+        match self {
+            SiField::None => {
+                // 类型标记
+                arr[0] = 0;
+            }
+
+            SiField::Kill { tid } => {
+                // 类型标记
+                arr[0] = 1;
+
+                // 发送者 tid
+                arr[1] = *tid as i32;
+
+                // uid（先占位）
+                arr[2] = 0;
+            }
+        }
+
+        arr
+    }
+
+    /// Linux siginfo._pad -> 内核 SiField
+    pub fn from_array(arr: [i32; 29]) -> Self {
+        match arr[0] {
+            // Kill 类型
+            1 => SiField::Kill {
+                tid: arr[1] as usize,
+            },
+
+            // 默认认为没有附加字段
+            _ => SiField::None,
+        }
+    }
+}
+
+// SigInfo ↔ LinuxSigInfo 互转
+impl From<SigInfo> for LinuxSigInfo {
+    fn from(si: SigInfo) -> Self {
+        LinuxSigInfo {
+            si_signo: si.signo,
+            si_errno: 0,
+            si_code: si.code,
+            _pad: si.fields.to_array(),
+            _align: [],
+        }
+    }
+}
+
+impl From<LinuxSigInfo> for SigInfo {
+    fn from(lsi: LinuxSigInfo) -> Self {
+        SigInfo {
+            // 信号编号
+            signo: lsi.si_signo,
+
+            // 信号来源
+            code: lsi.si_code,
+
+            // 恢复附加字段
+            fields: SiField::from_array(lsi._pad),
+        }
+    }
+}
+
 #[allow(unused)]
 impl SigInfo {
     /// 由 kill、sigsend、raise 发送

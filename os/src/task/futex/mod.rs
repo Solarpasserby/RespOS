@@ -17,6 +17,8 @@ pub const FUTEX_CMD_MASK: usize = !(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME);
 // 操作码
 pub const FUTEX_WAIT: usize = 0;
 pub const FUTEX_WAKE: usize = 1;
+pub const FUTEX_REQUEUE: usize = 3;
+pub const FUTEX_CMP_REQUEUE: usize = 4;
 pub const FUTEX_WAIT_BITSET: usize = 9;
 pub const FUTEX_WAKE_BITSET: usize = 10;
 pub const FUTEX_BITSET_MATCH_ANY: u32 = u32::MAX;
@@ -28,8 +30,8 @@ pub fn do_futex(
     uaddr: usize,
     futex_op: usize,
     val: usize,
-    _timeout: usize,
-    _uaddr2: usize,
+    val2: usize,
+    uaddr2: usize,
     val3: usize,
 ) -> SysResult<usize> {
     let cmd = futex_op & FUTEX_CMD_MASK;
@@ -47,12 +49,19 @@ pub fn do_futex(
     }
 
     match cmd {
-        FUTEX_WAIT => futex_wait(uaddr, val as u32, private),
+        FUTEX_WAIT => futex_wait(uaddr, val as u32, val2, private),
         FUTEX_WAKE => futex_wake(uaddr, val as u32, private),
-        FUTEX_WAIT_BITSET => futex_wait_bitset(uaddr, val as u32, val3 as u32, private),
+        FUTEX_REQUEUE => futex_requeue(uaddr, val as u32, uaddr2, val2 as u32, private),
+        FUTEX_CMP_REQUEUE => {
+            futex_cmp_requeue(uaddr, val as u32, uaddr2, val2 as u32, val3 as u32, private)
+        }
+        FUTEX_WAIT_BITSET => futex_wait_bitset(uaddr, val as u32, val2, val3 as u32, true, private),
         FUTEX_WAKE_BITSET => futex_wake_bitset(uaddr, val as u32, val3 as u32, private),
         _ => {
-            warn!("[kernel] unsupported futex op: op={:#x}, cmd={}", futex_op, cmd);
+            warn!(
+                "[kernel] unsupported futex op: op={:#x}, cmd={}",
+                futex_op, cmd
+            );
             Err(Errno::ENOSYS)
         }
     }

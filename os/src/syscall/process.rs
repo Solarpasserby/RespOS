@@ -149,37 +149,40 @@ pub fn sys_prlimit64(
     new_limit: *const RLimit,
     old_limit: *mut RLimit,
 ) -> SysResult<usize> {
+    const RLIMIT_NOFILE: usize = 7;
     const RLIMIT_STACK: usize = 3;
     const RLIM_INFINITY: usize = usize::MAX;
 
-    // TODO[ABI-COMPAT]: 目前还没有按进程保存 rlimit。这里先返回 libc 启动所需的
-    // 稳定值，并在校验 new_limit 指针后接受设置请求。
-    if pid != 0
-        && pid
-            != current_task()
-                .expect("[kernel] current task is None.")
-                .tid()
-    {
+    let task = current_task().expect("[kernel] current task is None.");
+    if pid != 0 && pid != task.tid() {
         return Err(Errno::ESRCH);
     }
 
+    let old = match resource {
+        RLIMIT_NOFILE => {
+            let (cur, max) = task.nofile_limit();
+            RLimit { cur, max }
+        }
+        RLIMIT_STACK => RLimit {
+            cur: USER_STACK_SIZE,
+            max: RLIM_INFINITY,
+        },
+        _ => RLimit {
+            cur: RLIM_INFINITY,
+            max: RLIM_INFINITY,
+        },
+    };
+
     if !new_limit.is_null() {
-        let mut ignored = RLimit { cur: 0, max: 0 };
-        copy_from_user(&mut ignored as *mut RLimit, new_limit, 1)?;
+        let mut limit = RLimit { cur: 0, max: 0 };
+        copy_from_user(&mut limit as *mut RLimit, new_limit, 1)?;
+        if resource == RLIMIT_NOFILE {
+            task.set_nofile_limit(limit.cur, limit.max)?;
+        }
     }
 
     if !old_limit.is_null() {
-        let limit = match resource {
-            RLIMIT_STACK => RLimit {
-                cur: USER_STACK_SIZE,
-                max: RLIM_INFINITY,
-            },
-            _ => RLimit {
-                cur: RLIM_INFINITY,
-                max: RLIM_INFINITY,
-            },
-        };
-        copy_to_user(old_limit, &limit as *const RLimit, 1)?;
+        copy_to_user(old_limit, &old as *const RLimit, 1)?;
     }
 
     Ok(0)
@@ -477,10 +480,35 @@ pub fn sys_futex(
 }
 
 /// 系统调用 sys_set_robust_list - 设置线程的 robust futex 链表
-///
-/// glibc 线程初始化时无条件调用。当前内核不实现 robust futex，
-/// 直接返回成功即可。
-pub fn sys_set_robust_list() -> SysResult<usize> {
+pub fn sys_set_robust_list(head: usize, len: usize) -> SysResult<usize> {
+    const ROBUST_LIST_HEAD_SIZE: usize = core::mem::size_of::<usize>() * 3;
+    if len != ROBUST_LIST_HEAD_SIZE {
+        return Err(Errno::EINVAL);
+    }
+    let task = current_task().expect("[kernel] current task is None.");
+    task.set_robust_list(head, len);
+    Ok(0)
+}
+
+pub fn sys_get_robust_list(
+    pid: usize,
+    head_ptr: *mut usize,
+    len_ptr: *mut usize,
+) -> SysResult<usize> {
+    const ROBUST_LIST_HEAD_SIZE: usize = core::mem::size_of::<usize>() * 3;
+
+    let task = current_task().expect("[kernel] current task is None.");
+    if pid != 0 && pid != task.tid() {
+        return Err(Errno::ESRCH);
+    }
+
+    let head = task.robust_list().map(|(head, _)| head).unwrap_or(0);
+    let len = task
+        .robust_list()
+        .map(|(_, len)| len)
+        .unwrap_or(ROBUST_LIST_HEAD_SIZE);
+    copy_to_user(head_ptr, &head as *const usize, 1)?;
+    copy_to_user(len_ptr, &len as *const usize, 1)?;
     Ok(0)
 }
 

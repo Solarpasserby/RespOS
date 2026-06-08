@@ -8,12 +8,13 @@ use super::scheduler::remove_task;
 use super::tid::{TidHandle, tid_alloc};
 use crate::fs::mount::init_root_fs;
 use crate::fs::{FdEntry, FdTable, Path};
-use crate::mm::{MemorySet, copy_to_user};
+use crate::mm::{MemorySet, copy_from_user, copy_to_user};
 use crate::mutex::SpinLock;
 use crate::signal::sig_handler::SigHandler;
 use crate::signal::sig_info::SigInfo;
 use crate::signal::sig_stack::{SS_DISABLE, SignalStack};
 use crate::signal::sig_struct::SigPending;
+use crate::signal::{SiField, Sig};
 use crate::syscall::{Errno, SysResult};
 use crate::trap::TrapContext;
 use alloc::collections::btree_map::BTreeMap;
@@ -21,7 +22,7 @@ use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use bitflags::bitflags;
-use core::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use spin::RwLock;
 
 /// 线程 tid 地址信息，用于 pthread 线程退出同步。
@@ -30,6 +31,10 @@ pub struct TidAddress {
     pub set_child_tid: Option<usize>,
     /// 线程退出时清零并做 futex wake 的用户空间地址。
     pub clear_child_tid: Option<usize>,
+    /// set_robust_list 注册的 robust_list_head 地址。
+    pub robust_list_head: Option<usize>,
+    /// robust_list_head 结构长度。
+    pub robust_list_len: usize,
 }
 
 impl TidAddress {
@@ -37,6 +42,8 @@ impl TidAddress {
         Self {
             set_child_tid: None,
             clear_child_tid: None,
+            robust_list_head: None,
+            robust_list_len: 0,
         }
     }
 }
@@ -74,6 +81,11 @@ pub struct TaskControlBlock {
 
     // 线程同步
     tid_address: SpinLock<TidAddress>,
+    // ===== 新增：可中断状态标记 =====
+    // 标记当前线程是否处于"可被信号中断"的阻塞中（futex_wait / sigtimedwait / wait4）
+    interruptible: AtomicBool,
+    // 信号中断标记：当线程在 interruptible 状态下被信号唤醒时置为 true
+    interrupted: AtomicBool,
 }
 
 impl core::fmt::Debug for TaskControlBlock {
@@ -119,12 +131,17 @@ impl TaskControlBlock {
 
             // 线程同步
             tid_address: SpinLock::new(TidAddress::new()),
+
+            // 可中断状态
+            interruptible: AtomicBool::new(false),
+            interrupted: AtomicBool::new(false),
         }
     }
 
     /// 新建任务
     ///
     /// 事实上只有初始任务会借由这个方法产生
+    ///
     pub fn init(elf_data: &[u8]) -> Arc<Self> {
         let tid: TidHandle = tid_alloc();
         let tgid = tid.0;
@@ -174,6 +191,10 @@ impl TaskControlBlock {
 
             // 线程同步
             tid_address: SpinLock::new(TidAddress::new()),
+
+            // 可中断状态
+            interruptible: AtomicBool::new(false),
+            interrupted: AtomicBool::new(false),
         });
 
         // 在线程组中添加该线程
@@ -303,6 +324,10 @@ impl TaskControlBlock {
 
             // 线程同步
             tid_address: SpinLock::new(TidAddress::new()),
+
+            // 可中断状态
+            interruptible: AtomicBool::new(false),
+            interrupted: AtomicBool::new(false),
         });
 
         // 修改任务异常上下文
@@ -418,6 +443,47 @@ impl TaskControlBlock {
     pub fn is_blocked(&self) -> bool {
         self.status() == TaskStatus::Blocked
     }
+    // ===== 可中断状态管理 =====
+
+    /// 进入可中断的阻塞前调用
+    pub fn set_interruptible(&self, val: bool) {
+        self.interruptible.store(val, Ordering::Relaxed);
+    }
+
+    /// 是否处于可中断状态
+    fn is_interruptible(&self) -> bool {
+        self.interruptible.load(Ordering::Relaxed)
+    }
+
+    /// 信号中断唤醒后检查
+    pub fn is_interrupted(&self) -> bool {
+        self.interrupted.load(Ordering::Relaxed)
+    }
+
+    /// 清除中断标记（处理完 EINTR 后调用）
+    pub fn clear_interrupted(&self) {
+        self.interrupted.store(false, Ordering::Relaxed);
+    }
+
+    /// ★ 核心判断：当前线程是否应该被 pending 信号中断
+    /// 条件：
+    ///   1. 线程处于可中断状态 (interruptible == true)
+    ///   2. 存在 pending 信号没有被掩码屏蔽
+    ///   3. 该信号的处理程序不是 SIG_IGN（sa_handler != 1）
+    pub fn check_signal_interrupt(&self) -> bool {
+        use crate::signal::sig_handler::SIG_IGN;
+        if !self.is_interruptible() {
+            return false;
+        }
+        // find_signal 已经帮我们跳过了被 mask 屏蔽的信号
+        if let Some(sig) = self.op_sig_pending(|pending| pending.find_signal()) {
+            let action = self.op_sig_handler(|handler| handler.get(sig));
+            // sa_handler == SIG_IGN(1) → 信号被显式忽略，不需要打断
+            action.sa_handler != SIG_IGN
+        } else {
+            false
+        }
+    }
     pub fn is_exited(&self) -> bool {
         self.status() == TaskStatus::Exited
     }
@@ -471,6 +537,17 @@ impl TaskControlBlock {
 
     pub fn clear_child_tid_addr(&self) -> Option<usize> {
         self.tid_address.lock().clear_child_tid
+    }
+    pub fn set_robust_list(&self, head: usize, len: usize) {
+        let mut tid_address = self.tid_address.lock();
+        tid_address.robust_list_head = (head != 0).then_some(head);
+        tid_address.robust_list_len = len;
+    }
+    pub fn robust_list(&self) -> Option<(usize, usize)> {
+        let tid_address = self.tid_address.lock();
+        tid_address
+            .robust_list_head
+            .map(|head| (head, tid_address.robust_list_len))
     }
 
     // exec 时关闭线程组中除自身外的其它线程，只清理线程私有状态。
@@ -528,7 +605,7 @@ impl TaskControlBlock {
     // 取信号栈
     pub fn sigstack(&self) -> Option<SignalStack> {
         let stack = *self.sig_stack.lock();
-        if stack.ss_flags == SS_DISABLE || stack.ss_size == 0 {
+        if stack.ss_flags == (SS_DISABLE as i32) || stack.ss_size == 0 {
             None
         } else {
             Some(stack)
@@ -536,13 +613,86 @@ impl TaskControlBlock {
     }
 
     // 信号入口：给线程发送信号
+    // pub fn receive_siginfo(&self, siginfo: SigInfo, thread_level: bool) {
+    //     let sig = crate::signal::Sig::from(siginfo.signo);
+    //     match thread_level {
+    //         true => {
+    //             self.op_sig_pending_mut(|pending| pending.add_signal(siginfo));
+    //             // SIGKILL/SIGSTOP 必须立即唤醒阻塞的线程，否则信号永远不会被处理
+    //             if sig.is_kill_or_stop() && self.is_blocked() {
+    //                 crate::task::scheduler::wakeup_task(self.tid());
+    //             }
+    //         }
+    //         false => {
+    //             let target = self.op_thread_group(|tg| {
+    //                 let mut fallback = None;
+    //                 let mut leader = None;
+    //                 for task in tg.iter() {
+    //                     if fallback.is_none() {
+    //                         fallback = Some(task.clone());
+    //                     }
+    //                     if task.is_process_leader() {
+    //                         leader = Some(task.clone());
+    //                     }
+    //                     let can_take_now = task.op_sig_pending(|pending| {
+    //                         !pending.mask.contain_signal(sig) || sig.is_kill_or_stop()
+    //                     });
+    //                     if can_take_now {
+    //                         return Some(task.clone());
+    //                     }
+    //                 }
+    //                 leader.or(fallback)
+    //             });
+    //             if let Some(task) = target {
+    //                 task.op_sig_pending_mut(|pending| pending.add_signal(siginfo));
+    //                 // SIGKILL/SIGSTOP 必须立即唤醒阻塞的线程
+    //                 if sig.is_kill_or_stop() && task.is_blocked() {
+    //                     crate::task::scheduler::wakeup_task(task.tid());
+    //                 }
+    //             }
+    //         }
+    //     }
+    // }
+    fn is_disabled_musl_sigcancel(&self, sig: Sig) -> bool {
+        if sig.raw() != 33 {
+            return false;
+        }
+
+        let tp = self.get_trap_cx().x[4];
+        if tp < 152 {
+            return false;
+        }
+
+        let mut cancel_state = 0u8;
+        copy_from_user(&mut cancel_state as *mut u8, (tp - 152) as *const u8, 1).is_ok()
+            && cancel_state == 1
+    }
+
     pub fn receive_siginfo(&self, siginfo: SigInfo, thread_level: bool) {
+        let sig = crate::signal::Sig::from(siginfo.signo);
+
         match thread_level {
+            // ===== 线程级信号 =====
             true => {
                 self.op_sig_pending_mut(|pending| pending.add_signal(siginfo));
+
+                // ★ 改动：不只是 KILL/STOP 才唤醒，而是调用 check_signal_interrupt
+                if self.check_signal_interrupt() && !self.is_disabled_musl_sigcancel(sig) {
+                    self.interrupted.store(true, Ordering::Relaxed);
+                    if self.is_blocked() {
+                        crate::task::scheduler::wakeup_task(self.tid());
+                    }
+                }
+                // 保留原来的 KILL/STOP 立即唤醒逻辑作为兜底
+                else if sig.is_kill_or_stop() && self.is_blocked() {
+                    self.interrupted.store(true, Ordering::Relaxed);
+                    crate::task::scheduler::wakeup_task(self.tid());
+                }
             }
+
+            // ===== 进程级信号 =====
             false => {
-                let sig = crate::signal::Sig::from(siginfo.signo);
+                // 原来的逻辑：找线程组中第一个能接收的线程
                 let target = self.op_thread_group(|tg| {
                     let mut fallback = None;
                     let mut leader = None;
@@ -562,8 +712,20 @@ impl TaskControlBlock {
                     }
                     leader.or(fallback)
                 });
+
                 if let Some(task) = target {
                     task.op_sig_pending_mut(|pending| pending.add_signal(siginfo));
+
+                    // ★ 改动：同样使用 check_signal_interrupt
+                    if task.check_signal_interrupt() && !task.is_disabled_musl_sigcancel(sig) {
+                        task.interrupted.store(true, Ordering::Relaxed);
+                        if task.is_blocked() {
+                            crate::task::scheduler::wakeup_task(task.tid());
+                        }
+                    } else if sig.is_kill_or_stop() && task.is_blocked() {
+                        task.interrupted.store(true, Ordering::Relaxed);
+                        crate::task::scheduler::wakeup_task(task.tid());
+                    }
                 }
             }
         }
@@ -597,6 +759,12 @@ impl TaskControlBlock {
     }
     pub fn get_fd_entry(&self, fd: usize) -> SysResult<FdEntry> {
         self.fd_table.lock().get_fd_entry(fd)
+    }
+    pub fn nofile_limit(&self) -> (usize, usize) {
+        self.fd_table.lock().nofile_limit()
+    }
+    pub fn set_nofile_limit(&self, cur: usize, max: usize) -> SysResult {
+        self.fd_table.lock().set_nofile_limit(cur, max)
     }
 }
 
@@ -641,12 +809,106 @@ fn exit_thread(task: Arc<TaskControlBlock>, exit_code: i32) {
         let _ = crate::task::futex::futex_wake_private(ctid, 1);
         let _ = crate::task::futex::futex_wake(ctid, 1, false);
     }
-
+    // 添加这一行：先从调度器就绪队列中移除
+    remove_task(task.tid());
     // 只有数据 线程组 和 TASK_MANAGER 持有对线程的引用，当引用归零时该线程占有的私有资源被释放
     task.op_thread_group_mut(|tg| tg.remove(&task.tid()));
     task.set_exited();
     task.set_exit_code(exit_code);
     TASK_MANAGER.remove(task.tid());
+}
+
+fn exit_robust_list(task: &Arc<TaskControlBlock>) {
+    const ROBUST_LIST_HEAD_SIZE: usize = core::mem::size_of::<usize>() * 3;
+    const FUTEX_WAITERS: u32 = 0x8000_0000;
+    const FUTEX_OWNER_DIED: u32 = 0x4000_0000;
+    const FUTEX_TID_MASK: u32 = 0x3fff_ffff;
+    const ROBUST_LIST_LIMIT: usize = 2048;
+
+    let Some((head, len)) = task.robust_list() else {
+        return;
+    };
+    if len != ROBUST_LIST_HEAD_SIZE {
+        return;
+    }
+
+    let mut first_entry = 0usize;
+    let mut futex_offset = 0isize;
+    let mut pending = 0usize;
+    if copy_from_user(&mut first_entry as *mut usize, head as *const usize, 1).is_err()
+        || copy_from_user(
+            &mut futex_offset as *mut isize,
+            (head + core::mem::size_of::<usize>()) as *const isize,
+            1,
+        )
+        .is_err()
+        || copy_from_user(
+            &mut pending as *mut usize,
+            (head + core::mem::size_of::<usize>() * 2) as *const usize,
+            1,
+        )
+        .is_err()
+    {
+        return;
+    }
+
+    let mut entry = first_entry;
+    for _ in 0..ROBUST_LIST_LIMIT {
+        if entry == 0 || entry == head {
+            break;
+        }
+        handle_robust_entry(
+            task.tid(),
+            entry,
+            futex_offset,
+            FUTEX_WAITERS,
+            FUTEX_OWNER_DIED,
+            FUTEX_TID_MASK,
+        );
+
+        let mut next = 0usize;
+        if copy_from_user(&mut next as *mut usize, entry as *const usize, 1).is_err() {
+            break;
+        }
+        entry = next;
+    }
+
+    if pending != 0 {
+        handle_robust_entry(
+            task.tid(),
+            pending,
+            futex_offset,
+            FUTEX_WAITERS,
+            FUTEX_OWNER_DIED,
+            FUTEX_TID_MASK,
+        );
+    }
+}
+
+fn handle_robust_entry(
+    tid: usize,
+    entry: usize,
+    futex_offset: isize,
+    futex_waiters: u32,
+    futex_owner_died: u32,
+    futex_tid_mask: u32,
+) {
+    let Some(futex_addr) = entry.checked_add_signed(futex_offset) else {
+        return;
+    };
+
+    let mut value = 0u32;
+    if copy_from_user(&mut value as *mut u32, futex_addr as *const u32, 1).is_err() {
+        return;
+    }
+    if value & futex_tid_mask != tid as u32 {
+        return;
+    }
+
+    let new_value = (value & futex_waiters) | futex_owner_died;
+    let _ = copy_to_user(futex_addr as *mut u32, &new_value as *const u32, 1);
+    let _ = crate::task::futex::futex_wake(futex_addr, 1, true);
+    let _ = crate::task::futex::futex_wake(futex_addr, 1, false);
 }
 
 /// 线程退出 - 对外接口
@@ -660,6 +922,7 @@ fn exit_thread(task: Arc<TaskControlBlock>, exit_code: i32) {
 pub fn task_exit(task: Arc<TaskControlBlock>, exit_code: i32) {
     // warn! {"[kernel] Thread exit. tid: {}, tgid: {}, thread_count: {}.", task.tid(), task.tgid(), task.op_thread_group(|tg| tg.iter().count())}
 
+    exit_robust_list(&task);
     if task.is_process_leader() {
         task_group_exit(task, exit_code);
         return;
@@ -709,8 +972,20 @@ pub fn task_group_exit(task: Arc<TaskControlBlock>, exit_code: i32) {
 
     leader.set_exited();
     leader.set_exit_code(exit_code);
-    // TODO: 向父进程发送 SIGCHLD 信号
-    // TODO: 清空信号
+    // 向父进程发送 SIGCHLD 信号
+    leader.op_parent(|parent_opt| {
+        if let Some(parent) = parent_opt.as_ref().and_then(|w| w.upgrade()) {
+            let siginfo = SigInfo::new(
+                Sig::SIGCHLD.raw(),
+                SigInfo::CLD_EXITED,
+                SiField::Kill { tid: leader.tid() },
+            );
+            parent.receive_siginfo(siginfo, false);
+        }
+    });
+
+    // 清空残留信号
+    leader.op_sig_pending_mut(|p| p.clear());
 
     TASK_MANAGER.remove(leader.tid());
 }

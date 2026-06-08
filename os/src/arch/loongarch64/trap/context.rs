@@ -15,6 +15,9 @@ pub struct TrapContext {
 }
 
 impl TrapContext {
+    pub fn get_a0(&self) -> usize {
+        self.x[4]
+    }
     pub fn get_sp(&self) -> usize {
         self.x[3]
     }
@@ -29,6 +32,12 @@ impl TrapContext {
     }
     pub fn set_a0(&mut self, a0: usize) {
         self.x[4] = a0; // LoongArch a0 = r4
+    }
+    pub fn set_a1(&mut self, a1: usize) {
+        self.x[5] = a1; // LoongArch a1 = r5
+    }
+    pub fn set_a2(&mut self, a2: usize) {
+        self.x[6] = a2; // LoongArch a2 = r6
     }
     pub fn get_sepc(&self) -> usize {
         self.era
