@@ -54,6 +54,9 @@ impl FileOp for Stdin {
     fn seek(&self, _offset: isize) -> SysResult<usize> {
         Err(Errno::ESPIPE)
     }
+    fn can_seek(&self) -> SysResult {
+        Err(Errno::ESPIPE)
+    }
     fn get_offset(&self) -> usize {
         0
     }
@@ -92,6 +95,9 @@ impl FileOp for Stdout {
         Ok(buf.len())
     }
     fn seek(&self, _offset: isize) -> SysResult<usize> {
+        Err(Errno::ESPIPE)
+    }
+    fn can_seek(&self) -> SysResult {
         Err(Errno::ESPIPE)
     }
     fn get_offset(&self) -> usize {

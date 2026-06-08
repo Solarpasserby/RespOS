@@ -58,6 +58,7 @@ pub fn sys_pread64(fd: usize, buf: *mut u8, len: usize, offset: isize) -> SysRes
     if !file.readable() {
         return Err(Errno::EBADF);
     }
+    file.can_seek()?;
     let old_offset = file.get_offset();
     file.seek(offset)?;
     let mut kbuf = alloc::vec![0u8; len];
@@ -466,10 +467,7 @@ pub fn sys_lseek(fd: usize, offset: isize, whence: usize) -> SysResult<usize> {
 
     let task = current_task().expect("[kernel] current task is None.");
     let file = task.get_fd_entry(fd)?.file;
-    let ty = file.get_stat()?.ty;
-    if ty != InodeType::Regular && ty != InodeType::Directory {
-        return Err(Errno::ESPIPE);
-    }
+    file.can_seek()?;
 
     let new_offset = match whence {
         SEEK_SET => add_offset(0, offset)?,

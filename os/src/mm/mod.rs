@@ -28,7 +28,7 @@ pub fn free_frame_count() -> usize {
 }
 
 pub fn heap_allocated() -> usize {
-    unsafe { heap_allocator::HEAP_ALLOCATOR.lock().stats_alloc_user() }
+    heap_allocator::HEAP_ALLOCATOR.lock().stats_alloc_user()
 }
 
 /// 初始化内存管理，启用虚拟地址

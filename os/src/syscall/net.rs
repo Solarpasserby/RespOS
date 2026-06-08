@@ -130,6 +130,10 @@ impl FileOp for SocketFile {
         Err(Errno::ESPIPE)
     }
 
+    fn can_seek(&self) -> SysResult {
+        Err(Errno::ESPIPE)
+    }
+
     fn get_offset(&self) -> usize {
         0
     }

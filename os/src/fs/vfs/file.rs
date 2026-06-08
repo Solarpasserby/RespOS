@@ -133,6 +133,8 @@ pub trait FileOp: Any + Send + Sync {
     fn read<'a>(&'a self, buf: &'a mut [u8]) -> SysResult<usize>;
     /// 写入数据到 buf 中，返回写入的字节数，同时更新文件偏移量
     fn write<'a>(&'a self, buf: &'a [u8]) -> SysResult<usize>;
+    /// 检查文件对象是否支持偏移移动。
+    fn can_seek(&self) -> SysResult;
     // 移动文件偏移
     fn seek(&self, offset: isize) -> SysResult<usize>;
     // 获得文件偏移
@@ -308,6 +310,15 @@ impl FileOp for File {
         let offset = usize::try_from(offset).map_err(|_| Errno::EINVAL)?;
         self.inner.lock().offset = offset;
         Ok(offset)
+    }
+
+    fn can_seek(&self) -> SysResult {
+        let ty = self.get_stat()?.ty;
+        if ty == InodeType::Regular || ty == InodeType::Directory {
+            Ok(())
+        } else {
+            Err(Errno::ESPIPE)
+        }
     }
 
     fn get_offset(&self) -> usize {
