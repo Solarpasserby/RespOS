@@ -273,6 +273,17 @@ fn resolve_utimens_times(
     Ok((atime, mtime))
 }
 
+fn set_fd_times(fd: isize, atime: Option<TimeSpec>, mtime: Option<TimeSpec>) -> SysResult {
+    if fd < 0 {
+        return Err(Errno::EBADF);
+    }
+    let task = current_task().expect("[kernel] current task is None.");
+    let file = task.get_fd_entry(fd as usize)?.file;
+    let file = file.as_any().downcast_ref::<File>().ok_or(Errno::EINVAL)?;
+    let path = file.path();
+    file.inode().set_times(&path.abs_path(), atime, mtime)
+}
+
 /// 系统调用 sys-utimensat
 ///
 /// 修改文件的访问时间 atime 和修改时间 mtime，常见调用者是 touch。
@@ -294,28 +305,30 @@ pub fn sys_utimensat(
         return Ok(0);
     }
 
+    // futimens(fd, times) 在 libc 中常落成 utimensat(fd, NULL, times, 0)。
+    // NULL path 与空字符串不同：它直接表示 dirfd 指向的打开文件。
+    if path.is_null() {
+        return set_fd_times(dirfd, atime, mtime).map(|_| 0);
+    }
+
     let path = copy_cstr_from_user(path)?;
     // 空路径只有在 AT_EMPTY_PATH 下合法：此时修改 dirfd 指向的文件；
     // 若 dirfd 是 AT_FDCWD，则修改当前工作目录。
     if path.is_empty() {
-        if flags & AT_EMPTY_PATH == 0 {
-            return Err(Errno::ENOENT);
-        }
-        if dirfd == AT_FDCWD {
+        if dirfd != AT_FDCWD {
+            // musl 的 futimens(fd, ...) 可能落成 utimensat(fd, "", times, 0)。
+            // 这里把非 AT_FDCWD 的空路径按 fd 目标处理，避免已 unlink 的打开文件
+            // 只能通过路径更新而失败。
+            set_fd_times(dirfd, atime, mtime)?;
+        } else {
+            if flags & AT_EMPTY_PATH == 0 {
+                return Err(Errno::ENOENT);
+            }
             let task = current_task().expect("[kernel] current task is None.");
             let cwd = task.cwd();
             cwd.dentry
                 .get_inode()
                 .set_times(&cwd.abs_path(), atime, mtime)?;
-        } else {
-            if dirfd < 0 {
-                return Err(Errno::EBADF);
-            }
-            let task = current_task().expect("[kernel] current task is None.");
-            let file = task.get_fd_entry(dirfd as usize)?.file;
-            let file = file.as_any().downcast_ref::<File>().ok_or(Errno::EINVAL)?;
-            let path = file.path();
-            file.inode().set_times(&path.abs_path(), atime, mtime)?;
         }
     } else {
         // utimensat 同样根据 AT_SYMLINK_NOFOLLOW 决定修改链接本身还是链接目标。

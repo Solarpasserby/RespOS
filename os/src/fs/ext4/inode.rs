@@ -13,7 +13,7 @@ use spin::Mutex;
 use crate::fs::KStat;
 use crate::fs::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
 use crate::syscall::{Errno, SysResult};
-use crate::timer::TimeSpec;
+use crate::timer::{TimeSpec, get_time_ms};
 
 lazy_static! {
     static ref EXT4_INODE_CACHE: Mutex<HashMap<u64, Weak<dyn InodeOp>>> =
@@ -24,6 +24,14 @@ lazy_static! {
 pub struct Ext4Inode {
     pub ino: u64,
     ty: Ext4InodeTypes,
+    times: Mutex<Option<InodeTimes>>,
+}
+
+#[derive(Clone, Copy)]
+struct InodeTimes {
+    atime: TimeSpec,
+    mtime: TimeSpec,
+    ctime: TimeSpec,
 }
 
 unsafe impl Send for Ext4Inode {}
@@ -31,7 +39,11 @@ unsafe impl Sync for Ext4Inode {}
 
 impl Ext4Inode {
     pub fn new(ino: u64, ty: Ext4InodeTypes) -> Self {
-        Self { ino, ty }
+        Self {
+            ino,
+            ty,
+            times: Mutex::new(None),
+        }
     }
 
     pub fn get_or_create(ino: u64, ty: Ext4InodeTypes) -> Arc<dyn InodeOp> {
@@ -213,6 +225,78 @@ impl Ext4Inode {
         }
         Some(Ext4InodeTypes::from((mode & 0o170000) as usize))
     }
+
+    fn now_timespec() -> TimeSpec {
+        let ms = get_time_ms();
+        TimeSpec {
+            sec: ms / 1000,
+            nsec: (ms % 1000) * 1_000_000,
+        }
+    }
+
+    fn normalize_lower_time(sec: u32) -> TimeSpec {
+        let now = Self::now_timespec();
+        let ts = TimeSpec {
+            sec: sec as usize,
+            nsec: 0,
+        };
+        // TODO[ABI-COMPAT]: 当前 CLOCK_REALTIME 仍是开机时间，镜像里的 ext4
+        // 时间戳却是构建机 Unix 时间。没有内核侧覆盖记录时，先把“未来”
+        // 时间归零，避免 libc 用 time() 与 stat() 比较时失真。
+        if ts.sec > now.sec {
+            TimeSpec::default()
+        } else {
+            ts
+        }
+    }
+
+    fn cached_times(&self, atime: u32, mtime: u32, ctime: u32) -> InodeTimes {
+        if let Some(times) = *self.times.lock() {
+            return times;
+        }
+        InodeTimes {
+            atime: Self::normalize_lower_time(atime),
+            mtime: Self::normalize_lower_time(mtime),
+            ctime: Self::normalize_lower_time(ctime),
+        }
+    }
+
+    fn has_cached_times(&self) -> bool {
+        self.times.lock().is_some()
+    }
+
+    fn write_lower_time(
+        c_path: *const core::ffi::c_char,
+        ts: TimeSpec,
+        setter: unsafe extern "C" fn(*const core::ffi::c_char, u32) -> i32,
+    ) -> SysResult {
+        if ts.sec > u32::MAX as usize {
+            return Ok(());
+        }
+        let ret = unsafe { setter(c_path, ts.sec as u32) };
+        if ret != 0 {
+            return match Self::map_lwext4_err(ret) {
+                // fd 指向的文件可能已经 unlink；此时 VFS 层仍要允许 futimens/fstat
+                // 作用在打开文件对象上，无法同步到底层路径时只更新 inode 缓存。
+                Errno::ENOENT => Ok(()),
+                err => Err(err),
+            };
+        }
+        Ok(())
+    }
+
+    fn init_inode_times(&self) {
+        let now = Self::now_timespec();
+        *self.times.lock() = Some(InodeTimes {
+            atime: now,
+            mtime: now,
+            ctime: now,
+        });
+    }
+
+    fn set_cached_times(&self, times: InodeTimes) {
+        *self.times.lock() = Some(times);
+    }
 }
 
 impl InodeOp for Ext4Inode {
@@ -227,7 +311,11 @@ impl InodeOp for Ext4Inode {
     fn stat(&self, path: &str) -> SysResult<KStat> {
         let ty = self.node_type();
         let size = match ty {
-            InodeType::Regular => self.file_size(path)?,
+            InodeType::Regular => match self.file_size(path) {
+                Ok(size) => size,
+                Err(Errno::ENOENT) if self.has_cached_times() => 0,
+                Err(err) => return Err(err),
+            },
             // lstat(symlink) 的 st_size 是链接目标字符串长度，不是目标文件大小。
             InodeType::SymLink => Self::file_readlink(path)?.len(),
             _ => 0,
@@ -254,6 +342,8 @@ impl InodeOp for Ext4Inode {
 
         unsafe { drop(CString::from_raw(c_path)) };
 
+        let times = self.cached_times(atime, mtime, ctime);
+
         Ok(KStat {
             dev: 0,
             size,
@@ -266,18 +356,9 @@ impl InodeOp for Ext4Inode {
             mode,
             blksize: crate::config::BLOCK_SIZE as u32,
             blocks: KStat::blocks_for_size(size as u64),
-            atime: TimeSpec {
-                sec: atime as usize,
-                nsec: 0,
-            },
-            mtime: TimeSpec {
-                sec: mtime as usize,
-                nsec: 0,
-            },
-            ctime: TimeSpec {
-                sec: ctime as usize,
-                nsec: 0,
-            },
+            atime: times.atime,
+            mtime: times.mtime,
+            ctime: times.ctime,
         })
     }
 
@@ -299,14 +380,20 @@ impl InodeOp for Ext4Inode {
     fn write_at(&self, path: &str, off: usize, buf: &[u8]) -> SysResult<usize> {
         self.check_type(InodeType::Regular)?;
 
-        let _guard = EXT4_OP_LOCK.lock();
-        let file = &mut Ext4File::new(path, self.ty.clone());
-        file.file_open(path, bindings::O_RDWR)
-            .map_err(Self::map_lwext4_err)?;
-        file.file_seek(off as i64, bindings::SEEK_SET)
-            .map_err(Self::map_lwext4_err)?;
-        let write_size = file.file_write(buf).map_err(Self::map_lwext4_err)?;
-        file.file_close().map_err(Self::map_lwext4_err)?;
+        let write_size = {
+            let _guard = EXT4_OP_LOCK.lock();
+            let file = &mut Ext4File::new(path, self.ty.clone());
+            file.file_open(path, bindings::O_RDWR)
+                .map_err(Self::map_lwext4_err)?;
+            file.file_seek(off as i64, bindings::SEEK_SET)
+                .map_err(Self::map_lwext4_err)?;
+            let write_size = file.file_write(buf).map_err(Self::map_lwext4_err)?;
+            file.file_close().map_err(Self::map_lwext4_err)?;
+            write_size
+        };
+
+        let now = Self::now_timespec();
+        let _ = self.set_times(path, None, Some(now));
 
         Ok(write_size)
     }
@@ -314,40 +401,58 @@ impl InodeOp for Ext4Inode {
     fn truncate(&self, path: &str, size: usize) -> SysResult<usize> {
         self.check_type(InodeType::Regular)?;
 
-        let _guard = EXT4_OP_LOCK.lock();
-        let file = &mut Ext4File::new(path, self.ty.clone());
-        file.file_open(path, bindings::O_RDWR)
-            .map_err(Self::map_lwext4_err)?;
-        file.file_truncate(size as u64)
-            .map_err(Self::map_lwext4_err)?;
-        file.file_close().map_err(Self::map_lwext4_err)?;
+        {
+            let _guard = EXT4_OP_LOCK.lock();
+            let file = &mut Ext4File::new(path, self.ty.clone());
+            file.file_open(path, bindings::O_RDWR)
+                .map_err(Self::map_lwext4_err)?;
+            file.file_truncate(size as u64)
+                .map_err(Self::map_lwext4_err)?;
+            file.file_close().map_err(Self::map_lwext4_err)?;
+        }
+
+        let now = Self::now_timespec();
+        let _ = self.set_times(path, None, Some(now));
 
         Ok(0)
     }
 
     fn set_times(&self, path: &str, atime: Option<TimeSpec>, mtime: Option<TimeSpec>) -> SysResult {
+        let mut times = if let Some(times) = *self.times.lock() {
+            times
+        } else {
+            self.stat(path)
+                .map(|stat| InodeTimes {
+                    atime: stat.atime,
+                    mtime: stat.mtime,
+                    ctime: stat.ctime,
+                })
+                .unwrap_or_else(|_| {
+                    let now = Self::now_timespec();
+                    InodeTimes {
+                        atime: now,
+                        mtime: now,
+                        ctime: now,
+                    }
+                })
+        };
+
         let _guard = EXT4_OP_LOCK.lock();
         let c_path = CString::new(path).map_err(|_| Errno::EINVAL)?;
         let c_path = c_path.as_ptr();
 
         if let Some(atime) = atime {
-            let ret = unsafe { bindings::ext4_atime_set(c_path, atime.sec as u32) };
-            if ret != 0 {
-                return Err(Self::map_lwext4_err(ret));
-            }
+            Self::write_lower_time(c_path, atime, bindings::ext4_atime_set)?;
+            times.atime = atime;
         }
         if let Some(mtime) = mtime {
-            let ret = unsafe { bindings::ext4_mtime_set(c_path, mtime.sec as u32) };
-            if ret != 0 {
-                return Err(Self::map_lwext4_err(ret));
-            }
+            Self::write_lower_time(c_path, mtime, bindings::ext4_mtime_set)?;
+            times.mtime = mtime;
         }
 
-        let now = crate::timer::get_time_ms() / 1000;
-        let ret = unsafe { bindings::ext4_ctime_set(c_path, now as u32) };
-        if ret != 0 {
-            return Err(Self::map_lwext4_err(ret));
-        }
+        times.ctime = Self::now_timespec();
+        Self::write_lower_time(c_path, times.ctime, bindings::ext4_ctime_set)?;
+        self.set_cached_times(times);
         Ok(())
     }
 
@@ -443,7 +548,11 @@ impl InodeOp for Ext4Inode {
             }
         }
 
-        self.lookup(parent_path, name)
+        let inode = self.lookup(parent_path, name)?;
+        if let Some(inode) = inode.as_any().downcast_ref::<Ext4Inode>() {
+            inode.init_inode_times();
+        }
+        Ok(inode)
     }
 
     fn symlink(&self, target: &str, parent_path: &str, name: &str) -> SysResult<Arc<dyn InodeOp>> {
@@ -452,7 +561,11 @@ impl InodeOp for Ext4Inode {
         let path = Self::child_path(parent_path, name);
         Self::file_symlink(target, &path)?;
         // 创建后重新 lookup，复用现有 inode cache/type 修正逻辑。
-        self.lookup(parent_path, name)
+        let inode = self.lookup(parent_path, name)?;
+        if let Some(inode) = inode.as_any().downcast_ref::<Ext4Inode>() {
+            inode.init_inode_times();
+        }
+        Ok(inode)
     }
 
     fn link(&self, old_path: &str, bare_dentry: Arc<Dentry>) -> SysResult {
