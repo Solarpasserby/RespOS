@@ -14,7 +14,6 @@ use crate::task::{
     exit_group_and_run_next, yield_current_task,
 };
 use alloc::string::String;
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 #[cfg(target_arch = "loongarch64")]
@@ -402,7 +401,7 @@ pub fn sys_wait4(
             Ok(children
                 .iter()
                 .find(|(child_tid, child)| matches_pid(**child_tid) && child.is_exited())
-                .map(|(child_tid, child)| (*child_tid, (child.exit_code() & 0xff) << 8)))
+                .map(|(child_tid, child)| (*child_tid, child.wait_status())))
         })?;
 
         if let Some((child_tid, wait_status)) = wait_result {
@@ -417,8 +416,7 @@ pub fn sys_wait4(
             }
 
             task.op_children_mut(|children| {
-                let child = children.remove(&child_tid).unwrap();
-                assert!(Arc::strong_count(&child) == 1, "task is danger!");
+                children.remove(&child_tid).unwrap();
             });
 
             warn! {"[kernel] (wait4) parent:{}, child:{}.", task.tid(), child_tid};

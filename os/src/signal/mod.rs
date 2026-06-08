@@ -5,7 +5,7 @@ pub mod sig_struct;
 use crate::config::TRAMPOLINE;
 use crate::mm::copy_to_user;
 
-use crate::task::{current_task, exit_and_run_next};
+use crate::task::{current_task, exit_and_run_next, exit_by_signal_and_run_next};
 use sig_handler::{SigAction, SigActionFlag};
 pub use sig_info::{LinuxSigInfo, SiField, SigInfo};
 use sig_stack::{SigContext, SignalStack, UContext};
@@ -49,11 +49,11 @@ pub fn handle_signal() {
                     ActionType::Ignore => {}
                     ActionType::Term => {
                         // TODO: Term 和 Core 当前等价，后续 Core 应做 core dump
-                        exit_and_run_next(sig.raw() & 0x7F);
+                        exit_by_signal_and_run_next(sig.raw());
                     }
                     ActionType::Core => {
                         // TODO: Core dump：先将进程内存写成 ELF core 文件，再终止
-                        exit_and_run_next(sig.raw() & 0x7F);
+                        exit_by_signal_and_run_next(sig.raw());
                     }
                     ActionType::Stop => {
                         // TODO: 将当前线程置为 Stopped 状态，发 SIGCHLD 给父进程

@@ -63,6 +63,7 @@ pub struct TaskControlBlock {
     parent: Arc<SpinLock<Option<Weak<TaskControlBlock>>>>,
     children: Arc<SpinLock<BTreeMap<usize, Arc<TaskControlBlock>>>>,
     exit_code: AtomicI32,
+    exit_signal: AtomicI32,
     // task_context: TaskContext, // 注意任务上下文的处理
 
     // 内存管理
@@ -113,6 +114,7 @@ impl TaskControlBlock {
             parent: Arc::new(SpinLock::new(None)),
             children: Arc::new(SpinLock::new(BTreeMap::new())),
             exit_code: AtomicI32::new(0),
+            exit_signal: AtomicI32::new(0),
             // task_context: TaskContext, // 注意任务上下文的处理
 
             // 内存管理
@@ -174,6 +176,7 @@ impl TaskControlBlock {
             parent: Arc::new(SpinLock::new(None)),
             children: Arc::new(SpinLock::new(BTreeMap::new())),
             exit_code: AtomicI32::new(0),
+            exit_signal: AtomicI32::new(0),
 
             // 内存管理
             memory_set: Arc::new(RwLock::new(memory_set)),
@@ -307,6 +310,7 @@ impl TaskControlBlock {
             parent,
             children,
             exit_code: AtomicI32::new(0),
+            exit_signal: AtomicI32::new(0),
 
             // 内存管理
             memory_set,
@@ -432,6 +436,14 @@ impl TaskControlBlock {
     pub fn exit_code(&self) -> i32 {
         self.exit_code.load(Ordering::Relaxed)
     }
+    pub fn wait_status(&self) -> i32 {
+        let signal = self.exit_signal.load(Ordering::Relaxed);
+        if signal != 0 {
+            signal & 0x7f
+        } else {
+            (self.exit_code() & 0xff) << 8
+        }
+    }
     /// 获取用户任务页表的页表基址寄存器值
     pub fn get_user_token(&self) -> usize {
         self.memory_set.read().token()
@@ -501,7 +513,12 @@ impl TaskControlBlock {
         *self.exe_path.lock() = path;
     }
     pub fn set_exit_code(&self, exit_code: i32) {
+        self.exit_signal.store(0, Ordering::Relaxed);
         self.exit_code.swap(exit_code, Ordering::Relaxed);
+    }
+    pub fn set_exit_signal(&self, signal: i32) {
+        self.exit_code.store(0, Ordering::Relaxed);
+        self.exit_signal.store(signal & 0x7f, Ordering::Relaxed);
     }
     pub fn set_parent(&self, parent: &Arc<TaskControlBlock>) {
         *self.parent.lock() = Some(Arc::downgrade(parent));
@@ -803,6 +820,7 @@ impl TaskControlBlock {
 ///
 /// 修改线程退出码，随后移除线程并释放线程占有的资源
 fn exit_thread(task: Arc<TaskControlBlock>, exit_code: i32) {
+    exit_robust_list(&task);
     if let Some(ctid) = task.clear_child_tid_addr() {
         let zero: i32 = 0;
         let _ = copy_to_user(ctid as *mut i32, &zero as *const i32, 1);
@@ -815,6 +833,21 @@ fn exit_thread(task: Arc<TaskControlBlock>, exit_code: i32) {
     task.op_thread_group_mut(|tg| tg.remove(&task.tid()));
     task.set_exited();
     task.set_exit_code(exit_code);
+    TASK_MANAGER.remove(task.tid());
+}
+
+fn exit_thread_by_signal(task: Arc<TaskControlBlock>, signal: i32) {
+    exit_robust_list(&task);
+    if let Some(ctid) = task.clear_child_tid_addr() {
+        let zero: i32 = 0;
+        let _ = copy_to_user(ctid as *mut i32, &zero as *const i32, 1);
+        let _ = crate::task::futex::futex_wake_private(ctid, 1);
+        let _ = crate::task::futex::futex_wake(ctid, 1, false);
+    }
+    remove_task(task.tid());
+    task.op_thread_group_mut(|tg| tg.remove(&task.tid()));
+    task.set_exited();
+    task.set_exit_signal(signal);
     TASK_MANAGER.remove(task.tid());
 }
 
@@ -922,13 +955,16 @@ fn handle_robust_entry(
 pub fn task_exit(task: Arc<TaskControlBlock>, exit_code: i32) {
     // warn! {"[kernel] Thread exit. tid: {}, tgid: {}, thread_count: {}.", task.tid(), task.tgid(), task.op_thread_group(|tg| tg.iter().count())}
 
-    exit_robust_list(&task);
     if task.is_process_leader() {
         task_group_exit(task, exit_code);
         return;
     } else {
         exit_thread(task, exit_code);
     }
+}
+
+pub fn task_exit_by_signal(task: Arc<TaskControlBlock>, signal: i32) {
+    task_group_exit_by_signal(task, signal);
 }
 
 /// 进程退出
@@ -970,6 +1006,7 @@ pub fn task_group_exit(task: Arc<TaskControlBlock>, exit_code: i32) {
     });
     task.fd_table.lock().clear();
 
+    exit_robust_list(&leader);
     leader.set_exited();
     leader.set_exit_code(exit_code);
     // 向父进程发送 SIGCHLD 信号
@@ -985,6 +1022,54 @@ pub fn task_group_exit(task: Arc<TaskControlBlock>, exit_code: i32) {
     });
 
     // 清空残留信号
+    leader.op_sig_pending_mut(|p| p.clear());
+
+    TASK_MANAGER.remove(leader.tid());
+}
+
+pub fn task_group_exit_by_signal(task: Arc<TaskControlBlock>, signal: i32) {
+    let tgid = task.tgid();
+    let threads = task.op_thread_group(|tg| tg.iter().collect::<Vec<_>>());
+    let leader = threads
+        .iter()
+        .find(|thread| thread.tid() == tgid)
+        .cloned()
+        .unwrap_or_else(|| task.clone());
+
+    for thread in threads {
+        remove_task(thread.tid());
+        if thread.tid() != leader.tid() {
+            exit_thread_by_signal(thread, signal);
+        }
+    }
+
+    leader.op_thread_group_mut(|tg| tg.remove(&leader.tid()));
+
+    let children = task.op_children_mut(core::mem::take);
+    for (_, child) in children {
+        child.set_parent(&INITPROC);
+        INITPROC.add_child(child);
+    }
+
+    task.op_memory_set_write(|mem| {
+        mem.recycle_data_pages();
+    });
+    task.fd_table.lock().clear();
+
+    exit_robust_list(&leader);
+    leader.set_exited();
+    leader.set_exit_signal(signal);
+    leader.op_parent(|parent_opt| {
+        if let Some(parent) = parent_opt.as_ref().and_then(|w| w.upgrade()) {
+            let siginfo = SigInfo::new(
+                Sig::SIGCHLD.raw(),
+                SigInfo::CLD_KILLED,
+                SiField::Kill { tid: leader.tid() },
+            );
+            parent.receive_siginfo(siginfo, false);
+        }
+    });
+
     leader.op_sig_pending_mut(|p| p.clear());
 
     TASK_MANAGER.remove(leader.tid());

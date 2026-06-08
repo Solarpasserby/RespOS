@@ -4,7 +4,7 @@
 //! 当前架构层 `__switch` 接收下一个任务的内核栈指针，因此这里会完成最后一步切换。
 
 use super::processor::{PROCESSOR, current_task};
-use super::task::{TaskControlBlock, task_exit, task_group_exit};
+use super::task::{TaskControlBlock, task_exit, task_exit_by_signal, task_group_exit};
 use crate::{arch::task::__switch, mutex::SpinNoIrqLock};
 use alloc::{collections::vec_deque::VecDeque, sync::Arc, vec::Vec};
 use bitflags::bitflags;
@@ -165,6 +165,15 @@ pub fn exit_and_run_next(exit_code: i32) -> ! {
         crate::arch::idle();
     };
     task_exit(task, exit_code);
+    switch_to_next_task_after_exit();
+}
+
+#[unsafe(no_mangle)]
+pub fn exit_by_signal_and_run_next(signal: i32) -> ! {
+    let Some(task) = current_task() else {
+        crate::arch::idle();
+    };
+    task_exit_by_signal(task, signal);
     switch_to_next_task_after_exit();
 }
 
