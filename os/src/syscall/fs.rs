@@ -11,7 +11,6 @@ use crate::fs::{
 use crate::mm::{check_user_writable, copy_cstr_from_user, copy_from_user, copy_to_user};
 use crate::task::current_task;
 use crate::timer::{TimeSpec, get_time_ms};
-use alloc::vec;
 
 const UTIME_NOW: usize = 1_073_741_823;
 const UTIME_OMIT: usize = 1_073_741_822;
@@ -805,7 +804,6 @@ pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> SysResult<usize
     if count == 0 {
         return Ok(0);
     }
-    check_user_writable(dirp, count)?;
 
     let task = current_task().expect("[kernel] current task is None.");
     let file = task.get_fd_entry(fd)?.get_file();
@@ -818,7 +816,6 @@ pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> SysResult<usize
     let current_off = file.get_offset();
     let mut written = 0;
     let mut next_off = current_off;
-    let mut buf = vec![0u8; count];
     let dirents = file.readdir()?;
     for dirent in dirents {
         let dirent_off = usize::try_from(dirent.d_off).map_err(|_| Errno::EINVAL)?;
@@ -836,7 +833,10 @@ pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> SysResult<usize
             }
             break;
         }
-        dirent.copy_to_buffer(&mut buf[written..written + dirent_size]);
+        let mut record = alloc::vec![0u8; dirent_size];
+        dirent.copy_to_buffer(&mut record);
+        let dst = unsafe { dirp.add(written) };
+        copy_to_user(dst, record.as_ptr(), dirent_size)?;
         written += dirent_size;
         next_off = dirent_off;
     }
@@ -844,7 +844,6 @@ pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> SysResult<usize
     if written != 0 {
         let next_off = isize::try_from(next_off).map_err(|_| Errno::EINVAL)?;
         file.seek(next_off)?;
-        copy_to_user(dirp, buf.as_ptr(), written)?;
     }
 
     Ok(written)
