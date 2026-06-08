@@ -5,12 +5,15 @@ MODE ?= debug
 ifeq ($(MODE),debug)
 	CARGO_BUILD_ARG :=
 	CARGO_TARGET_DIR := debug
+	CARGO_FEATURES := # --features log  # FIXME: 临时关闭，release 编译通过后恢复
 else ifeq ($(MODE),release)
 	CARGO_BUILD_ARG := --release
 	CARGO_TARGET_DIR := release
+	CARGO_FEATURES :=
 else ifeq ($(MODE),release-debug)
 	CARGO_BUILD_ARG := --profile release-debug
 	CARGO_TARGET_DIR := release-debug
+	CARGO_FEATURES :=
 else
 	$(error Unsupported MODE '$(MODE)'. Use MODE=debug, MODE=release, or MODE=release-debug)
 endif
@@ -132,7 +135,7 @@ kernel: prepare-cargo-config
 	@cd ../user && make build ARCH=$(USER_ARCH) MODE=$(MODE)
 	@PATH="$$HOME/.local/bin:$$PATH" RESPOS_USER_TARGET=$(USER_TARGET) \
 		RESPOS_USER_PROFILE_DIR=$(CARGO_TARGET_DIR) \
-		RESPOS_APP_REBUILD_STAMP=$$(date +%s%N) cargo build $(CARGO_BUILD_ARG)
+		RESPOS_APP_REBUILD_STAMP=$$(date +%s%N) cargo build $(CARGO_BUILD_ARG) $(CARGO_FEATURES)
 
 clean:
 	@cargo clean
