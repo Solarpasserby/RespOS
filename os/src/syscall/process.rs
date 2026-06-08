@@ -101,37 +101,40 @@ pub fn sys_prlimit64(
     new_limit: *const RLimit,
     old_limit: *mut RLimit,
 ) -> SysResult<usize> {
+    const RLIMIT_NOFILE: usize = 7;
     const RLIMIT_STACK: usize = 3;
     const RLIM_INFINITY: usize = usize::MAX;
 
-    // TODO[ABI-COMPAT]: 目前还没有按进程保存 rlimit。这里先返回 libc 启动所需的
-    // 稳定值，并在校验 new_limit 指针后接受设置请求。
-    if pid != 0
-        && pid
-            != current_task()
-                .expect("[kernel] current task is None.")
-                .tid()
-    {
+    let task = current_task().expect("[kernel] current task is None.");
+    if pid != 0 && pid != task.tid() {
         return Err(Errno::ESRCH);
     }
 
+    let old = match resource {
+        RLIMIT_NOFILE => {
+            let (cur, max) = task.nofile_limit();
+            RLimit { cur, max }
+        }
+        RLIMIT_STACK => RLimit {
+            cur: USER_STACK_SIZE,
+            max: RLIM_INFINITY,
+        },
+        _ => RLimit {
+            cur: RLIM_INFINITY,
+            max: RLIM_INFINITY,
+        },
+    };
+
     if !new_limit.is_null() {
-        let mut ignored = RLimit { cur: 0, max: 0 };
-        copy_from_user(&mut ignored as *mut RLimit, new_limit, 1)?;
+        let mut limit = RLimit { cur: 0, max: 0 };
+        copy_from_user(&mut limit as *mut RLimit, new_limit, 1)?;
+        if resource == RLIMIT_NOFILE {
+            task.set_nofile_limit(limit.cur, limit.max)?;
+        }
     }
 
     if !old_limit.is_null() {
-        let limit = match resource {
-            RLIMIT_STACK => RLimit {
-                cur: USER_STACK_SIZE,
-                max: RLIM_INFINITY,
-            },
-            _ => RLimit {
-                cur: RLIM_INFINITY,
-                max: RLIM_INFINITY,
-            },
-        };
-        copy_to_user(old_limit, &limit as *const RLimit, 1)?;
+        copy_to_user(old_limit, &old as *const RLimit, 1)?;
     }
 
     Ok(0)

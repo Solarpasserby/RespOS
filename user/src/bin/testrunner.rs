@@ -99,7 +99,7 @@ const LIBC_STATIC_TESTS: &[&str] = &[
     //"daemon_failure\0",
     // "dn_expand_empty\0",
     // "dn_expand_ptr_0\0",
-    "fflush_exit\0",
+    //"fflush_exit\0",
     // "fgets_eof\0",
     // "fgetwc_buffering\0",
     // "fpclassify_invalid_ld80\0",

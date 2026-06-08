@@ -740,6 +740,12 @@ impl TaskControlBlock {
     pub fn get_fd_entry(&self, fd: usize) -> SysResult<FdEntry> {
         self.fd_table.lock().get_fd_entry(fd)
     }
+    pub fn nofile_limit(&self) -> (usize, usize) {
+        self.fd_table.lock().nofile_limit()
+    }
+    pub fn set_nofile_limit(&self, cur: usize, max: usize) -> SysResult {
+        self.fd_table.lock().set_nofile_limit(cur, max)
+    }
 }
 
 impl TaskControlBlock {
