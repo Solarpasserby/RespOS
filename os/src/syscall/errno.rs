@@ -61,6 +61,8 @@ pub enum Errno {
     ENOSYS = 38,
     /// 目录非空。
     ENOTEMPTY = 39,
+    /// 操作超时。
+    ETIMEDOUT = 110,
     /// 我不知道。
     EIDONTKNONW = 114514,
 }
@@ -109,6 +111,7 @@ impl Errno {
             Errno::ENAMETOOLONG => "File name too long",
             Errno::ENOSYS => "Function not implemented",
             Errno::ENOTEMPTY => "Directory not empty",
+            Errno::ETIMEDOUT => "Connection timed out",
             Errno::EIDONTKNONW => "I don't know which is proper",
         }
     }

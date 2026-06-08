@@ -49,13 +49,13 @@ pub fn do_futex(
     }
 
     match cmd {
-        FUTEX_WAIT => futex_wait(uaddr, val as u32, private),
+        FUTEX_WAIT => futex_wait(uaddr, val as u32, val2, private),
         FUTEX_WAKE => futex_wake(uaddr, val as u32, private),
         FUTEX_REQUEUE => futex_requeue(uaddr, val as u32, uaddr2, val2 as u32, private),
         FUTEX_CMP_REQUEUE => {
             futex_cmp_requeue(uaddr, val as u32, uaddr2, val2 as u32, val3 as u32, private)
         }
-        FUTEX_WAIT_BITSET => futex_wait_bitset(uaddr, val as u32, val3 as u32, private),
+        FUTEX_WAIT_BITSET => futex_wait_bitset(uaddr, val as u32, val2, val3 as u32, true, private),
         FUTEX_WAKE_BITSET => futex_wake_bitset(uaddr, val as u32, val3 as u32, private),
         _ => {
             warn!(

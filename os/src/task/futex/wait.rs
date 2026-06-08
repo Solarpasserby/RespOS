@@ -6,10 +6,30 @@ use crate::syscall::{Errno, SysResult};
 use crate::task::scheduler::{
     prepare_current_task_blocked, remove_task, switch_to_next_task, wakeup_task,
 };
-use crate::task::{current_task, futex::FUTEX_BITSET_MATCH_ANY};
+use crate::task::{current_task, futex::FUTEX_BITSET_MATCH_ANY, yield_current_task};
+use crate::timer::get_time_ms;
 use alloc::vec::Vec;
 
 const FUTEX_TRACE: bool = false;
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct UserTimeSpec {
+    sec: usize,
+    nsec: usize,
+}
+
+impl UserTimeSpec {
+    fn to_ms(self) -> SysResult<usize> {
+        if self.nsec >= 1_000_000_000 {
+            return Err(Errno::EINVAL);
+        }
+        self.sec
+            .checked_mul(1000)
+            .and_then(|ms| ms.checked_add(self.nsec.div_ceil(1_000_000)))
+            .ok_or(Errno::EINVAL)
+    }
+}
 
 fn read_futex_value(uaddr: usize) -> SysResult<u32> {
     let mut val: u32 = 0;
@@ -144,6 +164,67 @@ fn futex_wait_common(
     Ok(0)
 }
 
+fn futex_deadline_ms(timeout_ptr: usize, absolute: bool) -> SysResult<Option<usize>> {
+    if timeout_ptr == 0 {
+        return Ok(None);
+    }
+
+    let mut timeout = UserTimeSpec { sec: 0, nsec: 0 };
+    copy_from_user(
+        &mut timeout as *mut UserTimeSpec,
+        timeout_ptr as *const UserTimeSpec,
+        1,
+    )?;
+    let timeout_ms = timeout.to_ms()?;
+    if absolute {
+        Ok(Some(timeout_ms))
+    } else {
+        Ok(Some(
+            get_time_ms().checked_add(timeout_ms).ok_or(Errno::EINVAL)?,
+        ))
+    }
+}
+
+fn futex_wait_timed_common(
+    uaddr: usize,
+    expected_val: u32,
+    bitset: u32,
+    deadline_ms: Option<usize>,
+    private: bool,
+) -> SysResult<usize> {
+    let Some(deadline_ms) = deadline_ms else {
+        return futex_wait_common(uaddr, expected_val, bitset, private);
+    };
+    if bitset == 0 {
+        return Err(Errno::EINVAL);
+    }
+
+    let task = current_task().expect("no current task");
+    let key = futex_key(uaddr, private);
+    loop {
+        let actual_val = read_futex_value(uaddr)?;
+        if actual_val != expected_val {
+            trace_futex(
+                "wait-timed-changed",
+                &key,
+                expected_val,
+                actual_val as usize,
+            );
+            return Ok(0);
+        }
+        if get_time_ms() >= deadline_ms {
+            trace_futex("wait-timedout", &key, expected_val, bitset as usize);
+            return Err(Errno::ETIMEDOUT);
+        }
+        if task.check_signal_interrupt() || task.is_interrupted() {
+            task.clear_interrupted();
+            trace_futex("wait-timed-eintr", &key, expected_val, bitset as usize);
+            return Err(Errno::EINTR);
+        }
+        yield_current_task();
+    }
+}
+
 fn futex_wake_common(uaddr: usize, nr_wake: u32, bitset: u32, private: bool) -> SysResult<usize> {
     if bitset == 0 {
         return Err(Errno::EINVAL);
@@ -233,8 +314,20 @@ fn futex_requeue_common(
     Ok(affected)
 }
 
-pub fn futex_wait(uaddr: usize, expected_val: u32, private: bool) -> SysResult<usize> {
-    futex_wait_common(uaddr, expected_val, FUTEX_BITSET_MATCH_ANY, private)
+pub fn futex_wait(
+    uaddr: usize,
+    expected_val: u32,
+    timeout_ptr: usize,
+    private: bool,
+) -> SysResult<usize> {
+    let deadline_ms = futex_deadline_ms(timeout_ptr, false)?;
+    futex_wait_timed_common(
+        uaddr,
+        expected_val,
+        FUTEX_BITSET_MATCH_ANY,
+        deadline_ms,
+        private,
+    )
 }
 
 pub fn futex_wake(uaddr: usize, nr_wake: u32, private: bool) -> SysResult<usize> {
@@ -269,10 +362,13 @@ pub fn futex_cmp_requeue(
 pub fn futex_wait_bitset(
     uaddr: usize,
     expected_val: u32,
+    timeout_ptr: usize,
     bitset: u32,
+    absolute_timeout: bool,
     private: bool,
 ) -> SysResult<usize> {
-    futex_wait_common(uaddr, expected_val, bitset, private)
+    let deadline_ms = futex_deadline_ms(timeout_ptr, absolute_timeout)?;
+    futex_wait_timed_common(uaddr, expected_val, bitset, deadline_ms, private)
 }
 
 pub fn futex_wake_bitset(
