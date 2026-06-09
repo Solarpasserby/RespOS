@@ -49,9 +49,7 @@ fn dynamic_linker_candidates(interp: &str) -> [&str; 3] {
     match interp {
         "/lib/ld-musl-riscv64-sf.so.1"
         | "/lib/ld-musl-riscv64.so.1"
-        | "/lib/ld-musl-loongarch64.so.1" => {
-            ["/musl/lib/libc.so", "/musl/libc.so", interp]
-        }
+        | "/lib/ld-musl-loongarch64.so.1" => ["/musl/lib/libc.so", "/musl/libc.so", interp],
         _ => [interp, "/musl/lib/libc.so", "/musl/libc.so"],
     }
 }
@@ -60,7 +58,10 @@ fn read_dynamic_linker(interp: &str) -> Option<Vec<u8>> {
     for path in dynamic_linker_candidates(interp) {
         if let Ok(file) = path_open(AT_FDCWD, path, 0, 0) {
             if let Ok(data) = file.read_all() {
-                info!("[from_elf_data] dynamic linker {} resolved to {}", interp, path);
+                info!(
+                    "[from_elf_data] dynamic linker {} resolved to {}",
+                    interp, path
+                );
                 return Some(data);
             }
         }
@@ -310,19 +311,33 @@ impl MemorySet {
         Ok(start)
     }
 
-    pub fn copy_to_mapped_area(&self, start: usize, data: &[u8]) -> SysResult {
+    /// 将内核缓冲区写入已经映射好的用户虚拟地址范围。
+    ///
+    /// 该函数通过页表找到物理页后写内核直映地址，不受用户页 PTE 的
+    /// 读写权限影响，适合用于 `mmap` 初始化只读文件页。
+    /// 将字节数据写入用户地址空间中已映射的虚拟地址范围。
+    ///
+    /// execve 初始化用户栈（argv/envp/auxv）时使用：新地址空间的用户栈页
+    /// 已在 MemorySet 中建立映射，通过页表翻译到物理页直接写入，避免依赖尚未设置的当前页表
+    pub fn write_bytes_to_mapped_range(&mut self, start: usize, data: &[u8]) -> SysResult {
+        let end = start.checked_add(data.len()).ok_or(Errno::EFAULT)?;
         let mut copied = 0usize;
-        while copied < data.len() {
-            let va = VirtAddr::from(start + copied);
-            let page_off = va.page_offset();
-            let n = (data.len() - copied).min(PAGE_SIZE - page_off);
-            let pte = self.page_table.translate(va.floor()).ok_or(Errno::EFAULT)?;
+        let mut cur = start;
+
+        while cur < end {
+            let va = VirtAddr::from(cur);
+            let vpn = va.floor();
+            let page_offset = cur & (PAGE_SIZE - 1);
+            let copy_len = (PAGE_SIZE - page_offset).min(end - cur);
+            let pte = self.page_table.translate(vpn).ok_or(Errno::EFAULT)?;
             if !pte.is_valid() {
                 return Err(Errno::EFAULT);
             }
-            let dst = &mut pte.ppn().get_bytes_array()[page_off..page_off + n];
-            dst.copy_from_slice(&data[copied..copied + n]);
-            copied += n;
+
+            let dst = &mut pte.ppn().get_bytes_array()[page_offset..page_offset + copy_len];
+            dst.copy_from_slice(&data[copied..copied + copy_len]);
+            copied += copy_len;
+            cur += copy_len;
         }
         Ok(())
     }
@@ -1065,6 +1080,16 @@ impl MemorySet {
             }
         }
         Err(Errno::EFAULT)
+    }
+
+    /// 检查一段用户虚拟页都属于用户映射区。
+    ///
+    /// 这里逐页检查，允许范围跨过相邻的多个用户 VMA。
+    pub fn check_user_mapped_range(&self, vpn_range: VPNRange) -> SysResult {
+        for vpn in vpn_range {
+            self.check_valid_user_vpn(vpn, MapPermission::empty())?;
+        }
+        Ok(())
     }
 
     /// 尝试处理用户态页错误，解决 COW 或惰性分配

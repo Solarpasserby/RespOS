@@ -103,11 +103,10 @@ pub fn sys_mmap(
             return Err(Errno::EACCES);
         }
 
-        let mut buf = vec![0u8; map_len];
-
+        let mut file_data = vec![0u8; map_len];
         let origin_offset = file.get_offset();
         file.seek(offset as isize)?;
-        let read_result = file.read(&mut buf[..len]);
+        let read_result = file.read(&mut file_data[..len]);
         let restore_result = file.seek(origin_offset as isize);
         read_result?;
         restore_result?;
@@ -115,7 +114,7 @@ pub fn sys_mmap(
         task.op_memory_set_write(|memory_set| {
             let start =
                 memory_set.mmap_framed(fixed_addr, map_len, permission, replace, noreplace)?;
-            memory_set.copy_to_mapped_area(start, buf.as_slice())?;
+            memory_set.write_bytes_to_mapped_range(start, &file_data)?;
             memory_set.flush_tlb();
             Ok(start)
         })

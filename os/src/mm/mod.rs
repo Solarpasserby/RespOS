@@ -12,7 +12,7 @@ mod heap_allocator;
 mod memory_set;
 
 use crate::arch::mm::{PTEFlags, PageTable, PageTableEntry};
-use crate::config::{USER_ARG_MAX_COUNT, USER_CSTR_MAX_LEN}; // 该常量定义于 config/syscall.rs 中
+use crate::config::{PAGE_SIZE, USER_ARG_MAX_COUNT, USER_CSTR_MAX_LEN};
 use crate::syscall::{Errno, SysResult};
 use crate::task::current_task;
 pub use address::*;
@@ -114,14 +114,13 @@ pub fn copy_from_user<T: Copy>(dst: *mut T, src: *const T, len: usize) -> SysRes
         return Ok(0);
     }
 
+    let byte_len = len
+        .checked_mul(core::mem::size_of::<T>())
+        .ok_or(Errno::EFAULT)?;
     // 检验来源地址有效性
     check_user_readable(src, len)?;
-    // 执行复制
-    unsafe {
-        let src_slice = core::slice::from_raw_parts(src, len);
-        let dst_slice = core::slice::from_raw_parts_mut(dst, len);
-        dst_slice.copy_from_slice(src_slice);
-    }
+    let dst_bytes = unsafe { core::slice::from_raw_parts_mut(dst as *mut u8, byte_len) };
+    copy_user_bytes_to_kernel(src as usize, dst_bytes)?;
     Ok(len)
 }
 
@@ -136,15 +135,73 @@ pub fn copy_to_user<T: Copy>(dst: *mut T, src: *const T, len: usize) -> SysResul
         return Ok(0);
     }
 
+    let byte_len = len
+        .checked_mul(core::mem::size_of::<T>())
+        .ok_or(Errno::EFAULT)?;
     // 检验目标地址有效性
     check_user_writable(dst, len)?;
-    // 执行复制
-    unsafe {
-        let src_slice = core::slice::from_raw_parts(src, len);
-        let dst_slice = core::slice::from_raw_parts_mut(dst, len);
-        dst_slice.copy_from_slice(src_slice);
-    }
+    let src_bytes = unsafe { core::slice::from_raw_parts(src as *const u8, byte_len) };
+    copy_kernel_bytes_to_user(dst as usize, src_bytes)?;
     Ok(len)
+}
+
+/// 用户→内核拷贝：逐页通过页表翻译到物理地址后复制。
+///
+/// 不能直接解引用用户虚拟地址：用户页可能是惰性分配的（匿名 mmap），
+/// 虚拟地址上没有映射时解引用会触发 kernel page fault。
+/// 通过页表 PTE → ppn → get_bytes_array 读写物理页帧，
+/// 绕过了虚拟地址的映射延迟问题。
+fn copy_user_bytes_to_kernel(user_start: usize, dst: &mut [u8]) -> SysResult {
+    let mut copied = 0usize;
+    let mut cur = user_start;
+    current_task()
+        .expect("[kernel] current task is None.")
+        .op_memory_set_read(|memory_set| {
+            while copied < dst.len() {
+                let va = VirtAddr::from(cur);
+                let vpn = va.floor();
+                let page_offset = va.page_offset();
+                // 每次最多拷贝到当前页末尾，超过则下一轮切到下一页
+                let copy_len = (PAGE_SIZE - page_offset).min(dst.len() - copied);
+                let pte = memory_set.page_table.translate(vpn).ok_or(Errno::EFAULT)?;
+                if !pte.is_valid() {
+                    return Err(Errno::EFAULT);
+                }
+                let src = &pte.ppn().get_bytes_array()[page_offset..page_offset + copy_len];
+                dst[copied..copied + copy_len].copy_from_slice(src);
+                copied += copy_len;
+                cur = cur.checked_add(copy_len).ok_or(Errno::EFAULT)?;
+            }
+            Ok(())
+        })
+}
+
+/// 内核→用户拷贝：逐页通过页表翻译到物理地址后写入。
+///
+/// 与 copy_user_bytes_to_kernel 对称，写入方向相反。
+/// 同样通过物理页帧写入，避免直接解引用用户虚拟地址。
+fn copy_kernel_bytes_to_user(user_start: usize, src: &[u8]) -> SysResult {
+    let mut copied = 0usize;
+    let mut cur = user_start;
+    current_task()
+        .expect("[kernel] current task is None.")
+        .op_memory_set_read(|memory_set| {
+            while copied < src.len() {
+                let va = VirtAddr::from(cur);
+                let vpn = va.floor();
+                let page_offset = va.page_offset();
+                let copy_len = (PAGE_SIZE - page_offset).min(src.len() - copied);
+                let pte = memory_set.page_table.translate(vpn).ok_or(Errno::EFAULT)?;
+                if !pte.is_valid() {
+                    return Err(Errno::EFAULT);
+                }
+                let dst = &mut pte.ppn().get_bytes_array()[page_offset..page_offset + copy_len];
+                dst.copy_from_slice(&src[copied..copied + copy_len]);
+                copied += copy_len;
+                cur = cur.checked_add(copy_len).ok_or(Errno::EFAULT)?;
+            }
+            Ok(())
+        })
 }
 
 pub fn check_user_readable<T>(src: *const T, len: usize) -> SysResult {

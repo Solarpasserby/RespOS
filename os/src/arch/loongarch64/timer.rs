@@ -8,14 +8,43 @@ use crate::config::CLOCK_FREQ;
 
 const TICKS_PER_SEC: usize = 100;
 const MSEC_PER_SEC: usize = 1000;
+const USEC_PER_SEC: usize = 1_000_000;
 
 #[derive(Clone, Copy, Debug, Default)]
 #[repr(C)]
 pub struct TimeSpec {
     /// 秒数
-    pub sec: usize,
+    pub sec: isize,
     /// 纳秒数
-    pub nsec: usize,
+    pub nsec: isize,
+}
+
+impl TimeSpec {
+    pub fn is_valid_duration(&self) -> bool {
+        self.sec >= 0 && self.nsec >= 0 && self.nsec < 1_000_000_000
+    }
+
+    pub fn is_zero(&self) -> bool {
+        self.sec == 0 && self.nsec == 0
+    }
+
+    pub fn checked_duration_ms(&self) -> Option<usize> {
+        if !self.is_valid_duration() {
+            return None;
+        }
+        (self.sec as usize)
+            .checked_mul(1000)
+            .and_then(|ms| ms.checked_add((self.nsec as usize).div_ceil(1_000_000)))
+    }
+
+    pub fn checked_duration_us(&self) -> Option<usize> {
+        if !self.is_valid_duration() {
+            return None;
+        }
+        (self.sec as usize)
+            .checked_mul(1_000_000)
+            .and_then(|us| us.checked_add((self.nsec as usize).div_ceil(1000)))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -59,4 +88,10 @@ pub fn set_next_ti_trigger() {
 /// 读取硬件运行时间（毫秒）
 pub fn get_time_ms() -> usize {
     get_time() / (CLOCK_FREQ / MSEC_PER_SEC)
+}
+
+/// 读取硬件运行时间（微秒）
+pub fn get_time_us() -> usize {
+    let ticks = get_time();
+    ticks / CLOCK_FREQ * USEC_PER_SEC + ticks % CLOCK_FREQ * USEC_PER_SEC / CLOCK_FREQ
 }

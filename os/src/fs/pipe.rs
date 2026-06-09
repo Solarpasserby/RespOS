@@ -4,8 +4,11 @@ use super::KStat;
 use super::vfs::{FileOp, InodeType, OpenFlags};
 use crate::config::PIPE_BUFFER_SIZE;
 use crate::syscall::{Errno, SysResult};
-use crate::task::yield_current_task;
-use alloc::sync::Arc;
+use crate::task::{
+    current_task, prepare_current_task_blocked, remove_task, switch_to_next_task, wakeup_task,
+    yield_current_task,
+};
+use alloc::{collections::VecDeque, sync::Arc};
 use core::any::Any;
 use spin::Mutex;
 
@@ -68,34 +71,142 @@ impl FileOp for Pipe {
         self
     }
     fn read<'a>(&'a self, buf: &'a mut [u8]) -> SysResult<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let task = current_task().expect("[kernel] current task is None.");
         loop {
-            let ret = self.read_inner(buf);
+            let mut wake_writer = None;
+            let mut should_block = false;
+            // —— 在锁内尝试读取 + 决定是否阻塞 ——
+            // 读成功 → 唤醒一个写端等待者（缓冲区有空间了）
+            // 读失败且写端已关 → 返回 0（EOF）
+            // 读失败且写端还在 → 将自己加入读等待队列，切走
+            let ret = {
+                let mut buffer = self.buffer.lock();
+                let mut read_size = 0;
+                for ch in buf.iter_mut() {
+                    if buffer.status == RingBufferStatus::EMPTY {
+                        break;
+                    }
+                    *ch = buffer.read_byte();
+                    read_size += 1;
+                }
+
+                if read_size != 0 {
+                    // 读到数据：缓冲区腾出空间，唤醒一个写端等待者
+                    wake_writer = buffer.pop_write_waiter();
+                    read_size
+                } else if buffer.write_closed() {
+                    // 缓冲区空且写端已关：EOF，直接返回
+                    return Ok(0);
+                } else {
+                    // 缓冲区空但写端还在：需要阻塞等待数据
+                    task.set_interruptible(true);
+                    buffer.push_read_waiter(task.tid());
+                    should_block = prepare_current_task_blocked();
+                    if !should_block {
+                        // 入队后但在切走前，信号已到达 → 撤销阻塞
+                        task.set_interruptible(false);
+                        buffer.remove_read_waiter(task.tid());
+                    }
+                    0
+                }
+            };
+
+            if let Some(tid) = wake_writer {
+                wakeup_task(tid);
+            }
             if ret != 0 {
                 return Ok(ret);
-            } else if self.buffer.lock().write_closed() {
-                // 缓存为空且写端关闭
-                return Ok(0);
+            }
+            if should_block {
+                // 在我们切走之前，写端已经写入数据并唤醒我们，此时从调度队列中移除即可，无需实际切换。
+                if task.is_ready() {
+                    remove_task(task.tid());
+                    task.set_running();
+                } else {
+                    switch_to_next_task();
+                }
+                // 回来后清理等待队列残留并检查信号中断
+                self.buffer.lock().remove_read_waiter(task.tid());
+                task.set_interruptible(false);
+                if task.is_interrupted() || task.check_signal_interrupt() {
+                    task.clear_interrupted();
+                    return Err(Errno::EINTR);
+                }
             } else {
-                // 缓存为空但存在写端
+                // prepare_current_task_blocked 返回 false：
+                // 缓冲区可能在我们入队前恰好被写端填了数据，yield 让出 CPU 后重试
                 yield_current_task();
-                continue;
             }
         }
     }
     fn write<'a>(&'a self, buf: &'a [u8]) -> SysResult<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let task = current_task().expect("[kernel] current task is None.");
         loop {
-            if self.buffer.lock().read_closed() {
-                // 读端关闭
-                return Err(Errno::EPIPE);
-            } else {
-                let ret = self.write_inner(buf);
-                if ret != 0 {
-                    return Ok(ret);
-                } else {
-                    // 缓存已满但读端存在
-                    yield_current_task();
-                    continue;
+            let mut wake_reader = None;
+            let mut should_block = false;
+            // —— 在锁内尝试写入 + 决定是否阻塞 ——
+            // 写成功 → 唤醒一个读端等待者（有数据可读了）
+            // 写失败且缓冲区满 → 将自己加入写等待队列，切走
+            // 读端已关闭 → EPIPE（对端不存在，写无意义）
+            let ret = {
+                let mut buffer = self.buffer.lock();
+                if buffer.read_closed() {
+                    return Err(Errno::EPIPE);
                 }
+
+                let mut write_size = 0;
+                for ch in buf {
+                    if buffer.status == RingBufferStatus::FULL {
+                        break;
+                    }
+                    buffer.write_byte(*ch);
+                    write_size += 1;
+                }
+
+                if write_size != 0 {
+                    // 写入了数据：唤醒一个读端等待者来消费
+                    wake_reader = buffer.pop_read_waiter();
+                    write_size
+                } else {
+                    // 缓冲区满但读端还在：需要阻塞等待空间
+                    task.set_interruptible(true);
+                    buffer.push_write_waiter(task.tid());
+                    should_block = prepare_current_task_blocked();
+                    if !should_block {
+                        task.set_interruptible(false);
+                        buffer.remove_write_waiter(task.tid());
+                    }
+                    0
+                }
+            };
+
+            if let Some(tid) = wake_reader {
+                wakeup_task(tid);
+            }
+            if ret != 0 {
+                return Ok(ret);
+            }
+            if should_block {
+                if task.is_ready() {
+                    remove_task(task.tid());
+                    task.set_running();
+                } else {
+                    switch_to_next_task();
+                }
+                self.buffer.lock().remove_write_waiter(task.tid());
+                task.set_interruptible(false);
+                if task.is_interrupted() || task.check_signal_interrupt() {
+                    task.clear_interrupted();
+                    return Err(Errno::EINTR);
+                }
+            } else {
+                yield_current_task();
             }
         }
     }
@@ -114,6 +225,18 @@ impl FileOp for Pipe {
     fn writable(&self) -> bool {
         self.writable
     }
+
+    // 管道读端是否有数据可立即读取而不阻塞
+    // 缓冲区非空，或者写端已关闭
+    fn read_ready(&self) -> bool {
+        let buf = self.buffer.lock();
+        buf.status != RingBufferStatus::EMPTY || buf.write_closed
+    }
+    // 管道写端是否有空间可立即写入而不阻塞
+    fn write_ready(&self) -> bool {
+        self.buffer.lock().status != RingBufferStatus::FULL
+    }
+
     fn get_flags(&self) -> OpenFlags {
         OpenFlags::empty()
     }
@@ -127,15 +250,23 @@ impl FileOp for Pipe {
 
 impl Drop for Pipe {
     fn drop(&mut self) {
-        // 当管道可写，销毁时其对应的管道缓存写端标记为不存在
+        // 管道关闭时：
+        // - 标记己端已关闭，让对端后续 read/write 感知到
+        // - 收集被阻塞在对端缓冲区上的所有等待者并全部唤醒
+        //   例：读端关闭 → 写端阻塞在 write_waiters 中 → 必须唤醒，否则永久挂起
+        let mut wake_waiters = VecDeque::new();
         if self.readable {
             let mut buffer = self.buffer.lock();
             buffer.read_closed = true;
+            wake_waiters.append(&mut buffer.write_waiters);
         }
-        // 当管道可写，销毁时其对应的管道缓存写端标记为不存在
         if self.writable {
             let mut buffer = self.buffer.lock();
             buffer.write_closed = true;
+            wake_waiters.append(&mut buffer.read_waiters);
+        }
+        for tid in wake_waiters {
+            wakeup_task(tid);
         }
     }
 }
@@ -154,6 +285,8 @@ struct PipeRingBuffer {
     status: RingBufferStatus,
     read_closed: bool,  // 管道读端是否关闭
     write_closed: bool, // 管道写端是否关闭
+    read_waiters: VecDeque<usize>,
+    write_waiters: VecDeque<usize>,
 }
 
 impl PipeRingBuffer {
@@ -165,6 +298,8 @@ impl PipeRingBuffer {
             status: RingBufferStatus::EMPTY,
             read_closed: false,
             write_closed: false,
+            read_waiters: VecDeque::new(),
+            write_waiters: VecDeque::new(),
         }
     }
 
@@ -192,6 +327,33 @@ impl PipeRingBuffer {
     }
     fn write_closed(&self) -> bool {
         self.write_closed
+    }
+    /// 将读端 tid 加入等待队列（去重，避免同任务重复入队）
+    fn push_read_waiter(&mut self, tid: usize) {
+        if !self.read_waiters.iter().any(|&waiter| waiter == tid) {
+            self.read_waiters.push_back(tid);
+        }
+    }
+    /// 将写端 tid 加入等待队列（去重）
+    fn push_write_waiter(&mut self, tid: usize) {
+        if !self.write_waiters.iter().any(|&waiter| waiter == tid) {
+            self.write_waiters.push_back(tid);
+        }
+    }
+    /// FIFO 弹出最早阻塞的读端
+    fn pop_read_waiter(&mut self) -> Option<usize> {
+        self.read_waiters.pop_front()
+    }
+    /// FIFO 弹出最早阻塞的写端
+    fn pop_write_waiter(&mut self) -> Option<usize> {
+        self.write_waiters.pop_front()
+    }
+    /// 信号打断 / 竞态回退时从队列中移除特定等待者
+    fn remove_read_waiter(&mut self, tid: usize) {
+        self.read_waiters.retain(|&waiter| waiter != tid);
+    }
+    fn remove_write_waiter(&mut self, tid: usize) {
+        self.write_waiters.retain(|&waiter| waiter != tid);
     }
 }
 

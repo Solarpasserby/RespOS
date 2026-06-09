@@ -65,6 +65,8 @@ pub enum Errno {
     ENOTEMPTY = 39,
     /// 符号链接层数过多，通常表示符号链接循环。
     ELOOP = 40,
+    /// 操作不支持，例如给 preadv2/pwritev2 传了内核未实现的 flags。
+    EOPNOTSUPP = 95,
     /// 操作超时。
     ETIMEDOUT = 110,
     /// 连接被拒绝。
@@ -119,6 +121,7 @@ impl Errno {
             Errno::ENOSYS => "Function not implemented",
             Errno::ENOTEMPTY => "Directory not empty",
             Errno::ELOOP => "Too many levels of symbolic links",
+            Errno::EOPNOTSUPP => "Operation not supported",
             Errno::ETIMEDOUT => "Connection timed out",
             Errno::ECONNREFUSED => "Connection refused",
             Errno::EIDONTKNONW => "I don't know which is proper",

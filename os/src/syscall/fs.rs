@@ -1,19 +1,23 @@
 // os/src/syscall/fs.rs
 
 use super::{Errno, SysResult};
+use crate::config::PAGE_SIZE;
 use crate::fs::mount::{do_mount, do_umount2};
 use crate::fs::vfs::{File, FileOp, InodeType, OpenFlags};
 use crate::fs::{
     AT_EMPTY_PATH, AT_FDCWD, AT_NO_AUTOMOUNT, AT_SYMLINK_NOFOLLOW, FdEntry, KStat, Stat, Statfs64,
     filename_create, filename_link, filename_lookup, filename_lookup_no_follow_final_symlink,
-    filename_rename, filename_symlink, filename_unlink, make_pipe, path_open,
+    filename_rename, filename_symlink, filename_unlink, init_fdset, make_pipe, path_open,
 };
-use crate::mm::{check_user_writable, copy_cstr_from_user, copy_from_user, copy_to_user};
-use crate::task::current_task;
+use crate::mm::{
+    VPNRange, VirtAddr, check_user_writable, copy_cstr_from_user, copy_from_user, copy_to_user,
+};
+use crate::signal::sig_struct::{Sig, SigSet};
+use crate::task::{current_task, yield_current_task};
 use crate::timer::{TimeSpec, get_time_ms};
 
-const UTIME_NOW: usize = 1_073_741_823;
-const UTIME_OMIT: usize = 1_073_741_822;
+const UTIME_NOW: isize = 1_073_741_823;
+const UTIME_OMIT: isize = 1_073_741_822;
 const F_OK: usize = 0;
 const X_OK: usize = 1;
 const W_OK: usize = 2;
@@ -334,8 +338,8 @@ fn validate_utimens_time(ts: TimeSpec) -> SysResult<TimeSpec> {
 fn current_timespec() -> TimeSpec {
     let ms = get_time_ms();
     TimeSpec {
-        sec: ms / 1000,
-        nsec: (ms % 1000) * 1_000_000,
+        sec: (ms / 1000) as isize,
+        nsec: ((ms % 1000) * 1_000_000) as isize,
     }
 }
 
@@ -912,4 +916,407 @@ pub fn sys_readlinkat(
         copy_to_user(buf, bytes.as_ptr(), n)?;
     }
     Ok(n)
+}
+
+/// pselect6 的 sigmask 参数不是单纯的 sigset_t*，而是一个（sigset_t* + size_t）对。
+/// musl/glibc 都会把这个结构体的地址传给内核。
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+struct Pselect6Sigmask {
+    sigmask: usize,
+    sigsetsize: usize,
+}
+
+/// 解析 pselect6 超时参数。
+///
+/// - `None`   → 无限等待，直到有 fd 就绪或信号中断
+/// - `Some(0)` → 不等待，立即返回当前就绪状态
+/// - `Some(t)` → 等待最多 t 微秒
+fn pselect_timeout_us(timeout: *const TimeSpec) -> SysResult<Option<usize>> {
+    if timeout.is_null() {
+        return Ok(None);
+    }
+
+    let mut tmo = TimeSpec::default();
+    copy_from_user(&mut tmo as *mut TimeSpec, timeout, 1)?;
+    tmo.checked_duration_us().ok_or(Errno::EINVAL).map(Some)
+}
+
+/// 解析 pselect6 信号掩码参数。
+///
+/// `sigmask == 0` 表示不修改掩码（类似 select 行为）。
+/// 否则从用户空间读取 sigset_t，过滤掉不可屏蔽的 SIGKILL/SIGSTOP。
+fn pselect_sigmask(sigmask: usize) -> SysResult<Option<SigSet>> {
+    if sigmask == 0 {
+        return Ok(None);
+    }
+
+    let mut user_arg = Pselect6Sigmask::default();
+    copy_from_user(
+        &mut user_arg as *mut Pselect6Sigmask,
+        sigmask as *const Pselect6Sigmask,
+        1,
+    )?;
+    if user_arg.sigmask == 0 {
+        return Ok(None);
+    }
+    if user_arg.sigsetsize != core::mem::size_of::<SigSet>() {
+        return Err(Errno::EINVAL);
+    }
+
+    let mut new_mask = SigSet::empty();
+    copy_from_user(
+        &mut new_mask as *mut SigSet,
+        user_arg.sigmask as *const SigSet,
+        1,
+    )?;
+    new_mask.remove_signal(Sig::SIGKILL);
+    new_mask.remove_signal(Sig::SIGSTOP);
+    Ok(Some(new_mask))
+}
+
+/// pselect6 — 等待多个文件描述符就绪，带超时和信号掩码。
+///
+/// 退出条件（任一满足即返回）：
+/// 1. 有 fd 可读/可写 → 返回就绪 fd 数
+/// 2. 超时到期 → 返回 0
+/// 3. 被信号中断 → 返回 EINTR
+///
+/// sigmask 允许原子替换信号掩码；函数返回后自动恢复原掩码。
+pub fn sys_pselect6(
+    nfds: usize,
+    readfds: usize,
+    writefds: usize,
+    exceptfds: usize,
+    timeout: *const TimeSpec,
+    sigmask: usize,
+) -> SysResult<usize> {
+    let timeout_us = pselect_timeout_us(timeout)?;
+    let new_mask = pselect_sigmask(sigmask)?;
+
+    // 保存并替换信号掩码（pselect6 的 sigmask 参数语义）
+    let task = current_task().expect("[kernel] current task is None.");
+    let origin_mask = task.op_sig_pending(|pending| pending.mask);
+    if let Some(mask) = new_mask {
+        task.op_sig_pending_mut(|pending| pending.mask = mask);
+    }
+
+    // 闭包保证 cleanup（恢复掩码）在任意退出路径上都执行
+    let result = (|| {
+        let start_ms = get_time_ms();
+        let mut readfditer = init_fdset(readfds, nfds)?;
+        let mut writeiter = init_fdset(writefds, nfds)?;
+        let mut exceptiter = init_fdset(exceptfds, nfds)?;
+
+        let mut set;
+        loop {
+            set = 0;
+
+            // 轮询可读 fd：fd 必须是以读模式打开 且 数据立即可用
+            if readfditer.fdset.valid() {
+                readfditer.fdset.clear();
+                for i in 0..readfditer.fds.len() {
+                    let fd = readfditer.fds[i];
+                    let file = &readfditer.files[i];
+                    if file.readable() && file.read_ready() {
+                        readfditer.fdset.set(fd);
+                        set += 1;
+                    }
+                }
+            }
+
+            // 轮询可写 fd：fd 必须是以写模式打开 且 缓冲区有空间
+            if writeiter.fdset.valid() {
+                writeiter.fdset.clear();
+                for i in 0..writeiter.fds.len() {
+                    let fd = writeiter.fds[i];
+                    let file = &writeiter.files[i];
+                    if file.writable() && file.write_ready() {
+                        writeiter.fdset.set(fd);
+                        set += 1;
+                    }
+                }
+            }
+
+            // 当前文件对象没有 out-of-band/异常事件来源，exceptfds 只做合法性检查和清零写回。
+            if exceptiter.fdset.valid() {
+                exceptiter.fdset.clear();
+            }
+
+            if set > 0 {
+                break;
+            }
+
+            if let Some(timeout_us) = timeout_us {
+                if timeout_us == 0 {
+                    break;
+                }
+                let elapsed_us = (get_time_ms().saturating_sub(start_ms)) * 1000;
+                if elapsed_us >= timeout_us {
+                    break;
+                }
+            }
+
+            // 在 yield 前标记可中断，让信号能在调度器中被检测到
+            task.set_interruptible(true);
+            if task.check_signal_interrupt() || task.is_interrupted() {
+                task.clear_interrupted();
+                task.set_interruptible(false);
+                return Err(Errno::EINTR);
+            }
+            yield_current_task();
+            // yield 后再次检查：其他任务或信号可能设置了中断标志
+            if task.is_interrupted() {
+                task.clear_interrupted();
+                task.set_interruptible(false);
+                return Err(Errno::EINTR);
+            }
+            task.set_interruptible(false);
+        }
+
+        // 将内核修改后的 fd_set 写回用户空间
+        if readfditer.fdset.valid() {
+            readfditer.fdset.write_back()?;
+        }
+        if writeiter.fdset.valid() {
+            writeiter.fdset.write_back()?;
+        }
+        if exceptiter.fdset.valid() {
+            exceptiter.fdset.write_back()?;
+        }
+
+        Ok(set)
+    })();
+
+    // 确保无论如何退出都恢复原状态
+    task.set_interruptible(false);
+    if new_mask.is_some() {
+        task.op_sig_pending_mut(|pending| pending.mask = origin_mask);
+    }
+
+    result
+}
+
+/// 系统调用 sys-fsync — 将文件缓冲数据刷入存储介质。
+/// 当前文件系统实现在内存中，直接返回成功。
+pub fn sys_fsync(fd: usize) -> SysResult<usize> {
+    let task = current_task().expect("[kernel] current task is None.");
+    let file = task.get_fd_entry(fd)?.file;
+    file.fsync()
+}
+
+/// 系统调用 sys-fdatasync — 当前等价于 fsync。
+pub fn sys_fdatasync(fd: usize) -> SysResult<usize> {
+    sys_fsync(fd)
+}
+
+/// 系统调用 sys-msync — 同步 mmap 映射区域与文件。
+///
+/// 支持的 flags：
+/// - MS_ASYNC (1)：异步写回。当前无操作。
+/// - MS_INVALIDATE (2)：当前无页缓存失效实现，仅做参数与地址校验。
+/// - MS_SYNC (4)：同步写回。当前无操作。
+///
+/// MS_ASYNC 和 MS_SYNC 互斥。
+pub fn sys_msync(addr: usize, len: usize, flags: i32) -> SysResult<usize> {
+    const MS_ASYNC: i32 = 1;
+    const MS_INVALIDATE: i32 = 2;
+    const MS_SYNC: i32 = 4;
+    const MS_ALLOWED_FLAGS: i32 = MS_ASYNC | MS_INVALIDATE | MS_SYNC;
+
+    if addr % PAGE_SIZE != 0 {
+        return Err(Errno::EINVAL);
+    }
+    if flags & !MS_ALLOWED_FLAGS != 0 {
+        return Err(Errno::EINVAL);
+    }
+    if flags & MS_ASYNC != 0 && flags & MS_SYNC != 0 {
+        return Err(Errno::EINVAL);
+    }
+
+    if len == 0 {
+        return Ok(0);
+    }
+
+    let end = addr.checked_add(len).ok_or(Errno::EINVAL)?;
+    let start_vpn = VirtAddr::from(addr).floor();
+    let end_vpn = VirtAddr::from(end).ceil();
+    let vpn_range = VPNRange::new(start_vpn, end_vpn);
+    let task = current_task().expect("[kernel] current task is None.");
+    task.op_memory_set_read(|memory_set| memory_set.check_user_mapped_range(vpn_range))?;
+
+    Ok(0)
+}
+
+/// 系统调用 preadv — 从指定文件偏移处读取数据，分散写入多个用户缓冲区。
+///
+///
+/// 语义细节：
+/// - 中途出错且已有部分数据读取时，返回已读字节数而非 -1
+/// - 短读（read 返回不足请求长度）直接终止，不再处理后续 iov
+pub fn sys_preadv(
+    fd: usize,
+    iov_ptr: *const IoVec,
+    iovcnt: usize,
+    offset: isize,
+) -> SysResult<usize> {
+    const IOV_MAX: usize = 1024;
+    if offset < 0 || iovcnt > IOV_MAX {
+        return Err(Errno::EINVAL);
+    }
+    if iovcnt == 0 {
+        return Ok(0);
+    }
+
+    let task = current_task().expect("[kernel] current task is None.");
+    let file = task.get_fd_entry(fd)?.file;
+    if !file.readable() {
+        return Err(Errno::EBADF);
+    }
+    file.can_seek()?;
+
+    let old_offset = file.get_offset(); // 保存原偏移
+    file.seek(offset)?; // 定位到写入起点
+
+    let mut total: usize = 0;
+    for idx in 0..iovcnt {
+        let mut item = IoVec {
+            base: core::ptr::null_mut(),
+            len: 0,
+        };
+        let iov_ret = unsafe { copy_from_user(&mut item as *mut IoVec, iov_ptr.add(idx), 1) };
+        if let Err(err) = iov_ret {
+            let _ = file.seek(old_offset as isize);
+            return if total > 0 { Ok(total) } else { Err(err) };
+        }
+        if item.len == 0 {
+            continue;
+        }
+        // 复用 sys_read 完成单段读取（内部走 file.read()，偏移自动推进）
+        match sys_read(fd, item.base, item.len) {
+            Ok(read) => {
+                total = total.checked_add(read).ok_or(Errno::EINVAL)?;
+                if read < item.len {
+                    break; // 短读：文件已读完，不再续读后续 iov
+                }
+            }
+            Err(err) => {
+                let _ = file.seek(old_offset as isize);
+                return if total > 0 { Ok(total) } else { Err(err) };
+            }
+        }
+    }
+
+    let _ = file.seek(old_offset as isize); // 恢复原偏移
+    Ok(total)
+}
+
+/// 系统调用 pwritev — 将多个用户缓冲区的数据连续写入文件指定偏移处。
+///
+/// 与 writev 的区别：不依赖（也不修改）文件的当前偏移量，
+/// 而是从 offset 处开始写入。多个 iov 条目连续写入：
+/// offset, offset+len0, offset+len0+len1, ...
+///
+/// 语义细节（与 Linux pwritev 对齐）：
+/// - 中途出错且已有部分数据写入时，返回已写字节数而非 -1
+/// - 短写（write 返回不足请求长度）直接终止，不再处理后续 iov
+pub fn sys_pwritev(
+    fd: usize,
+    iov_ptr: *const IoVec,
+    iovcnt: usize,
+    offset: isize,
+) -> SysResult<usize> {
+    const IOV_MAX: usize = 1024;
+    if offset < 0 || iovcnt > IOV_MAX {
+        return Err(Errno::EINVAL);
+    }
+    if iovcnt == 0 {
+        return Ok(0);
+    }
+
+    let task = current_task().expect("[kernel] current task is None.");
+    let file = task.get_fd_entry(fd)?.file;
+    if !file.writable() {
+        return Err(Errno::EBADF);
+    }
+    file.can_seek()?;
+
+    let old_offset = file.get_offset(); // 保存原偏移
+    file.seek(offset)?; // 定位到写入起点
+
+    let mut total: usize = 0;
+    for idx in 0..iovcnt {
+        let mut item = IoVec {
+            base: core::ptr::null_mut(),
+            len: 0,
+        };
+        let iov_ret = unsafe { copy_from_user(&mut item as *mut IoVec, iov_ptr.add(idx), 1) };
+        if let Err(err) = iov_ret {
+            let _ = file.seek(old_offset as isize);
+            return if total > 0 { Ok(total) } else { Err(err) };
+        }
+        if item.len == 0 {
+            continue;
+        }
+        // 复用 sys_write 完成单段写入（内部走 file.write()，偏移自动推进）
+        match sys_write(fd, item.base, item.len) {
+            Ok(written) => {
+                total = total.checked_add(written).ok_or(Errno::EINVAL)?;
+                if written < item.len {
+                    break; // 短写：文件空间不足，不再续写后续 iov
+                }
+            }
+            Err(err) => {
+                let _ = file.seek(old_offset as isize);
+                return if total > 0 { Ok(total) } else { Err(err) };
+            }
+        }
+    }
+
+    let _ = file.seek(old_offset as isize); // 恢复原偏移
+    Ok(total)
+}
+
+/// 系统调用 preadv2 — preadv 的扩展版本，增加 flags 参数。
+///
+/// offset == -1 时等价于 readv（使用文件当前偏移），
+/// 否则等价于 preadv（从指定偏移读取）。
+/// 当前内核不支持任何 flags（如 RWF_HIPRI/RWF_DSYNC 等）。
+pub fn sys_preadv2(
+    fd: usize,
+    iov_ptr: *const IoVec,
+    iovcnt: usize,
+    offset: isize,
+    flags: i32,
+) -> SysResult<usize> {
+    if flags != 0 {
+        return Err(Errno::EOPNOTSUPP);
+    }
+    if offset == -1 {
+        sys_readv(fd, iov_ptr, iovcnt)
+    } else {
+        sys_preadv(fd, iov_ptr, iovcnt, offset)
+    }
+}
+
+/// 系统调用 pwritev2 — pwritev 的扩展版本，增加 flags 参数。
+///
+/// offset == -1 时等价于 writev（使用文件当前偏移），
+/// 否则等价于 pwritev（从指定偏移写入）。
+/// 当前内核不支持任何 flags。
+pub fn sys_pwritev2(
+    fd: usize,
+    iov_ptr: *const IoVec,
+    iovcnt: usize,
+    offset: isize,
+    flags: i32,
+) -> SysResult<usize> {
+    if flags != 0 {
+        return Err(Errno::EOPNOTSUPP);
+    }
+    if offset == -1 {
+        sys_writev(fd, iov_ptr, iovcnt)
+    } else {
+        sys_pwritev(fd, iov_ptr, iovcnt, offset)
+    }
 }

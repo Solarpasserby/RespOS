@@ -229,15 +229,15 @@ impl Ext4Inode {
     fn now_timespec() -> TimeSpec {
         let ms = get_time_ms();
         TimeSpec {
-            sec: ms / 1000,
-            nsec: (ms % 1000) * 1_000_000,
+            sec: (ms / 1000) as isize,
+            nsec: ((ms % 1000) * 1_000_000) as isize,
         }
     }
 
     fn normalize_lower_time(sec: u32) -> TimeSpec {
         let now = Self::now_timespec();
         let ts = TimeSpec {
-            sec: sec as usize,
+            sec: sec as isize,
             nsec: 0,
         };
         // TODO[ABI-COMPAT]: 当前 CLOCK_REALTIME 仍是开机时间，镜像里的 ext4
@@ -270,7 +270,7 @@ impl Ext4Inode {
         ts: TimeSpec,
         setter: unsafe extern "C" fn(*const core::ffi::c_char, u32) -> i32,
     ) -> SysResult {
-        if ts.sec > u32::MAX as usize {
+        if ts.sec < 0 || ts.sec > u32::MAX as isize {
             return Ok(());
         }
         let ret = unsafe { setter(c_path, ts.sec as u32) };

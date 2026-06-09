@@ -2,7 +2,7 @@
 
 use super::{Errno, SysResult};
 use crate::mm::{copy_from_user, copy_to_user};
-use crate::timer::{TimeSpec, get_time_ms};
+use crate::timer::{TimeSpec, get_time_ms, get_time_us};
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -41,10 +41,10 @@ pub fn sys_times(buf: *mut Tms) -> SysResult<usize> {
 }
 
 pub fn sys_gettimeofday(tv: *mut TimeVal, _tz: usize) -> SysResult<usize> {
-    let ms = get_time_ms();
+    let us = get_time_us();
     let time_val = TimeVal {
-        sec: ms / 1000,
-        usec: (ms % 1000) * 1000,
+        sec: us / 1_000_000,
+        usec: us % 1_000_000,
     };
     copy_to_user(tv, &time_val as *const TimeVal, 1)?;
     Ok(0)
@@ -73,8 +73,8 @@ pub fn sys_clock_gettime(clock_id: usize, tp: *mut TimeSpec) -> SysResult<usize>
         | CLOCK_BOOTTIME => {
             let ms = get_time_ms();
             let time_spec = TimeSpec {
-                sec: ms / 1000,
-                nsec: (ms % 1000) * 1_000_000,
+                sec: (ms / 1000) as isize,
+                nsec: ((ms % 1000) * 1_000_000) as isize,
             };
             copy_to_user(tp, &time_spec as *const TimeSpec, 1)?;
             Ok(0)
@@ -86,10 +86,10 @@ pub fn sys_clock_gettime(clock_id: usize, tp: *mut TimeSpec) -> SysResult<usize>
 /// 系统调用 sys-nanosleep
 ///
 /// TODO: 实现较简单，且未实现信号打断机制
-pub fn sys_nanosleep(req: *const TimeVal, _rem: *mut TimeVal) -> SysResult<usize> {
-    let mut time_val = TimeVal { sec: 0, usec: 0 };
-    copy_from_user(&mut time_val as *mut TimeVal, req, 1)?;
-    let time_ms = time_val.sec * 1000 + time_val.usec / 1000;
+pub fn sys_nanosleep(req: *const TimeSpec, _rem: *mut TimeSpec) -> SysResult<usize> {
+    let mut req_time = TimeSpec::default();
+    copy_from_user(&mut req_time as *mut TimeSpec, req, 1)?;
+    let time_ms = req_time.checked_duration_ms().ok_or(Errno::EINVAL)?;
 
     let start_time = get_time_ms();
     loop {
