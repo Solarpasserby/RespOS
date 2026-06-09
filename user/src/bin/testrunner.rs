@@ -95,10 +95,10 @@ fn _run_dynamic_musl() {
 }
 
 fn _run_libctest_musl() {
-    println!("#### OS COMP TEST GROUP START libctest ####");
+    println!("#### OS COMP TEST GROUP START libctest-musl ####");
     _run_static_musl();
     _run_dynamic_musl();
-    println!("#### OS COMP TEST GROUP END libctest ####");
+    println!("#### OS COMP TEST GROUP END libctest-musl ####");
 }
 
 fn read_file(path: &str, buf: &mut [u8]) -> isize {
