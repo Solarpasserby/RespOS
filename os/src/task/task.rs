@@ -378,13 +378,16 @@ impl TaskControlBlock {
         // 刷新页表，由于应用程序通过异常进入，在异常返回时不会刷新页表
         // 为了程序返回后看到的地址空间为自身而非父任务的地址空间，需要主动刷新页表
         memory_set_guard.activate();
+        /* ===== 修改用户栈数据 ===== */
+        let (argv_base, envp_base, auxv_base, stack_top) = init_user_stack(
+            &mut memory_set_guard,
+            args.as_slice(),
+            envs.as_slice(),
+            aux_vec,
+            &mut user_sp,
+        )?;
         drop(old_memory_set);
         drop(memory_set_guard);
-
-        /* ===== 修改用户栈数据 ===== */
-        // 需保证页表已刷新，函数内部直接访存高度依赖
-        let (argv_base, envp_base, auxv_base, stack_top) =
-            init_user_stack(args.as_slice(), envs.as_slice(), aux_vec, &mut user_sp);
 
         /* ===== 修改异常上下文 ===== */
         let argc = args.len();
@@ -1077,11 +1080,12 @@ pub fn task_group_exit_by_signal(task: Arc<TaskControlBlock>, signal: i32) {
 
 // 将命令行参数和环境变量压入用户栈
 fn init_user_stack(
+    memory_set: &mut MemorySet,
     args_vec: &[String],
     envs_vec: &[String],
     mut auxv: Vec<AuxHeader>,
     user_sp: &mut usize,
-) -> (usize, usize, usize, usize) {
+) -> SysResult<(usize, usize, usize, usize)> {
     const STACK_ALIGN: usize = 16;
 
     #[inline(always)]
@@ -1089,51 +1093,72 @@ fn init_user_stack(
         addr & !(STACK_ALIGN - 1)
     }
 
-    fn push_strings_to_stack(strings: &[String], stack_ptr: &mut usize) -> Vec<usize> {
+    fn push_bytes_to_stack(
+        memory_set: &mut MemorySet,
+        bytes: &[u8],
+        stack_ptr: &mut usize,
+    ) -> SysResult<usize> {
+        *stack_ptr -= bytes.len();
+        memory_set.write_bytes_to_mapped_range(*stack_ptr, bytes)?;
+        Ok(*stack_ptr)
+    }
+
+    fn push_strings_to_stack(
+        memory_set: &mut MemorySet,
+        strings: &[String],
+        stack_ptr: &mut usize,
+    ) -> SysResult<Vec<usize>> {
         let mut addresses = Vec::with_capacity(strings.len());
 
         for string in strings {
-            *stack_ptr -= string.len() + 1;
-            let ptr = *stack_ptr as *mut u8;
-            unsafe {
-                ptr.copy_from_nonoverlapping(string.as_ptr(), string.len());
-                ptr.add(string.len()).write(0);
-            }
+            let addr = push_bytes_to_stack(memory_set, &[0], stack_ptr)?;
+            *stack_ptr = addr - string.len();
+            memory_set.write_bytes_to_mapped_range(*stack_ptr, string.as_bytes())?;
             addresses.push(*stack_ptr);
         }
 
         *stack_ptr = align_down(*stack_ptr);
-        addresses
+        Ok(addresses)
     }
 
-    fn push_usize_to_stack(value: usize, stack_ptr: &mut usize) {
+    fn push_usize_to_stack(
+        memory_set: &mut MemorySet,
+        value: usize,
+        stack_ptr: &mut usize,
+    ) -> SysResult {
         *stack_ptr -= core::mem::size_of::<usize>();
-        unsafe {
-            *(*stack_ptr as *mut usize) = value;
-        }
+        memory_set.write_bytes_to_mapped_range(*stack_ptr, &value.to_ne_bytes())
     }
 
-    fn push_pointers_to_stack(pointers: &[usize], stack_ptr: &mut usize) -> usize {
-        push_usize_to_stack(0, stack_ptr);
+    fn push_pointers_to_stack(
+        memory_set: &mut MemorySet,
+        pointers: &[usize],
+        stack_ptr: &mut usize,
+    ) -> SysResult<usize> {
+        push_usize_to_stack(memory_set, 0, stack_ptr)?;
         for &ptr in pointers.iter().rev() {
-            push_usize_to_stack(ptr, stack_ptr);
+            push_usize_to_stack(memory_set, ptr, stack_ptr)?;
         }
-        *stack_ptr
+        Ok(*stack_ptr)
     }
 
-    fn push_auxv_to_stack(auxv: &[AuxHeader], stack_ptr: &mut usize) -> usize {
+    fn push_auxv_to_stack(
+        memory_set: &mut MemorySet,
+        auxv: &[AuxHeader],
+        stack_ptr: &mut usize,
+    ) -> SysResult<usize> {
         for header in auxv.iter().rev() {
-            push_usize_to_stack(header.value, stack_ptr);
-            push_usize_to_stack(header.aux_type, stack_ptr);
+            push_usize_to_stack(memory_set, header.value, stack_ptr)?;
+            push_usize_to_stack(memory_set, header.aux_type, stack_ptr)?;
         }
-        *stack_ptr
+        Ok(*stack_ptr)
     }
 
     *user_sp = align_down(*user_sp);
 
     // 字符串内容可以位于指针数组之上，argv/envp 数组保存实际地址。
-    let envp = push_strings_to_stack(envs_vec, user_sp);
-    let argv = push_strings_to_stack(args_vec, user_sp);
+    let envp = push_strings_to_stack(memory_set, envs_vec, user_sp)?;
+    let argv = push_strings_to_stack(memory_set, args_vec, user_sp)?;
 
     // —— 压入 AT_PLATFORM 字符串 ——
     #[cfg(target_arch = "riscv64")]
@@ -1143,26 +1168,22 @@ fn init_user_stack(
 
     *user_sp -= platform.len() + 1;
     *user_sp -= *user_sp % core::mem::size_of::<usize>();
-    unsafe {
-        let ptr = *user_sp as *mut u8;
-        ptr.copy_from_nonoverlapping(platform.as_ptr(), platform.len());
-        ptr.add(platform.len()).write(0);
-    }
+    memory_set.write_bytes_to_mapped_range(*user_sp, platform.as_bytes())?;
+    memory_set.write_bytes_to_mapped_range(*user_sp + platform.len(), &[0])?;
     let platform_addr = *user_sp;
 
     // —— 压入 16 字节随机数 ——
     *user_sp -= 16;
     let random_addr = *user_sp;
-    unsafe {
-        let random = random_addr as *mut u8;
-        let mut seed = random_addr ^ args_vec.len() ^ envs_vec.len().wrapping_shl(8);
-        for idx in 0..16 {
-            seed ^= seed << 7;
-            seed ^= seed >> 9;
-            seed ^= (idx + 1usize).wrapping_mul(0x9e37_79b9);
-            random.add(idx).write(seed as u8);
-        }
+    let mut random = [0u8; 16];
+    let mut seed = random_addr ^ args_vec.len() ^ envs_vec.len().wrapping_shl(8);
+    for (idx, byte) in random.iter_mut().enumerate() {
+        seed ^= seed << 7;
+        seed ^= seed >> 9;
+        seed ^= (idx + 1usize).wrapping_mul(0x9e37_79b9);
+        *byte = seed as u8;
     }
+    memory_set.write_bytes_to_mapped_range(random_addr, &random)?;
 
     // —— 追加动态 aux 条目 ——
     auxv.push(AuxHeader {
@@ -1191,12 +1212,12 @@ fn init_user_stack(
     let padding = (STACK_ALIGN - pointer_bytes % STACK_ALIGN) % STACK_ALIGN;
     *user_sp -= padding;
 
-    let auxv_base = push_auxv_to_stack(&auxv, user_sp);
-    let envp_base = push_pointers_to_stack(&envp, user_sp);
-    let argv_base = push_pointers_to_stack(&argv, user_sp);
-    push_usize_to_stack(args_vec.len(), user_sp);
+    let auxv_base = push_auxv_to_stack(memory_set, &auxv, user_sp)?;
+    let envp_base = push_pointers_to_stack(memory_set, &envp, user_sp)?;
+    let argv_base = push_pointers_to_stack(memory_set, &argv, user_sp)?;
+    push_usize_to_stack(memory_set, args_vec.len(), user_sp)?;
 
-    (argv_base, envp_base, auxv_base, *user_sp)
+    Ok((argv_base, envp_base, auxv_base, *user_sp))
 }
 
 /// 线程组结构

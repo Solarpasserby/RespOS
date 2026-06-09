@@ -290,6 +290,10 @@ impl MemorySet {
     ///
     /// 该函数通过页表找到物理页后写内核直映地址，不受用户页 PTE 的
     /// 读写权限影响，适合用于 `mmap` 初始化只读文件页。
+    /// 将字节数据写入用户地址空间中已映射的虚拟地址范围。
+    ///
+    /// execve 初始化用户栈（argv/envp/auxv）时使用：新地址空间的用户栈页
+    /// 已在 MemorySet 中建立映射，通过页表翻译到物理页直接写入，避免依赖尚未设置的当前页表
     pub fn write_bytes_to_mapped_range(&mut self, start: usize, data: &[u8]) -> SysResult {
         let end = start.checked_add(data.len()).ok_or(Errno::EFAULT)?;
         let mut copied = 0usize;

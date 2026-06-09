@@ -86,7 +86,15 @@ const CTRL_BLK_SIZE: usize = core::mem::size_of::<MemoryControlBlock>();
 #[no_mangle]
 pub extern "C" fn malloc(size: c_size_t) -> *mut c_void {
     // Allocate `(actual length) + 8`. The lowest 8 Bytes are stored in the actual allocated space size.
-    let layout = Layout::from_size_align(size + CTRL_BLK_SIZE, 8).unwrap();
+    // 防御：size + CTRL_BLK_SIZE 溢出时 wrapping 会导致 Layout 不合法，alloc 会直接 panic。这里提前检查，返回 null
+    let Some(alloc_size) = size.checked_add(CTRL_BLK_SIZE) else {
+        warn!("malloc size overflow: {}", size);
+        return core::ptr::null_mut();
+    };
+    let Ok(layout) = Layout::from_size_align(alloc_size, 8) else {
+        warn!("malloc invalid layout: {}", alloc_size);
+        return core::ptr::null_mut();
+    };
     unsafe {
         let ptr = alloc(layout);
         assert!(!ptr.is_null(), "malloc failed");
@@ -111,7 +119,15 @@ pub extern "C" fn free(ptr: *mut c_void) {
     unsafe {
         let ptr = ptr.sub(1);
         let size = ptr.read().size;
-        let layout = Layout::from_size_align(size + CTRL_BLK_SIZE, 8).unwrap();
+        // 防御：与 malloc 对称，避免 size + CTRL_BLK_SIZE 溢出导致 dealloc panic
+        let Some(alloc_size) = size.checked_add(CTRL_BLK_SIZE) else {
+            warn!("free size overflow: {}", size);
+            return;
+        };
+        let Ok(layout) = Layout::from_size_align(alloc_size, 8) else {
+            warn!("free invalid layout: {}", alloc_size);
+            return;
+        };
         dealloc(ptr.cast(), layout)
     }
 }
