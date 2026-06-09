@@ -9,6 +9,7 @@ use crate::config::{
     MMAP_MIN_ADDR, PAGE_SIZE, PAGE_SIZE_BITS, TRAMPOLINE, TRAMPOLINE_CODE, USER_STACK_SIZE,
     VIRTIO_MMIO,
 };
+use crate::fs::{AT_FDCWD, path_open};
 use crate::syscall::{Errno, SysResult};
 use crate::task::{
     AT_BASE, AT_CLKTCK, AT_EGID, AT_ENTRY, AT_EUID, AT_GID, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM,
@@ -42,6 +43,27 @@ lazy_static! {
     /// 由于内核空间被所有用户空间共享，所以使用 `Arc` 来实现共享，使用 `Mutex` 来实现内部可变性
     pub static ref KERNEL_SPACE: Arc<Mutex<MemorySet>> =
         Arc::new(Mutex::new(MemorySet::new_kernel()));
+}
+
+fn dynamic_linker_candidates(interp: &str) -> [&str; 3] {
+    match interp {
+        "/lib/ld-musl-riscv64-sf.so.1" | "/lib/ld-musl-riscv64.so.1" => {
+            ["/musl/lib/libc.so", "/musl/libc.so", interp]
+        }
+        _ => [interp, "/musl/lib/libc.so", "/musl/libc.so"],
+    }
+}
+
+fn read_dynamic_linker(interp: &str) -> Option<Vec<u8>> {
+    for path in dynamic_linker_candidates(interp) {
+        if let Ok(file) = path_open(AT_FDCWD, path, 0, 0) {
+            if let Ok(data) = file.read_all() {
+                info!("[from_elf_data] dynamic linker {} resolved to {}", interp, path);
+                return Some(data);
+            }
+        }
+    }
+    None
 }
 
 /// 地址空间
@@ -284,6 +306,23 @@ impl MemorySet {
             self.mmap_start = end;
         }
         Ok(start)
+    }
+
+    pub fn copy_to_mapped_area(&self, start: usize, data: &[u8]) -> SysResult {
+        let mut copied = 0usize;
+        while copied < data.len() {
+            let va = VirtAddr::from(start + copied);
+            let page_off = va.page_offset();
+            let n = (data.len() - copied).min(PAGE_SIZE - page_off);
+            let pte = self.page_table.translate(va.floor()).ok_or(Errno::EFAULT)?;
+            if !pte.is_valid() {
+                return Err(Errno::EFAULT);
+            }
+            let dst = &mut pte.ppn().get_bytes_array()[page_off..page_off + n];
+            dst.copy_from_slice(&data[copied..copied + n]);
+            copied += n;
+        }
+        Ok(())
     }
 
     // TOFIX: mmap 在分配内存时，如果分配跨过 2 MB 页表区间，则会导致第一个落进去的线程 TLS/启动栈会变成零
@@ -725,7 +764,8 @@ impl MemorySet {
         assert_eq!(magic, [0x7f, 0x45, 0x4c, 0x46], "invalid elf!");
         let ph_count = elf_header.pt2.ph_count();
         let ph_entsize = elf_header.pt2.ph_entry_size() as usize;
-        let mut entry_point = elf_header.pt2.entry_point() as usize;
+        let app_entry_point = elf_header.pt2.entry_point() as usize;
+        let mut entry_point = app_entry_point;
 
         let mut max_vpn_end = VirtPageNum(0);
         let mut ph_va: usize = 0;
@@ -770,11 +810,16 @@ impl MemorySet {
 
             if ph_type == xmas_elf::program::Type::Interp {
                 need_dl = true;
+                let start = ph.offset() as usize;
+                let end = start + ph.file_size() as usize;
+                if let Ok(s) = core::str::from_utf8(&elf.input[start..end]) {
+                    interp_path = Some(alloc::string::String::from(s.trim_end_matches('\0')));
+                }
             }
         }
 
-        // —— 读取 .interp section 获取动态链接器路径 ——
-        if need_dl {
+        // —— 兼容未剥离 ELF：若 PT_INTERP 未能解析，再尝试 .interp section ——
+        if need_dl && interp_path.is_none() {
             if let Some(section) = elf.find_section_by_name(".interp") {
                 let raw = section.raw_data(&elf);
                 if let Ok(s) = core::str::from_utf8(raw) {
@@ -785,8 +830,12 @@ impl MemorySet {
 
         // —— 加载动态链接器 ——
         if let Some(ref interp) = interp_path {
-            // 尝试从内置应用数据中加载动态链接器
-            if let Some(interp_data) = crate::loader::get_app_data_by_name(interp) {
+            let fs_interp_data = read_dynamic_linker(interp);
+            let interp_data = fs_interp_data
+                .as_deref()
+                .or_else(|| crate::loader::get_app_data_by_name(interp));
+
+            if let Some(interp_data) = interp_data {
                 let interp_elf = xmas_elf::ElfFile::new(interp_data).unwrap();
                 let interp_head = interp_elf.header;
                 let interp_ph_count = interp_head.pt2.ph_count();
@@ -857,7 +906,7 @@ impl MemorySet {
             },
             AuxHeader {
                 aux_type: AT_ENTRY,
-                value: entry_point
+                value: app_entry_point
             },
             AuxHeader {
                 aux_type: AT_UID,

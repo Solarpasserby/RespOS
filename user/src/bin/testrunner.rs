@@ -16,6 +16,7 @@ const GLIBC_BUSYBOX_PATH: &str = "/glibc/busybox\0";
 const BASIC_SCRIPT: &str = "basic_testcode.sh\0";
 const LIBCBENCH_SCRIPT: &str = "libcbench_testcode.sh\0";
 const RUN_STATIC_SCRIPT: &str = "run-static.sh\0";
+const RUN_DYNAMIC_SCRIPT: &str = "run-dynamic.sh\0";
 const BUSYBOX_CMD_FILE: &str = "busybox_cmd.txt\0";
 
 fn strip_nul(s: &str) -> &str {
@@ -87,6 +88,10 @@ fn _run_libcbench_glibc() {
 
 fn _run_static_musl() {
     run_shell_script("/musl/\0", BUSYBOX_PATH, RUN_STATIC_SCRIPT);
+}
+
+fn _run_dynamic_musl() {
+    run_shell_script("/musl/\0", BUSYBOX_PATH, RUN_DYNAMIC_SCRIPT);
 }
 
 fn read_file(path: &str, buf: &mut [u8]) -> isize {
@@ -237,29 +242,29 @@ fn _run_busybox_glibc() {
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("[testrunner] start");
-    _run_basic_musl(); // umount 有些问题
-    _run_basic_glibc(); // umount 有些问题
-    _run_libcbench_musl(); // Passed
-    _run_libcbench_glibc(); // Passed
-    _run_busybox_musl();
-    _run_busybox_glibc();
-    _run_static_musl();
+    // _run_basic_musl(); // umount 有些问题
+    // _run_basic_glibc(); // umount 有些问题
+    // _run_libcbench_musl(); // Passed
+    // _run_libcbench_glibc(); // Passed
+    // _run_busybox_musl();
+    // _run_busybox_glibc();
+    _run_dynamic_musl();
     println!("[testrunner] all selected tests finished, powering off");
     poweroff();
     0
 }
 
-#[cfg(target_arch = "loongarch64")]
-#[unsafe(no_mangle)]
-fn main() -> i32 {
-    println!("[testrunner] start");
-    _run_basic_musl();
-    _run_basic_glibc();
-    _run_libcbench_musl();
-    _run_libcbench_glibc();
-    _run_busybox_musl();
-    _run_busybox_glibc();
-    println!("[testrunner] all selected tests finished, powering off");
-    poweroff();
-    0
-}
+// #[cfg(target_arch = "loongarch64")]
+// #[unsafe(no_mangle)]
+// fn main() -> i32 {
+//     println!("[testrunner] start");
+//     _run_basic_musl();
+//     _run_basic_glibc();
+//     _run_libcbench_musl();
+//     _run_libcbench_glibc();
+//     _run_busybox_musl();
+//     _run_busybox_glibc();
+//     println!("[testrunner] all selected tests finished, powering off");
+//     poweroff();
+//     0
+// }

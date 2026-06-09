@@ -4,6 +4,7 @@ use super::{Errno, SysResult};
 use crate::config::{MMAP_MIN_ADDR, PAGE_SIZE};
 use crate::mm::{MapPermission, VPNRange, VirtAddr};
 use crate::task::current_task;
+use alloc::vec;
 use bitflags::bitflags;
 
 /// 系统调用 sys-brk
@@ -102,21 +103,20 @@ pub fn sys_mmap(
             return Err(Errno::EACCES);
         }
 
+        let mut buf = vec![0u8; map_len];
+
+        let origin_offset = file.get_offset();
+        file.seek(offset as isize)?;
+        let read_result = file.read(&mut buf[..len]);
+        let restore_result = file.seek(origin_offset as isize);
+        read_result?;
+        restore_result?;
+
         task.op_memory_set_write(|memory_set| {
             let start =
                 memory_set.mmap_framed(fixed_addr, map_len, permission, replace, noreplace)?;
+            memory_set.copy_to_mapped_area(start, buf.as_slice())?;
             memory_set.flush_tlb();
-
-            let buf = unsafe { core::slice::from_raw_parts_mut(start as *mut u8, map_len) };
-            buf.fill(0);
-
-            // 没有复制文件内容，仅仅是模拟正常情况下的报错
-            let origin_offset = file.get_offset();
-            file.seek(offset as isize)?;
-            let read_result = file.read(&mut buf[..len]);
-            let restore_result = file.seek(origin_offset as isize);
-            read_result?;
-            restore_result?;
             Ok(start)
         })
     }
