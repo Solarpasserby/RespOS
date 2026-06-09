@@ -1,6 +1,7 @@
 // os/src/syscall/fs.rs
 
 use super::{Errno, SysResult};
+use crate::config::PAGE_SIZE;
 use crate::fs::mount::{do_mount, do_umount2};
 use crate::fs::vfs::{File, FileOp, InodeType, OpenFlags};
 use crate::fs::{
@@ -8,9 +9,8 @@ use crate::fs::{
     filename_create, filename_link, filename_lookup, filename_lookup_no_follow_final_symlink,
     filename_rename, filename_symlink, filename_unlink, init_fdset, make_pipe, path_open,
 };
-use crate::config::PAGE_SIZE;
 use crate::mm::{
-    VirtAddr, VPNRange, check_user_writable, copy_cstr_from_user, copy_from_user, copy_to_user,
+    VPNRange, VirtAddr, check_user_writable, copy_cstr_from_user, copy_from_user, copy_to_user,
 };
 use crate::signal::sig_struct::{Sig, SigSet};
 use crate::task::{current_task, yield_current_task};
@@ -1146,4 +1146,177 @@ pub fn sys_msync(addr: usize, len: usize, flags: i32) -> SysResult<usize> {
     task.op_memory_set_read(|memory_set| memory_set.check_user_mapped_range(vpn_range))?;
 
     Ok(0)
+}
+
+/// 系统调用 preadv — 从指定文件偏移处读取数据，分散写入多个用户缓冲区。
+///
+///
+/// 语义细节：
+/// - 中途出错且已有部分数据读取时，返回已读字节数而非 -1
+/// - 短读（read 返回不足请求长度）直接终止，不再处理后续 iov
+pub fn sys_preadv(
+    fd: usize,
+    iov_ptr: *const IoVec,
+    iovcnt: usize,
+    offset: isize,
+) -> SysResult<usize> {
+    const IOV_MAX: usize = 1024;
+    if offset < 0 || iovcnt > IOV_MAX {
+        return Err(Errno::EINVAL);
+    }
+    if iovcnt == 0 {
+        return Ok(0);
+    }
+
+    let task = current_task().expect("[kernel] current task is None.");
+    let file = task.get_fd_entry(fd)?.file;
+    if !file.readable() {
+        return Err(Errno::EBADF);
+    }
+    file.can_seek()?;
+
+    let old_offset = file.get_offset(); // 保存原偏移
+    file.seek(offset)?; // 定位到写入起点
+
+    let mut total: usize = 0;
+    for idx in 0..iovcnt {
+        let mut item = IoVec {
+            base: core::ptr::null_mut(),
+            len: 0,
+        };
+        let iov_ret = unsafe { copy_from_user(&mut item as *mut IoVec, iov_ptr.add(idx), 1) };
+        if let Err(err) = iov_ret {
+            let _ = file.seek(old_offset as isize);
+            return if total > 0 { Ok(total) } else { Err(err) };
+        }
+        if item.len == 0 {
+            continue;
+        }
+        // 复用 sys_read 完成单段读取（内部走 file.read()，偏移自动推进）
+        match sys_read(fd, item.base, item.len) {
+            Ok(read) => {
+                total = total.checked_add(read).ok_or(Errno::EINVAL)?;
+                if read < item.len {
+                    break; // 短读：文件已读完，不再续读后续 iov
+                }
+            }
+            Err(err) => {
+                let _ = file.seek(old_offset as isize);
+                return if total > 0 { Ok(total) } else { Err(err) };
+            }
+        }
+    }
+
+    let _ = file.seek(old_offset as isize); // 恢复原偏移
+    Ok(total)
+}
+
+/// 系统调用 pwritev — 将多个用户缓冲区的数据连续写入文件指定偏移处。
+///
+/// 与 writev 的区别：不依赖（也不修改）文件的当前偏移量，
+/// 而是从 offset 处开始写入。多个 iov 条目连续写入：
+/// offset, offset+len0, offset+len0+len1, ...
+///
+/// 语义细节（与 Linux pwritev 对齐）：
+/// - 中途出错且已有部分数据写入时，返回已写字节数而非 -1
+/// - 短写（write 返回不足请求长度）直接终止，不再处理后续 iov
+pub fn sys_pwritev(
+    fd: usize,
+    iov_ptr: *const IoVec,
+    iovcnt: usize,
+    offset: isize,
+) -> SysResult<usize> {
+    const IOV_MAX: usize = 1024;
+    if offset < 0 || iovcnt > IOV_MAX {
+        return Err(Errno::EINVAL);
+    }
+    if iovcnt == 0 {
+        return Ok(0);
+    }
+
+    let task = current_task().expect("[kernel] current task is None.");
+    let file = task.get_fd_entry(fd)?.file;
+    if !file.writable() {
+        return Err(Errno::EBADF);
+    }
+    file.can_seek()?;
+
+    let old_offset = file.get_offset(); // 保存原偏移
+    file.seek(offset)?; // 定位到写入起点
+
+    let mut total: usize = 0;
+    for idx in 0..iovcnt {
+        let mut item = IoVec {
+            base: core::ptr::null_mut(),
+            len: 0,
+        };
+        let iov_ret = unsafe { copy_from_user(&mut item as *mut IoVec, iov_ptr.add(idx), 1) };
+        if let Err(err) = iov_ret {
+            let _ = file.seek(old_offset as isize);
+            return if total > 0 { Ok(total) } else { Err(err) };
+        }
+        if item.len == 0 {
+            continue;
+        }
+        // 复用 sys_write 完成单段写入（内部走 file.write()，偏移自动推进）
+        match sys_write(fd, item.base, item.len) {
+            Ok(written) => {
+                total = total.checked_add(written).ok_or(Errno::EINVAL)?;
+                if written < item.len {
+                    break; // 短写：文件空间不足，不再续写后续 iov
+                }
+            }
+            Err(err) => {
+                let _ = file.seek(old_offset as isize);
+                return if total > 0 { Ok(total) } else { Err(err) };
+            }
+        }
+    }
+
+    let _ = file.seek(old_offset as isize); // 恢复原偏移
+    Ok(total)
+}
+
+/// 系统调用 preadv2 — preadv 的扩展版本，增加 flags 参数。
+///
+/// offset == -1 时等价于 readv（使用文件当前偏移），
+/// 否则等价于 preadv（从指定偏移读取）。
+/// 当前内核不支持任何 flags（如 RWF_HIPRI/RWF_DSYNC 等）。
+pub fn sys_preadv2(
+    fd: usize,
+    iov_ptr: *const IoVec,
+    iovcnt: usize,
+    offset: isize,
+    flags: i32,
+) -> SysResult<usize> {
+    if flags != 0 {
+        return Err(Errno::EOPNOTSUPP);
+    }
+    if offset == -1 {
+        sys_readv(fd, iov_ptr, iovcnt)
+    } else {
+        sys_preadv(fd, iov_ptr, iovcnt, offset)
+    }
+}
+
+/// 系统调用 pwritev2 — pwritev 的扩展版本，增加 flags 参数。
+///
+/// offset == -1 时等价于 writev（使用文件当前偏移），
+/// 否则等价于 pwritev（从指定偏移写入）。
+/// 当前内核不支持任何 flags。
+pub fn sys_pwritev2(
+    fd: usize,
+    iov_ptr: *const IoVec,
+    iovcnt: usize,
+    offset: isize,
+    flags: i32,
+) -> SysResult<usize> {
+    if flags != 0 {
+        return Err(Errno::EOPNOTSUPP);
+    }
+    if offset == -1 {
+        sys_writev(fd, iov_ptr, iovcnt)
+    } else {
+        sys_pwritev(fd, iov_ptr, iovcnt, offset)
+    }
 }

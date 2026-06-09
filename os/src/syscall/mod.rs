@@ -27,6 +27,8 @@ const SYSCALL_WRITE: usize = 64;
 const SYSCALL_READV: usize = 65;
 const SYSCALL_WRITEV: usize = 66;
 const SYSCALL_PREAD64: usize = 67;
+const SYSCALL_PREADV: usize = 69;
+const SYSCALL_PWRITEV: usize = 70;
 const SYSCALL_PSELECT6: usize = 72;
 const SYSCALL_READLINKAT: usize = 78;
 const SYSCALL_FSTATAT: usize = 79;
@@ -81,6 +83,8 @@ const SYSCALL_MMAP: usize = 222;
 const SYSCALL_MPROTECT: usize = 226;
 const SYSCALL_MSYNC: usize = 227;
 const SYSCALL_MADVISE: usize = 233;
+const SYSCALL_PREADV2: usize = 286;
+const SYSCALL_PWRITEV2: usize = 287;
 const SYSCALL_WAIT4: usize = 260;
 const SYSCALL_PRLIMIT64: usize = 261;
 const SYSCALL_RENAMEAT2: usize = 276;
@@ -148,6 +152,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         SYSCALL_WRITE => sys_write(args[0], args[1] as *mut u8, args[2]),
         SYSCALL_READV => sys_readv(args[0], args[1] as *const IoVec, args[2]),
         SYSCALL_WRITEV => sys_writev(args[0], args[1] as *const IoVec, args[2]),
+        SYSCALL_PREADV => sys_preadv(args[0], args[1] as *const IoVec, args[2], args[3] as isize),
+        SYSCALL_PWRITEV => sys_pwritev(args[0], args[1] as *const IoVec, args[2], args[3] as isize),
         SYSCALL_PREAD64 => sys_pread64(args[0], args[1] as *mut u8, args[2], args[3] as isize),
         SYSCALL_PSELECT6 => sys_pselect6(
             args[0],
@@ -261,6 +267,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         ),
         SYSCALL_MPROTECT => sys_mprotect(args[0], args[1], args[2] as u32),
         SYSCALL_MSYNC => sys_msync(args[0], args[1], args[2] as i32),
+        SYSCALL_PREADV2 => sys_preadv2(args[0], args[1] as *const IoVec, args[2], args[3] as isize, args[4] as i32),
+        SYSCALL_PWRITEV2 => sys_pwritev2(args[0], args[1] as *const IoVec, args[2], args[3] as isize, args[4] as i32),
         SYSCALL_MADVISE => sys_madvise(args[0], args[1], args[2] as i32),
         SYSCALL_WAIT4 => sys_wait4(
             args[0] as isize,
