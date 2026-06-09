@@ -19,7 +19,6 @@ const RUN_STATIC_SCRIPT: &str = "run-static.sh\0";
 const BUSYBOX_CMD_FILE: &str = "busybox_cmd.txt\0";
 const LUA_SCRIPT: &str = "lua_testcode.sh\0";
 const LMBENCH_SCRIPT: &str = "lmbench_testcode.sh\0";
-const LMBENCH_COMMAND: &str = "export PATH=/bin:.; export ENOUGH=1000000; export TIMING_O=0; export LOOP_O=0; busybox cp hello /tmp/hello; sh lmbench_testcode.sh\0";
 
 fn strip_nul(s: &str) -> &str {
     &s[..s.len() - 1]
@@ -265,87 +264,46 @@ fn _run_lua_glibc() {
 }
 
 fn _run_lmbench_musl() {
-    run_lmbench_script("/musl/\0", BUSYBOX_PATH);
-}
-
-fn _run_lmbench_glibc() {
-    run_lmbench_script("/glibc/\0", GLIBC_BUSYBOX_PATH);
-}
-
-fn run_lmbench_script(workdir: &str, shell_path: &str) {
-    if chdir(workdir) < 0 {
-        println!("[testrunner] cannot enter {}", strip_nul(workdir));
-        return;
-    }
-    let _ = mkdir("/bin\0", 0o755);
-    let _ = mkdir("/tmp\0", 0o777);
+    // hello 脚本硬编码了构建机路径 /code/lmbench_src/bin/build/lmbench_all
     let _ = mkdir("/code\0", 0o755);
     let _ = mkdir("/code/lmbench_src\0", 0o755);
     let _ = mkdir("/code/lmbench_src/bin\0", 0o755);
     let _ = mkdir("/code/lmbench_src/bin/build\0", 0o755);
-    let _ = link(shell_path, "/bin/busybox\0");
-    let _ = link(shell_path, "/bin/sh\0");
-    let _ = link(shell_path, "/bin/cp\0");
-    let _ = link(shell_path, "cp\0");
     let _ = link(
         "/musl/lmbench_all\0",
         "/code/lmbench_src/bin/build/lmbench_all\0",
     );
-    let _ = unlink("hello\0");
-    let _ = link("lmbench_all\0", "hello\0");
+    run_shell_script("/musl/\0", BUSYBOX_PATH, LMBENCH_SCRIPT);
+}
 
-    let pid = fork();
-    if pid == 0 {
-        let argv: &[*const u8] = &[
-            "busybox\0".as_ptr(),
-            "sh\0".as_ptr(),
-            "-c\0".as_ptr(),
-            LMBENCH_COMMAND.as_ptr(),
-            core::ptr::null(),
-        ];
-        let ret = exec(shell_path, argv);
-        println!("[testrunner] exec lmbench script failed: {}", ret);
-        exit(-1);
-    }
-
-    if pid < 0 {
-        println!("[testrunner] fork {} failed", strip_nul(LMBENCH_SCRIPT));
-    } else {
-        let mut ec = 0;
-        let waited = waitpid(pid as usize, &mut ec);
-        if waited < 0 {
-            println!(
-                "[testrunner] wait {} failed: {}",
-                strip_nul(LMBENCH_SCRIPT),
-                waited
-            );
-        } else if ec != 0 {
-            println!(
-                "[testrunner] {} exited with code {}",
-                strip_nul(LMBENCH_SCRIPT),
-                ec
-            );
-        }
-    }
-
-    let _ = chdir("/\0");
+fn _run_lmbench_glibc() {
+    // hello 脚本硬编码了构建机路径 /code/lmbench_src/bin/build/lmbench_all
+    let _ = mkdir("/code\0", 0o755);
+    let _ = mkdir("/code/lmbench_src\0", 0o755);
+    let _ = mkdir("/code/lmbench_src/bin\0", 0o755);
+    let _ = mkdir("/code/lmbench_src/bin/build\0", 0o755);
+    let _ = link(
+        "/glibc/lmbench_all\0",
+        "/code/lmbench_src/bin/build/lmbench_all\0",
+    );
+    run_shell_script("/glibc/\0", GLIBC_BUSYBOX_PATH, LMBENCH_SCRIPT);
 }
 
 #[cfg(target_arch = "riscv64")]
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("[testrunner] start");
-    // _run_basic_musl();
-    // _run_basic_glibc();
-    // _run_libcbench_musl();
-    // _run_libcbench_glibc();
-    // _run_busybox_musl();
-    // _run_busybox_glibc();
-    // _run_static_musl();
-    // _run_lua_musl();
-    // _run_lua_glibc();
-    // _run_lmbench_musl();
-    // _run_lmbench_glibc();
+    _run_basic_musl();
+    _run_basic_glibc();
+    _run_libcbench_musl();
+    _run_libcbench_glibc();
+    _run_busybox_musl();
+    _run_busybox_glibc();
+    _run_static_musl();
+    _run_lua_musl();
+    _run_lua_glibc();
+    _run_lmbench_musl();
+    _run_lmbench_glibc();
     println!("[testrunner] all selected tests finished, powering off");
     poweroff();
     0
@@ -355,15 +313,15 @@ fn main() -> i32 {
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("[testrunner] start");
-    // _run_basic_musl();
-    // _run_basic_glibc();
-    // _run_libcbench_musl();
-    // _run_libcbench_glibc();
-    // _run_busybox_musl();
-    // _run_busybox_glibc();
-    // _run_lua_musl();
-    // _run_lua_glibc();
-    // _run_lmbench_musl();
+    _run_basic_musl();
+    _run_basic_glibc();
+    _run_libcbench_musl();
+    _run_libcbench_glibc();
+    _run_busybox_musl();
+    _run_busybox_glibc();
+    _run_lua_musl();
+    _run_lua_glibc();
+    _run_lmbench_musl();
     // _run_lmbench_glibc(); // 会报错，还要修改
     println!("[testrunner] all selected tests finished, powering off");
     poweroff();

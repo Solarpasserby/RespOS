@@ -319,17 +319,6 @@ pub fn sys_clone(
 
 pub fn sys_execve(path: *const u8, args: *const usize, envp: *const usize) -> SysResult<usize> {
     let path = copy_cstr_from_user(path)?;
-    // lmbench 的 lat_proc shell / lat_proc exec 测例会通过 hello 脚本
-    // 调用 lmbench_all。hello 是编译时生成的，内部硬编码了构建机的绝对路径
-    // "/code/lmbench_src/bin/build/lmbench_all"，但测试镜像中实际二进制在
-    // /musl/lmbench_all。这里做路径迁移兜底，避免 execve 因路径不存在而失败。
-    //
-    // TODO[ABI-COMPAT]: 更干净的方案是修正构建系统安装路径，消除内核侧的路径特判。
-    let path = if path == "/code/lmbench_src/bin/build/lmbench_all" {
-        String::from("/musl/lmbench_all")
-    } else {
-        path
-    };
     let args_vec = extract_cstrings_from_user(args)?;
     let envs_vec = if envp.is_null() {
         Vec::new()

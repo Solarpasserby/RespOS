@@ -5,7 +5,7 @@ MODE ?= debug
 ifeq ($(MODE),debug)
 	CARGO_BUILD_ARG :=
 	CARGO_TARGET_DIR := debug
-	CARGO_FEATURES := --features log  # FIXME: 临时关闭，release 编译通过后恢复
+	CARGO_FEATURES := # --features log  # FIXME: loongarch 架构下以 debug 评测，取消日志输出
 else ifeq ($(MODE),release)
 	CARGO_BUILD_ARG := --release
 	CARGO_TARGET_DIR := release
