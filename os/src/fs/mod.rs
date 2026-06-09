@@ -2,6 +2,7 @@
 
 pub mod dev;
 pub mod ext4;
+mod fdset;
 mod fdtable;
 mod kstat;
 pub mod mount;
@@ -13,6 +14,7 @@ pub mod proc;
 mod stdio;
 pub mod vfs;
 
+pub use fdset::*;
 pub use fdtable::*;
 pub use kstat::*;
 pub use namei::*;

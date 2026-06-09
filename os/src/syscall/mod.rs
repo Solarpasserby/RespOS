@@ -27,10 +27,11 @@ const SYSCALL_WRITE: usize = 64;
 const SYSCALL_READV: usize = 65;
 const SYSCALL_WRITEV: usize = 66;
 const SYSCALL_PREAD64: usize = 67;
+const SYSCALL_PSELECT6: usize = 72;
+const SYSCALL_READLINKAT: usize = 78;
 const SYSCALL_FSTATAT: usize = 79;
 const SYSCALL_FSTAT: usize = 80;
 const SYSCALL_UTIMENSAT: usize = 88;
-const SYSCALL_READLINKAT: usize = 78;
 const SYSCALL_EXIT: usize = 93;
 const SYSCALL_EXIT_GROUP: usize = 94;
 const SYSCALL_SET_TID_ADDRESS: usize = 96;
@@ -145,6 +146,20 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         SYSCALL_READV => sys_readv(args[0], args[1] as *const IoVec, args[2]),
         SYSCALL_WRITEV => sys_writev(args[0], args[1] as *const IoVec, args[2]),
         SYSCALL_PREAD64 => sys_pread64(args[0], args[1] as *mut u8, args[2], args[3] as isize),
+        SYSCALL_PSELECT6 => sys_pselect6(
+            args[0],
+            args[1],
+            args[2],
+            args[3],
+            args[4] as *const TimeSpec,
+            args[5],
+        ),
+        SYSCALL_READLINKAT => sys_readlinkat(
+            args[0] as isize,
+            args[1] as *const u8,
+            args[2] as *mut u8,
+            args[3],
+        ),
         SYSCALL_FSTATAT => sys_fstatat(
             args[0] as isize,
             args[1] as *const u8,
@@ -153,12 +168,6 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         ),
         SYSCALL_FSTAT => sys_fstat(args[0], args[1] as *mut Stat),
         SYSCALL_FSTATFS => sys_fstatfs(args[0], args[1] as *mut crate::fs::Statfs64),
-        SYSCALL_READLINKAT => sys_readlinkat(
-            args[0] as isize,
-            args[1] as *const u8,
-            args[2] as *mut u8,
-            args[3],
-        ),
         SYSCALL_UTIMENSAT => sys_utimensat(
             args[0] as isize,
             args[1] as *const u8,
@@ -168,10 +177,6 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         SYSCALL_EXIT => sys_exit(args[0] as i32),
         SYSCALL_EXIT_GROUP => sys_exit_group(args[0] as i32),
         SYSCALL_SET_TID_ADDRESS => sys_set_tid_address(args[0]),
-        SYSCALL_SET_ROBUST_LIST => sys_set_robust_list(args[0], args[1]),
-        SYSCALL_GET_ROBUST_LIST => {
-            sys_get_robust_list(args[0], args[1] as *mut usize, args[2] as *mut usize)
-        }
         SYSCALL_FUTEX => sys_futex(
             args[0] as *const i32,
             args[1],
@@ -180,13 +185,14 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
             args[4],
             args[5],
         ),
-        SYSCALL_NANOSLEEP => sys_nanosleep(args[0] as *const TimeVal, args[1] as *mut TimeVal),
+        SYSCALL_SET_ROBUST_LIST => sys_set_robust_list(args[0], args[1]),
+        SYSCALL_GET_ROBUST_LIST => {
+            sys_get_robust_list(args[0], args[1] as *mut usize, args[2] as *mut usize)
+        }
+        SYSCALL_NANOSLEEP => sys_nanosleep(args[0] as *const TimeSpec, args[1] as *mut TimeSpec),
         SYSCALL_CLOCK_GETTIME => sys_clock_gettime(args[0], args[1] as *mut TimeSpec),
         SYSCALL_SYSLOG => sys_syslog(args[0], args[1] as *mut u8, args[2] as isize),
         SYSCALL_SCHED_YIELD => sys_sched_yield(),
-        SYSCALL_SETPRIORITY => sys_setpriority(args[0], args[1], args[2] as isize),
-        SYSCALL_TIMES => sys_times(args[0] as *mut Tms),
-        SYSCALL_UNAME => sys_uname(args[0] as *mut UtsName),
         SYSCALL_KILL => sys_kill(args[0], args[1] as i32),
         SYSCALL_TKILL => sys_tkill(args[0], args[1] as i32),
         SYSCALL_TGKILL => sys_tgkill(args[0], args[1], args[2] as i32),
@@ -194,14 +200,12 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
             sys_sigaction(args[0] as i32, args[1] as *const u8, args[2] as *mut u8)
         }
         SYSCALL_SIGPROCMASK => sys_sigprocmask(args[0], args[1], args[2], args[3]),
+        SYSCALL_RT_SIGTIMEDWAIT => sys_rt_sigtimedwait(args[0], args[1], args[2], args[3]),
         SYSCALL_SIGRETURN => sys_sigreturn(),
-        SYSCALL_RT_SIGTIMEDWAIT => sys_rt_sigtimedwait(
-            args[0], // set: 信号集指针
-            args[1], // info: 信号信息输出指针
-            args[2], // timeout_ptr: 超时时间指针
-            args[3], // sigsetsize: 信号集大小
-        ),
+        SYSCALL_SETPRIORITY => sys_setpriority(args[0], args[1], args[2] as isize),
         SYSCALL_REBOOT => sys_reboot(),
+        SYSCALL_TIMES => sys_times(args[0] as *mut Tms),
+        SYSCALL_UNAME => sys_uname(args[0] as *mut UtsName),
         SYSCALL_GETTIMEOFDAY => sys_gettimeofday(args[0] as *mut TimeVal, args[1]),
         SYSCALL_GETPID => sys_getpid(),
         SYSCALL_GETPPID => sys_getppid(),

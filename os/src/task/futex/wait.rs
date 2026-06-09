@@ -7,29 +7,10 @@ use crate::task::scheduler::{
     prepare_current_task_blocked, remove_task, switch_to_next_task, wakeup_task,
 };
 use crate::task::{current_task, futex::FUTEX_BITSET_MATCH_ANY, yield_current_task};
-use crate::timer::get_time_ms;
+use crate::timer::{TimeSpec, get_time_ms};
 use alloc::vec::Vec;
 
 const FUTEX_TRACE: bool = false;
-
-#[repr(C)]
-#[derive(Copy, Clone)]
-struct UserTimeSpec {
-    sec: usize,
-    nsec: usize,
-}
-
-impl UserTimeSpec {
-    fn to_ms(self) -> SysResult<usize> {
-        if self.nsec >= 1_000_000_000 {
-            return Err(Errno::EINVAL);
-        }
-        self.sec
-            .checked_mul(1000)
-            .and_then(|ms| ms.checked_add(self.nsec.div_ceil(1_000_000)))
-            .ok_or(Errno::EINVAL)
-    }
-}
 
 fn read_futex_value(uaddr: usize) -> SysResult<u32> {
     let mut val: u32 = 0;
@@ -169,13 +150,13 @@ fn futex_deadline_ms(timeout_ptr: usize, absolute: bool) -> SysResult<Option<usi
         return Ok(None);
     }
 
-    let mut timeout = UserTimeSpec { sec: 0, nsec: 0 };
+    let mut timeout = TimeSpec::default();
     copy_from_user(
-        &mut timeout as *mut UserTimeSpec,
-        timeout_ptr as *const UserTimeSpec,
+        &mut timeout as *mut TimeSpec,
+        timeout_ptr as *const TimeSpec,
         1,
     )?;
-    let timeout_ms = timeout.to_ms()?;
+    let timeout_ms = timeout.checked_duration_ms().ok_or(Errno::EINVAL)?;
     if absolute {
         Ok(Some(timeout_ms))
     } else {

@@ -4,23 +4,7 @@ use crate::signal::sig_handler::SigAction;
 use crate::signal::sig_struct::{FrameFlags, Sig, SigFrame, SigRTFrame, SigSet};
 use crate::signal::{SiField, SigInfo};
 use crate::task::{TASK_MANAGER, current_task, yield_current_task};
-use crate::timer::get_time_ms;
-
-#[repr(C)]
-#[derive(Copy, Clone)]
-struct UserTimeSpec {
-    tv_sec: u64,  // 实际 C 里是 time_t (long)，64位系统 8 字节
-    tv_nsec: u64, // long，8 字节
-}
-
-impl UserTimeSpec {
-    fn to_ms(&self) -> u64 {
-        self.tv_sec * 1000 + self.tv_nsec / 1_000_000
-    }
-    fn is_zero(&self) -> bool {
-        self.tv_sec == 0 && self.tv_nsec == 0
-    }
-}
+use crate::timer::{TimeSpec, get_time_ms};
 
 #[cfg(target_arch = "riscv64")]
 fn restore_sig_context(
@@ -294,25 +278,19 @@ pub fn sys_rt_sigtimedwait(
     // ----- 3. 需要等待 -----
     if timeout_ptr != 0 {
         // 3a. 有限等待
-        let mut timeout = UserTimeSpec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
+        let mut timeout = TimeSpec::default();
         copy_from_user(
-            &mut timeout as *mut UserTimeSpec,
-            timeout_ptr as *const UserTimeSpec,
+            &mut timeout as *mut TimeSpec,
+            timeout_ptr as *const TimeSpec,
             1,
         )?;
-        if timeout.tv_nsec >= 1_000_000_000 {
-            return Err(Errno::EINVAL);
-        }
+        let total_ms = timeout.checked_duration_ms().ok_or(Errno::EINVAL)?;
 
         // timeout == 0 → 立即轮询返回 EAGAIN
         if timeout.is_zero() {
             return Err(Errno::EAGAIN);
         }
 
-        let total_ms = timeout.to_ms() as usize;
         let start_ms = get_time_ms();
 
         loop {

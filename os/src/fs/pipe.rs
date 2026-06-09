@@ -114,6 +114,18 @@ impl FileOp for Pipe {
     fn writable(&self) -> bool {
         self.writable
     }
+
+    // 管道读端是否有数据可立即读取而不阻塞。
+    // 缓冲区非空，或者写端已关闭
+    fn read_ready(&self) -> bool {
+        let buf = self.buffer.lock();
+        buf.status != RingBufferStatus::EMPTY || buf.write_closed
+    }
+    // 管道写端是否有空间可立即写入而不阻塞
+    fn write_ready(&self) -> bool {
+        self.buffer.lock().status != RingBufferStatus::FULL
+    }
+
     fn get_flags(&self) -> OpenFlags {
         OpenFlags::empty()
     }

@@ -6,14 +6,15 @@ use crate::fs::vfs::{File, FileOp, InodeType, OpenFlags};
 use crate::fs::{
     AT_EMPTY_PATH, AT_FDCWD, AT_NO_AUTOMOUNT, AT_SYMLINK_NOFOLLOW, FdEntry, KStat, Stat, Statfs64,
     filename_create, filename_link, filename_lookup, filename_lookup_no_follow_final_symlink,
-    filename_rename, filename_symlink, filename_unlink, make_pipe, path_open,
+    filename_rename, filename_symlink, filename_unlink, init_fdset, make_pipe, path_open,
 };
 use crate::mm::{check_user_writable, copy_cstr_from_user, copy_from_user, copy_to_user};
-use crate::task::current_task;
+use crate::signal::sig_struct::{Sig, SigSet};
+use crate::task::{current_task, yield_current_task};
 use crate::timer::{TimeSpec, get_time_ms};
 
-const UTIME_NOW: usize = 1_073_741_823;
-const UTIME_OMIT: usize = 1_073_741_822;
+const UTIME_NOW: isize = 1_073_741_823;
+const UTIME_OMIT: isize = 1_073_741_822;
 const F_OK: usize = 0;
 const X_OK: usize = 1;
 const W_OK: usize = 2;
@@ -334,8 +335,8 @@ fn validate_utimens_time(ts: TimeSpec) -> SysResult<TimeSpec> {
 fn current_timespec() -> TimeSpec {
     let ms = get_time_ms();
     TimeSpec {
-        sec: ms / 1000,
-        nsec: (ms % 1000) * 1_000_000,
+        sec: (ms / 1000) as isize,
+        nsec: ((ms % 1000) * 1_000_000) as isize,
     }
 }
 
@@ -912,4 +913,183 @@ pub fn sys_readlinkat(
         copy_to_user(buf, bytes.as_ptr(), n)?;
     }
     Ok(n)
+}
+
+/// pselect6 的 sigmask 参数不是单纯的 sigset_t*，而是一个（sigset_t* + size_t）对。
+/// musl/glibc 都会把这个结构体的地址传给内核。
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+struct Pselect6Sigmask {
+    sigmask: usize,
+    sigsetsize: usize,
+}
+
+/// 解析 pselect6 超时参数。
+///
+/// - `None`   → 无限等待，直到有 fd 就绪或信号中断
+/// - `Some(0)` → 不等待，立即返回当前就绪状态
+/// - `Some(t)` → 等待最多 t 微秒
+fn pselect_timeout_us(timeout: *const TimeSpec) -> SysResult<Option<usize>> {
+    if timeout.is_null() {
+        return Ok(None);
+    }
+
+    let mut tmo = TimeSpec::default();
+    copy_from_user(&mut tmo as *mut TimeSpec, timeout, 1)?;
+    tmo.checked_duration_us().ok_or(Errno::EINVAL).map(Some)
+}
+
+/// 解析 pselect6 信号掩码参数。
+///
+/// `sigmask == 0` 表示不修改掩码（类似 select 行为）。
+/// 否则从用户空间读取 sigset_t，过滤掉不可屏蔽的 SIGKILL/SIGSTOP。
+fn pselect_sigmask(sigmask: usize) -> SysResult<Option<SigSet>> {
+    if sigmask == 0 {
+        return Ok(None);
+    }
+
+    let mut user_arg = Pselect6Sigmask::default();
+    copy_from_user(
+        &mut user_arg as *mut Pselect6Sigmask,
+        sigmask as *const Pselect6Sigmask,
+        1,
+    )?;
+    if user_arg.sigmask == 0 {
+        return Ok(None);
+    }
+    if user_arg.sigsetsize != core::mem::size_of::<SigSet>() {
+        return Err(Errno::EINVAL);
+    }
+
+    let mut new_mask = SigSet::empty();
+    copy_from_user(
+        &mut new_mask as *mut SigSet,
+        user_arg.sigmask as *const SigSet,
+        1,
+    )?;
+    new_mask.remove_signal(Sig::SIGKILL);
+    new_mask.remove_signal(Sig::SIGSTOP);
+    Ok(Some(new_mask))
+}
+
+/// pselect6 — 等待多个文件描述符就绪，带超时和信号掩码。
+///
+/// 退出条件（任一满足即返回）：
+/// 1. 有 fd 可读/可写 → 返回就绪 fd 数
+/// 2. 超时到期 → 返回 0
+/// 3. 被信号中断 → 返回 EINTR
+///
+/// sigmask 允许原子替换信号掩码；函数返回后自动恢复原掩码。
+pub fn sys_pselect6(
+    nfds: usize,
+    readfds: usize,
+    writefds: usize,
+    exceptfds: usize,
+    timeout: *const TimeSpec,
+    sigmask: usize,
+) -> SysResult<usize> {
+    let timeout_us = pselect_timeout_us(timeout)?;
+    let new_mask = pselect_sigmask(sigmask)?;
+
+    // 保存并替换信号掩码（pselect6 的 sigmask 参数语义）
+    let task = current_task().expect("[kernel] current task is None.");
+    let origin_mask = task.op_sig_pending(|pending| pending.mask);
+    if let Some(mask) = new_mask {
+        task.op_sig_pending_mut(|pending| pending.mask = mask);
+    }
+
+    // 闭包保证 cleanup（恢复掩码）在任意退出路径上都执行
+    let result = (|| {
+        let start_ms = get_time_ms();
+        let mut readfditer = init_fdset(readfds, nfds)?;
+        let mut writeiter = init_fdset(writefds, nfds)?;
+        let mut exceptiter = init_fdset(exceptfds, nfds)?;
+
+        let mut set;
+        loop {
+            set = 0;
+
+            // 轮询可读 fd：fd 必须是以读模式打开 且 数据立即可用
+            if readfditer.fdset.valid() {
+                readfditer.fdset.clear();
+                for i in 0..readfditer.fds.len() {
+                    let fd = readfditer.fds[i];
+                    let file = &readfditer.files[i];
+                    if file.readable() && file.read_ready() {
+                        readfditer.fdset.set(fd);
+                        set += 1;
+                    }
+                }
+            }
+
+            // 轮询可写 fd：fd 必须是以写模式打开 且 缓冲区有空间
+            if writeiter.fdset.valid() {
+                writeiter.fdset.clear();
+                for i in 0..writeiter.fds.len() {
+                    let fd = writeiter.fds[i];
+                    let file = &writeiter.files[i];
+                    if file.writable() && file.write_ready() {
+                        writeiter.fdset.set(fd);
+                        set += 1;
+                    }
+                }
+            }
+
+            // 当前文件对象没有 out-of-band/异常事件来源，exceptfds 只做合法性检查和清零写回。
+            if exceptiter.fdset.valid() {
+                exceptiter.fdset.clear();
+            }
+
+            if set > 0 {
+                break;
+            }
+
+            if let Some(timeout_us) = timeout_us {
+                if timeout_us == 0 {
+                    break;
+                }
+                let elapsed_us = (get_time_ms().saturating_sub(start_ms)) * 1000;
+                if elapsed_us >= timeout_us {
+                    break;
+                }
+            }
+
+            // 在 yield 前标记可中断，让信号能在调度器中被检测到
+            task.set_interruptible(true);
+            if task.check_signal_interrupt() || task.is_interrupted() {
+                task.clear_interrupted();
+                task.set_interruptible(false);
+                return Err(Errno::EINTR);
+            }
+            yield_current_task();
+            // yield 后再次检查：其他任务或信号可能设置了中断标志
+            if task.is_interrupted() {
+                task.clear_interrupted();
+                task.set_interruptible(false);
+                return Err(Errno::EINTR);
+            }
+            task.set_interruptible(false);
+        }
+
+        // 将内核修改后的 fd_set 写回用户空间
+        if readfditer.fdset.valid() {
+            readfditer.fdset.write_back()?;
+        }
+        if writeiter.fdset.valid() {
+            writeiter.fdset.write_back()?;
+        }
+        if exceptiter.fdset.valid() {
+            exceptiter.fdset.write_back()?;
+        }
+
+        Ok(set)
+    })();
+
+    // 确保无论如何退出都恢复原状态
+    task.set_interruptible(false);
+    if new_mask.is_some() {
+        task.op_sig_pending_mut(|pending| pending.mask = origin_mask);
+    }
+
+    result
 }

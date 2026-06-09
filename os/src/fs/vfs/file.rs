@@ -144,6 +144,14 @@ pub trait FileOp: Any + Send + Sync {
     fn get_stat(&self) -> SysResult<KStat>;
     fn readable(&self) -> bool;
     fn writable(&self) -> bool;
+    // 非阻塞可读：数据是否立即可用—— pipe 非空 / 文件总是可读
+    fn read_ready(&self) -> bool {
+        true
+    }
+    // 非阻塞可写：是否立即可写—— pipe 非满 / 文件总是可写
+    fn write_ready(&self) -> bool {
+        true
+    }
     fn is_tty(&self) -> bool {
         false
     }
