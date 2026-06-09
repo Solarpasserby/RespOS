@@ -1,0 +1,1 @@
+qemu-system-loongarch64: -netdev user,id=net0,hostfwd=tcp::5555-:5555,hostfwd=udp::5555-:5555: Could not set up host forwarding rule 'udp::5555-:5555'
