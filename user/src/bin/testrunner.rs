@@ -30,12 +30,6 @@ fn run_shell_script(workdir: &str, shell_path: &str, script_path: &str) {
         println!("[testrunner] cannot enter {}", strip_nul(workdir));
         return;
     }
-    // scripts like test.sh use #!/bin/busybox sh shebang
-    // lat_proc shell does execlp("/bin/sh", ...)
-    let _ = mkdir("/bin\0", 0o755);
-    let _ = link(shell_path, "/bin/busybox\0");
-    let _ = link(shell_path, "/bin/sh\0");
-
     let pid = fork();
     if pid == 0 {
         let argv: &[*const u8] = &[
@@ -275,7 +269,17 @@ fn _run_lua_glibc() {
     run_shell_script("/glibc/\0", GLIBC_BUSYBOX_PATH, LUA_SCRIPT);
 }
 
+fn prepare_bin_shell(shell_path: &str) {
+    let _ = mkdir("/bin\0", 0o755);
+    let _ = unlink("/bin/busybox\0");
+    let _ = unlink("/bin/sh\0");
+    let _ = link(shell_path, "/bin/busybox\0");
+    let _ = link(shell_path, "/bin/sh\0");
+}
+
 fn _run_lmbench_musl() {
+    // lat_proc shell does execlp("/bin/sh", ...).
+    prepare_bin_shell(BUSYBOX_PATH);
     // hello 脚本硬编码了构建机路径 /code/lmbench_src/bin/build/lmbench_all
     let _ = mkdir("/code\0", 0o755);
     let _ = mkdir("/code/lmbench_src\0", 0o755);
@@ -289,6 +293,8 @@ fn _run_lmbench_musl() {
 }
 
 fn _run_lmbench_glibc() {
+    // lat_proc shell does execlp("/bin/sh", ...).
+    prepare_bin_shell(GLIBC_BUSYBOX_PATH);
     // hello 脚本硬编码了构建机路径 /code/lmbench_src/bin/build/lmbench_all
     let _ = mkdir("/code\0", 0o755);
     let _ = mkdir("/code/lmbench_src\0", 0o755);
@@ -331,11 +337,11 @@ fn main() -> i32 {
     _run_libcbench_glibc();
     _run_busybox_musl();
     _run_busybox_glibc();
-    // _run_libctest_musl(); // 卡死，需要改
+    _run_libctest_musl();
     _run_lua_musl();
     _run_lua_glibc();
     _run_lmbench_musl();
-    // _run_lmbench_glibc(); // 会报错，还要修改
+    _run_lmbench_glibc(); // 会报错，还要修改
     println!("[testrunner] all selected tests finished, powering off");
     poweroff();
     0
