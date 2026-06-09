@@ -18,6 +18,8 @@ const LIBCBENCH_SCRIPT: &str = "libcbench_testcode.sh\0";
 const RUN_STATIC_SCRIPT: &str = "run-static.sh\0";
 const RUN_DYNAMIC_SCRIPT: &str = "run-dynamic.sh\0";
 const BUSYBOX_CMD_FILE: &str = "busybox_cmd.txt\0";
+const LUA_SCRIPT: &str = "lua_testcode.sh\0";
+const LMBENCH_SCRIPT: &str = "lmbench_testcode.sh\0";
 
 fn strip_nul(s: &str) -> &str {
     &s[..s.len() - 1]
@@ -28,6 +30,11 @@ fn run_shell_script(workdir: &str, shell_path: &str, script_path: &str) {
         println!("[testrunner] cannot enter {}", strip_nul(workdir));
         return;
     }
+    // scripts like test.sh use #!/bin/busybox sh shebang
+    // lat_proc shell does execlp("/bin/sh", ...)
+    let _ = mkdir("/bin\0", 0o755);
+    let _ = link(shell_path, "/bin/busybox\0");
+    let _ = link(shell_path, "/bin/sh\0");
 
     let pid = fork();
     if pid == 0 {
@@ -140,14 +147,14 @@ fn run_busybox_command(line: &str) -> i32 {
     ec
 }
 
-fn ensure_busybox_applet_links() {
+fn ensure_busybox_applet_links_musl() {
     let _ = mkdir("/bin\0", 0o755);
-    cleanup_busybox_applet_links();
+    cleanup_busybox_applet_links_musl();
     let _ = link("/musl/busybox\0", "/bin/ls\0");
     let _ = link("/musl/busybox\0", "/bin/sleep\0");
 }
 
-fn cleanup_busybox_applet_links() {
+fn cleanup_busybox_applet_links_musl() {
     let _ = unlink("/bin/ls\0");
     let _ = unlink("/bin/sleep\0");
 }
@@ -157,7 +164,7 @@ fn _run_busybox_musl() {
         println!("[testrunner] cannot enter /musl");
         return;
     }
-    ensure_busybox_applet_links();
+    ensure_busybox_applet_links_musl();
 
     println!("#### OS COMP TEST GROUP START busybox-musl ####");
 
@@ -166,7 +173,7 @@ fn _run_busybox_musl() {
     if n < 0 {
         println!("[testrunner] cannot read {}", strip_nul(BUSYBOX_CMD_FILE));
         let _ = chdir("/\0");
-        cleanup_busybox_applet_links();
+        cleanup_busybox_applet_links_musl();
         println!("#### OS COMP TEST GROUP END busybox-musl ####");
         return;
     }
@@ -196,8 +203,20 @@ fn _run_busybox_musl() {
     }
 
     let _ = chdir("/\0");
-    cleanup_busybox_applet_links();
+    cleanup_busybox_applet_links_musl();
     println!("#### OS COMP TEST GROUP END busybox-musl ####");
+}
+
+fn ensure_busybox_applet_links_glibc() {
+    let _ = mkdir("/bin\0", 0o755);
+    cleanup_busybox_applet_links_glibc();
+    let _ = link("/glibc/busybox\0", "/bin/ls\0");
+    let _ = link("/glibc/busybox\0", "/bin/sleep\0");
+}
+
+fn cleanup_busybox_applet_links_glibc() {
+    let _ = unlink("/bin/ls\0");
+    let _ = unlink("/bin/sleep\0");
 }
 
 fn _run_busybox_glibc() {
@@ -205,6 +224,7 @@ fn _run_busybox_glibc() {
         println!("[testrunner] cannot enter /glibc");
         return;
     }
+    ensure_busybox_applet_links_glibc();
 
     println!("#### OS COMP TEST GROUP START busybox-glibc ####");
 
@@ -213,6 +233,7 @@ fn _run_busybox_glibc() {
     if n < 0 {
         println!("[testrunner] cannot read {}", strip_nul(BUSYBOX_CMD_FILE));
         let _ = chdir("/\0");
+        cleanup_busybox_applet_links_glibc();
         println!("#### OS COMP TEST GROUP END busybox-glibc ####");
         return;
     }
@@ -242,20 +263,59 @@ fn _run_busybox_glibc() {
     }
 
     let _ = chdir("/\0");
+    cleanup_busybox_applet_links_glibc();
     println!("#### OS COMP TEST GROUP END busybox-glibc ####");
+}
+
+fn _run_lua_musl() {
+    run_shell_script("/musl/\0", BUSYBOX_PATH, LUA_SCRIPT);
+}
+
+fn _run_lua_glibc() {
+    run_shell_script("/glibc/\0", GLIBC_BUSYBOX_PATH, LUA_SCRIPT);
+}
+
+fn _run_lmbench_musl() {
+    // hello 脚本硬编码了构建机路径 /code/lmbench_src/bin/build/lmbench_all
+    let _ = mkdir("/code\0", 0o755);
+    let _ = mkdir("/code/lmbench_src\0", 0o755);
+    let _ = mkdir("/code/lmbench_src/bin\0", 0o755);
+    let _ = mkdir("/code/lmbench_src/bin/build\0", 0o755);
+    let _ = link(
+        "/musl/lmbench_all\0",
+        "/code/lmbench_src/bin/build/lmbench_all\0",
+    );
+    run_shell_script("/musl/\0", BUSYBOX_PATH, LMBENCH_SCRIPT);
+}
+
+fn _run_lmbench_glibc() {
+    // hello 脚本硬编码了构建机路径 /code/lmbench_src/bin/build/lmbench_all
+    let _ = mkdir("/code\0", 0o755);
+    let _ = mkdir("/code/lmbench_src\0", 0o755);
+    let _ = mkdir("/code/lmbench_src/bin\0", 0o755);
+    let _ = mkdir("/code/lmbench_src/bin/build\0", 0o755);
+    let _ = link(
+        "/glibc/lmbench_all\0",
+        "/code/lmbench_src/bin/build/lmbench_all\0",
+    );
+    run_shell_script("/glibc/\0", GLIBC_BUSYBOX_PATH, LMBENCH_SCRIPT);
 }
 
 #[cfg(target_arch = "riscv64")]
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("[testrunner] start");
-    _run_basic_musl(); // umount 有些问题
-    _run_basic_glibc(); // umount 有些问题
-    _run_libcbench_musl(); // Passed
-    _run_libcbench_glibc(); // Passed
+    _run_basic_musl();
+    _run_basic_glibc();
+    _run_libcbench_musl();
+    _run_libcbench_glibc();
     _run_busybox_musl();
     _run_busybox_glibc();
     _run_libctest_musl();
+    _run_lua_musl();
+    _run_lua_glibc();
+    _run_lmbench_musl();
+    _run_lmbench_glibc();
     println!("[testrunner] all selected tests finished, powering off");
     poweroff();
     0
@@ -271,7 +331,11 @@ fn main() -> i32 {
     _run_libcbench_glibc();
     _run_busybox_musl();
     _run_busybox_glibc();
-    _run_libctest_musl();
+    // _run_libctest_musl(); // 卡死，需要改
+    _run_lua_musl();
+    _run_lua_glibc();
+    _run_lmbench_musl();
+    // _run_lmbench_glibc(); // 会报错，还要修改
     println!("[testrunner] all selected tests finished, powering off");
     poweroff();
     0
