@@ -102,21 +102,19 @@ pub fn sys_mmap(
             return Err(Errno::EACCES);
         }
 
+        let mut file_data = alloc::vec![0u8; map_len];
+        let origin_offset = file.get_offset();
+        file.seek(offset as isize)?;
+        let read_result = file.read(&mut file_data[..len]);
+        let restore_result = file.seek(origin_offset as isize);
+        read_result?;
+        restore_result?;
+
         task.op_memory_set_write(|memory_set| {
             let start =
                 memory_set.mmap_framed(fixed_addr, map_len, permission, replace, noreplace)?;
+            memory_set.write_bytes_to_mapped_range(start, &file_data)?;
             memory_set.flush_tlb();
-
-            let buf = unsafe { core::slice::from_raw_parts_mut(start as *mut u8, map_len) };
-            buf.fill(0);
-
-            // 没有复制文件内容，仅仅是模拟正常情况下的报错
-            let origin_offset = file.get_offset();
-            file.seek(offset as isize)?;
-            let read_result = file.read(&mut buf[..len]);
-            let restore_result = file.seek(origin_offset as isize);
-            read_result?;
-            restore_result?;
             Ok(start)
         })
     }

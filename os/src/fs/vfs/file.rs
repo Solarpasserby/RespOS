@@ -155,6 +155,10 @@ pub trait FileOp: Any + Send + Sync {
     fn is_tty(&self) -> bool {
         false
     }
+    /// 将文件缓冲数据刷入存储介质。当前文件系统在内存中，默认无操作。
+    fn fsync(&self) -> SysResult<usize> {
+        Ok(0)
+    }
 }
 
 impl File {

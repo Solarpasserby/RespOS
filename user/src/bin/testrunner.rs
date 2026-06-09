@@ -284,7 +284,7 @@ fn main() -> i32 {
     // _run_static_musl();
     // _run_lua_musl();
     // _run_lua_glibc();
-    // _run_lmbench_musl();
+    _run_lmbench_musl();
     // _run_lmbench_glibc();
     println!("[testrunner] all selected tests finished, powering off");
     poweroff();

@@ -8,6 +8,7 @@
 mod context;
 
 use super::timer::set_next_ti_trigger;
+use crate::signal::{SiField, Sig, SigInfo};
 use crate::syscall::*;
 use crate::task::{current_task, exit_and_run_next, handle_signals, yield_current_task};
 use core::arch::global_asm;
@@ -100,15 +101,11 @@ pub fn trap_handler(cx: &mut TrapContext) {
                 .op_memory_set_write(|memory_set| {
                     memory_set.handle_page_fault(page_fault_cause, stval)
                 });
-            if let Err(err) = result {
-                println!(
-                    "[kernel] PageFault in application, cause = {:?}, sepc = {:#x}, bad addr = {:#x}, err = {:?}, kernel killed it.",
-                    scause.cause(),
-                    cx.sepc,
-                    stval,
-                    err
-                );
-                exit_and_run_next(-2);
+            if result.is_err() {
+                let siginfo = SigInfo::new(Sig::SIGSEGV.raw(), SigInfo::KERNEL, SiField::None);
+                current_task()
+                    .expect("[kernel] current task is None.")
+                    .receive_siginfo(siginfo, true);
             }
         }
         Trap::Exception(Exception::IllegalInstruction) => {

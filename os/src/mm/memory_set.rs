@@ -286,6 +286,33 @@ impl MemorySet {
         Ok(start)
     }
 
+    /// 将内核缓冲区写入已经映射好的用户虚拟地址范围。
+    ///
+    /// 该函数通过页表找到物理页后写内核直映地址，不受用户页 PTE 的
+    /// 读写权限影响，适合用于 `mmap` 初始化只读文件页。
+    pub fn write_bytes_to_mapped_range(&mut self, start: usize, data: &[u8]) -> SysResult {
+        let end = start.checked_add(data.len()).ok_or(Errno::EFAULT)?;
+        let mut copied = 0usize;
+        let mut cur = start;
+
+        while cur < end {
+            let va = VirtAddr::from(cur);
+            let vpn = va.floor();
+            let page_offset = cur & (PAGE_SIZE - 1);
+            let copy_len = (PAGE_SIZE - page_offset).min(end - cur);
+            let pte = self.page_table.translate(vpn).ok_or(Errno::EFAULT)?;
+            if !pte.is_valid() {
+                return Err(Errno::EFAULT);
+            }
+
+            let dst = &mut pte.ppn().get_bytes_array()[page_offset..page_offset + copy_len];
+            dst.copy_from_slice(&data[copied..copied + copy_len]);
+            copied += copy_len;
+            cur += copy_len;
+        }
+        Ok(())
+    }
+
     // TOFIX: mmap 在分配内存时，如果分配跨过 2 MB 页表区间，则会导致第一个落进去的线程 TLS/启动栈会变成零
     // 目前对 mmap 起点的控制和处理属于为了通过测例的妥协之举
     #[cfg(target_arch = "loongarch64")]
@@ -1014,6 +1041,16 @@ impl MemorySet {
             }
         }
         Err(Errno::EFAULT)
+    }
+
+    /// 检查一段用户虚拟页都属于用户映射区。
+    ///
+    /// 这里逐页检查，允许范围跨过相邻的多个用户 VMA。
+    pub fn check_user_mapped_range(&self, vpn_range: VPNRange) -> SysResult {
+        for vpn in vpn_range {
+            self.check_valid_user_vpn(vpn, MapPermission::empty())?;
+        }
+        Ok(())
     }
 
     /// 尝试处理用户态页错误，解决 COW 或惰性分配

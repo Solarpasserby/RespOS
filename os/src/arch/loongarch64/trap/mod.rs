@@ -4,6 +4,7 @@ mod context;
 
 use super::register::{badv, ecfg, eentry, estat};
 use super::{sbi::clear_timer_interrupt, timer::set_next_ti_trigger};
+use crate::signal::{SiField, Sig, SigInfo};
 use crate::syscall::*;
 use crate::task::{current_task, exit_and_run_next, handle_signals, yield_current_task};
 use core::arch::global_asm;
@@ -75,15 +76,11 @@ fn handle_user_page_fault(cx: &TrapContext, exception: estat::Exception) {
         .op_memory_set_write(|memory_set| {
             memory_set.handle_page_fault(page_fault_cause(exception), badv)
         });
-    if let Err(err) = result {
-        println!(
-            "[kernel] PageFault in application, cause = {:?}, era = {:#x}, bad addr = {:#x}, err = {:?}, kernel killed it.",
-            estat::Trap::Exception(exception),
-            cx.era,
-            badv,
-            err
-        );
-        exit_and_run_next(-2);
+    if result.is_err() {
+        let siginfo = SigInfo::new(Sig::SIGSEGV.raw(), SigInfo::KERNEL, SiField::None);
+        current_task()
+            .expect("[kernel] current task is None.")
+            .receive_siginfo(siginfo, true);
     }
 }
 

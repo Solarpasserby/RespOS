@@ -8,7 +8,10 @@ use crate::fs::{
     filename_create, filename_link, filename_lookup, filename_lookup_no_follow_final_symlink,
     filename_rename, filename_symlink, filename_unlink, init_fdset, make_pipe, path_open,
 };
-use crate::mm::{check_user_writable, copy_cstr_from_user, copy_from_user, copy_to_user};
+use crate::config::PAGE_SIZE;
+use crate::mm::{
+    VirtAddr, VPNRange, check_user_writable, copy_cstr_from_user, copy_from_user, copy_to_user,
+};
 use crate::signal::sig_struct::{Sig, SigSet};
 use crate::task::{current_task, yield_current_task};
 use crate::timer::{TimeSpec, get_time_ms};
@@ -1092,4 +1095,55 @@ pub fn sys_pselect6(
     }
 
     result
+}
+
+/// 系统调用 sys-fsync — 将文件缓冲数据刷入存储介质。
+/// 当前文件系统实现在内存中，直接返回成功。
+pub fn sys_fsync(fd: usize) -> SysResult<usize> {
+    let task = current_task().expect("[kernel] current task is None.");
+    let file = task.get_fd_entry(fd)?.file;
+    file.fsync()
+}
+
+/// 系统调用 sys-fdatasync — 当前等价于 fsync。
+pub fn sys_fdatasync(fd: usize) -> SysResult<usize> {
+    sys_fsync(fd)
+}
+
+/// 系统调用 sys-msync — 同步 mmap 映射区域与文件。
+///
+/// 支持的 flags：
+/// - MS_ASYNC (1)：异步写回。当前无操作。
+/// - MS_INVALIDATE (2)：当前无页缓存失效实现，仅做参数与地址校验。
+/// - MS_SYNC (4)：同步写回。当前无操作。
+///
+/// MS_ASYNC 和 MS_SYNC 互斥。
+pub fn sys_msync(addr: usize, len: usize, flags: i32) -> SysResult<usize> {
+    const MS_ASYNC: i32 = 1;
+    const MS_INVALIDATE: i32 = 2;
+    const MS_SYNC: i32 = 4;
+    const MS_ALLOWED_FLAGS: i32 = MS_ASYNC | MS_INVALIDATE | MS_SYNC;
+
+    if addr % PAGE_SIZE != 0 {
+        return Err(Errno::EINVAL);
+    }
+    if flags & !MS_ALLOWED_FLAGS != 0 {
+        return Err(Errno::EINVAL);
+    }
+    if flags & MS_ASYNC != 0 && flags & MS_SYNC != 0 {
+        return Err(Errno::EINVAL);
+    }
+
+    if len == 0 {
+        return Ok(0);
+    }
+
+    let end = addr.checked_add(len).ok_or(Errno::EINVAL)?;
+    let start_vpn = VirtAddr::from(addr).floor();
+    let end_vpn = VirtAddr::from(end).ceil();
+    let vpn_range = VPNRange::new(start_vpn, end_vpn);
+    let task = current_task().expect("[kernel] current task is None.");
+    task.op_memory_set_read(|memory_set| memory_set.check_user_mapped_range(vpn_range))?;
+
+    Ok(0)
 }
