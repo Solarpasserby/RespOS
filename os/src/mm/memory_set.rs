@@ -47,7 +47,9 @@ lazy_static! {
 
 fn dynamic_linker_candidates(interp: &str) -> [&str; 3] {
     match interp {
-        "/lib/ld-musl-riscv64-sf.so.1" | "/lib/ld-musl-riscv64.so.1" => {
+        "/lib/ld-musl-riscv64-sf.so.1"
+        | "/lib/ld-musl-riscv64.so.1"
+        | "/lib/ld-musl-loongarch64.so.1" => {
             ["/musl/lib/libc.so", "/musl/libc.so", interp]
         }
         _ => [interp, "/musl/lib/libc.so", "/musl/libc.so"],
