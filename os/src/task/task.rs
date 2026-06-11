@@ -678,7 +678,10 @@ impl TaskControlBlock {
             return false;
         }
 
+        #[cfg(target_arch = "riscv64")]
         let tp = self.get_trap_cx().x[4];
+        #[cfg(target_arch = "loongarch64")]
+        let tp = self.get_trap_cx().x[2];
         if tp < 152 {
             return false;
         }

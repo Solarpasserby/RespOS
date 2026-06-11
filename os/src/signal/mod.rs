@@ -22,8 +22,10 @@ fn make_sig_context(x: [usize; 32], pc: usize, mask: SigSet, info: usize) -> Sig
 #[cfg(target_arch = "loongarch64")]
 fn make_sig_context(x: [usize; 32], pc: usize, mask: SigSet, info: usize) -> SigContext {
     SigContext {
-        x,
-        sepc: pc,
+        pc,
+        gregs: x,
+        flags: 0,
+        _pad: 0,
         mask,
         info,
     }

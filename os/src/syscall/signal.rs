@@ -21,8 +21,8 @@ fn restore_sig_context(
     trap_cx: &mut crate::arch::trap::TrapContext,
     ctx: crate::signal::sig_stack::SigContext,
 ) {
-    trap_cx.x = ctx.x;
-    trap_cx.set_sepc(ctx.sepc);
+    trap_cx.x = ctx.gregs;
+    trap_cx.set_sepc(ctx.pc);
 }
 
 pub fn sys_kill(pid: usize, signum: i32) -> SysResult<usize> {

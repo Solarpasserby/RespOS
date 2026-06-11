@@ -63,8 +63,13 @@ pub struct SigContext {
 #[derive(Clone, Copy, Debug)]
 #[cfg(target_arch = "loongarch64")]
 pub struct SigContext {
-    pub x: [usize; 32], // 32 个通用寄存器的值
-    pub sepc: usize,    // 被中断的那条指令的地址
-    pub mask: SigSet,   // 记录原先的mask
-    pub info: usize,    // 标志是否存在SIGINFO
+    // Linux/musl LoongArch mcontext_t starts with the interrupted PC,
+    // followed by the 32 general-purpose registers. musl's SIGCANCEL
+    // handler rewrites this PC slot before returning from the signal.
+    pub pc: usize,
+    pub gregs: [usize; 32],
+    pub flags: u32,
+    pub _pad: u32,
+    pub mask: SigSet, // 记录原先的mask
+    pub info: usize,  // 标志是否存在SIGINFO
 }

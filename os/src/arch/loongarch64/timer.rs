@@ -4,11 +4,17 @@
 // 使用 rdtime.d 指令读取稳定计数器，替代 RISC-V 的 mtime CSR。
 
 use super::{register, sbi::set_timer};
-use crate::config::CLOCK_FREQ;
+use crate::config::DEFAULT_CLOCK_FREQ;
+use core::arch::asm;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 const TICKS_PER_SEC: usize = 100;
 const MSEC_PER_SEC: usize = 1000;
 const USEC_PER_SEC: usize = 1_000_000;
+
+// TODO: 动态读取计算机运行频率，目前关闭
+static CLOCK_FREQ_HZ: AtomicUsize = AtomicUsize::new(DEFAULT_CLOCK_FREQ);
+const USE_CPUCFG_CLOCK_FREQ: bool = false;
 
 #[derive(Clone, Copy, Debug, Default)]
 #[repr(C)]
@@ -47,6 +53,46 @@ impl TimeSpec {
     }
 }
 
+#[inline(always)]
+fn cpucfg(index: usize) -> usize {
+    let bits: usize;
+    unsafe {
+        asm!("cpucfg {0}, {1}", out(reg) bits, in(reg) index, options(nomem, nostack));
+    }
+    bits
+}
+
+#[inline(always)]
+pub fn get_clock_freq() -> usize {
+    // CLOCK_FREQ_HZ.load(Ordering::Relaxed)
+    DEFAULT_CLOCK_FREQ
+}
+
+/// Read the stable counter frequency from CPUCFG when the platform exposes it.
+pub fn init_clock_freq() {
+    let base_freq = cpucfg(4) & 0xffff_ffff;
+    let cfg5 = cpucfg(5);
+    let mul = cfg5 & 0xffff;
+    let div = (cfg5 >> 16) & 0xffff;
+
+    if base_freq != 0 && mul != 0 && div != 0 {
+        let cpucfg_freq = base_freq * mul / div;
+        if USE_CPUCFG_CLOCK_FREQ {
+            CLOCK_FREQ_HZ.store(cpucfg_freq, Ordering::Relaxed);
+        }
+        println!(
+            "[timer] CPUCFG freq: {} Hz, active clock freq: {} Hz",
+            cpucfg_freq,
+            get_clock_freq()
+        );
+    } else {
+        println!(
+            "[timer] invalid CPUCFG timer freq base={} mul={} div={}, use default {} Hz",
+            base_freq, mul, div, DEFAULT_CLOCK_FREQ
+        );
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 #[repr(C)]
 pub struct StatxTimeStamp {
@@ -82,16 +128,17 @@ pub fn get_time() -> usize {
 
 /// 设置下一次时钟中断触发
 pub fn set_next_ti_trigger() {
-    set_timer(get_time() + CLOCK_FREQ / TICKS_PER_SEC);
+    set_timer(get_time() + get_clock_freq() / TICKS_PER_SEC);
 }
 
 /// 读取硬件运行时间（毫秒）
 pub fn get_time_ms() -> usize {
-    get_time() / (CLOCK_FREQ / MSEC_PER_SEC)
+    get_time() / (get_clock_freq() / MSEC_PER_SEC)
 }
 
 /// 读取硬件运行时间（微秒）
 pub fn get_time_us() -> usize {
     let ticks = get_time();
-    ticks / CLOCK_FREQ * USEC_PER_SEC + ticks % CLOCK_FREQ * USEC_PER_SEC / CLOCK_FREQ
+    let clock_freq = get_clock_freq();
+    ticks / clock_freq * USEC_PER_SEC + ticks % clock_freq * USEC_PER_SEC / clock_freq
 }

@@ -54,6 +54,9 @@ fn rust_main_high() -> ! {
     #[cfg(target_arch = "loongarch64")]
     arch::enable_kernel_extensions();
 
+    #[cfg(target_arch = "loongarch64")]
+    timer::init_clock_freq();
+
     error!("hello world");
     warn!("hello world");
     info!("hello world");

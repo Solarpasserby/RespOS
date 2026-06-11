@@ -28,6 +28,7 @@ const AT_STATX_SYNC_TYPE: usize = 0x6000;
 // 使用 mm 实现的 `copy_cstr_from_user`, `copy_from_user`, `copy_to_user` 来访问用户空间的数据
 
 // TODO: write 和 read 借助堆上分配的空间中转数据，有额外开销，须优化
+const IO_CHUNK_SIZE: usize = PAGE_SIZE;
 
 /// 系统调用 sys-read
 pub fn sys_read(fd: usize, buf: *mut u8, len: usize) -> SysResult<usize> {
@@ -42,10 +43,21 @@ pub fn sys_read(fd: usize, buf: *mut u8, len: usize) -> SysResult<usize> {
         return Err(Errno::EBADF);
     }
 
-    let mut kbuf = alloc::vec![0u8; len];
-    let ret = file.read(kbuf.as_mut_slice())?;
-    copy_to_user(buf, kbuf.as_ptr(), ret)?;
-    Ok(ret)
+    let mut kbuf = alloc::vec![0u8; len.min(IO_CHUNK_SIZE)];
+    let mut total = 0usize;
+    while total < len {
+        let chunk_len = (len - total).min(kbuf.len());
+        let ret = file.read(&mut kbuf[..chunk_len])?;
+        if ret == 0 {
+            break;
+        }
+        copy_to_user(unsafe { buf.add(total) }, kbuf.as_ptr(), ret)?;
+        total += ret;
+        if ret < chunk_len {
+            break;
+        }
+    }
+    Ok(total)
 }
 
 pub fn sys_pread64(fd: usize, buf: *mut u8, len: usize, offset: isize) -> SysResult<usize> {
@@ -65,15 +77,29 @@ pub fn sys_pread64(fd: usize, buf: *mut u8, len: usize, offset: isize) -> SysRes
     file.can_seek()?;
     let old_offset = file.get_offset();
     file.seek(offset)?;
-    let mut kbuf = alloc::vec![0u8; len];
-    let ret = file.read(kbuf.as_mut_slice());
+    let mut kbuf = alloc::vec![0u8; len.min(IO_CHUNK_SIZE)];
+    let mut total = 0usize;
+    let mut ret = Ok(0usize);
+    while total < len {
+        let chunk_len = (len - total).min(kbuf.len());
+        ret = file.read(&mut kbuf[..chunk_len]);
+        let read_len = match ret {
+            Ok(read_len) => read_len,
+            Err(_) => break,
+        };
+        if read_len == 0 {
+            break;
+        }
+        copy_to_user(unsafe { buf.add(total) }, kbuf.as_ptr(), read_len)?;
+        total += read_len;
+        if read_len < chunk_len {
+            break;
+        }
+    }
     let restore_ret = file.seek(old_offset as isize);
 
     match (ret, restore_ret) {
-        (Ok(read_len), Ok(_)) => {
-            copy_to_user(buf, kbuf.as_ptr(), read_len)?;
-            Ok(read_len)
-        }
+        (Ok(_), Ok(_)) => Ok(total),
         (Err(err), _) => Err(err),
         (_, Err(err)) => Err(err),
     }
@@ -91,10 +117,18 @@ pub fn sys_write(fd: usize, buf: *mut u8, len: usize) -> SysResult<usize> {
         return Err(Errno::EBADF);
     }
 
-    let mut kbuf = alloc::vec![0u8; len];
-    copy_from_user(kbuf.as_mut_ptr(), buf, len)?;
-    let ret = file.write(kbuf.as_slice())?;
-    Ok(ret)
+    let mut kbuf = alloc::vec![0u8; len.min(IO_CHUNK_SIZE)];
+    let mut total = 0usize;
+    while total < len {
+        let chunk_len = (len - total).min(kbuf.len());
+        copy_from_user(kbuf.as_mut_ptr(), unsafe { buf.add(total) }, chunk_len)?;
+        let written = file.write(&kbuf[..chunk_len])?;
+        total += written;
+        if written < chunk_len {
+            break;
+        }
+    }
+    Ok(total)
 }
 
 #[repr(C)]

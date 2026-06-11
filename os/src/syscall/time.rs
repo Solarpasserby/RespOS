@@ -2,6 +2,7 @@
 
 use super::{Errno, SysResult};
 use crate::mm::{copy_from_user, copy_to_user};
+use crate::task::{current_task, yield_current_task};
 use crate::timer::{TimeSpec, get_time_ms, get_time_us};
 
 #[repr(C)]
@@ -85,18 +86,48 @@ pub fn sys_clock_gettime(clock_id: usize, tp: *mut TimeSpec) -> SysResult<usize>
 
 /// 系统调用 sys-nanosleep
 ///
-/// TODO: 实现较简单，且未实现信号打断机制
-pub fn sys_nanosleep(req: *const TimeSpec, _rem: *mut TimeSpec) -> SysResult<usize> {
+pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> SysResult<usize> {
     let mut req_time = TimeSpec::default();
     copy_from_user(&mut req_time as *mut TimeSpec, req, 1)?;
     let time_ms = req_time.checked_duration_ms().ok_or(Errno::EINVAL)?;
+    let task = current_task().expect("no current task");
 
     let start_time = get_time_ms();
     loop {
         let current_time = get_time_ms();
-        if current_time - start_time >= time_ms {
-            // 插入气泡
+        let elapsed = current_time.saturating_sub(start_time);
+        if elapsed >= time_ms {
             break;
+        }
+        task.set_interruptible(true);
+        if task.check_signal_interrupt() || task.is_interrupted() {
+            task.clear_interrupted();
+            task.set_interruptible(false);
+            if !rem.is_null() {
+                let left_ms = time_ms - elapsed;
+                let remain = TimeSpec {
+                    sec: (left_ms / 1000) as isize,
+                    nsec: ((left_ms % 1000) * 1_000_000) as isize,
+                };
+                copy_to_user(rem, &remain as *const TimeSpec, 1)?;
+            }
+            return Err(Errno::EINTR);
+        }
+        yield_current_task();
+        task.set_interruptible(false);
+        if task.is_interrupted() || task.check_signal_interrupt() {
+            task.clear_interrupted();
+            if !rem.is_null() {
+                let now = get_time_ms();
+                let elapsed = now.saturating_sub(start_time).min(time_ms);
+                let left_ms = time_ms - elapsed;
+                let remain = TimeSpec {
+                    sec: (left_ms / 1000) as isize,
+                    nsec: ((left_ms % 1000) * 1_000_000) as isize,
+                };
+                copy_to_user(rem, &remain as *const TimeSpec, 1)?;
+            }
+            return Err(Errno::EINTR);
         }
     }
     Ok(0)
