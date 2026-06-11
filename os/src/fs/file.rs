@@ -168,6 +168,19 @@ impl File {
     pub fn path(&self) -> Arc<Path> {
         self.inner.lock().path.clone()
     }
+
+    pub fn truncate(&self, size: usize) -> SysResult<usize> {
+        let mut inner = self.inner.lock();
+        let path = inner.path.abs_path();
+        self.inode.truncate(&path, size)?;
+        if let Some(cache) = inner.cache.as_mut() {
+            *cache = FileCache::new(size);
+        }
+        if inner.offset > size {
+            inner.offset = size;
+        }
+        Ok(0)
+    }
 }
 
 impl FileOp for File {

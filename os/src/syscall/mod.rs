@@ -15,6 +15,7 @@ const SYSCALL_UMOUNT2: usize = 39;
 const SYSCALL_MOUNT: usize = 40;
 const SYSCALL_STATFS: usize = 43;
 const SYSCALL_FSTATFS: usize = 44;
+const SYSCALL_FTRUNCATE: usize = 46;
 const SYSCALL_FACCESSAT: usize = 48;
 const SYSCALL_CHDIR: usize = 49;
 const SYSCALL_OPENAT: usize = 56;
@@ -66,6 +67,10 @@ const SYSCALL_GETGID: usize = 176;
 const SYSCALL_GETEGID: usize = 177;
 const SYSCALL_GETTID: usize = 178;
 const SYSCALL_SYSINFO: usize = 179;
+const SYSCALL_SHMGET: usize = 194;
+const SYSCALL_SHMCTL: usize = 195;
+const SYSCALL_SHMAT: usize = 196;
+const SYSCALL_SHMDT: usize = 197;
 const SYSCALL_SOCKET: usize = 198;
 const SYSCALL_BIND: usize = 200;
 const SYSCALL_LISTEN: usize = 201;
@@ -93,6 +98,7 @@ const SYSCALL_STATX: usize = 291;
 
 mod errno;
 mod fs;
+mod ipc;
 mod mm;
 mod net;
 mod process;
@@ -104,6 +110,7 @@ use crate::fs::Stat;
 use crate::timer::TimeSpec;
 pub use errno::*;
 use fs::*;
+use ipc::*;
 use mm::*;
 use net::*;
 use process::*;
@@ -139,6 +146,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
             args[4] as *const u8,
         ),
         SYSCALL_STATFS => sys_statfs(args[0] as *const u8, args[1] as *mut crate::fs::Statfs64),
+        SYSCALL_FTRUNCATE => sys_ftruncate(args[0], args[1] as isize),
         SYSCALL_FACCESSAT => {
             sys_faccessat(args[0] as isize, args[1] as *const u8, args[2], args[3])
         }
@@ -226,6 +234,10 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         SYSCALL_GETEGID => sys_getegid(),
         SYSCALL_GETTID => sys_gettid(),
         SYSCALL_SYSINFO => sys_sysinfo(args[0] as *mut SysInfo),
+        SYSCALL_SHMGET => sys_shmget(args[0] as isize, args[1], args[2]),
+        SYSCALL_SHMCTL => sys_shmctl(args[0], args[1], args[2]),
+        SYSCALL_SHMAT => sys_shmat(args[0], args[1], args[2]),
+        SYSCALL_SHMDT => sys_shmdt(args[0]),
         SYSCALL_SOCKET => sys_socket(args[0], args[1], args[2]),
         SYSCALL_BIND => sys_bind(args[0], args[1], args[2]),
         SYSCALL_LISTEN => sys_listen(args[0], args[1]),

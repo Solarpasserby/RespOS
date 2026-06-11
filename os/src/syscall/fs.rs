@@ -491,6 +491,19 @@ pub fn sys_fstat(fd: usize, stat: *mut Stat) -> SysResult<usize> {
     Ok(0)
 }
 
+pub fn sys_ftruncate(fd: usize, length: isize) -> SysResult<usize> {
+    if length < 0 {
+        return Err(Errno::EINVAL);
+    }
+    let task = current_task().expect("[kernel] current task is None.");
+    let file = task.get_fd_entry(fd)?.file;
+    if !file.writable() {
+        return Err(Errno::EINVAL);
+    }
+    let file = file.as_any().downcast_ref::<File>().ok_or(Errno::EINVAL)?;
+    file.truncate(length as usize)
+}
+
 /// 系统调用 sys-faccessat
 ///
 /// 按 dirfd + path 定位文件，并根据 mode 检查该路径是否存在、是否可读/可写/可执行。

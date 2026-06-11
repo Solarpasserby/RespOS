@@ -225,6 +225,7 @@ impl MemorySet {
                         data_frames: right_frames,
                         map_type: area.map_type,
                         map_perm: area.map_perm,
+                        shared: area.shared,
                     };
                     area.vpn_range = VPNRange::new(area_start, overlap_start);
                     Some(right_area)
@@ -305,6 +306,37 @@ impl MemorySet {
         }
 
         self.insert_framed_area_va(VirtAddr::from(start), VirtAddr::from(end), map_perm);
+        if addr.is_none() {
+            self.mmap_start = end;
+        }
+        Ok(start)
+    }
+
+    /// Map existing physical frames into a user range. Used for SysV shared memory.
+    pub fn mmap_shared_frames(
+        &mut self,
+        addr: Option<usize>,
+        map_len: usize,
+        map_perm: MapPermission,
+        frames: &[Arc<FrameTracker>],
+    ) -> SysResult<usize> {
+        let start = self.choose_mmap_start(addr, map_len)?;
+        let end = start.checked_add(map_len).ok_or(Errno::ENOMEM)?;
+        if end > MMAP_MAX_ADDR {
+            return Err(Errno::ENOMEM);
+        }
+
+        let vpn_range = VPNRange::new(VirtAddr::from(start).floor(), VirtAddr::from(end).ceil());
+        if self.area_intersects(&vpn_range) || frames.len() != vpn_range.into_iter().count() {
+            return Err(Errno::EINVAL);
+        }
+
+        let mut area = MapArea::new_shared(VirtAddr::from(start), VirtAddr::from(end), map_perm);
+        for (vpn, frame) in area.vpn_range.into_iter().zip(frames.iter()) {
+            self.page_table.map(vpn, frame.ppn(), PTEFlags::from(map_perm));
+            area.data_frames.insert(vpn, frame.clone());
+        }
+        self.areas.push(area);
         if addr.is_none() {
             self.mmap_start = end;
         }
@@ -560,6 +592,7 @@ impl MemorySet {
                         data_frames: old_area.data_frames,
                         map_type: old_map_type,
                         map_perm: old_map_perm,
+                        shared: old_area.shared,
                     },
                 );
                 idx += 1;
@@ -573,6 +606,7 @@ impl MemorySet {
                     data_frames: middle_and_right,
                     map_type: old_map_type,
                     map_perm: new_map_perm,
+                    shared: old_area.shared,
                 },
             );
             idx += 1;
@@ -586,6 +620,7 @@ impl MemorySet {
                         data_frames: right_frames,
                         map_type: old_map_type,
                         map_perm: old_map_perm,
+                        shared: old_area.shared,
                     },
                 );
                 idx += 1;
@@ -1013,7 +1048,10 @@ impl MemorySet {
                 let shared_frame = area.data_frames.get(&vpn).unwrap().clone();
                 let ppn = shared_frame.ppn();
 
-                if is_writable {
+                if area.shared {
+                    let child_flags = PTEFlags::from_bits(area.map_perm.bits).unwrap();
+                    memory_set.page_table.map(vpn, ppn, child_flags);
+                } else if is_writable {
                     // COW 共享：标记父进程 PTE 为只读 + COW
                     let parent_pte = user_space.page_table.translate(vpn).unwrap();
                     let mut flags = parent_pte.flags();
@@ -1197,6 +1235,7 @@ struct MapArea {
     data_frames: BTreeMap<VirtPageNum, Arc<FrameTracker>>,
     map_type: MapType,
     map_perm: MapPermission,
+    shared: bool,
 }
 
 impl MapArea {
@@ -1216,8 +1255,16 @@ impl MapArea {
             data_frames: BTreeMap::new(),
             map_type,
             map_perm,
+            shared: false,
         }
     }
+
+    pub fn new_shared(start_va: VirtAddr, end_va: VirtAddr, map_perm: MapPermission) -> Self {
+        let mut area = Self::new(start_va, end_va, MapType::Framed, map_perm);
+        area.shared = true;
+        area
+    }
+
     /// 复制构造空逻辑段
     ///
     /// 只指定了一段与传入逻辑段一致的虚拟内存，内部没有实际的映射的页帧
@@ -1227,6 +1274,7 @@ impl MapArea {
             data_frames: BTreeMap::new(),
             map_type: another.map_type,
             map_perm: another.map_perm,
+            shared: another.shared,
         }
     }
 
