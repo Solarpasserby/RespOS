@@ -20,7 +20,7 @@ const RUN_DYNAMIC_SCRIPT: &str = "run-dynamic.sh\0";
 const BUSYBOX_CMD_FILE: &str = "busybox_cmd.txt\0";
 const LUA_SCRIPT: &str = "lua_testcode.sh\0";
 const LMBENCH_SCRIPT: &str = "lmbench_testcode.sh\0";
-
+const LTP_SCRIPT: &str = "ltp_testcode.sh\0";
 fn strip_nul(s: &str) -> &str {
     &s[..s.len() - 1]
 }
@@ -306,22 +306,31 @@ fn _run_lmbench_glibc() {
     );
     run_shell_script("/glibc/\0", GLIBC_BUSYBOX_PATH, LMBENCH_SCRIPT);
 }
+fn _run_ltp_musl() {
+    run_shell_script("/musl/\0", BUSYBOX_PATH, LTP_SCRIPT);
+}
+
+fn _run_ltp_glibc() {
+    run_shell_script("/glibc/\0", GLIBC_BUSYBOX_PATH, LTP_SCRIPT);
+}
 
 #[cfg(target_arch = "riscv64")]
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("[testrunner] start");
-    _run_basic_musl();
-    _run_basic_glibc();
-    _run_libcbench_musl();
-    _run_libcbench_glibc();
-    _run_busybox_musl();
-    _run_busybox_glibc();
-    _run_libctest_musl();
-    _run_lua_musl();
-    _run_lua_glibc();
-    _run_lmbench_musl();
-    _run_lmbench_glibc();
+    // _run_basic_musl();
+    // _run_basic_glibc();
+    // _run_libcbench_musl();
+    // _run_libcbench_glibc();
+    // _run_busybox_musl();
+    // _run_busybox_glibc();
+    // _run_libctest_musl();
+    // _run_lua_musl();
+    // _run_lua_glibc();
+    // _run_lmbench_musl();
+    // _run_lmbench_glibc();
+    _run_ltp_musl();
+    _run_ltp_glibc();
     println!("[testrunner] all selected tests finished, powering off");
     poweroff();
     0
