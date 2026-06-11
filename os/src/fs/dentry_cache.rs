@@ -1,15 +1,13 @@
 // os/src/fs/dentry_cache.rs
 
 use super::vfs::Dentry;
+use crate::config::DENTRY_CACHE_CAPACITY;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use hashbrown::HashMap;
 use lazy_static::lazy_static;
 use spin::Mutex;
-
-/// 缓存容量上限
-const DENTRY_CACHE_CAPACITY: usize = 1024;
 
 lazy_static! {
     /// 全局 dentry 缓存，key 为绝对路径
