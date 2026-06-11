@@ -170,14 +170,18 @@ impl File {
     }
 
     pub fn truncate(&self, size: usize) -> SysResult<usize> {
-        let mut inner = self.inner.lock();
+        let inner = self.inner.lock();
         let path = inner.path.abs_path();
         self.inode.truncate(&path, size)?;
-        if let Some(cache) = inner.cache.as_mut() {
-            *cache = FileCache::new(size);
+        if let Some(ref pc) = inner.page_cache {
+            pc.resize(size);
+            if inner.write_back {
+                pc.sync(&self.inode, &path)?;
+            }
         }
         if inner.offset > size {
-            inner.offset = size;
+            drop(inner);
+            self.inner.lock().offset = size;
         }
         Ok(0)
     }

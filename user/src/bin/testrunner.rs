@@ -289,16 +289,8 @@ fn _run_iozone_glibc() {
     run_shell_script("/glibc/\0", GLIBC_BUSYBOX_PATH, IOZONE_SCRIPT);
 }
 
-fn prepare_bin_shell(shell_path: &str) {
-    let _ = mkdir("/bin\0", 0o755);
-    let _ = unlink("/bin/busybox\0");
-    let _ = unlink("/bin/sh\0");
-    let _ = link(shell_path, "/bin/busybox\0");
-    let _ = link(shell_path, "/bin/sh\0");
-}
-
 fn _run_lmbench_musl() {
-    if chdir("/musl") < 0 {
+    if chdir("/musl\0") < 0 {
         println!("[testrunner] cannot enter /musl");
         return;
     }
@@ -322,7 +314,7 @@ fn _run_lmbench_musl() {
 }
 
 fn _run_lmbench_glibc() {
-    if chdir("/glibc") < 0 {
+    if chdir("/glibc\0") < 0 {
         println!("[testrunner] cannot enter /glibc");
         return;
     }
@@ -356,21 +348,21 @@ fn _run_ltp_glibc() {
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("[testrunner] start");
-    // _run_basic_musl();
-    // _run_basic_glibc();
-    // _run_libcbench_musl();
-    // _run_libcbench_glibc();
-    // _run_busybox_musl();
-    // _run_busybox_glibc();
-    // _run_libctest_musl();
-    // _run_lua_musl();
-    // _run_lua_glibc();
-    // _run_lmbench_musl();
-    // _run_lmbench_glibc();
-    // _run_ltp_musl();
-    // _run_ltp_glibc();
+    _run_basic_musl();
+    _run_basic_glibc();
+    _run_libcbench_musl();
+    _run_libcbench_glibc();
+    _run_busybox_musl();
+    _run_busybox_glibc();
+    _run_libctest_musl();
+    _run_lua_musl();
+    _run_lua_glibc();
+    _run_lmbench_musl();
+    _run_lmbench_glibc();
     _run_iozone_musl();
     _run_iozone_glibc();
+    _run_ltp_musl();
+    _run_ltp_glibc();
     println!("[testrunner] all selected tests finished, powering off");
     poweroff();
     0
@@ -380,19 +372,21 @@ fn main() -> i32 {
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("[testrunner] start");
-    // _run_basic_musl();
-    // _run_basic_glibc();
-    // _run_libcbench_musl();
-    // _run_libcbench_glibc();
-    // _run_busybox_musl();
-    // _run_busybox_glibc();
-    // _run_libctest_musl();
-    // _run_lua_musl();
-    // _run_lua_glibc();
-    // _run_lmbench_musl();
-    // _run_lmbench_glibc(); // 会报错，还要修改
+    _run_basic_musl();
+    _run_basic_glibc();
+    _run_libcbench_musl();
+    _run_libcbench_glibc();
+    _run_busybox_musl();
+    _run_busybox_glibc();
+    _run_libctest_musl();
+    _run_lua_musl();
+    _run_lua_glibc();
+    _run_lmbench_musl();
+    _run_lmbench_glibc(); // 会报错，还要修改
     _run_iozone_musl();
     _run_iozone_glibc();
+    _run_ltp_musl();
+    _run_ltp_glibc();
     println!("[testrunner] all selected tests finished, powering off");
     poweroff();
     0
