@@ -92,7 +92,7 @@ impl File {
     }
 
     pub fn new_tmpfile(path: Arc<Path>, inode: Arc<dyn InodeOp>, flags: OpenFlags) -> Self {
-        let page_cache = Some(Arc::new(PageCache::new(0)));
+        let page_cache = Some(PageCache::new(0));
         Self {
             inode,
             inner: Mutex::new(FileInner {
@@ -224,7 +224,8 @@ impl FileOp for File {
             let n = pc.write_at(offset, buf, lower)?;
             if inner.write_back {
                 match self.inode.write_at(&path, offset, buf) {
-                    Ok(_) | Err(Errno::ENOENT) => {}
+                    Ok(written) => pc.mark_clean_range(offset, written.min(n)),
+                    Err(Errno::ENOENT) => {}
                     Err(err) => return Err(err),
                 }
             }

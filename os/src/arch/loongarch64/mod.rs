@@ -171,7 +171,9 @@ pub fn enable_boot_paging() {
 
         core::ptr::write_volatile(
             (pgd as *mut usize).add(pgd_idx),
-            table_pte(kernel_virt_to_phys(core::ptr::addr_of!(BOOT_PMD) as *const _)),
+            table_pte(kernel_virt_to_phys(
+                core::ptr::addr_of!(BOOT_PMD) as *const _
+            )),
         );
         for table in 0..BOOT_PTE_TABLES {
             let table_pa = ptes as usize + table * core::mem::size_of::<BootPage>();

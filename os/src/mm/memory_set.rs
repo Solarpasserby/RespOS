@@ -333,7 +333,8 @@ impl MemorySet {
 
         let mut area = MapArea::new_shared(VirtAddr::from(start), VirtAddr::from(end), map_perm);
         for (vpn, frame) in area.vpn_range.into_iter().zip(frames.iter()) {
-            self.page_table.map(vpn, frame.ppn(), PTEFlags::from(map_perm));
+            self.page_table
+                .map(vpn, frame.ppn(), PTEFlags::from(map_perm));
             area.data_frames.insert(vpn, frame.clone());
         }
         self.areas.push(area);

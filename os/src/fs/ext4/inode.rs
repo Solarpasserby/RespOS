@@ -46,7 +46,7 @@ impl Ext4Inode {
             ino,
             ty,
             times: Mutex::new(None),
-            page_cache: Arc::new(PageCache::new(0)),
+            page_cache: PageCache::new(0),
         }
     }
 

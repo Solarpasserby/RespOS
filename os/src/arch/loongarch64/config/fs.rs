@@ -11,3 +11,6 @@ pub const INODE_CACHE_CAPACITY: usize = 1024;
 
 /// 目录项缓存容量上限
 pub const DENTRY_CACHE_CAPACITY: usize = 1024;
+
+/// 页缓存容量上限
+pub const PAGE_CACHE_GLOBAL_MAX_PAGES: usize = 512;

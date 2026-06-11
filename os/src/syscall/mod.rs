@@ -279,8 +279,20 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         ),
         SYSCALL_MPROTECT => sys_mprotect(args[0], args[1], args[2] as u32),
         SYSCALL_MSYNC => sys_msync(args[0], args[1], args[2] as i32),
-        SYSCALL_PREADV2 => sys_preadv2(args[0], args[1] as *const IoVec, args[2], args[3] as isize, args[4] as i32),
-        SYSCALL_PWRITEV2 => sys_pwritev2(args[0], args[1] as *const IoVec, args[2], args[3] as isize, args[4] as i32),
+        SYSCALL_PREADV2 => sys_preadv2(
+            args[0],
+            args[1] as *const IoVec,
+            args[2],
+            args[3] as isize,
+            args[4] as i32,
+        ),
+        SYSCALL_PWRITEV2 => sys_pwritev2(
+            args[0],
+            args[1] as *const IoVec,
+            args[2],
+            args[3] as isize,
+            args[4] as i32,
+        ),
         SYSCALL_MADVISE => sys_madvise(args[0], args[1], args[2] as i32),
         SYSCALL_WAIT4 => sys_wait4(
             args[0] as isize,
