@@ -1,6 +1,6 @@
 use super::{Errno, SysResult};
-use crate::fs::vfs::{FileOp, InodeType, OpenFlags};
-use crate::fs::{FdEntry, KStat};
+use crate::fs::vfs::InodeType;
+use crate::fs::{FdEntry, FileOp, KStat, OpenFlags};
 use crate::mm::{copy_from_user, copy_to_user};
 use crate::mutex::SpinLock;
 use crate::task::{current_task, yield_current_task};

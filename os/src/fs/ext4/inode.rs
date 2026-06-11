@@ -581,7 +581,7 @@ impl InodeOp for Ext4Inode {
         Ok(())
     }
 
-    fn unlink(&self, valid_dentry: Arc<Dentry>) -> SysResult {
+    fn unlink(&self, valid_dentry: &Arc<Dentry>) -> SysResult {
         // 调用者保证参数合法
         // self.check_type(InodeType::Directory)?;
 

@@ -17,6 +17,7 @@ mod stat;
 
 use super::Statfs64;
 use super::vfs::{Dentry, InodeOp, SuperBlockOp};
+use crate::fs::dentry_cache;
 use crate::fs::mount::{self, Mount, VfsMount, get_mount_by_dentry};
 use alloc::sync::Arc;
 
@@ -59,10 +60,11 @@ pub fn init_procfs(root: Arc<Dentry>) {
         Arc::new(ProcDirInode),
     ));
     root.insert_child("proc", proc_mountpoint.clone());
-    mount::pin_vfs_dentry(proc_mountpoint.clone());
+    dentry_cache::insert_dentry_cache(proc_mountpoint.clone());
+    dentry_cache::pin_vfs_dentry(proc_mountpoint.clone());
 
     let proc_root = Arc::new(Dentry::new("/".into(), None, Arc::new(ProcDirInode)));
-    mount::pin_vfs_dentry(proc_root.clone());
+    dentry_cache::pin_vfs_dentry(proc_root.clone());
     let proc_mount = VfsMount::new(proc_root.clone(), Arc::new(ProcSuperBlock), 0);
     let parent_mount = get_mount_by_dentry(&root).expect("[procfs] root mount is not initialized");
     mount::add_mount(Mount::new_child(proc_mountpoint, proc_mount, parent_mount));
@@ -73,5 +75,6 @@ pub fn init_procfs(root: Arc<Dentry>) {
         Arc::new(ProcSelfInode),
     ));
     proc_root.insert_child("self", self_dentry.clone());
-    mount::pin_vfs_dentry(self_dentry);
+    dentry_cache::insert_dentry_cache(self_dentry.clone());
+    dentry_cache::pin_vfs_dentry(self_dentry);
 }

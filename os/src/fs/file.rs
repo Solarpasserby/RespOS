@@ -1,6 +1,6 @@
 // os/src/vfs/file.rs
 
-use super::{InodeOp, InodeType, LinuxDirent64};
+use super::vfs::{InodeOp, InodeType, LinuxDirent64};
 use crate::config::PAGE_SIZE;
 use crate::fs::{KStat, Path};
 use crate::syscall::{Errno, SysResult};

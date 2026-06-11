@@ -1,6 +1,6 @@
 // os/src/fs/fdtable.rs
 
-use super::vfs::{FileOp, OpenFlags};
+use super::{FileOp, OpenFlags};
 use super::{Stdin, Stdout};
 use crate::config::FTB_RLIMIT;
 use crate::mutex::SpinLock;

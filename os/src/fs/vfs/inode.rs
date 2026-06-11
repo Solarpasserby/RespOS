@@ -42,7 +42,7 @@ pub trait InodeOp: Any + Send + Sync {
     }
 
     fn link(&self, old_path: &str, bare_dentry: Arc<Dentry>) -> SysResult;
-    fn unlink(&self, valid_dentry: Arc<Dentry>) -> SysResult;
+    fn unlink(&self, valid_dentry: &Arc<Dentry>) -> SysResult;
 
     /// 读取符号链接的目标路径。仅 SymLink 类型需要实现。
     fn read_link(&self, _path: &str) -> SysResult<String> {

@@ -61,7 +61,7 @@ impl InodeOp for ZeroInode {
         Err(Errno::EACCES)
     }
 
-    fn unlink(&self, _valid_dentry: Arc<Dentry>) -> SysResult {
+    fn unlink(&self, _valid_dentry: &Arc<Dentry>) -> SysResult {
         Err(Errno::EACCES)
     }
 }

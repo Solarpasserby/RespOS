@@ -1,9 +1,11 @@
 // os/src/fs/mod.rs
 
+pub mod dentry_cache;
 pub mod dev;
 pub mod ext4;
 mod fdset;
 mod fdtable;
+mod file;
 mod kstat;
 pub mod mount;
 mod namei;
@@ -16,6 +18,7 @@ pub mod vfs;
 
 pub use fdset::*;
 pub use fdtable::*;
+pub use file::*;
 pub use kstat::*;
 pub use namei::*;
 pub use path::*;

@@ -1,7 +1,8 @@
 // os/src/fs/stdio.rs
 
 use super::KStat;
-use super::vfs::{FileOp, InodeType, OpenFlags};
+use super::vfs::InodeType;
+use super::{FileOp, OpenFlags};
 use crate::sbi::console_getchar;
 use crate::syscall::{Errno, SysResult};
 use crate::task::yield_current_task;

@@ -112,7 +112,7 @@ impl InodeOp for ShmDirInode {
         Err(Errno::EPERM)
     }
 
-    fn unlink(&self, valid_dentry: Arc<Dentry>) -> SysResult {
+    fn unlink(&self, valid_dentry: &Arc<Dentry>) -> SysResult {
         let name = valid_dentry
             .abs_path
             .trim_end_matches('/')
@@ -206,7 +206,7 @@ impl InodeOp for ShmFileInode {
         Err(Errno::EPERM)
     }
 
-    fn unlink(&self, _valid_dentry: Arc<Dentry>) -> SysResult {
+    fn unlink(&self, _valid_dentry: &Arc<Dentry>) -> SysResult {
         Err(Errno::ENOTDIR)
     }
 }

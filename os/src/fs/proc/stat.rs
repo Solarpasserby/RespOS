@@ -63,7 +63,7 @@ impl InodeOp for ProcStatInode {
     fn link(&self, _old_path: &str, _bare_dentry: Arc<Dentry>) -> SysResult {
         Err(Errno::EACCES)
     }
-    fn unlink(&self, _valid_dentry: Arc<Dentry>) -> SysResult {
+    fn unlink(&self, _valid_dentry: &Arc<Dentry>) -> SysResult {
         Err(Errno::EACCES)
     }
 }
@@ -129,7 +129,7 @@ impl InodeOp for TaskStatInode {
     fn link(&self, _old_path: &str, _bare_dentry: Arc<Dentry>) -> SysResult {
         Err(Errno::EACCES)
     }
-    fn unlink(&self, _valid_dentry: Arc<Dentry>) -> SysResult {
+    fn unlink(&self, _valid_dentry: &Arc<Dentry>) -> SysResult {
         Err(Errno::EACCES)
     }
 }
