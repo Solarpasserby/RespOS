@@ -21,6 +21,7 @@ pub use fdtable::*;
 pub use file::*;
 pub use kstat::*;
 pub use namei::*;
+pub use page_cache::*;
 pub use path::*;
 pub use pipe::*;
 pub use stdio::*;

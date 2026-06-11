@@ -11,8 +11,8 @@ use lazy_static::lazy_static;
 use lwext4_rust::{Ext4File, InodeTypes as Ext4InodeTypes, bindings};
 use spin::Mutex;
 
-use crate::fs::KStat;
 use crate::fs::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
+use crate::fs::{KStat, PageCache};
 use crate::syscall::{Errno, SysResult};
 use crate::timer::{TimeSpec, get_time_ms};
 
@@ -26,6 +26,8 @@ pub struct Ext4Inode {
     pub ino: u64,
     ty: Ext4InodeTypes,
     times: Mutex<Option<InodeTimes>>,
+    /// 共享页缓存，挂载在 inode 上，同一 inode 的所有 File 共享
+    page_cache: Arc<PageCache>,
 }
 
 #[derive(Clone, Copy)]
@@ -44,6 +46,7 @@ impl Ext4Inode {
             ino,
             ty,
             times: Mutex::new(None),
+            page_cache: Arc::new(PageCache::new(0)),
         }
     }
 
@@ -312,6 +315,14 @@ impl InodeOp for Ext4Inode {
 
     fn node_type(&self) -> InodeType {
         InodeType::from(self.ty.clone())
+    }
+
+    fn get_page_cache(&self) -> Option<Arc<PageCache>> {
+        if self.node_type() == InodeType::Regular {
+            Some(self.page_cache.clone())
+        } else {
+            None
+        }
     }
 
     fn stat(&self, path: &str) -> SysResult<KStat> {

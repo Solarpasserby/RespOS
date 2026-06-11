@@ -2,6 +2,7 @@
 
 use super::{Dentry, LinuxDirent64};
 use crate::fs::KStat;
+use crate::fs::page_cache::PageCache;
 use crate::syscall::{Errno, SysResult};
 use crate::timer::TimeSpec;
 use alloc::string::String;
@@ -18,6 +19,11 @@ pub trait InodeOp: Any + Send + Sync {
     fn read_at(&self, path: &str, off: usize, buf: &mut [u8]) -> SysResult<usize>;
     fn write_at(&self, path: &str, off: usize, buf: &[u8]) -> SysResult<usize>;
     fn truncate(&self, path: &str, size: usize) -> SysResult<usize>;
+
+    /// 返回共享页缓存。仅 ext4 常规文件返回 Some，其余返回 None。
+    fn get_page_cache(&self) -> Option<Arc<PageCache>> {
+        None
+    }
     fn set_times(
         &self,
         _path: &str,
