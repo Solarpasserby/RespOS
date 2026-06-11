@@ -16,7 +16,13 @@ macro_rules! read_csr {
 macro_rules! write_csr {
     ($csr:expr, $bits:expr) => {{
         unsafe {
-            core::arch::asm!("csrwr {}, {}", in(reg) $bits, const $csr, options(nomem, nostack));
+            let bits = $bits;
+            core::arch::asm!(
+                "csrwr {}, {}",
+                inout(reg) bits => _,
+                const $csr,
+                options(nomem, nostack)
+            );
         }
     }};
 }
@@ -329,6 +335,14 @@ pub mod mmu {
     #[inline(always)]
     pub unsafe fn write_asid(bits: usize) {
         write_csr!(CSR_ASID, bits & 0x3ff);
+    }
+
+    #[inline(always)]
+    pub unsafe fn sync_page_table_root() {
+        unsafe {
+            let _: usize = read_pgdh();
+            core::arch::asm!("dbar 0", "ibar 0", options(nostack));
+        }
     }
 
     #[inline(always)]

@@ -63,6 +63,7 @@ pub fn write_mmu_token(token: usize) {
         register::mmu::write_pgdl(token);
         register::mmu::write_pgdh(token);
         register::mmu::write_asid(0);
+        register::mmu::sync_page_table_root();
     }
 }
 
