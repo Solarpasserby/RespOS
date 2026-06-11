@@ -30,7 +30,10 @@
     .section .text
     .globl __trap_from_user
     .globl __restore
-    .align 4
+    # LoongArch EENTRY 保存普通异常入口基址，入口必须按页边界对齐。
+    # release 链接布局变化时，如果这里只有 16 字节对齐，硬件可能跳到
+    # 截断后的错误地址，表现为用户态异常/中断后卡死。
+    .align 12
 __trap_from_user:
     # 步骤1: 用 KSAVE0 保存 sp
     csrwr       $sp, 0x30       # KSAVE0 <-> sp, 现在 sp=原KS值, KSAVE0=用户sp
@@ -167,6 +170,7 @@ __restore:
     ertn
 
     .globl __trap_from_kernel
+    .align 12
 __trap_from_kernel:
     # 在内核栈上分配 TrapContext 空间 (34 × 8 = 272 bytes)
     addi.d      $sp, $sp, -272

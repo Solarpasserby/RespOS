@@ -3,7 +3,7 @@ SHELL := /bin/bash
 
 MODE ?= release
 RV_MODE ?= $(MODE)
-LA_MODE ?= debug
+LA_MODE ?= $(MODE)
 MEM ?= 128M
 SMP ?= 1
 RV_FS_IMG ?= img/sdcard-rv.img

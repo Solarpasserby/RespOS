@@ -7,7 +7,7 @@ use crate::task::scheduler::{
     prepare_current_task_blocked, remove_task, switch_to_next_task, wakeup_task,
 };
 use crate::task::{current_task, futex::FUTEX_BITSET_MATCH_ANY, yield_current_task};
-use crate::timer::{TimeSpec, get_time_ms};
+use crate::timer::{TimeSpec, get_time_ms, get_timeout_ms};
 use alloc::vec::Vec;
 
 const FUTEX_TRACE: bool = false;
@@ -145,7 +145,13 @@ fn futex_wait_common(
     Ok(0)
 }
 
-fn futex_deadline_ms(timeout_ptr: usize, absolute: bool) -> SysResult<Option<usize>> {
+#[derive(Clone, Copy)]
+enum FutexDeadline {
+    UserClock(usize),
+    TimeoutClock(usize),
+}
+
+fn futex_deadline_ms(timeout_ptr: usize, absolute: bool) -> SysResult<Option<FutexDeadline>> {
     if timeout_ptr == 0 {
         return Ok(None);
     }
@@ -158,11 +164,13 @@ fn futex_deadline_ms(timeout_ptr: usize, absolute: bool) -> SysResult<Option<usi
     )?;
     let timeout_ms = timeout.checked_duration_ms().ok_or(Errno::EINVAL)?;
     if absolute {
-        Ok(Some(timeout_ms))
+        Ok(Some(FutexDeadline::UserClock(timeout_ms)))
     } else {
-        Ok(Some(
-            get_time_ms().checked_add(timeout_ms).ok_or(Errno::EINVAL)?,
-        ))
+        Ok(Some(FutexDeadline::TimeoutClock(
+            get_timeout_ms()
+                .checked_add(timeout_ms)
+                .ok_or(Errno::EINVAL)?,
+        )))
     }
 }
 
@@ -170,10 +178,10 @@ fn futex_wait_timed_common(
     uaddr: usize,
     expected_val: u32,
     bitset: u32,
-    deadline_ms: Option<usize>,
+    deadline: Option<FutexDeadline>,
     private: bool,
 ) -> SysResult<usize> {
-    let Some(deadline_ms) = deadline_ms else {
+    let Some(deadline) = deadline else {
         return futex_wait_common(uaddr, expected_val, bitset, private);
     };
     if bitset == 0 {
@@ -194,7 +202,11 @@ fn futex_wait_timed_common(
             );
             return Err(Errno::EAGAIN);
         }
-        if get_time_ms() >= deadline_ms {
+        let timed_out = match deadline {
+            FutexDeadline::UserClock(deadline_ms) => get_time_ms() >= deadline_ms,
+            FutexDeadline::TimeoutClock(deadline_ms) => get_timeout_ms() >= deadline_ms,
+        };
+        if timed_out {
             trace_futex("wait-timedout", &key, expected_val, bitset as usize);
             return Err(Errno::ETIMEDOUT);
         }

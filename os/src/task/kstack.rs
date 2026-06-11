@@ -4,6 +4,7 @@ use super::tid::TidHandle;
 use crate::config::{KERNEL_STACK_SIZE, KERNEL_STACK_TOP, PAGE_SIZE};
 use crate::mm::KERNEL_SPACE;
 use alloc::vec::Vec;
+use core::cell::SyncUnsafeCell;
 use lazy_static::lazy_static;
 use spin::Mutex;
 
@@ -64,13 +65,18 @@ impl KernelStackAllocator {
 /// 但是在内核栈生命周期结束后，其对应内核空间的内存也会被释放，体现了 RAII 的思想
 #[repr(C)]
 pub struct KernelStack {
-    top: usize, // 内核栈顶指针
+    // `__switch` 会通过 TaskControlBlock 的起始地址直接写回这个字段。
+    // 这里必须具备内部可变性，否则 release 优化下普通共享字段被汇编修改属于未定义行为。
+    top: SyncUnsafeCell<usize>, // 内核栈顶指针
     slot: usize,
 }
 
 impl KernelStack {
     pub fn zero_init() -> Self {
-        Self { top: 0, slot: 0 }
+        Self {
+            top: SyncUnsafeCell::new(0),
+            slot: 0,
+        }
     }
 
     pub fn new(tid_handle: &TidHandle) -> Self {
@@ -79,7 +85,7 @@ impl KernelStack {
         let stack_top = get_kernel_stack_top_edge(slot);
         KERNEL_SPACE.lock().insert_stack_area(stack_top);
         Self {
-            top: stack_top,
+            top: SyncUnsafeCell::new(stack_top),
             slot,
         }
     }
@@ -89,10 +95,10 @@ impl KernelStack {
     }
 
     pub fn get_top(&self) -> usize {
-        self.top
+        unsafe { *self.top.get() }
     }
     pub fn set_top(&mut self, stack_top: usize) {
-        self.top = stack_top;
+        *self.top.get_mut() = stack_top;
     }
 
     #[allow(unused)]
@@ -111,7 +117,7 @@ impl KernelStack {
 
 impl Drop for KernelStack {
     fn drop(&mut self) {
-        if self.top == 0 {
+        if *self.top.get_mut() == 0 {
             return;
         }
         KERNEL_SPACE

@@ -4,7 +4,7 @@ use crate::signal::sig_handler::SigAction;
 use crate::signal::sig_struct::{FrameFlags, Sig, SigFrame, SigRTFrame, SigSet};
 use crate::signal::{SiField, SigInfo};
 use crate::task::{TASK_MANAGER, current_task, yield_current_task};
-use crate::timer::{TimeSpec, get_time_ms};
+use crate::timer::{TimeSpec, get_timeout_ms};
 
 #[cfg(target_arch = "riscv64")]
 fn restore_sig_context(
@@ -291,7 +291,7 @@ pub fn sys_rt_sigtimedwait(
             return Err(Errno::EAGAIN);
         }
 
-        let start_ms = get_time_ms();
+        let start_ms = get_timeout_ms();
 
         loop {
             // 检查信号
@@ -306,7 +306,7 @@ pub fn sys_rt_sigtimedwait(
             }
 
             // 检查超时
-            if get_time_ms() - start_ms >= total_ms {
+            if get_timeout_ms().saturating_sub(start_ms) >= total_ms {
                 info!("[sys_rt_sigtimedwait] timeout");
                 return Err(Errno::EAGAIN);
             }

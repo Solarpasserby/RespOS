@@ -178,9 +178,9 @@ pub fn exit_by_signal_and_run_next(signal: i32) -> ! {
 }
 
 #[unsafe(no_mangle)]
-pub fn exit_group_and_run_next(exit_code: i32) {
+pub fn exit_group_and_run_next(exit_code: i32) -> ! {
     let Some(task) = current_task() else {
-        return;
+        crate::arch::idle();
     };
     task_group_exit(task, exit_code);
     switch_to_next_task_after_exit();

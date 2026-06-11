@@ -95,3 +95,13 @@ pub fn get_time_us() -> usize {
     let ticks = get_time();
     ticks / CLOCK_FREQ * USEC_PER_SEC + ticks % CLOCK_FREQ * USEC_PER_SEC / CLOCK_FREQ
 }
+
+/// RISC-V 目前用户可见时间和 timeout 使用同一套硬件尺度。
+pub fn get_timeout_ms() -> usize {
+    get_time_ms()
+}
+
+/// RISC-V 目前用户可见时间和 timeout 使用同一套硬件尺度。
+pub fn get_timeout_us() -> usize {
+    get_time_us()
+}

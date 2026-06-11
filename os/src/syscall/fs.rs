@@ -15,7 +15,7 @@ use crate::mm::{
 };
 use crate::signal::sig_struct::{Sig, SigSet};
 use crate::task::{current_task, yield_current_task};
-use crate::timer::{TimeSpec, get_time_ms};
+use crate::timer::{TimeSpec, get_time_ms, get_timeout_us};
 
 const UTIME_NOW: isize = 1_073_741_823;
 const UTIME_OMIT: isize = 1_073_741_822;
@@ -1051,7 +1051,7 @@ pub fn sys_pselect6(
 
     // 闭包保证 cleanup（恢复掩码）在任意退出路径上都执行
     let result = (|| {
-        let start_ms = get_time_ms();
+        let start_us = get_timeout_us();
         let mut readfditer = init_fdset(readfds, nfds)?;
         let mut writeiter = init_fdset(writefds, nfds)?;
         let mut exceptiter = init_fdset(exceptfds, nfds)?;
@@ -1099,7 +1099,7 @@ pub fn sys_pselect6(
                 if timeout_us == 0 {
                     break;
                 }
-                let elapsed_us = (get_time_ms().saturating_sub(start_ms)) * 1000;
+                let elapsed_us = get_timeout_us().saturating_sub(start_us);
                 if elapsed_us >= timeout_us {
                     break;
                 }

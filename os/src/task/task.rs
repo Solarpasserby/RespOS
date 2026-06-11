@@ -837,8 +837,8 @@ fn exit_thread(task: Arc<TaskControlBlock>, exit_code: i32) {
     remove_task(task.tid());
     // 只有数据 线程组 和 TASK_MANAGER 持有对线程的引用，当引用归零时该线程占有的私有资源被释放
     task.op_thread_group_mut(|tg| tg.remove(&task.tid()));
-    task.set_exited();
     task.set_exit_code(exit_code);
+    task.set_exited();
     TASK_MANAGER.remove(task.tid());
 }
 
@@ -852,8 +852,8 @@ fn exit_thread_by_signal(task: Arc<TaskControlBlock>, signal: i32) {
     }
     remove_task(task.tid());
     task.op_thread_group_mut(|tg| tg.remove(&task.tid()));
-    task.set_exited();
     task.set_exit_signal(signal);
+    task.set_exited();
     TASK_MANAGER.remove(task.tid());
 }
 
@@ -1013,8 +1013,8 @@ pub fn task_group_exit(task: Arc<TaskControlBlock>, exit_code: i32) {
     task.fd_table.lock().clear();
 
     exit_robust_list(&leader);
-    leader.set_exited();
     leader.set_exit_code(exit_code);
+    leader.set_exited();
     // 向父进程发送 SIGCHLD 信号
     leader.op_parent(|parent_opt| {
         if let Some(parent) = parent_opt.as_ref().and_then(|w| w.upgrade()) {
@@ -1063,8 +1063,8 @@ pub fn task_group_exit_by_signal(task: Arc<TaskControlBlock>, signal: i32) {
     task.fd_table.lock().clear();
 
     exit_robust_list(&leader);
-    leader.set_exited();
     leader.set_exit_signal(signal);
+    leader.set_exited();
     leader.op_parent(|parent_opt| {
         if let Some(parent) = parent_opt.as_ref().and_then(|w| w.upgrade()) {
             let siginfo = SigInfo::new(

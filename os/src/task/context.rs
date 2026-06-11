@@ -6,7 +6,7 @@ use crate::trap::__restore;
 ///
 /// 存储任务的运行状态，然而由于切换任务使用函数调用实现，因此上下文内容更贴近被调用者运行时的内容
 #[derive(Copy, Clone)]
-#[repr(C)]
+#[repr(C, align(16))]
 pub struct TaskContext {
     ra: usize, // 返回地址
     tp: usize, // 线程指针寄存器，仅按调用约定保存/恢复

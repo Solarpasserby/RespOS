@@ -3,7 +3,7 @@
 use super::{Errno, SysResult};
 use crate::mm::{copy_from_user, copy_to_user};
 use crate::task::{current_task, yield_current_task};
-use crate::timer::{TimeSpec, get_time_ms, get_time_us};
+use crate::timer::{TimeSpec, get_time_ms, get_time_us, get_timeout_ms};
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -92,9 +92,9 @@ pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> SysResult<usiz
     let time_ms = req_time.checked_duration_ms().ok_or(Errno::EINVAL)?;
     let task = current_task().expect("no current task");
 
-    let start_time = get_time_ms();
+    let start_time = get_timeout_ms();
     loop {
-        let current_time = get_time_ms();
+        let current_time = get_timeout_ms();
         let elapsed = current_time.saturating_sub(start_time);
         if elapsed >= time_ms {
             break;
@@ -118,7 +118,7 @@ pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> SysResult<usiz
         if task.is_interrupted() || task.check_signal_interrupt() {
             task.clear_interrupted();
             if !rem.is_null() {
-                let now = get_time_ms();
+                let now = get_timeout_ms();
                 let elapsed = now.saturating_sub(start_time).min(time_ms);
                 let left_ms = time_ms - elapsed;
                 let remain = TimeSpec {

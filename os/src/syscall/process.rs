@@ -127,8 +127,7 @@ pub fn sys_exit(exit_code: i32) -> ! {
 ///
 /// 退出整个线程组
 pub fn sys_exit_group(exit_code: i32) -> ! {
-    exit_group_and_run_next(exit_code);
-    panic!("Unreachable in sys_exit_group!");
+    exit_group_and_run_next(exit_code)
 }
 
 pub fn sys_sched_yield() -> SysResult<usize> {
