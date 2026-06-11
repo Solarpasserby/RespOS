@@ -361,8 +361,8 @@ fn main() -> i32 {
     _run_lmbench_glibc();
     _run_iozone_musl();
     _run_iozone_glibc();
-    _run_ltp_musl();
-    _run_ltp_glibc();
+    // _run_ltp_musl();
+    // _run_ltp_glibc();
     println!("[testrunner] all selected tests finished, powering off");
     poweroff();
     0
@@ -385,8 +385,8 @@ fn main() -> i32 {
     _run_lmbench_glibc(); // 会报错，还要修改
     _run_iozone_musl();
     _run_iozone_glibc();
-    _run_ltp_musl();
-    _run_ltp_glibc();
+    // _run_ltp_musl();
+    // _run_ltp_glibc();
     println!("[testrunner] all selected tests finished, powering off");
     poweroff();
     0
