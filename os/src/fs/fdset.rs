@@ -10,7 +10,7 @@
 //!  3. 轮询就绪态，对就绪 fd 调用 fdset.set()
 //!  4. fdset.write_back    — 将修改后的位图写回用户空间
 
-use crate::fs::vfs::FileOp;
+use super::FileOp;
 use crate::mm::{copy_from_user, copy_to_user};
 use crate::syscall::{Errno, SysResult};
 use crate::task::current_task;

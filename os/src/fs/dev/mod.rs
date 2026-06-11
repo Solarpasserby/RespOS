@@ -28,6 +28,7 @@ use null::NullInode;
 use shm::shm_dir;
 use zero::ZeroInode;
 
+use crate::fs::dentry_cache;
 use crate::fs::mount::{self, Mount, VfsMount, get_mount_by_dentry};
 use crate::syscall::{Errno, SysResult};
 
@@ -91,7 +92,7 @@ impl InodeOp for DevDirInode {
     fn link(&self, _old_path: &str, _bare_dentry: Arc<Dentry>) -> SysResult {
         Err(Errno::EACCES)
     }
-    fn unlink(&self, _valid_dentry: Arc<Dentry>) -> SysResult {
+    fn unlink(&self, _valid_dentry: &Arc<Dentry>) -> SysResult {
         Err(Errno::EACCES)
     }
 }
@@ -148,10 +149,11 @@ pub fn init_devfs(root: Arc<Dentry>) {
         Arc::new(DevDirInode),
     ));
     root.insert_child("dev", dev_mountpoint.clone());
-    mount::pin_vfs_dentry(dev_mountpoint.clone());
+    dentry_cache::insert_dentry_cache(dev_mountpoint.clone());
+    dentry_cache::pin_vfs_dentry(dev_mountpoint.clone());
 
     let dev_root = Arc::new(Dentry::new("/".into(), None, Arc::new(DevDirInode)));
-    mount::pin_vfs_dentry(dev_root.clone());
+    dentry_cache::pin_vfs_dentry(dev_root.clone());
     let dev_mount = VfsMount::new(dev_root, Arc::new(DevSuperBlock), 0);
     let parent_mount = get_mount_by_dentry(&root).expect("[devfs] root mount is not initialized");
     mount::add_mount(Mount::new_child(dev_mountpoint, dev_mount, parent_mount));

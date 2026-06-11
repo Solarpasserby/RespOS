@@ -1,5 +1,6 @@
 // os/src/ext4/inode.rs
 
+use crate::config::INODE_CACHE_CAPACITY;
 use alloc::ffi::CString;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
@@ -10,8 +11,8 @@ use lazy_static::lazy_static;
 use lwext4_rust::{Ext4File, InodeTypes as Ext4InodeTypes, bindings};
 use spin::Mutex;
 
-use crate::fs::KStat;
 use crate::fs::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
+use crate::fs::{KStat, PageCache};
 use crate::syscall::{Errno, SysResult};
 use crate::timer::{TimeSpec, get_time_ms};
 
@@ -25,6 +26,8 @@ pub struct Ext4Inode {
     pub ino: u64,
     ty: Ext4InodeTypes,
     times: Mutex<Option<InodeTimes>>,
+    /// 共享页缓存，挂载在 inode 上，同一 inode 的所有 File 共享
+    page_cache: Arc<PageCache>,
 }
 
 #[derive(Clone, Copy)]
@@ -43,6 +46,7 @@ impl Ext4Inode {
             ino,
             ty,
             times: Mutex::new(None),
+            page_cache: Arc::new(PageCache::new(0)),
         }
     }
 
@@ -50,6 +54,11 @@ impl Ext4Inode {
         let mut cache = EXT4_INODE_CACHE.lock();
         if let Some(inode) = cache.get(&ino).and_then(Weak::upgrade) {
             return inode;
+        }
+
+        // 缓存满则先清理已死亡的 Weak 条目
+        if cache.len() >= INODE_CACHE_CAPACITY {
+            evict_dead_inodes(&mut cache);
         }
 
         let inode: Arc<dyn InodeOp> = Arc::new(Self::new(ino, ty));
@@ -306,6 +315,14 @@ impl InodeOp for Ext4Inode {
 
     fn node_type(&self) -> InodeType {
         InodeType::from(self.ty.clone())
+    }
+
+    fn get_page_cache(&self) -> Option<Arc<PageCache>> {
+        if self.node_type() == InodeType::Regular {
+            Some(self.page_cache.clone())
+        } else {
+            None
+        }
     }
 
     fn stat(&self, path: &str) -> SysResult<KStat> {
@@ -581,7 +598,7 @@ impl InodeOp for Ext4Inode {
         Ok(())
     }
 
-    fn unlink(&self, valid_dentry: Arc<Dentry>) -> SysResult {
+    fn unlink(&self, valid_dentry: &Arc<Dentry>) -> SysResult {
         // 调用者保证参数合法
         // self.check_type(InodeType::Directory)?;
 
@@ -615,6 +632,23 @@ impl InodeOp for Ext4Inode {
         self.check_type(InodeType::SymLink)?;
         Self::file_readlink(path)
     }
+}
+
+/// 清除缓存中已死亡的 Weak 条目
+fn evict_dead_inodes(cache: &mut HashMap<u64, Weak<dyn InodeOp>>) {
+    let dead: Vec<u64> = cache
+        .iter()
+        .filter(|(_, w)| w.upgrade().is_none())
+        .map(|(k, _)| *k)
+        .collect();
+    for key in dead {
+        cache.remove(&key);
+    }
+}
+
+/// 手动清理 inode 缓存中已死亡的条目
+pub fn clean_inode_cache() {
+    evict_dead_inodes(&mut EXT4_INODE_CACHE.lock());
 }
 
 impl From<InodeType> for Ext4InodeTypes {

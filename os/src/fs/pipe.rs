@@ -1,7 +1,8 @@
 // os/src/fs/pipe.rs
 
 use super::KStat;
-use super::vfs::{FileOp, InodeType, OpenFlags};
+use super::vfs::InodeType;
+use super::{FileOp, OpenFlags};
 use crate::config::PIPE_BUFFER_SIZE;
 use crate::syscall::{Errno, SysResult};
 use crate::task::{

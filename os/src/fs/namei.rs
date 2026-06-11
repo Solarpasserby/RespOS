@@ -1,8 +1,10 @@
 // os/src/fs/namei.rs
 
 use super::Path;
+use super::dentry_cache::{insert_dentry_cache, lookup_dentry_cache, remove_dentry_cache};
 use super::mount::{VfsMount, get_mount_by_dentry, get_mount_by_vfsmount, root_path};
-use super::vfs::{Dentry, File, InodeType, OpenFlags};
+use super::vfs::{Dentry, InodeType};
+use super::{File, OpenFlags};
 use crate::fs::ext4::Ext4Inode;
 use crate::syscall::{Errno, SysResult};
 use crate::task::current_task;
@@ -71,7 +73,7 @@ fn base_path_from_dirfd(dirfd: isize, file_name: &str) -> SysResult<Arc<Path>> {
 
 /// 根据当前 `Nameidate` 查找下一级目录项
 ///
-/// 首先查找 Dentry 的孩子，然后查找 DentryCache，最后查找 Inode 的子节点
+/// 先查全局 DentryCache，未命中再调文件系统 lookup
 pub fn lookup_dentry(nd: &mut Nameidata) -> SysResult<Arc<Dentry>> {
     lookup_dentry_maybe_follow_mount(nd, true)
 }
@@ -81,37 +83,29 @@ fn lookup_dentry_maybe_follow_mount(
     follow_mount: bool,
 ) -> SysResult<Arc<Dentry>> {
     let name = nd.path_segments[nd.depth];
+    let abs_path = child_abs_path(&nd.dentry, name);
 
-    // 查找当前 Dentry 的孩子，找到直接返回
-    if let Some(child) = nd.dentry.get_child(name) {
-        // 检查子目录项是否为挂载点，是则穿越
+    // 查询全局 DentryCache
+    if let Some(cached) = lookup_dentry_cache(&abs_path) {
         if follow_mount {
-            if let Some(mount) = get_mount_by_dentry(&child) {
+            if let Some(mount) = get_mount_by_dentry(&cached) {
                 nd.mnt = mount.vfs_mount.clone();
                 nd.dentry = mount.vfs_mount.root.clone();
                 return Ok(nd.dentry.clone());
             }
         }
-        return Ok(child);
+        return Ok(cached);
     }
 
-    let abs_path = if nd.dentry.abs_path == "/" {
-        format!("/{}", name)
-    } else {
-        format!("{}/{}", nd.dentry.abs_path, name)
-    };
-    // TODO: 查询 DentryCache
-
-    // 获取当前 Dentry 的 Inode
+    // 缓存未命中，调文件系统 lookup
     let current_dir_inode = nd.dentry.get_inode();
-    // 查找 Inode 的子节点
     let child_inode = current_dir_inode.lookup(&nd.dentry.abs_path, name)?;
 
-    // 创建新的 Dentry，并更新父子状态。TODO: 将新建 Dentry 加入缓存
+    // 创建新 dentry，建立父子关系，加入缓存
     let child_dentry = Arc::new(Dentry::new(abs_path, Some(nd.dentry.clone()), child_inode));
     nd.dentry.insert_child(name, child_dentry.clone());
+    insert_dentry_cache(child_dentry.clone());
 
-    // 检查子目录项是否为挂载点，是则穿越
     if follow_mount {
         if let Some(mount) = get_mount_by_dentry(&child_dentry) {
             nd.mnt = mount.vfs_mount.clone();
@@ -136,7 +130,7 @@ fn follow_dotdot(nd: &mut Nameidata) {
     nd.dentry = nd.dentry.get_parent_or_self();
 }
 
-// TODO: 个人觉得创建子目录项的过程不合适，之后实现缓存的时候再做修改
+// 创建子目录项的过程不合适
 fn install_child_dentry(
     parent: &Arc<Dentry>,
     name: &str,
@@ -145,6 +139,7 @@ fn install_child_dentry(
     let abs_path = child_abs_path(parent, name);
     let child_dentry = Arc::new(Dentry::new(abs_path, Some(parent.clone()), inode));
     parent.insert_child(name, child_dentry.clone());
+    insert_dentry_cache(child_dentry.clone());
     child_dentry
 }
 
@@ -506,8 +501,9 @@ pub fn filename_unlink(dirfd: isize, path: &str, remove_dir: bool) -> SysResult 
 
     let parent = target.get_parent().ok_or(Errno::EBUSY)?;
     let name = dentry_name(&target)?;
-    parent.get_inode().unlink(target)?;
+    parent.get_inode().unlink(&target)?;
     parent.remove_child(name.as_str());
+    remove_dentry_cache(&target.abs_path);
     Ok(())
 }
 
@@ -543,7 +539,8 @@ pub fn filename_link(olddirfd: isize, oldpath: &str, newdirfd: isize, newpath: &
             let old_inode = old_path.dentry.get_inode();
             old_inode.link(&old_path.abs_path(), bare_dentry.clone())?;
             bare_dentry.inner.lock().inode = Some(old_inode);
-            nd.dentry.insert_child(name, bare_dentry);
+            nd.dentry.insert_child(name, bare_dentry.clone());
+            insert_dentry_cache(bare_dentry);
             Ok(())
         }
         Err(err) => Err(err),
@@ -605,12 +602,15 @@ pub fn filename_rename(
         .unwrap_or_else(|| old.dentry.clone());
     old_parent.remove_child(old.dentry.abs_path.rsplit('/').next().unwrap_or(""));
 
+    remove_dentry_cache(&old.abs_path().as_str());
+    remove_dentry_cache(&new_abs);
     let renamed_dentry = Arc::new(Dentry::new(
         new_abs,
         Some(nd.dentry.clone()),
         old.dentry.get_inode(),
     ));
-    nd.dentry.insert_child(name, renamed_dentry);
+    nd.dentry.insert_child(name, renamed_dentry.clone());
+    insert_dentry_cache(renamed_dentry);
 
     Ok(())
 }
