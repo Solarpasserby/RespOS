@@ -45,17 +45,43 @@ lazy_static! {
         Arc::new(Mutex::new(MemorySet::new_kernel()));
 }
 
-fn dynamic_linker_candidates(interp: &str) -> [&str; 3] {
+fn dynamic_linker_candidates(interp: &str) -> [&str; 5] {
     match interp {
         "/lib/ld-musl-riscv64-sf.so.1"
         | "/lib/ld-musl-riscv64.so.1"
-        | "/lib/ld-musl-loongarch64.so.1" => ["/musl/lib/libc.so", "/musl/libc.so", interp],
-        _ => [interp, "/musl/lib/libc.so", "/musl/libc.so"],
+        | "/lib/ld-musl-loongarch64.so.1"
+        | "/lib64/ld-musl-loongarch-lp64d.so.1" => {
+            ["/musl/lib/libc.so", "/musl/libc.so", interp, "", ""]
+        }
+        "/lib/ld-linux-riscv64-lp64d.so.1" => [
+            "/glibc/lib/ld-linux-riscv64-lp64d.so.1",
+            "/glibc/ld-linux-riscv64-lp64d.so.1",
+            interp,
+            "",
+            "",
+        ],
+        "/lib64/ld-linux-loongarch-lp64d.so.1" => [
+            "/glibc/lib/ld-linux-loongarch-lp64d.so.1",
+            "/glibc/ld-linux-loongarch-lp64d.so.1",
+            interp,
+            "",
+            "",
+        ],
+        _ => [
+            interp,
+            "/glibc/lib/ld-linux-riscv64-lp64d.so.1",
+            "/glibc/lib/ld-linux-loongarch-lp64d.so.1",
+            "/musl/lib/libc.so",
+            "/musl/libc.so",
+        ],
     }
 }
 
 fn read_dynamic_linker(interp: &str) -> Option<Vec<u8>> {
     for path in dynamic_linker_candidates(interp) {
+        if path.is_empty() {
+            continue;
+        }
         if let Ok(file) = path_open(AT_FDCWD, path, 0, 0) {
             if let Ok(data) = file.read_all() {
                 info!(

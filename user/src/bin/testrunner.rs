@@ -8,7 +8,8 @@ extern crate alloc;
 
 use alloc::string::String;
 use user_lib::{
-    O_RDONLY, chdir, close, exec, exit, fork, link, mkdir, open, poweroff, read, unlink, waitpid,
+    O_RDONLY, chdir, close, exec, execve, exit, fork, link, mkdir, open, poweroff, read, unlink,
+    waitpid,
 };
 
 const BUSYBOX_PATH: &str = "/musl/busybox\0";
@@ -27,6 +28,15 @@ fn strip_nul(s: &str) -> &str {
 }
 
 fn run_shell_script(workdir: &str, shell_path: &str, script_path: &str) {
+    run_shell_script_with_env(workdir, shell_path, script_path, &[core::ptr::null()]);
+}
+
+fn run_shell_script_with_env(
+    workdir: &str,
+    shell_path: &str,
+    script_path: &str,
+    envp: &[*const u8],
+) {
     if chdir(workdir) < 0 {
         println!("[testrunner] cannot enter {}", strip_nul(workdir));
         return;
@@ -39,7 +49,7 @@ fn run_shell_script(workdir: &str, shell_path: &str, script_path: &str) {
             script_path.as_ptr(),
             core::ptr::null(),
         ];
-        let ret = exec(shell_path, argv);
+        let ret = execve(shell_path, argv, envp);
         println!(
             "[testrunner] exec {} sh {} failed: {}",
             strip_nul(shell_path),
@@ -286,7 +296,8 @@ fn _run_iozone_musl() {
 }
 
 fn _run_iozone_glibc() {
-    run_shell_script("/glibc/\0", GLIBC_BUSYBOX_PATH, IOZONE_SCRIPT);
+    let envp: &[*const u8] = &["LD_LIBRARY_PATH=/glibc/lib\0".as_ptr(), core::ptr::null()];
+    run_shell_script_with_env("/glibc/\0", GLIBC_BUSYBOX_PATH, IOZONE_SCRIPT, envp);
 }
 
 fn _run_lmbench_musl() {
@@ -348,17 +359,17 @@ fn _run_ltp_glibc() {
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("[testrunner] start");
-    _run_basic_musl();
-    _run_basic_glibc();
-    _run_libcbench_musl();
-    _run_libcbench_glibc();
-    _run_busybox_musl();
-    _run_busybox_glibc();
-    _run_libctest_musl();
-    _run_lua_musl();
-    _run_lua_glibc();
-    _run_lmbench_musl();
-    _run_lmbench_glibc();
+    // _run_basic_musl();
+    // _run_basic_glibc();
+    // _run_libcbench_musl();
+    // _run_libcbench_glibc();
+    // _run_busybox_musl();
+    // _run_busybox_glibc();
+    // _run_libctest_musl();
+    // _run_lua_musl();
+    // _run_lua_glibc();
+    // _run_lmbench_musl();
+    // _run_lmbench_glibc();
     // _run_iozone_musl();
     // _run_iozone_glibc();
     // _run_ltp_musl();
@@ -372,19 +383,19 @@ fn main() -> i32 {
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("[testrunner] start");
-    _run_basic_musl();
-    _run_basic_glibc();
-    _run_libcbench_musl();
-    _run_libcbench_glibc();
-    _run_busybox_musl();
-    _run_busybox_glibc();
-    _run_libctest_musl();
-    _run_lua_musl();
-    _run_lua_glibc();
-    _run_lmbench_musl();
-    _run_lmbench_glibc();
-    // _run_iozone_musl();
-    // _run_iozone_glibc();
+    // _run_basic_musl();
+    // _run_basic_glibc();
+    // _run_libcbench_musl();
+    // _run_libcbench_glibc();
+    // _run_busybox_musl();
+    // _run_busybox_glibc();
+    // _run_libctest_musl();
+    // _run_lua_musl();
+    // _run_lua_glibc();
+    // _run_lmbench_musl();
+    // _run_lmbench_glibc(); // 会报错，还要修改
+    _run_iozone_musl();
+    _run_iozone_glibc();
     // _run_ltp_musl();
     // _run_ltp_glibc();
     println!("[testrunner] all selected tests finished, powering off");

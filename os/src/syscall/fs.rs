@@ -106,6 +106,54 @@ pub fn sys_pread64(fd: usize, buf: *mut u8, len: usize, offset: isize) -> SysRes
     }
 }
 
+pub fn sys_pwrite64(fd: usize, buf: *mut u8, len: usize, offset: isize) -> SysResult<usize> {
+    if offset < 0 {
+        return Err(Errno::EINVAL);
+    }
+    if len == 0 {
+        return Ok(0);
+    }
+
+    let task = current_task().expect("[kernel] current task is None.");
+    let file = task.get_fd_entry(fd)?.file;
+    if !file.writable() {
+        return Err(Errno::EBADF);
+    }
+    file.can_seek()?;
+
+    let old_offset = file.get_offset();
+    file.seek(offset)?;
+
+    let mut kbuf = alloc::vec![0u8; len.min(IO_CHUNK_SIZE)];
+    let mut total = 0usize;
+    let mut ret = Ok(0usize);
+    while total < len {
+        let chunk_len = (len - total).min(kbuf.len());
+        if let Err(err) = copy_from_user(kbuf.as_mut_ptr(), unsafe { buf.add(total) }, chunk_len) {
+            ret = Err(err);
+            break;
+        }
+        ret = file.write(&kbuf[..chunk_len]);
+        let written = match ret {
+            Ok(written) => written,
+            Err(_) => break,
+        };
+        total += written;
+        if written < chunk_len {
+            break;
+        }
+    }
+
+    let restore_ret = file.seek(old_offset as isize);
+    match (ret, restore_ret) {
+        (Ok(_), Ok(_)) => Ok(total),
+        (Err(err), _) if total == 0 => Err(err),
+        (Err(_), _) => Ok(total),
+        (_, Err(err)) if total == 0 => Err(err),
+        (_, Err(_)) => Ok(total),
+    }
+}
+
 /// 系统调用 sys-write
 pub fn sys_write(fd: usize, buf: *mut u8, len: usize) -> SysResult<usize> {
     if len == 0 {

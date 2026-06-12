@@ -28,6 +28,7 @@ const SYSCALL_WRITE: usize = 64;
 const SYSCALL_READV: usize = 65;
 const SYSCALL_WRITEV: usize = 66;
 const SYSCALL_PREAD64: usize = 67;
+const SYSCALL_PWRITE64: usize = 68;
 const SYSCALL_PREADV: usize = 69;
 const SYSCALL_PWRITEV: usize = 70;
 const SYSCALL_PSELECT6: usize = 72;
@@ -163,6 +164,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         SYSCALL_PREADV => sys_preadv(args[0], args[1] as *const IoVec, args[2], args[3] as isize),
         SYSCALL_PWRITEV => sys_pwritev(args[0], args[1] as *const IoVec, args[2], args[3] as isize),
         SYSCALL_PREAD64 => sys_pread64(args[0], args[1] as *mut u8, args[2], args[3] as isize),
+        SYSCALL_PWRITE64 => sys_pwrite64(args[0], args[1] as *mut u8, args[2], args[3] as isize),
         SYSCALL_PSELECT6 => sys_pselect6(
             args[0],
             args[1],

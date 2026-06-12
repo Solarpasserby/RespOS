@@ -143,6 +143,7 @@ impl FdTable {
             self.next_fd.store(next_fd, Ordering::Relaxed);
             old
         };
+        old.file.fsync()?;
         drop(old);
         Ok(())
     }

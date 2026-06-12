@@ -77,7 +77,9 @@ impl File {
         let write_back = ty == InodeType::Regular && page_cache.is_some();
         if let Some(ref pc) = page_cache {
             let size = inode.stat(&abs_path).map(|stat| stat.size).unwrap_or(0);
-            pc.resize(size);
+            if size > pc.len() {
+                pc.resize(size);
+            }
         }
         Self {
             inode,
@@ -187,6 +189,12 @@ impl File {
     }
 }
 
+impl Drop for File {
+    fn drop(&mut self) {
+        let _ = <Self as FileOp>::fsync(self);
+    }
+}
+
 impl FileOp for File {
     fn as_any(&self) -> &dyn Any {
         self
@@ -221,15 +229,7 @@ impl FileOp for File {
         let offset = inner.offset;
         let n = if let Some(ref pc) = inner.page_cache {
             let lower = inner.write_back.then_some((&self.inode, path.as_str()));
-            let n = pc.write_at(offset, buf, lower)?;
-            if inner.write_back {
-                match self.inode.write_at(&path, offset, buf) {
-                    Ok(written) => pc.mark_clean_range(offset, written.min(n)),
-                    Err(Errno::ENOENT) => {}
-                    Err(err) => return Err(err),
-                }
-            }
-            n
+            pc.write_at(offset, buf, lower)?
         } else {
             self.inode.write_at(&path, offset, buf)?
         };

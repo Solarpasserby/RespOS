@@ -340,24 +340,56 @@ impl PageCache {
             .iter()
             .map(|(&idx, p)| (idx, p.clone()))
             .collect();
+
+        let mut run_offset = 0usize;
+        let mut run_data = Vec::new();
+        let mut run_pages: Vec<(usize, Arc<Mutex<Page>>)> = Vec::new();
+
         for (page_idx, page) in pages {
-            let mut p = page.lock();
-            if p.dirty {
-                let offset = page_idx * PAGE_SIZE;
-                if offset >= file_size {
-                    continue;
-                }
-                let len = (file_size - offset).min(PAGE_SIZE);
-                let written = inode.write_at(path, offset, &p.data[..len])?;
-                if written != len {
+            let offset = page_idx * PAGE_SIZE;
+            if offset >= file_size {
+                continue;
+            }
+
+            let len = (file_size - offset).min(PAGE_SIZE);
+            let p = page.lock();
+            if !p.dirty {
+                continue;
+            }
+
+            if !run_data.is_empty() && offset != run_offset + run_data.len() {
+                let written = inode.write_at(path, run_offset, &run_data)?;
+                if written != run_data.len() {
                     return Err(Errno::EIO);
                 }
-                p.dirty = false;
+                for (idx, dirty_page) in run_pages.drain(..) {
+                    dirty_page.lock().dirty = false;
+                    self.touch_page(idx, &dirty_page);
+                }
+                run_data.clear();
                 cleaned = true;
-                drop(p);
-                self.touch_page(page_idx, &page);
             }
+
+            if run_data.is_empty() {
+                run_offset = offset;
+            }
+            run_data.extend_from_slice(&p.data[..len]);
+            drop(p);
+            run_pages.push((page_idx, page));
         }
+
+        if !run_data.is_empty() {
+            let written = inode.write_at(path, run_offset, &run_data)?;
+            if written != run_data.len() {
+                return Err(Errno::EIO);
+            }
+            for (idx, dirty_page) in run_pages.drain(..) {
+                dirty_page.lock().dirty = false;
+                self.touch_page(idx, &dirty_page);
+            }
+            cleaned = true;
+        }
+
         if cleaned {
             Self::reclaim_global();
         }

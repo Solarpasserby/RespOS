@@ -329,7 +329,7 @@ impl InodeOp for Ext4Inode {
         let ty = self.node_type();
         let size = match ty {
             InodeType::Regular => match self.file_size(path) {
-                Ok(size) => size,
+                Ok(size) => size.max(self.page_cache.len()),
                 Err(Errno::ENOENT) if self.has_cached_times() => 0,
                 Err(err) => return Err(err),
             },

@@ -185,6 +185,9 @@ pub fn fork() -> isize {
 pub fn exec(path: &str, args: &[*const u8]) -> isize {
     sys_execve(path, args, core::ptr::null())
 }
+pub fn execve(path: &str, args: &[*const u8], envs: &[*const u8]) -> isize {
+    sys_execve(path, args, envs.as_ptr())
+}
 pub fn wait(exit_code: &mut i32) -> isize {
     loop {
         // 等待任意进程
