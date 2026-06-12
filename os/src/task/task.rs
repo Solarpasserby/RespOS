@@ -209,7 +209,8 @@ impl TaskControlBlock {
         // 初始化内核栈上的异常上下文
         let trap_context = TrapContext::init_app_context(entry_point, user_sp, 0, 0, 0, 0, false);
         // 初始化任务上下文
-        let task_context = TaskContext::app_init_task_context(token);
+        let mut task_context = TaskContext::app_init_task_context(token);
+        task_context.set_tp(Arc::as_ptr(&task_ctrl_block) as usize);
 
         // 修改内核栈中上下文数据
         unsafe {
@@ -815,7 +816,8 @@ impl TaskControlBlock {
     fn write_task_cx(self: &Arc<Self>, kernel_stack_ptr: usize) {
         let token = self.get_user_token();
         let task_cx_ptr = kernel_stack_ptr as *mut TaskContext;
-        let task_cx = TaskContext::app_init_task_context(token);
+        let mut task_cx = TaskContext::app_init_task_context(token);
+        task_cx.set_tp(Arc::as_ptr(self) as usize);
         unsafe {
             task_cx_ptr.write(task_cx);
         }
@@ -1006,13 +1008,15 @@ pub fn task_group_exit(task: Arc<TaskControlBlock>, exit_code: i32) {
         INITPROC.add_child(child);
     }
 
+    // robust list 仍然依赖用户地址，必须在拆掉用户地址空间前处理。
+    exit_robust_list(&leader);
+
     // 回收进程级共享资源。
     task.op_memory_set_write(|mem| {
         mem.recycle_data_pages();
     });
     task.fd_table.lock().clear();
 
-    exit_robust_list(&leader);
     leader.set_exit_code(exit_code);
     leader.set_exited();
     // 向父进程发送 SIGCHLD 信号
@@ -1057,12 +1061,13 @@ pub fn task_group_exit_by_signal(task: Arc<TaskControlBlock>, signal: i32) {
         INITPROC.add_child(child);
     }
 
+    exit_robust_list(&leader);
+
     task.op_memory_set_write(|mem| {
         mem.recycle_data_pages();
     });
     task.fd_table.lock().clear();
 
-    exit_robust_list(&leader);
     leader.set_exit_signal(signal);
     leader.set_exited();
     leader.op_parent(|parent_opt| {

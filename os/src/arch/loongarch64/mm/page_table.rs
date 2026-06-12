@@ -26,10 +26,13 @@ use crate::mm::{FrameTracker, frame_alloc as alloc_frame};
 use crate::mm::{
     KERNEL_SPACE, MapPermission, PPN_WIDTH, PhysAddr, PhysPageNum, VirtAddr, VirtPageNum,
 };
+use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use bitflags::bitflags;
+use lazy_static::lazy_static;
+use spin::Mutex;
 
 const PTE_V: usize = 1 << 0;
 const PTE_D: usize = 1 << 1;
@@ -42,6 +45,47 @@ const PTE_COW: usize = 1 << 9;
 const PTE_NR: usize = 1usize << 61;
 const PTE_NX: usize = 1usize << 62;
 const PTE_PPN_MASK: usize = ((1usize << PPN_WIDTH) - 1) << 12;
+
+const PAGE_TABLE_FRAME_QUARANTINE_LIMIT: usize = 1024;
+
+lazy_static! {
+    static ref PAGE_TABLE_FRAME_QUARANTINE: Mutex<PageTableFrameQuarantine> =
+        Mutex::new(PageTableFrameQuarantine::new());
+}
+
+struct PageTableFrameQuarantine {
+    page_count: usize,
+    retired: VecDeque<Vec<FrameTracker>>,
+}
+
+impl PageTableFrameQuarantine {
+    fn new() -> Self {
+        Self {
+            page_count: 0,
+            retired: VecDeque::new(),
+        }
+    }
+
+    fn retire(&mut self, frames: Vec<FrameTracker>) -> Vec<Vec<FrameTracker>> {
+        if frames.is_empty() {
+            return Vec::new();
+        }
+
+        self.page_count += frames.len();
+        self.retired.push_back(frames);
+
+        let mut expired = Vec::new();
+        while self.page_count > PAGE_TABLE_FRAME_QUARANTINE_LIMIT {
+            let Some(frames) = self.retired.pop_front() else {
+                self.page_count = 0;
+                break;
+            };
+            self.page_count -= frames.len();
+            expired.push(frames);
+        }
+        expired
+    }
+}
 
 pub struct PageTable {
     root_ppn: PhysPageNum,
@@ -81,6 +125,18 @@ impl PageTable {
 
     pub fn token(&self) -> usize {
         self.root_ppn.0 << 12
+    }
+
+    /// 延迟回收当前页表持有的页表页帧。
+    ///
+    /// LoongArch release 下，短进程密集退出时立刻回收并复用页表页帧会触发
+    /// 上下文切换后的卡死。这里把页表页帧放进有限隔离队列，避免立即复用，
+    /// 队列超过上限后再释放最旧的一批，防止进程数量增长时无限占用内存。
+    pub fn retire_owned_frames(&mut self) {
+        let expired = PAGE_TABLE_FRAME_QUARANTINE
+            .lock()
+            .retire(core::mem::take(&mut self.frames));
+        drop(expired);
     }
 
     pub fn translate(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {

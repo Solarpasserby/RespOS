@@ -8,6 +8,7 @@ use super::task::{TaskControlBlock, task_exit, task_exit_by_signal, task_group_e
 use crate::{arch::task::__switch, mutex::SpinNoIrqLock};
 use alloc::{collections::vec_deque::VecDeque, sync::Arc, vec::Vec};
 use bitflags::bitflags;
+use core::sync::atomic::{Ordering, compiler_fence};
 use lazy_static::lazy_static;
 
 lazy_static! {
@@ -26,6 +27,16 @@ fn cleanup_dead_tasks() {
         core::mem::take(&mut *tasks)
     };
     drop(dead_tasks);
+}
+
+#[inline(never)]
+fn schedule_barrier() {
+    compiler_fence(Ordering::SeqCst);
+    #[cfg(target_arch = "loongarch64")]
+    unsafe {
+        core::arch::asm!("dbar 0", options(nostack, preserves_flags));
+    }
+    compiler_fence(Ordering::SeqCst);
 }
 
 /// 添加新任务到就绪队列。
@@ -76,19 +87,27 @@ pub fn remove_thread_group(tgid: usize) {
 ///
 /// 调用者需要在调用前处理好当前任务的退出或状态变化。
 #[unsafe(no_mangle)]
+#[inline(never)]
 pub fn switch_to_next_task() {
     let Some(current) = current_task() else {
         crate::arch::idle();
     };
 
     if let Some(next_task) = fetch_task() {
+        if Arc::ptr_eq(&current, &next_task) {
+            current.set_running();
+            cleanup_dead_tasks();
+            return;
+        }
         let next_task_kernel_stack = next_task.kstack();
         let current_task_ptr = Arc::as_ptr(&current) as usize;
         next_task.set_running();
         PROCESSOR.lock().switch_to(next_task);
+        schedule_barrier();
         unsafe {
             __switch(next_task_kernel_stack, current_task_ptr);
         }
+        schedule_barrier();
         cleanup_dead_tasks();
         return;
     }
@@ -98,12 +117,16 @@ pub fn switch_to_next_task() {
 
 /// 主动让出当前任务。
 #[unsafe(no_mangle)]
+#[inline(never)]
 pub fn yield_current_task() {
     let Some(task) = current_task() else {
         return;
     };
-
     if let Some(next_task) = fetch_task() {
+        if Arc::ptr_eq(&task, &next_task) {
+            task.set_running();
+            return;
+        }
         let current_task_ptr = Arc::as_ptr(&task) as usize;
         task.set_ready();
         add_task(task);
@@ -111,15 +134,18 @@ pub fn yield_current_task() {
         let next_task_kernel_stack = next_task.kstack();
         next_task.set_running();
         PROCESSOR.lock().switch_to(next_task);
+        schedule_barrier();
         unsafe {
             __switch(next_task_kernel_stack, current_task_ptr);
         }
+        schedule_barrier();
         cleanup_dead_tasks();
     }
 }
 
 /// 阻塞当前任务并运行下一个任务。
 #[unsafe(no_mangle)]
+#[inline(never)]
 pub fn blocking_and_run_next() {
     let Some(task) = current_task() else {
         return;
@@ -133,13 +159,16 @@ pub fn blocking_and_run_next() {
         let next_task_kernel_stack = next_task.kstack();
         next_task.set_running();
         PROCESSOR.lock().switch_to(next_task);
+        schedule_barrier();
         unsafe {
             __switch(next_task_kernel_stack, current_task_ptr);
         }
+        schedule_barrier();
         cleanup_dead_tasks();
     }
 }
 
+#[inline(never)]
 fn switch_to_next_task_after_exit() -> ! {
     let Some(current) = current_task() else {
         panic!("Unreachable!");
@@ -151,6 +180,7 @@ fn switch_to_next_task_after_exit() -> ! {
         next_task.set_running();
         PROCESSOR.lock().switch_to(next_task);
         defer_drop_task(current);
+        schedule_barrier();
         unsafe {
             __switch(next_task_kernel_stack, current_task_ptr);
         }

@@ -106,6 +106,15 @@ impl MemorySet {
 
     /// 对外暴露的添加内核栈段的接口
     pub fn insert_stack_area(&mut self, stack_top: usize) {
+        let stack_bottom_va = VirtAddr::from(stack_top - KERNEL_STACK_SIZE);
+        let stack_bottom_vpn = VirtPageNum::from(stack_bottom_va);
+        if self
+            .areas
+            .iter()
+            .any(|area| area.vpn_range.get_start() == stack_bottom_vpn)
+        {
+            return;
+        }
         self.push_empty_map_area(
             MapArea::new(
                 (stack_top - KERNEL_STACK_SIZE).into(),
@@ -697,6 +706,11 @@ impl MemorySet {
     /// 回收内部地址空间
     pub fn recycle_data_pages(&mut self) {
         self.areas.clear();
+        // LoongArch 当前所有用户进程共用 ASID 0。release 下如果在退出
+        // 后立即回收页表页帧，后续短进程复用这些页帧时可能与残留的
+        // 地址转换状态撞车，表现为 wait4 返回后卡死。
+        #[cfg(target_arch = "loongarch64")]
+        self.page_table.retire_owned_frames();
     }
 }
 

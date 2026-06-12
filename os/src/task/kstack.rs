@@ -120,6 +120,13 @@ impl Drop for KernelStack {
         if *self.top.get_mut() == 0 {
             return;
         }
+        #[cfg(target_arch = "loongarch64")]
+        {
+            // LoongArch release 下在调度返回路径析构任务并同步反映射内核栈，
+            // 会扰动全局内核页表并导致短进程退出后卡死。栈 slot 会被复用，
+            // 对应映射保留在 KERNEL_SPACE 中，下一次分配同一 slot 时直接复用。
+        }
+        #[cfg(not(target_arch = "loongarch64"))]
         KERNEL_SPACE
             .lock()
             .remove_stack_area(get_kernel_stack_top_edge(self.slot));

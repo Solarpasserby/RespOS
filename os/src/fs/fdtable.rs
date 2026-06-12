@@ -37,9 +37,12 @@ impl FdTable {
         let stdin = FdEntry::new(Arc::new(Stdin), OpenFlags::O_RDONLY);
         let stdout = FdEntry::new(Arc::new(Stdout), OpenFlags::O_WRONLY);
         let stderr = FdEntry::new(Arc::new(Stdout), OpenFlags::O_WRONLY);
-        let mut table = self.table.lock();
-        *table = vec![Some(stdin), Some(stdout), Some(stderr)];
+        let old_table = {
+            let mut table = self.table.lock();
+            core::mem::replace(&mut *table, vec![Some(stdin), Some(stdout), Some(stderr)])
+        };
         self.next_fd.store(3, Ordering::Relaxed);
+        drop(old_table);
     }
 
     pub fn nofile_limit(&self) -> (usize, usize) {
@@ -130,13 +133,17 @@ impl FdTable {
     }
 
     pub fn close(&self, fd: usize) -> SysResult {
-        let mut table = self.table.lock();
-        if fd >= table.len() {
-            return Err(Errno::EBADF);
-        }
-        table[fd].take().ok_or(Errno::EBADF)?;
-        let next_fd = self.next_fd.load(Ordering::Relaxed).min(fd);
-        self.next_fd.store(next_fd, Ordering::Relaxed);
+        let old = {
+            let mut table = self.table.lock();
+            if fd >= table.len() {
+                return Err(Errno::EBADF);
+            }
+            let old = table[fd].take().ok_or(Errno::EBADF)?;
+            let next_fd = self.next_fd.load(Ordering::Relaxed).min(fd);
+            self.next_fd.store(next_fd, Ordering::Relaxed);
+            old
+        };
+        drop(old);
         Ok(())
     }
 
@@ -155,9 +162,12 @@ impl FdTable {
 
     /// 清空文件描述符表
     pub fn clear(&self) {
-        let mut table = self.table.lock();
-        table.clear();
+        let old_table = {
+            let mut table = self.table.lock();
+            core::mem::take(&mut *table)
+        };
         self.next_fd.store(0, Ordering::Relaxed);
+        drop(old_table);
     }
 }
 

@@ -26,6 +26,8 @@
 
     .section .text
     .global __switch
+    .type __switch, @function
+    .align 4
 __switch:
     # 在内核栈上分配 TaskContext 空间 (16 * 8 = 128 bytes)
     addi.d      $sp, $sp, -128
@@ -85,3 +87,4 @@ __switch:
 
     # 返回
     jirl        $zero, $ra, 0
+    .size __switch, . - __switch
