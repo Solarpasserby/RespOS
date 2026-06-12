@@ -119,7 +119,12 @@ fn _run_static_musl() {
 }
 
 fn _run_dynamic_musl() {
-    run_shell_script("/musl/\0", BUSYBOX_PATH, RUN_DYNAMIC_SCRIPT);
+    prepare_musl_loader_links();
+    let envp: &[*const u8] = &[
+        "LD_LIBRARY_PATH=/musl/lib:/musl\0".as_ptr(),
+        core::ptr::null(),
+    ];
+    run_shell_script_with_env("/musl/\0", BUSYBOX_PATH, RUN_DYNAMIC_SCRIPT, envp);
 }
 
 fn _run_libctest_musl() {
@@ -299,7 +304,7 @@ fn _run_lua_glibc() {
 }
 
 fn _run_iozone_musl() {
-    prepare_iozone_musl_loader_links();
+    prepare_musl_loader_links();
     let envp: &[*const u8] = &[
         "LD_LIBRARY_PATH=/musl/lib:/musl\0".as_ptr(),
         core::ptr::null(),
@@ -323,7 +328,7 @@ fn relink_loader(src: &str, dst: &str) {
     let _ = link(src, dst);
 }
 
-fn prepare_iozone_musl_loader_links() {
+fn prepare_musl_loader_links() {
     prepare_loader_dirs();
     relink_loader("/musl/lib/libc.so\0", RV_MUSL_LOADER);
     relink_loader("/musl/lib/libc.so\0", RV_MUSL_SF_LOADER);
