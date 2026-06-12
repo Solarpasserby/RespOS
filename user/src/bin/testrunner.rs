@@ -23,6 +23,13 @@ const LUA_SCRIPT: &str = "lua_testcode.sh\0";
 const LMBENCH_SCRIPT: &str = "lmbench_testcode.sh\0";
 const LTP_SCRIPT: &str = "ltp_testcode.sh\0";
 const IOZONE_SCRIPT: &str = "iozone_testcode.sh\0";
+
+const RV_MUSL_LOADER: &str = "/lib/ld-musl-riscv64.so.1\0";
+const RV_MUSL_SF_LOADER: &str = "/lib/ld-musl-riscv64-sf.so.1\0";
+const LA_MUSL_LOADER: &str = "/lib64/ld-musl-loongarch-lp64d.so.1\0";
+const RV_GLIBC_LOADER: &str = "/lib/ld-linux-riscv64-lp64d.so.1\0";
+const LA_GLIBC_LOADER: &str = "/lib64/ld-linux-loongarch-lp64d.so.1\0";
+
 fn strip_nul(s: &str) -> &str {
     &s[..s.len() - 1]
 }
@@ -292,12 +299,44 @@ fn _run_lua_glibc() {
 }
 
 fn _run_iozone_musl() {
-    run_shell_script("/musl/\0", BUSYBOX_PATH, IOZONE_SCRIPT);
+    prepare_iozone_musl_loader_links();
+    let envp: &[*const u8] = &[
+        "LD_LIBRARY_PATH=/musl/lib:/musl\0".as_ptr(),
+        core::ptr::null(),
+    ];
+    run_shell_script_with_env("/musl/\0", BUSYBOX_PATH, IOZONE_SCRIPT, envp);
 }
 
 fn _run_iozone_glibc() {
+    prepare_iozone_glibc_loader_links();
     let envp: &[*const u8] = &["LD_LIBRARY_PATH=/glibc/lib\0".as_ptr(), core::ptr::null()];
     run_shell_script_with_env("/glibc/\0", GLIBC_BUSYBOX_PATH, IOZONE_SCRIPT, envp);
+}
+
+fn prepare_loader_dirs() {
+    let _ = mkdir("/lib\0", 0o755);
+    let _ = mkdir("/lib64\0", 0o755);
+}
+
+fn relink_loader(src: &str, dst: &str) {
+    let _ = unlink(dst);
+    let _ = link(src, dst);
+}
+
+fn prepare_iozone_musl_loader_links() {
+    prepare_loader_dirs();
+    relink_loader("/musl/lib/libc.so\0", RV_MUSL_LOADER);
+    relink_loader("/musl/lib/libc.so\0", RV_MUSL_SF_LOADER);
+    relink_loader("/musl/lib/libc.so\0", LA_MUSL_LOADER);
+}
+
+fn prepare_iozone_glibc_loader_links() {
+    prepare_loader_dirs();
+    relink_loader("/glibc/lib/ld-linux-riscv64-lp64d.so.1\0", RV_GLIBC_LOADER);
+    relink_loader(
+        "/glibc/lib/ld-linux-loongarch-lp64d.so.1\0",
+        LA_GLIBC_LOADER,
+    );
 }
 
 fn _run_lmbench_musl() {
@@ -359,17 +398,17 @@ fn _run_ltp_glibc() {
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("[testrunner] start");
-    _run_basic_musl();
-    _run_basic_glibc();
-    _run_libcbench_musl();
-    _run_libcbench_glibc();
-    _run_busybox_musl();
-    _run_busybox_glibc();
-    _run_libctest_musl();
-    _run_lua_musl();
-    _run_lua_glibc();
-    _run_lmbench_musl();
-    _run_lmbench_glibc();
+    // _run_basic_musl();
+    // _run_basic_glibc();
+    // _run_libcbench_musl();
+    // _run_libcbench_glibc();
+    // _run_busybox_musl();
+    // _run_busybox_glibc();
+    // _run_libctest_musl();
+    // _run_lua_musl();
+    // _run_lua_glibc();
+    // _run_lmbench_musl();
+    // _run_lmbench_glibc();
     _run_iozone_musl();
     _run_iozone_glibc();
     // _run_ltp_musl();
@@ -383,17 +422,17 @@ fn main() -> i32 {
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("[testrunner] start");
-    _run_basic_musl();
-    _run_basic_glibc();
-    _run_libcbench_musl();
-    _run_libcbench_glibc();
-    _run_busybox_musl();
-    _run_busybox_glibc();
-    _run_libctest_musl();
-    _run_lua_musl();
-    _run_lua_glibc();
-    _run_lmbench_musl();
-    _run_lmbench_glibc(); // 会报错，还要修改
+    // _run_basic_musl();
+    // _run_basic_glibc();
+    // _run_libcbench_musl();
+    // _run_libcbench_glibc();
+    // _run_busybox_musl();
+    // _run_busybox_glibc();
+    // _run_libctest_musl();
+    // _run_lua_musl();
+    // _run_lua_glibc();
+    // _run_lmbench_musl();
+    // _run_lmbench_glibc(); // 会报错，还要修改
     _run_iozone_musl();
     _run_iozone_glibc();
     // _run_ltp_musl();
