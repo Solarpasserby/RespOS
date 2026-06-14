@@ -4,6 +4,7 @@ use super::vfs::{InodeOp, InodeType, LinuxDirent64};
 use crate::fs::page_cache::PageCache;
 use crate::fs::{KStat, Path};
 use crate::syscall::{Errno, SysResult};
+use crate::timer::{TimeSpec, get_time_ms};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
@@ -63,17 +64,20 @@ impl File {
     pub fn new(path: Arc<Path>, inode: Arc<dyn InodeOp>, flags: OpenFlags) -> Self {
         let abs_path = path.abs_path();
         let ty = inode.node_type();
+        let page_cache = inode.get_page_cache();
         if flags.contains(OpenFlags::O_TRUNC)
             && flags.intersects(OpenFlags::O_WRONLY | OpenFlags::O_RDWR)
         {
             let _ = inode.truncate(&abs_path, 0);
+            if let Some(ref pc) = page_cache {
+                pc.resize(0);
+            }
         }
         let offset = if flags.contains(OpenFlags::O_APPEND) && ty == InodeType::Regular {
             inode.stat(&abs_path).map(|stat| stat.size).unwrap_or(0)
         } else {
             0
         };
-        let page_cache = inode.get_page_cache();
         let write_back = ty == InodeType::Regular && page_cache.is_some();
         if let Some(ref pc) = page_cache {
             let size = inode.stat(&abs_path).map(|stat| stat.size).unwrap_or(0);
@@ -229,10 +233,23 @@ impl FileOp for File {
         let offset = inner.offset;
         let n = if let Some(ref pc) = inner.page_cache {
             let lower = inner.write_back.then_some((&self.inode, path.as_str()));
-            pc.write_at(offset, buf, lower)?
+            let n = pc.write_at(offset, buf, lower)?;
+            let end = offset.checked_add(n).ok_or(Errno::EINVAL)?;
+            if end > pc.len() {
+                pc.resize(end);
+            }
+            n
         } else {
             self.inode.write_at(&path, offset, buf)?
         };
+        if n != 0 && inner.write_back {
+            let ms = get_time_ms();
+            let now = TimeSpec {
+                sec: (ms / 1000) as isize,
+                nsec: ((ms % 1000) * 1_000_000) as isize,
+            };
+            let _ = self.inode.set_times(&path, None, Some(now));
+        }
         inner.offset += n;
         Ok(n)
     }

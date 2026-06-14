@@ -190,6 +190,10 @@ impl Ext4Inode {
 
     fn lookup_dirent(parent_path: &str, name: &str) -> SysResult<(u64, Ext4InodeTypes)> {
         let _guard = EXT4_OP_LOCK.lock();
+        Self::lookup_dirent_locked(parent_path, name)
+    }
+
+    fn lookup_dirent_locked(parent_path: &str, name: &str) -> SysResult<(u64, Ext4InodeTypes)> {
         let c_path = CString::new(parent_path).map_err(|_| Errno::EINVAL)?;
         let c_path = c_path.into_raw();
         let mut dir: bindings::ext4_dir = unsafe { core::mem::zeroed() };
@@ -209,10 +213,14 @@ impl Ext4Inode {
             }
 
             let dirent = unsafe { &*dirent };
+            if dirent.inode == 0 {
+                continue;
+            }
             if Self::dirent_name_eq(&dirent.name, dirent.name_length as usize, name) {
                 let child_path = Self::child_path(parent_path, name);
-                let ty = Self::inode_mode_type(&child_path)
-                    .unwrap_or_else(|| Ext4InodeTypes::from(dirent.inode_type as usize));
+                let Some(ty) = Self::inode_mode_type(&child_path) else {
+                    continue;
+                };
                 found = Some((dirent.inode as u64, ty));
                 break;
             }
@@ -430,6 +438,12 @@ impl InodeOp for Ext4Inode {
 
         let now = Self::now_timespec();
         let _ = self.set_times(path, None, Some(now));
+        if write_size != 0 {
+            let end = off.checked_add(write_size).ok_or(Errno::EINVAL)?;
+            if end > self.page_cache.len() {
+                self.page_cache.resize(end);
+            }
+        }
 
         Ok(write_size)
     }
@@ -449,6 +463,7 @@ impl InodeOp for Ext4Inode {
 
         let now = Self::now_timespec();
         let _ = self.set_times(path, None, Some(now));
+        self.page_cache.resize(size);
 
         Ok(0)
     }
@@ -556,7 +571,20 @@ impl InodeOp for Ext4Inode {
             }
 
             let dirent = unsafe { &*dirent };
+            if dirent.inode == 0 {
+                continue;
+            }
             let name_len = dirent.name_length as usize;
+            let name = core::str::from_utf8(&dirent.name[..name_len]).map_err(|_| Errno::EINVAL)?;
+            let ty = if name == "." || name == ".." {
+                InodeType::from(Ext4InodeTypes::from(dirent.inode_type as usize))
+            } else {
+                let child_path = Self::child_path(path, name);
+                let Some(ty) = Self::inode_mode_type(&child_path) else {
+                    continue;
+                };
+                InodeType::from(ty)
+            };
             let reclen = Self::dirent64_reclen(name_len);
             next_off += reclen;
 
@@ -566,7 +594,7 @@ impl InodeOp for Ext4Inode {
                 d_ino: dirent.inode as u64,
                 d_off: next_off as i64,
                 d_reclen: reclen as u16,
-                d_type: InodeType::from(Ext4InodeTypes::from(dirent.inode_type as usize)) as u8,
+                d_type: ty as u8,
                 d_name,
             });
         }
