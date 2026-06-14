@@ -17,7 +17,7 @@ use crate::signal::sig_stack::{SS_DISABLE, SignalStack};
 use crate::signal::sig_struct::SigPending;
 use crate::signal::{SiField, Sig};
 use crate::syscall::{Errno, SysResult};
-use crate::timer::get_time_ms;
+use crate::timer::{get_accounting_ms, get_timeout_ms};
 use crate::trap::TrapContext;
 use alloc::collections::btree_map::BTreeMap;
 use alloc::string::String;
@@ -148,7 +148,7 @@ impl TaskControlBlock {
             alarm_deadline_ms: AtomicUsize::new(0),
             alarm_interval_ms: AtomicUsize::new(0),
             personality: AtomicUsize::new(0),
-            start_time_ms: AtomicUsize::new(get_time_ms()),
+            start_time_ms: AtomicUsize::new(get_accounting_ms()),
             child_utime_ticks: AtomicUsize::new(0),
             child_stime_ticks: AtomicUsize::new(0),
         }
@@ -215,7 +215,7 @@ impl TaskControlBlock {
             alarm_deadline_ms: AtomicUsize::new(0),
             alarm_interval_ms: AtomicUsize::new(0),
             personality: AtomicUsize::new(0),
-            start_time_ms: AtomicUsize::new(get_time_ms()),
+            start_time_ms: AtomicUsize::new(get_accounting_ms()),
             child_utime_ticks: AtomicUsize::new(0),
             child_stime_ticks: AtomicUsize::new(0),
         });
@@ -358,7 +358,7 @@ impl TaskControlBlock {
             alarm_deadline_ms: AtomicUsize::new(0),
             alarm_interval_ms: AtomicUsize::new(0),
             personality: AtomicUsize::new(self.personality()),
-            start_time_ms: AtomicUsize::new(get_time_ms()),
+            start_time_ms: AtomicUsize::new(get_accounting_ms()),
             child_utime_ticks: AtomicUsize::new(0),
             child_stime_ticks: AtomicUsize::new(0),
         });
@@ -801,7 +801,7 @@ impl TaskControlBlock {
         if deadline == 0 {
             return 0;
         }
-        deadline.saturating_sub(get_time_ms())
+        deadline.saturating_sub(get_timeout_ms())
     }
 
     pub fn real_timer_interval_ms(&self) -> usize {
@@ -813,17 +813,16 @@ impl TaskControlBlock {
         let deadline = if value_ms == 0 {
             0
         } else {
-            get_time_ms().saturating_add(value_ms)
+            get_timeout_ms().saturating_add(value_ms)
         };
         self.alarm_deadline_ms.store(deadline, Ordering::Relaxed);
-        self.alarm_interval_ms
-            .store(interval_ms, Ordering::Relaxed);
+        self.alarm_interval_ms.store(interval_ms, Ordering::Relaxed);
         old_remaining
     }
 
     pub fn check_real_timer(&self) {
         let deadline = self.alarm_deadline_ms.load(Ordering::Relaxed);
-        if deadline == 0 || get_time_ms() < deadline {
+        if deadline == 0 || get_timeout_ms() < deadline {
             return;
         }
 
@@ -831,11 +830,16 @@ impl TaskControlBlock {
         let next_deadline = if interval == 0 {
             0
         } else {
-            get_time_ms().saturating_add(interval)
+            get_timeout_ms().saturating_add(interval)
         };
         if self
             .alarm_deadline_ms
-            .compare_exchange(deadline, next_deadline, Ordering::Relaxed, Ordering::Relaxed)
+            .compare_exchange(
+                deadline,
+                next_deadline,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            )
             .is_err()
         {
             return;
@@ -855,7 +859,7 @@ impl TaskControlBlock {
 
     pub fn elapsed_ticks(&self) -> usize {
         let start = self.start_time_ms.load(Ordering::Relaxed);
-        let elapsed = get_time_ms().saturating_sub(start);
+        let elapsed = get_accounting_ms().saturating_sub(start);
         (elapsed * CLK_TCK / 1000).max(1)
     }
 

@@ -2114,6 +2114,7 @@ int ext4_raw_inode_fill(const char *path, uint32_t *ret_ino,
 	/*Load parent*/
 	r = ext4_fs_get_inode_ref(&mp->fs, f.inode, &inode_ref);
 	if (r != EOK) {
+		ext4_fclose(&f);
 		EXT4_MP_UNLOCK(mp);
 		return r;
 	}
@@ -2123,6 +2124,7 @@ int ext4_raw_inode_fill(const char *path, uint32_t *ret_ino,
 
 	memcpy(inode, inode_ref.inode, sizeof(struct ext4_inode));
 	ext4_fs_put_inode_ref(&inode_ref);
+	ext4_fclose(&f);
 	EXT4_MP_UNLOCK(mp);
 
 	return r;
@@ -3146,11 +3148,15 @@ int ext4_dir_mk(const char *path)
 
 	/*Check if exist.*/
 	r = ext4_generic_open(&f, path, "r", false, 0, 0);
-	if (r == EOK)
+	if (r == EOK) {
+		ext4_fclose(&f);
 		goto Finish;
+	}
 
 	/*Create new directory.*/
 	r = ext4_generic_open(&f, path, "w", false, 0, 0);
+	if (r == EOK)
+		ext4_fclose(&f);
 
 Finish:
 	EXT4_MP_UNLOCK(mp);

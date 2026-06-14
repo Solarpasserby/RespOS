@@ -516,12 +516,43 @@ fn do_fchmodat(dirfd: isize, path: *const u8, mode: usize, flags: usize) -> SysR
         } else {
             filename_lookup(dirfd, path.as_str(), 0)?
         };
-        resolved
-            .dentry
-            .get_inode()
-            .set_mode(&resolved.abs_path(), mode)?;
+        let abs_path = resolved.abs_path();
+        resolved.dentry.get_inode().set_mode(&abs_path, mode)?;
     }
 
+    Ok(0)
+}
+
+pub fn sys_fchownat(
+    dirfd: isize,
+    path: *const u8,
+    _owner: usize,
+    _group: usize,
+    flags: usize,
+) -> SysResult<usize> {
+    const FCHOWNAT_ALLOWED_FLAGS: usize = AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH;
+
+    if flags & !FCHOWNAT_ALLOWED_FLAGS != 0 {
+        return Err(Errno::EINVAL);
+    }
+
+    let path = copy_cstr_from_user(path)?;
+    if path.is_empty() {
+        if flags & AT_EMPTY_PATH == 0 {
+            return Err(Errno::ENOENT);
+        }
+        if dirfd != AT_FDCWD {
+            let task = current_task().expect("[kernel] current task is None.");
+            let _ = task.get_fd_entry(dirfd as usize)?;
+        }
+    } else if flags & AT_SYMLINK_NOFOLLOW != 0 {
+        filename_lookup_no_follow_final_symlink(dirfd, path.as_str())?;
+    } else {
+        filename_lookup(dirfd, path.as_str(), 0)?;
+    }
+
+    // TODO[ABI-COMPAT]: 当前内核是单用户 root 模型，暂不维护 inode uid/gid。
+    // glibc/LTP 初始化会用 chown 修正临时目录/文件属主；路径存在即可视为成功。
     Ok(0)
 }
 

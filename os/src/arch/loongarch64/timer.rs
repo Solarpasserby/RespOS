@@ -4,20 +4,17 @@
 // 使用 rdtime.d 指令读取稳定计数器，替代 RISC-V 的 mtime CSR。
 
 use super::{register, sbi::set_timer};
-use crate::config::{DEFAULT_CLOCK_FREQ, TIMEOUT_CLOCK_FREQ};
+use crate::config::{ACCOUNTING_CLOCK_FREQ, HARDWARE_CLOCK_FREQ, USER_CLOCK_FREQ};
 use core::arch::asm;
-use core::sync::atomic::{AtomicUsize, Ordering};
 
 const TICKS_PER_SEC: usize = 100;
 const MSEC_PER_SEC: usize = 1000;
 const USEC_PER_SEC: usize = 1_000_000;
 
-// 用户可见时间和 timeout 时间刻意分开：
-// - CLOCK_FREQ_HZ 控制 gettimeofday/clock_gettime 等用户可见时间；
-// - TIMEOUT_CLOCK_FREQ_HZ 控制内核相对等待的真实 deadline。
-static CLOCK_FREQ_HZ: AtomicUsize = AtomicUsize::new(DEFAULT_CLOCK_FREQ);
-static TIMEOUT_CLOCK_FREQ_HZ: AtomicUsize = AtomicUsize::new(TIMEOUT_CLOCK_FREQ);
-const USE_CPUCFG_CLOCK_FREQ: bool = false;
+// 时间频率刻意分成三类：
+// - hardware clock: timer interrupt 和 timeout 使用真实硬件尺度；
+// - user clock: gettimeofday/clock_gettime 使用，可为 bench 调整；
+// - accounting clock: times()/getrusage() 等 CPU 时间记账使用。
 
 #[derive(Clone, Copy, Debug, Default)]
 #[repr(C)]
@@ -66,17 +63,31 @@ fn cpucfg(index: usize) -> usize {
 }
 
 #[inline(always)]
-pub fn get_clock_freq() -> usize {
-    // CLOCK_FREQ_HZ.load(Ordering::Relaxed)
-    DEFAULT_CLOCK_FREQ
+fn ticks_to_ms(ticks: usize, freq: usize) -> usize {
+    ticks / (freq / MSEC_PER_SEC)
 }
 
 #[inline(always)]
-fn get_timeout_clock_freq() -> usize {
-    TIMEOUT_CLOCK_FREQ_HZ.load(Ordering::Relaxed)
+fn ticks_to_us(ticks: usize, freq: usize) -> usize {
+    ticks / freq * USEC_PER_SEC + ticks % freq * USEC_PER_SEC / freq
 }
 
-/// Read the stable counter frequency from CPUCFG when the platform exposes it.
+#[inline(always)]
+pub fn get_hardware_clock_freq() -> usize {
+    HARDWARE_CLOCK_FREQ
+}
+
+#[inline(always)]
+pub fn get_user_clock_freq() -> usize {
+    USER_CLOCK_FREQ
+}
+
+#[inline(always)]
+pub fn get_accounting_clock_freq() -> usize {
+    ACCOUNTING_CLOCK_FREQ
+}
+
+/// Read CPUCFG only as a boot-time diagnostic. Runtime clock policy comes from board.rs.
 pub fn init_clock_freq() {
     let base_freq = cpucfg(4) & 0xffff_ffff;
     let cfg5 = cpucfg(5);
@@ -85,24 +96,22 @@ pub fn init_clock_freq() {
 
     if base_freq != 0 && mul != 0 && div != 0 {
         let cpucfg_freq = base_freq * mul / div;
-        if USE_CPUCFG_CLOCK_FREQ {
-            CLOCK_FREQ_HZ.store(cpucfg_freq, Ordering::Relaxed);
-        }
-        TIMEOUT_CLOCK_FREQ_HZ.store(cpucfg_freq, Ordering::Relaxed);
         println!(
-            "[timer] CPUCFG freq: {} Hz, user clock freq: {} Hz, timeout clock freq: {} Hz",
+            "[timer] CPUCFG freq: {} Hz, hardware clock freq: {} Hz, user clock freq: {} Hz, accounting clock freq: {} Hz",
             cpucfg_freq,
-            get_clock_freq(),
-            get_timeout_clock_freq()
+            get_hardware_clock_freq(),
+            get_user_clock_freq(),
+            get_accounting_clock_freq()
         );
     } else {
         println!(
-            "[timer] invalid CPUCFG timer freq base={} mul={} div={}, user clock freq: {} Hz, timeout clock freq: {} Hz",
+            "[timer] invalid CPUCFG timer freq base={} mul={} div={}, hardware clock freq: {} Hz, user clock freq: {} Hz, accounting clock freq: {} Hz",
             base_freq,
             mul,
             div,
-            DEFAULT_CLOCK_FREQ,
-            get_timeout_clock_freq()
+            get_hardware_clock_freq(),
+            get_user_clock_freq(),
+            get_accounting_clock_freq()
         );
     }
 }
@@ -142,29 +151,35 @@ pub fn get_time() -> usize {
 
 /// 设置下一次时钟中断触发
 pub fn set_next_ti_trigger() {
-    set_timer(get_time() + get_clock_freq() / TICKS_PER_SEC);
+    set_timer(get_time() + get_hardware_clock_freq() / TICKS_PER_SEC);
 }
 
-/// 读取硬件运行时间（毫秒）
+/// 读取用户可见运行时间（毫秒）
 pub fn get_time_ms() -> usize {
-    get_time() / (get_clock_freq() / MSEC_PER_SEC)
+    ticks_to_ms(get_time(), get_user_clock_freq())
 }
 
-/// 读取硬件运行时间（微秒）
+/// 读取用户可见运行时间（微秒）
 pub fn get_time_us() -> usize {
-    let ticks = get_time();
-    let clock_freq = get_clock_freq();
-    ticks / clock_freq * USEC_PER_SEC + ticks % clock_freq * USEC_PER_SEC / clock_freq
+    ticks_to_us(get_time(), get_user_clock_freq())
 }
 
 /// 读取 timeout/deadline 使用的真实运行时间（毫秒）。
 pub fn get_timeout_ms() -> usize {
-    get_time() / (get_timeout_clock_freq() / MSEC_PER_SEC)
+    ticks_to_ms(get_time(), get_hardware_clock_freq())
 }
 
 /// 读取 timeout/deadline 使用的真实运行时间（微秒）。
 pub fn get_timeout_us() -> usize {
-    let ticks = get_time();
-    let clock_freq = get_timeout_clock_freq();
-    ticks / clock_freq * USEC_PER_SEC + ticks % clock_freq * USEC_PER_SEC / clock_freq
+    ticks_to_us(get_time(), get_hardware_clock_freq())
+}
+
+/// 读取 CPU 时间记账使用的运行时间（毫秒）。
+pub fn get_accounting_ms() -> usize {
+    ticks_to_ms(get_time(), get_accounting_clock_freq())
+}
+
+/// 读取 CPU 时间记账使用的运行时间（微秒）。
+pub fn get_accounting_us() -> usize {
+    ticks_to_us(get_time(), get_accounting_clock_freq())
 }

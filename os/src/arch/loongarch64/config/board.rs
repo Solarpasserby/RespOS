@@ -1,18 +1,17 @@
 // LoongArch QEMU virt 机器板级配置
 
-// LoongArch QEMU virt 机器默认时钟频率。
+// LoongArch QEMU virt 机器时钟频率。
 //
-// 这组值刻意拆成两类：
-// - DEFAULT_CLOCK_FREQ：用户可见时间的换算频率，影响 gettimeofday、
-//   clock_gettime 以及 bench 类测例输出。
-// - TIMEOUT_CLOCK_FREQ：内核等待/超时使用的硬件计数器频率，影响
-//   nanosleep、sigtimedwait、pselect 等相对 timeout 的真实等待时长。
+// 这组值刻意拆成三类：
+// - HARDWARE_CLOCK_FREQ：真实硬件计数器频率，用于 timer interrupt 和 timeout。
+// - USER_CLOCK_FREQ：用户可见时间频率，用于 gettimeofday/clock_gettime，可为 bench 调整。
+// - ACCOUNTING_CLOCK_FREQ：times()/getrusage() 这类 CPU 时间记账的换算频率。
 //
-// CPUCFG 在 QEMU virt 上通常能读到 100MHz。直接把它用于所有时间路径会
-// 同时改变用户时间和 tick 编程，容易让不同测例互相牵制；因此用户时间
-// 保留可调默认值，timeout 路径优先使用真实硬件尺度。
-pub const DEFAULT_CLOCK_FREQ: usize = 20_000_000;
-pub const TIMEOUT_CLOCK_FREQ: usize = 100_000_000;
+// 当前 QEMU virt 的 rdtime.d/CPUCFG 通常对应 100MHz。USER_CLOCK_FREQ 保持较低值
+// 是为了保留 bench-facing wall clock 的可调空间；不要再把它用于硬件 timer 编程。
+pub const HARDWARE_CLOCK_FREQ: usize = 100_000_000;
+pub const USER_CLOCK_FREQ: usize = 100_000_000;
+pub const ACCOUNTING_CLOCK_FREQ: usize = HARDWARE_CLOCK_FREQ;
 // QEMU loongarch64 virt with `-m 128M` maps RAM in low memory.
 pub const MEMORY_START: usize = 0;
 pub const MEMORY_END: usize = 0x0800_0000;

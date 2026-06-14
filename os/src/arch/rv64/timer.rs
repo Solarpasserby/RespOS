@@ -3,7 +3,7 @@
 //! ### 系统计时器模块
 
 use super::sbi::set_timer;
-use crate::config::CLOCK_FREQ;
+use crate::config::{ACCOUNTING_CLOCK_FREQ, HARDWARE_CLOCK_FREQ, USER_CLOCK_FREQ};
 use riscv::register::time;
 
 const TICKS_PER_SEC: usize = 100; // 每秒触发时钟中断的次数
@@ -80,28 +80,62 @@ pub fn get_time() -> usize {
     time::read()
 }
 
+#[inline(always)]
+fn ticks_to_ms(ticks: usize, freq: usize) -> usize {
+    ticks / (freq / MSEC_PER_SEC)
+}
+
+#[inline(always)]
+fn ticks_to_us(ticks: usize, freq: usize) -> usize {
+    ticks / freq * USEC_PER_SEC + ticks % freq * USEC_PER_SEC / freq
+}
+
+#[inline(always)]
+pub fn get_hardware_clock_freq() -> usize {
+    HARDWARE_CLOCK_FREQ
+}
+
+#[inline(always)]
+pub fn get_user_clock_freq() -> usize {
+    USER_CLOCK_FREQ
+}
+
+#[inline(always)]
+pub fn get_accounting_clock_freq() -> usize {
+    ACCOUNTING_CLOCK_FREQ
+}
+
 /// 设置下一次时钟中断触发器
 pub fn set_next_ti_trigger() {
-    set_timer(get_time() + CLOCK_FREQ / TICKS_PER_SEC);
+    set_timer(get_time() + get_hardware_clock_freq() / TICKS_PER_SEC);
 }
 
-/// 读取硬件运行时间(ms)
+/// 读取用户可见运行时间(ms)
 pub fn get_time_ms() -> usize {
-    time::read() / (CLOCK_FREQ / MSEC_PER_SEC)
+    ticks_to_ms(get_time(), get_user_clock_freq())
 }
 
-/// 读取硬件运行时间(us)
+/// 读取用户可见运行时间(us)
 pub fn get_time_us() -> usize {
-    let ticks = get_time();
-    ticks / CLOCK_FREQ * USEC_PER_SEC + ticks % CLOCK_FREQ * USEC_PER_SEC / CLOCK_FREQ
+    ticks_to_us(get_time(), get_user_clock_freq())
 }
 
-/// RISC-V 目前用户可见时间和 timeout 使用同一套硬件尺度。
+/// RISC-V 目前 timeout 使用同一套硬件尺度。
 pub fn get_timeout_ms() -> usize {
-    get_time_ms()
+    ticks_to_ms(get_time(), get_hardware_clock_freq())
 }
 
-/// RISC-V 目前用户可见时间和 timeout 使用同一套硬件尺度。
+/// RISC-V 目前 timeout 使用同一套硬件尺度。
 pub fn get_timeout_us() -> usize {
-    get_time_us()
+    ticks_to_us(get_time(), get_hardware_clock_freq())
+}
+
+/// 读取 CPU 时间记账使用的运行时间(ms)。
+pub fn get_accounting_ms() -> usize {
+    ticks_to_ms(get_time(), get_accounting_clock_freq())
+}
+
+/// 读取 CPU 时间记账使用的运行时间(us)。
+pub fn get_accounting_us() -> usize {
+    ticks_to_us(get_time(), get_accounting_clock_freq())
 }
