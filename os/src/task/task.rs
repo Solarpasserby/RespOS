@@ -6,6 +6,7 @@ use super::kstack::KernelStack;
 use super::manager::TASK_MANAGER;
 use super::scheduler::remove_task;
 use super::tid::{TidHandle, tid_alloc};
+use crate::config::CLK_TCK;
 use crate::fs::mount::init_root_fs;
 use crate::fs::{FdEntry, FdTable, Path};
 use crate::mm::{MemorySet, copy_from_user, copy_to_user};
@@ -16,6 +17,7 @@ use crate::signal::sig_stack::{SS_DISABLE, SignalStack};
 use crate::signal::sig_struct::SigPending;
 use crate::signal::{SiField, Sig};
 use crate::syscall::{Errno, SysResult};
+use crate::timer::get_time_ms;
 use crate::trap::TrapContext;
 use alloc::collections::btree_map::BTreeMap;
 use alloc::string::String;
@@ -57,7 +59,7 @@ pub struct TaskControlBlock {
     // 基本数据
     tid: RwLock<TidHandle>,
     tgid: AtomicUsize,
-    // pgid: AtomicUsize,
+    pgid: AtomicUsize,
     thread_group: Arc<SpinLock<ThreadGroup>>,
     task_status: SpinLock<TaskStatus>,
     parent: Arc<SpinLock<Option<Weak<TaskControlBlock>>>>,
@@ -87,6 +89,12 @@ pub struct TaskControlBlock {
     interruptible: AtomicBool,
     // 信号中断标记：当线程在 interruptible 状态下被信号唤醒时置为 true
     interrupted: AtomicBool,
+    alarm_deadline_ms: AtomicUsize,
+    alarm_interval_ms: AtomicUsize,
+    personality: AtomicUsize,
+    start_time_ms: AtomicUsize,
+    child_utime_ticks: AtomicUsize,
+    child_stime_ticks: AtomicUsize,
 }
 
 impl core::fmt::Debug for TaskControlBlock {
@@ -108,7 +116,7 @@ impl TaskControlBlock {
             // 基本数据
             tid: RwLock::new(TidHandle(0)),
             tgid: AtomicUsize::new(0),
-            // pgid: AtomicUsize,
+            pgid: AtomicUsize::new(0),
             thread_group: Arc::new(SpinLock::new(ThreadGroup::new())),
             task_status: SpinLock::new(TaskStatus::Ready),
             parent: Arc::new(SpinLock::new(None)),
@@ -137,6 +145,12 @@ impl TaskControlBlock {
             // 可中断状态
             interruptible: AtomicBool::new(false),
             interrupted: AtomicBool::new(false),
+            alarm_deadline_ms: AtomicUsize::new(0),
+            alarm_interval_ms: AtomicUsize::new(0),
+            personality: AtomicUsize::new(0),
+            start_time_ms: AtomicUsize::new(get_time_ms()),
+            child_utime_ticks: AtomicUsize::new(0),
+            child_stime_ticks: AtomicUsize::new(0),
         }
     }
 
@@ -170,7 +184,7 @@ impl TaskControlBlock {
             // 基本数据
             tid: RwLock::new(tid),
             tgid: AtomicUsize::new(tgid),
-            // pgid: 0,
+            pgid: AtomicUsize::new(tgid),
             thread_group: Arc::new(SpinLock::new(ThreadGroup::new())),
             task_status: SpinLock::new(TaskStatus::Ready),
             parent: Arc::new(SpinLock::new(None)),
@@ -198,6 +212,12 @@ impl TaskControlBlock {
             // 可中断状态
             interruptible: AtomicBool::new(false),
             interrupted: AtomicBool::new(false),
+            alarm_deadline_ms: AtomicUsize::new(0),
+            alarm_interval_ms: AtomicUsize::new(0),
+            personality: AtomicUsize::new(0),
+            start_time_ms: AtomicUsize::new(get_time_ms()),
+            child_utime_ticks: AtomicUsize::new(0),
+            child_stime_ticks: AtomicUsize::new(0),
         });
 
         // 在线程组中添加该线程
@@ -244,10 +264,11 @@ impl TaskControlBlock {
             .unwrap_or_else(|| self.clone());
 
         // 创建线程或是进程
-        let (tgid, thread_group, parent, children, cwd, exe_path) = if is_thread {
+        let (tgid, pgid, thread_group, parent, children, cwd, exe_path) = if is_thread {
             // 创建线程，属于同一线程组
             (
                 self.tgid(),
+                self.pgid(),
                 self.thread_group.clone(),
                 self.parent.clone(),
                 self.children.clone(),
@@ -258,6 +279,7 @@ impl TaskControlBlock {
             // 创建进程
             (
                 tid.0,
+                self.pgid(),
                 Arc::new(SpinLock::new(ThreadGroup::new())),
                 Arc::new(SpinLock::new(Some(Arc::downgrade(&process_leader)))),
                 Arc::new(SpinLock::new(BTreeMap::new())),
@@ -305,7 +327,7 @@ impl TaskControlBlock {
             // 基本数据
             tid: RwLock::new(tid),
             tgid: AtomicUsize::new(tgid),
-            // pgid: 0,
+            pgid: AtomicUsize::new(pgid),
             thread_group,
             task_status: SpinLock::new(TaskStatus::Ready),
             parent,
@@ -333,6 +355,12 @@ impl TaskControlBlock {
             // 可中断状态
             interruptible: AtomicBool::new(false),
             interrupted: AtomicBool::new(false),
+            alarm_deadline_ms: AtomicUsize::new(0),
+            alarm_interval_ms: AtomicUsize::new(0),
+            personality: AtomicUsize::new(self.personality()),
+            start_time_ms: AtomicUsize::new(get_time_ms()),
+            child_utime_ticks: AtomicUsize::new(0),
+            child_stime_ticks: AtomicUsize::new(0),
         });
 
         // 修改任务异常上下文
@@ -428,6 +456,9 @@ impl TaskControlBlock {
     pub fn tgid(&self) -> usize {
         self.tgid.load(Ordering::Relaxed)
     }
+    pub fn pgid(&self) -> usize {
+        self.pgid.load(Ordering::Relaxed)
+    }
     pub fn status(&self) -> TaskStatus {
         self.task_status.lock().clone()
     }
@@ -509,6 +540,9 @@ impl TaskControlBlock {
     /* ======= 设置内部数据 ====== */
     pub fn set_tgid(&self, tgid: usize) {
         self.tgid.swap(tgid, Ordering::Relaxed);
+    }
+    pub fn set_pgid(&self, pgid: usize) {
+        self.pgid.store(pgid, Ordering::Relaxed);
     }
     pub fn set_cwd(&self, path: Arc<Path>) {
         *self.cwd.lock() = path;
@@ -760,6 +794,81 @@ impl TaskControlBlock {
 
     pub fn sig_context_addr(&self) -> usize {
         self.sig_context_addr.load(Ordering::Relaxed)
+    }
+
+    pub fn real_timer_remaining_ms(&self) -> usize {
+        let deadline = self.alarm_deadline_ms.load(Ordering::Relaxed);
+        if deadline == 0 {
+            return 0;
+        }
+        deadline.saturating_sub(get_time_ms())
+    }
+
+    pub fn real_timer_interval_ms(&self) -> usize {
+        self.alarm_interval_ms.load(Ordering::Relaxed)
+    }
+
+    pub fn set_real_timer_ms(&self, value_ms: usize, interval_ms: usize) -> usize {
+        let old_remaining = self.real_timer_remaining_ms();
+        let deadline = if value_ms == 0 {
+            0
+        } else {
+            get_time_ms().saturating_add(value_ms)
+        };
+        self.alarm_deadline_ms.store(deadline, Ordering::Relaxed);
+        self.alarm_interval_ms
+            .store(interval_ms, Ordering::Relaxed);
+        old_remaining
+    }
+
+    pub fn check_real_timer(&self) {
+        let deadline = self.alarm_deadline_ms.load(Ordering::Relaxed);
+        if deadline == 0 || get_time_ms() < deadline {
+            return;
+        }
+
+        let interval = self.alarm_interval_ms.load(Ordering::Relaxed);
+        let next_deadline = if interval == 0 {
+            0
+        } else {
+            get_time_ms().saturating_add(interval)
+        };
+        if self
+            .alarm_deadline_ms
+            .compare_exchange(deadline, next_deadline, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+
+        let siginfo = SigInfo::new(Sig::SIGALRM.raw(), SigInfo::KERNEL, SiField::None);
+        self.receive_siginfo(siginfo, false);
+    }
+
+    pub fn personality(&self) -> usize {
+        self.personality.load(Ordering::Relaxed)
+    }
+
+    pub fn set_personality(&self, personality: usize) -> usize {
+        self.personality.swap(personality, Ordering::Relaxed)
+    }
+
+    pub fn elapsed_ticks(&self) -> usize {
+        let start = self.start_time_ms.load(Ordering::Relaxed);
+        let elapsed = get_time_ms().saturating_sub(start);
+        (elapsed * CLK_TCK / 1000).max(1)
+    }
+
+    pub fn child_ticks(&self) -> (usize, usize) {
+        (
+            self.child_utime_ticks.load(Ordering::Relaxed),
+            self.child_stime_ticks.load(Ordering::Relaxed),
+        )
+    }
+
+    pub fn add_child_ticks(&self, utime: usize, stime: usize) {
+        self.child_utime_ticks.fetch_add(utime, Ordering::Relaxed);
+        self.child_stime_ticks.fetch_add(stime, Ordering::Relaxed);
     }
     pub fn op_thread_group<T>(&self, f: impl FnOnce(&ThreadGroup) -> T) -> T {
         f(&self.thread_group.lock())

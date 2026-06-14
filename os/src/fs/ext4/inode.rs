@@ -473,6 +473,22 @@ impl InodeOp for Ext4Inode {
         Ok(())
     }
 
+    fn set_mode(&self, path: &str, mode: u32) -> SysResult {
+        let _guard = EXT4_OP_LOCK.lock();
+        let c_path = CString::new(path).map_err(|_| Errno::EINVAL)?;
+        let ret = unsafe { bindings::ext4_mode_set(c_path.as_ptr(), mode & 0o7777) };
+        if ret != 0 {
+            return Err(Self::map_lwext4_err(ret));
+        }
+
+        if let Some(mut times) = *self.times.lock() {
+            times.ctime = Self::now_timespec();
+            Self::write_lower_time(c_path.as_ptr(), times.ctime, bindings::ext4_ctime_set)?;
+            self.set_cached_times(times);
+        }
+        Ok(())
+    }
+
     /// 查找与 name 匹配的子索引节点，约定 name 为常规文件名
     fn lookup(&self, parent_path: &str, name: &str) -> SysResult<Arc<dyn InodeOp>> {
         self.check_type(InodeType::Directory)?;

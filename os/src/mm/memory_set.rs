@@ -168,6 +168,20 @@ impl MemorySet {
     ) {
         self.push_map_area_lazy(MapArea::new(start_va, end_va, MapType::Framed, map_perm));
     }
+
+    /// 插入匿名共享映射。
+    ///
+    /// TODO[ABI-COMPAT]: 这里选择立即分配物理页，避免 fork 时父子进程分别
+    /// fault 出不同页帧。它还不是完整的 Linux shmem/tmpfs 语义，但能保证
+    /// `MAP_SHARED | MAP_ANONYMOUS` 在现有 COW fork 模型下真正共享内存。
+    pub fn insert_shared_framed_area_va(
+        &mut self,
+        start_va: VirtAddr,
+        end_va: VirtAddr,
+        map_perm: MapPermission,
+    ) {
+        self.push_empty_map_area(MapArea::new_shared(start_va, end_va, map_perm), None, 0);
+    }
     /// 根据首虚拟页号删除对应逻辑段
     pub fn remove_area_with_start_vpn(&mut self, vpn_start: VirtPageNum) -> SysResult {
         let (idx, area) = self
@@ -277,6 +291,36 @@ impl MemorySet {
         Ok(start)
     }
 
+    /// 按 mmap 语义选择地址并插入匿名共享区域。
+    pub fn mmap_shared_anonymous(
+        &mut self,
+        addr: Option<usize>,
+        map_len: usize,
+        map_perm: MapPermission,
+        replace: bool,
+        noreplace: bool,
+    ) -> SysResult<usize> {
+        let start = self.choose_mmap_start(addr, map_len)?;
+        let end = start.checked_add(map_len).ok_or(Errno::ENOMEM)?;
+        if end > MMAP_MAX_ADDR {
+            return Err(Errno::ENOMEM);
+        }
+
+        let vpn_range = VPNRange::new(VirtAddr::from(start).floor(), VirtAddr::from(end).ceil());
+        if noreplace && self.area_intersects(&vpn_range) {
+            return Err(Errno::EEXIST);
+        }
+        if replace {
+            self.remove_area_with_overlap_range(vpn_range)?;
+        }
+
+        self.insert_shared_framed_area_va(VirtAddr::from(start), VirtAddr::from(end), map_perm);
+        if addr.is_none() {
+            self.mmap_start = end;
+        }
+        Ok(start)
+    }
+
     /// 按 mmap 语义选择一段地址并插入已分配物理页的区域。
     pub fn mmap_framed(
         &mut self,
@@ -301,6 +345,39 @@ impl MemorySet {
         }
 
         self.insert_framed_area_va(VirtAddr::from(start), VirtAddr::from(end), map_perm);
+        if addr.is_none() {
+            self.mmap_start = end;
+        }
+        Ok(start)
+    }
+
+    /// 按 mmap 语义选择地址并插入已分配物理页的共享区域。
+    ///
+    /// TODO[ABI-COMPAT]: 目前只保证 fork 后继续共享这些页帧，还没有把脏页回写
+    /// 到底层文件。LTP 的 `/dev/shm` 结果区首先依赖的是进程间可见性。
+    pub fn mmap_shared_framed(
+        &mut self,
+        addr: Option<usize>,
+        map_len: usize,
+        map_perm: MapPermission,
+        replace: bool,
+        noreplace: bool,
+    ) -> SysResult<usize> {
+        let start = self.choose_mmap_start(addr, map_len)?;
+        let end = start.checked_add(map_len).ok_or(Errno::ENOMEM)?;
+        if end > MMAP_MAX_ADDR {
+            return Err(Errno::ENOMEM);
+        }
+
+        let vpn_range = VPNRange::new(VirtAddr::from(start).floor(), VirtAddr::from(end).ceil());
+        if noreplace && self.area_intersects(&vpn_range) {
+            return Err(Errno::EEXIST);
+        }
+        if replace {
+            self.remove_area_with_overlap_range(vpn_range)?;
+        }
+
+        self.insert_shared_framed_area_va(VirtAddr::from(start), VirtAddr::from(end), map_perm);
         if addr.is_none() {
             self.mmap_start = end;
         }

@@ -24,9 +24,13 @@ const PROC_MEMINFO_INO: u64 = 5;
 const PROC_MOUNTS_INO: u64 = 6;
 const PROC_STAT_INO: u64 = 7;
 const PROC_SELF_STAT_INO: u64 = 8;
+const PROC_SYS_INO: u64 = 9;
+const PROC_SYS_KERNEL_INO: u64 = 10;
+const PROC_SYS_KERNEL_PID_MAX_INO: u64 = 11;
 const PROC_PID_DIR_INO_BASE: u64 = 0x10000;
 const PROC_PID_STAT_INO_BASE: u64 = 0x20000;
 const PROC_DEV: u64 = 0x100;
+const PID_MAX_CONTENT: &str = "4194304\n";
 
 // ── /proc ─────────────────────────────────────────────────────────
 
@@ -58,6 +62,8 @@ impl InodeOp for ProcDirInode {
             Ok(Arc::new(MountsInode))
         } else if name == "stat" {
             Ok(Arc::new(ProcStatInode))
+        } else if name == "sys" {
+            Ok(Arc::new(ProcSysInode))
         } else if let Ok(pid) = name.parse::<usize>() {
             if TASK_MANAGER.get(pid).is_some() {
                 Ok(Arc::new(ProcPidDirInode { pid }))
@@ -77,6 +83,7 @@ impl InodeOp for ProcDirInode {
             entry(PROC_MEMINFO_INO, InodeType::Regular, 4, b"meminfo\0"),
             entry(PROC_MOUNTS_INO, InodeType::Regular, 5, b"mounts\0"),
             entry(PROC_STAT_INO, InodeType::Regular, 6, b"stat\0"),
+            entry(PROC_SYS_INO, InodeType::Directory, 7, b"sys\0"),
         ];
         let pids = core::cell::RefCell::new(Vec::new());
         TASK_MANAGER.for_each(|task| {
@@ -85,7 +92,7 @@ impl InodeOp for ProcDirInode {
                 pids.borrow_mut().push(task.tid());
             }
         });
-        let mut off: i64 = 7;
+        let mut off: i64 = 8;
         for pid in pids.into_inner() {
             let name = alloc::format!("{}\0", pid).into_bytes();
             entries.push(entry(
@@ -107,6 +114,187 @@ impl InodeOp for ProcDirInode {
     }
     fn truncate(&self, _path: &str, _size: usize) -> SysResult<usize> {
         Err(Errno::EACCES)
+    }
+    fn create(
+        &self,
+        _parent_path: &str,
+        _name: &str,
+        _ty: InodeType,
+    ) -> SysResult<Arc<dyn InodeOp>> {
+        Err(Errno::EACCES)
+    }
+    fn link(&self, _old_path: &str, _bare_dentry: Arc<Dentry>) -> SysResult {
+        Err(Errno::EACCES)
+    }
+    fn unlink(&self, _valid_dentry: &Arc<Dentry>) -> SysResult {
+        Err(Errno::EACCES)
+    }
+}
+
+// ── /proc/sys/kernel ──────────────────────────────────────────────
+
+pub(super) struct ProcSysInode;
+
+impl InodeOp for ProcSysInode {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn node_type(&self) -> InodeType {
+        InodeType::Directory
+    }
+
+    fn stat(&self, _path: &str) -> SysResult<KStat> {
+        Ok(KStat::minimal(0, InodeType::Directory)
+            .with_dev(PROC_DEV)
+            .with_ino(PROC_SYS_INO)
+            .with_mode(0o555)
+            .with_nlink(2))
+    }
+
+    fn lookup(&self, _parent_path: &str, name: &str) -> SysResult<Arc<dyn InodeOp>> {
+        match name {
+            "kernel" => Ok(Arc::new(ProcSysKernelInode)),
+            _ => Err(Errno::ENOENT),
+        }
+    }
+
+    fn readdir(&self, _path: &str) -> SysResult<Vec<LinuxDirent64>> {
+        Ok(vec![
+            dir_entry(PROC_SYS_INO, 1, b".\0"),
+            dir_entry(PROC_ROOT_INO, 2, b"..\0"),
+            entry(PROC_SYS_KERNEL_INO, InodeType::Directory, 3, b"kernel\0"),
+        ])
+    }
+
+    fn read_at(&self, _path: &str, _off: usize, _buf: &mut [u8]) -> SysResult<usize> {
+        Err(Errno::EISDIR)
+    }
+    fn write_at(&self, _path: &str, _off: usize, _buf: &[u8]) -> SysResult<usize> {
+        Err(Errno::EACCES)
+    }
+    fn truncate(&self, _path: &str, _size: usize) -> SysResult<usize> {
+        Err(Errno::EACCES)
+    }
+    fn create(
+        &self,
+        _parent_path: &str,
+        _name: &str,
+        _ty: InodeType,
+    ) -> SysResult<Arc<dyn InodeOp>> {
+        Err(Errno::EACCES)
+    }
+    fn link(&self, _old_path: &str, _bare_dentry: Arc<Dentry>) -> SysResult {
+        Err(Errno::EACCES)
+    }
+    fn unlink(&self, _valid_dentry: &Arc<Dentry>) -> SysResult {
+        Err(Errno::EACCES)
+    }
+}
+
+pub(super) struct ProcSysKernelInode;
+
+impl InodeOp for ProcSysKernelInode {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn node_type(&self) -> InodeType {
+        InodeType::Directory
+    }
+
+    fn stat(&self, _path: &str) -> SysResult<KStat> {
+        Ok(KStat::minimal(0, InodeType::Directory)
+            .with_dev(PROC_DEV)
+            .with_ino(PROC_SYS_KERNEL_INO)
+            .with_mode(0o555)
+            .with_nlink(2))
+    }
+
+    fn lookup(&self, _parent_path: &str, name: &str) -> SysResult<Arc<dyn InodeOp>> {
+        match name {
+            "pid_max" => Ok(Arc::new(ProcPidMaxInode)),
+            _ => Err(Errno::ENOENT),
+        }
+    }
+
+    fn readdir(&self, _path: &str) -> SysResult<Vec<LinuxDirent64>> {
+        Ok(vec![
+            dir_entry(PROC_SYS_KERNEL_INO, 1, b".\0"),
+            dir_entry(PROC_SYS_INO, 2, b"..\0"),
+            entry(
+                PROC_SYS_KERNEL_PID_MAX_INO,
+                InodeType::Regular,
+                3,
+                b"pid_max\0",
+            ),
+        ])
+    }
+
+    fn read_at(&self, _path: &str, _off: usize, _buf: &mut [u8]) -> SysResult<usize> {
+        Err(Errno::EISDIR)
+    }
+    fn write_at(&self, _path: &str, _off: usize, _buf: &[u8]) -> SysResult<usize> {
+        Err(Errno::EACCES)
+    }
+    fn truncate(&self, _path: &str, _size: usize) -> SysResult<usize> {
+        Err(Errno::EACCES)
+    }
+    fn create(
+        &self,
+        _parent_path: &str,
+        _name: &str,
+        _ty: InodeType,
+    ) -> SysResult<Arc<dyn InodeOp>> {
+        Err(Errno::EACCES)
+    }
+    fn link(&self, _old_path: &str, _bare_dentry: Arc<Dentry>) -> SysResult {
+        Err(Errno::EACCES)
+    }
+    fn unlink(&self, _valid_dentry: &Arc<Dentry>) -> SysResult {
+        Err(Errno::EACCES)
+    }
+}
+
+pub(super) struct ProcPidMaxInode;
+
+impl InodeOp for ProcPidMaxInode {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn node_type(&self) -> InodeType {
+        InodeType::Regular
+    }
+
+    fn stat(&self, _path: &str) -> SysResult<KStat> {
+        Ok(KStat::minimal(PID_MAX_CONTENT.len(), InodeType::Regular)
+            .with_dev(PROC_DEV)
+            .with_ino(PROC_SYS_KERNEL_PID_MAX_INO)
+            .with_mode(0o444))
+    }
+
+    fn read_at(&self, _path: &str, off: usize, buf: &mut [u8]) -> SysResult<usize> {
+        let bytes = PID_MAX_CONTENT.as_bytes();
+        if off >= bytes.len() {
+            return Ok(0);
+        }
+        let n = buf.len().min(bytes.len() - off);
+        buf[..n].copy_from_slice(&bytes[off..off + n]);
+        Ok(n)
+    }
+
+    fn write_at(&self, _path: &str, _off: usize, _buf: &[u8]) -> SysResult<usize> {
+        Err(Errno::EACCES)
+    }
+    fn truncate(&self, _path: &str, _size: usize) -> SysResult<usize> {
+        Err(Errno::EACCES)
+    }
+    fn lookup(&self, _parent_path: &str, _name: &str) -> SysResult<Arc<dyn InodeOp>> {
+        Err(Errno::ENOTDIR)
+    }
+    fn readdir(&self, _path: &str) -> SysResult<Vec<LinuxDirent64>> {
+        Err(Errno::ENOTDIR)
     }
     fn create(
         &self,

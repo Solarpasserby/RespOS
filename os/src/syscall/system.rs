@@ -1,11 +1,11 @@
 // os/src/syscall/utils.rs
 
-use super::SysResult;
+use super::{Errno, SysResult};
 use crate::arch::sbi;
 use crate::config::{MEMORY_END, MEMORY_START, PAGE_SIZE};
 use crate::fs::ext4;
 use crate::mm::{copy_to_user, free_frame_count};
-use crate::task::TASK_MANAGER;
+use crate::task::{TASK_MANAGER, current_task};
 use crate::timer::get_time_ms;
 
 #[repr(C)]
@@ -52,21 +52,37 @@ impl UtsName {
     }
 }
 
-impl Default for UtsName {
-    fn default() -> Self {
+impl UtsName {
+    fn linux_default() -> Self {
         #[cfg(target_arch = "riscv64")]
         let machine = "riscv64";
         #[cfg(target_arch = "loongarch64")]
         let machine = "loongarch64";
 
         Self {
-            sysname: Self::from_str("RespOS"),
+            sysname: Self::from_str("Linux"),
             nodename: Self::from_str("LAPTOP"),
             release: Self::from_str("6.10.0-dev"), // 为运行 glibc 程序所设
             version: Self::from_str("Resp0S 0.1.0"),
             machine: Self::from_str(machine),
             domainname: Self::from_str("localdomain"),
         }
+    }
+
+    fn with_personality(persona: usize) -> Self {
+        const UNAME26: usize = 0x0002_0000;
+        let mut uts = Self::linux_default();
+        if persona & UNAME26 != 0 {
+            // Linux 的 UNAME26 兼容位会把 3.x+ 内核版本伪装成 2.6.40+。
+            uts.release = Self::from_str("2.6.40-dev");
+        }
+        uts
+    }
+}
+
+impl Default for UtsName {
+    fn default() -> Self {
+        Self::linux_default()
     }
 }
 
@@ -103,11 +119,32 @@ pub fn sys_syslog(action: usize, buf: *mut u8, len: isize) -> SysResult<usize> {
 
 /// 系统调用 sys-uname
 ///
-/// TODO：目前只做固定实现
 pub fn sys_uname(buf: *mut UtsName) -> SysResult<usize> {
-    let utsname = UtsName::default();
+    let persona = current_task().map_or(0, |task| task.personality());
+    let utsname = UtsName::with_personality(persona);
     copy_to_user(buf, &utsname as *const UtsName, 1)?;
     Ok(0)
+}
+
+/// 系统调用 sys-personality。
+///
+pub fn sys_personality(persona: usize) -> SysResult<usize> {
+    const GET_PERSONA: usize = usize::MAX;
+    const PER_MASK: usize = 0x00ff;
+    const ADDR_NO_RANDOMIZE: usize = 0x0040_0000;
+    const UNAME26: usize = 0x0002_0000;
+    const SUPPORTED_FLAGS: usize = ADDR_NO_RANDOMIZE | UNAME26;
+
+    let task = current_task().expect("[kernel] current task is None.");
+    let old = task.personality();
+    if persona == GET_PERSONA {
+        return Ok(old);
+    }
+    if persona & !(PER_MASK | SUPPORTED_FLAGS) != 0 {
+        return Err(Errno::EINVAL);
+    }
+    task.set_personality(persona);
+    Ok(old)
 }
 
 pub fn sys_reboot() -> SysResult<usize> {

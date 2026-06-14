@@ -137,6 +137,9 @@ pub fn trap_handler(cx: &mut TrapContext) {
             );
         }
     };
+    if let Some(task) = current_task() {
+        task.check_real_timer();
+    }
     handle_signals();
     return;
 }

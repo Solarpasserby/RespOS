@@ -2,7 +2,7 @@
 
 use super::time::TimeVal;
 use super::{Errno, SysResult};
-use crate::config::USER_STACK_SIZE;
+use crate::config::{CLK_TCK, USER_STACK_SIZE};
 use crate::fs::{AT_FDCWD, path_open};
 use crate::loader::get_app_data_by_name;
 use crate::mm::{
@@ -10,7 +10,7 @@ use crate::mm::{
     extract_cstrings_from_user,
 };
 use crate::task::{
-    CloneFlags, WaitOption, add_task, current_task, do_futex, exit_and_run_next,
+    CloneFlags, TASK_MANAGER, WaitOption, add_task, current_task, do_futex, exit_and_run_next,
     exit_group_and_run_next, yield_current_task,
 };
 use alloc::string::String;
@@ -139,6 +139,24 @@ pub fn sys_gettid() -> SysResult<usize> {
     Ok(current_task()
         .expect("[kernel] current task is None.")
         .tid())
+}
+
+/// 系统调用 sys-setpgid
+///
+/// 当前内核尚未建模 session/controlling terminal，只维护进程组号本身。
+/// 这足以覆盖 libc/LTP harness 常见的 setpgid(0, 0) 初始化路径。
+///
+/// TODO[ABI-COMPAT]: 补齐跨 session、已 exec 子进程、非子进程等 EPERM/EACCES 规则。
+pub fn sys_setpgid(pid: usize, pgid: usize) -> SysResult<usize> {
+    let current = current_task().expect("[kernel] current task is None.");
+    let target = if pid == 0 {
+        current
+    } else {
+        TASK_MANAGER.get(pid).ok_or(Errno::ESRCH)?
+    };
+    let new_pgid = if pgid == 0 { target.tgid() } else { pgid };
+    target.set_pgid(new_pgid);
+    Ok(0)
 }
 
 pub fn sys_prlimit64(
@@ -408,9 +426,25 @@ pub fn sys_wait4(
                 copy_to_user(exit_code_ptr, &wait_status as *const i32, 1)?;
             }
 
-            // 当前内核还没有任务资源统计，先按 wait4 ABI 写回零值结构。
+            let (child_utime, child_stime) = task.op_children_mut(|children| {
+                let child = children.get(&child_tid).unwrap();
+                let ticks = child.elapsed_ticks();
+                (ticks, ticks)
+            });
+            task.add_child_ticks(child_utime, child_stime);
+
             if !rusage.is_null() {
-                let usage = RUsage::default();
+                let usage = RUsage {
+                    ru_utime: TimeVal {
+                        sec: child_utime / CLK_TCK,
+                        usec: (child_utime % CLK_TCK) * (1_000_000 / CLK_TCK),
+                    },
+                    ru_stime: TimeVal {
+                        sec: child_stime / CLK_TCK,
+                        usec: (child_stime % CLK_TCK) * (1_000_000 / CLK_TCK),
+                    },
+                    ..RUsage::default()
+                };
                 copy_to_user(rusage, &usage as *const RUsage, 1)?;
             }
 

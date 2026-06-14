@@ -84,12 +84,13 @@ pub fn sys_mmap(
             return Err(Errno::EINVAL);
         }
         task.op_memory_set_write(|memory_set| {
-            #[cfg(target_arch = "loongarch64")]
-            let start = memory_set
-                .mmap_lazy_anonymous(fixed_addr, map_len, permission, replace, noreplace)?;
-            #[cfg(target_arch = "riscv64")]
-            let start = memory_set
-                .mmap_lazy_anonymous(fixed_addr, map_len, permission, replace, noreplace)?;
+            let start = if has_shared {
+                memory_set.mmap_shared_anonymous(
+                    fixed_addr, map_len, permission, replace, noreplace,
+                )?
+            } else {
+                memory_set.mmap_lazy_anonymous(fixed_addr, map_len, permission, replace, noreplace)?
+            };
             memory_set.flush_tlb();
             Ok(start)
         })
@@ -112,8 +113,13 @@ pub fn sys_mmap(
         restore_result?;
 
         task.op_memory_set_write(|memory_set| {
-            let start =
-                memory_set.mmap_framed(fixed_addr, map_len, permission, replace, noreplace)?;
+            let start = if has_shared {
+                memory_set.mmap_shared_framed(
+                    fixed_addr, map_len, permission, replace, noreplace,
+                )?
+            } else {
+                memory_set.mmap_framed(fixed_addr, map_len, permission, replace, noreplace)?
+            };
             memory_set.write_bytes_to_mapped_range(start, &file_data)?;
             memory_set.flush_tlb();
             Ok(start)

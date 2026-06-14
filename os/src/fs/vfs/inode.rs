@@ -32,6 +32,9 @@ pub trait InodeOp: Any + Send + Sync {
     ) -> SysResult {
         Err(Errno::EINVAL)
     }
+    fn set_mode(&self, _path: &str, _mode: u32) -> SysResult {
+        Err(Errno::EINVAL)
+    }
 
     fn lookup(&self, parent_path: &str, name: &str) -> SysResult<Arc<dyn InodeOp>>;
     fn readdir(&self, path: &str) -> SysResult<Vec<LinuxDirent64>>;

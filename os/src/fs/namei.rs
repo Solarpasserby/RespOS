@@ -268,7 +268,7 @@ pub fn path_open(dirfd: isize, path: &str, flags: usize, mode: usize) -> SysResu
 }
 
 /// 根据路径创建文件
-pub fn filename_create(dirfd: isize, path: &str, ty: InodeType, _mode: usize) -> SysResult {
+pub fn filename_create(dirfd: isize, path: &str, ty: InodeType, mode: usize) -> SysResult {
     if path.is_empty() {
         return Err(Errno::ENOENT);
     }
@@ -292,6 +292,14 @@ pub fn filename_create(dirfd: isize, path: &str, ty: InodeType, _mode: usize) ->
         Err(Errno::ENOENT) => {
             let current_dir_inode = nd.dentry.get_inode();
             let inode = current_dir_inode.create(&nd.dentry.abs_path, name, ty)?;
+            if mode & 0o7777 != 0 {
+                let child_path = if nd.dentry.abs_path == "/" {
+                    alloc::format!("/{}", name)
+                } else {
+                    alloc::format!("{}/{}", nd.dentry.abs_path, name)
+                };
+                let _ = inode.set_mode(child_path.as_str(), mode as u32);
+            }
             install_child_dentry(&nd.dentry, name, inode);
             Ok(())
         }

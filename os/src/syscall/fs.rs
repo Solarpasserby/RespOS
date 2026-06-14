@@ -468,6 +468,63 @@ fn set_fd_times(fd: isize, atime: Option<TimeSpec>, mtime: Option<TimeSpec>) -> 
     file.inode().set_times(&path.abs_path(), atime, mtime)
 }
 
+fn set_fd_mode(fd: isize, mode: u32) -> SysResult {
+    if fd < 0 {
+        return Err(Errno::EBADF);
+    }
+    let task = current_task().expect("[kernel] current task is None.");
+    let file = task.get_fd_entry(fd as usize)?.file;
+    let file = file.as_any().downcast_ref::<File>().ok_or(Errno::EINVAL)?;
+    let path = file.path();
+    file.inode().set_mode(&path.abs_path(), mode)
+}
+
+/// 系统调用 sys-fchmodat
+///
+/// 按 dirfd + path 定位文件并修改权限位。当前内核还没有 uid/gid/capability
+/// 权限模型，因此只做路径解析、flags 合法性检查和后端 mode 写入。
+///
+/// TODO[ABI-COMPAT]: 尚未实现所有者、CAP_FOWNER、S_ISGID 清理等 Linux
+/// 权限规则；目前主要用于满足 libc/LTP 对 chmod 路径的基础需求。
+pub fn sys_fchmodat(dirfd: isize, path: *const u8, mode: usize) -> SysResult<usize> {
+    do_fchmodat(dirfd, path, mode, 0)
+}
+
+fn do_fchmodat(dirfd: isize, path: *const u8, mode: usize, flags: usize) -> SysResult<usize> {
+    const FCHMODAT_ALLOWED_FLAGS: usize = AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH;
+
+    if mode & !0o7777 != 0 || flags & !FCHMODAT_ALLOWED_FLAGS != 0 {
+        return Err(Errno::EINVAL);
+    }
+
+    let mode = mode as u32;
+    let path = copy_cstr_from_user(path)?;
+    if path.is_empty() {
+        if flags & AT_EMPTY_PATH == 0 {
+            return Err(Errno::ENOENT);
+        }
+        if dirfd == AT_FDCWD {
+            let task = current_task().expect("[kernel] current task is None.");
+            let cwd = task.cwd();
+            cwd.dentry.get_inode().set_mode(&cwd.abs_path(), mode)?;
+        } else {
+            set_fd_mode(dirfd, mode)?;
+        }
+    } else {
+        let resolved = if flags & AT_SYMLINK_NOFOLLOW != 0 {
+            filename_lookup_no_follow_final_symlink(dirfd, path.as_str())?
+        } else {
+            filename_lookup(dirfd, path.as_str(), 0)?
+        };
+        resolved
+            .dentry
+            .get_inode()
+            .set_mode(&resolved.abs_path(), mode)?;
+    }
+
+    Ok(0)
+}
+
 /// 系统调用 sys-utimensat
 ///
 /// 修改文件的访问时间 atime 和修改时间 mtime，常见调用者是 touch。

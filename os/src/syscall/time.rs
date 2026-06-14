@@ -6,10 +6,24 @@ use crate::task::{current_task, yield_current_task};
 use crate::timer::{TimeSpec, get_time_ms, get_time_us, get_timeout_ms};
 
 #[repr(C)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Default)]
 pub struct TimeVal {
     pub sec: usize,
     pub usec: usize,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct TimeZone {
+    pub minuteswest: i32,
+    pub dsttime: i32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct ITimerVal {
+    pub interval: TimeVal,
+    pub value: TimeVal,
 }
 
 #[repr(C)]
@@ -21,33 +35,41 @@ pub struct Tms {
     pub tms_cstime: usize,
 }
 
-impl Default for Tms {
-    fn default() -> Self {
-        Self {
-            tms_utime: 1,
-            tms_stime: 1,
-            tms_cutime: 1,
-            tms_cstime: 1,
-        }
-    }
-}
-
-/// 系统调用 sys-times
+/// 系统调用 sys-times。
 ///
-/// TODO：目前只做固定实现
+/// TODO[ABI-COMPAT]: 当前先用 wall-clock 近似 user/system CPU tick，后续应替换为
+/// 调度器实际运行时间记账。
 pub fn sys_times(buf: *mut Tms) -> SysResult<usize> {
-    let tms = Tms::default();
+    let task = current_task().expect("no current task");
+    let ticks = task.elapsed_ticks();
+    let (child_utime, child_stime) = task.child_ticks();
+    let tms = Tms {
+        tms_utime: ticks,
+        tms_stime: ticks,
+        tms_cutime: child_utime,
+        tms_cstime: child_stime,
+    };
     copy_to_user(buf, &tms as *const Tms, 1)?;
-    Ok(0)
+    Ok(ticks)
 }
 
-pub fn sys_gettimeofday(tv: *mut TimeVal, _tz: usize) -> SysResult<usize> {
-    let us = get_time_us();
-    let time_val = TimeVal {
-        sec: us / 1_000_000,
-        usec: us % 1_000_000,
-    };
-    copy_to_user(tv, &time_val as *const TimeVal, 1)?;
+pub fn sys_gettimeofday(tv: *mut TimeVal, tz: *mut TimeZone) -> SysResult<usize> {
+    if !tv.is_null() {
+        let us = get_time_us();
+        let time_val = TimeVal {
+            sec: us / 1_000_000,
+            usec: us % 1_000_000,
+        };
+        copy_to_user(tv, &time_val as *const TimeVal, 1)?;
+    }
+    if !tz.is_null() {
+        // Linux 仍接受历史遗留的 timezone 参数；系统时区固定为 UTC。
+        let time_zone = TimeZone {
+            minuteswest: 0,
+            dsttime: 0,
+        };
+        copy_to_user(tz, &time_zone as *const TimeZone, 1)?;
+    }
     Ok(0)
 }
 
@@ -82,6 +104,68 @@ pub fn sys_clock_gettime(clock_id: usize, tp: *mut TimeSpec) -> SysResult<usize>
         }
         _ => Err(Errno::EINVAL),
     }
+}
+
+fn timeval_to_ms(tv: TimeVal) -> SysResult<usize> {
+    if tv.usec >= 1_000_000 {
+        return Err(Errno::EINVAL);
+    }
+    tv.sec
+        .checked_mul(1000)
+        .and_then(|ms| ms.checked_add(tv.usec.div_ceil(1000)))
+        .ok_or(Errno::EINVAL)
+}
+
+fn ms_to_timeval(ms: usize) -> TimeVal {
+    TimeVal {
+        sec: ms / 1000,
+        usec: (ms % 1000) * 1000,
+    }
+}
+
+pub fn sys_getitimer(which: usize, curr_value: *mut ITimerVal) -> SysResult<usize> {
+    const ITIMER_REAL: usize = 0;
+    if which != ITIMER_REAL {
+        return Err(Errno::EINVAL);
+    }
+
+    let task = current_task().expect("no current task");
+    let current = ITimerVal {
+        interval: ms_to_timeval(task.real_timer_interval_ms()),
+        value: ms_to_timeval(task.real_timer_remaining_ms()),
+    };
+    copy_to_user(curr_value, &current as *const ITimerVal, 1)?;
+    Ok(0)
+}
+
+pub fn sys_setitimer(
+    which: usize,
+    new_value: *const ITimerVal,
+    old_value: *mut ITimerVal,
+) -> SysResult<usize> {
+    const ITIMER_REAL: usize = 0;
+    if which != ITIMER_REAL {
+        return Err(Errno::EINVAL);
+    }
+
+    let task = current_task().expect("no current task");
+    if !old_value.is_null() {
+        let old = ITimerVal {
+            interval: ms_to_timeval(task.real_timer_interval_ms()),
+            value: ms_to_timeval(task.real_timer_remaining_ms()),
+        };
+        copy_to_user(old_value, &old as *const ITimerVal, 1)?;
+    }
+
+    if new_value.is_null() {
+        return Err(Errno::EFAULT);
+    }
+    let mut new_timer = ITimerVal::default();
+    copy_from_user(&mut new_timer as *mut ITimerVal, new_value, 1)?;
+    let value_ms = timeval_to_ms(new_timer.value)?;
+    let interval_ms = timeval_to_ms(new_timer.interval)?;
+    task.set_real_timer_ms(value_ms, interval_ms);
+    Ok(0)
 }
 
 /// 系统调用 sys-nanosleep

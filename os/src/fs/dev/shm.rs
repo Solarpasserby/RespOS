@@ -15,7 +15,7 @@ use spin::Mutex;
 const SHM_FILE_INO_BASE: u64 = 0x1000;
 
 lazy_static! {
-    static ref SHM_DIR: Arc<ShmDirInode> = Arc::new(ShmDirInode::new());
+    static ref SHM_DIR: Arc<ShmDirInode> = Arc::new(ShmDirInode::new(SHM_DIR_INO, 0o777));
 }
 
 static NEXT_SHM_INO: AtomicU64 = AtomicU64::new(SHM_FILE_INO_BASE);
@@ -25,13 +25,17 @@ pub(super) fn shm_dir() -> Arc<dyn InodeOp> {
 }
 
 struct ShmDirInode {
-    files: Mutex<BTreeMap<String, Arc<ShmFileInode>>>,
+    ino: u64,
+    mode: Mutex<u32>,
+    entries: Mutex<BTreeMap<String, Arc<dyn InodeOp>>>,
 }
 
 impl ShmDirInode {
-    fn new() -> Self {
+    fn new(ino: u64, mode: u32) -> Self {
         Self {
-            files: Mutex::new(BTreeMap::new()),
+            ino,
+            mode: Mutex::new(mode),
+            entries: Mutex::new(BTreeMap::new()),
         }
     }
 }
@@ -48,30 +52,30 @@ impl InodeOp for ShmDirInode {
     fn stat(&self, _path: &str) -> SysResult<KStat> {
         Ok(KStat::minimal(0, InodeType::Directory)
             .with_dev(DEVFS_DEV)
-            .with_ino(SHM_DIR_INO)
-            .with_mode(0o777)
+            .with_ino(self.ino)
+            .with_mode(*self.mode.lock())
             .with_nlink(2))
     }
 
     fn lookup(&self, _parent_path: &str, name: &str) -> SysResult<Arc<dyn InodeOp>> {
-        self.files
+        self.entries
             .lock()
             .get(name)
             .cloned()
-            .map(|inode| inode as Arc<dyn InodeOp>)
             .ok_or(Errno::ENOENT)
     }
 
     fn readdir(&self, _path: &str) -> SysResult<Vec<LinuxDirent64>> {
-        let files = self.files.lock();
-        let mut entries = vec![dir_entry(SHM_DIR_INO, 1, b".\0"), dir_entry(1, 2, b"..\0")];
+        let children = self.entries.lock();
+        let mut entries = vec![dir_entry(self.ino, 1, b".\0"), dir_entry(1, 2, b"..\0")];
 
-        for (idx, (name, inode)) in files.iter().enumerate() {
+        for (idx, (name, inode)) in children.iter().enumerate() {
             let mut d_name = Vec::from(name.as_bytes());
             d_name.push(0);
+            let stat = inode.stat("").unwrap_or_else(|_| KStat::minimal(0, inode.node_type()));
             entries.push(entry(
-                inode.ino,
-                InodeType::Regular,
+                stat.ino,
+                inode.node_type(),
                 (idx + 3) as i64,
                 d_name.as_slice(),
             ));
@@ -93,19 +97,31 @@ impl InodeOp for ShmDirInode {
     }
 
     fn create(&self, _parent_path: &str, name: &str, ty: InodeType) -> SysResult<Arc<dyn InodeOp>> {
-        if ty != InodeType::Regular || name.is_empty() || name.contains('/') {
+        if name.is_empty() || name.contains('/') {
+            return Err(Errno::EINVAL);
+        }
+        if ty != InodeType::Regular && ty != InodeType::Directory {
             return Err(Errno::EINVAL);
         }
 
-        let mut files = self.files.lock();
-        if files.contains_key(name) {
+        let mut entries = self.entries.lock();
+        if entries.contains_key(name) {
             return Err(Errno::EEXIST);
         }
 
         let ino = NEXT_SHM_INO.fetch_add(1, Ordering::Relaxed);
-        let file = Arc::new(ShmFileInode::new(ino));
-        files.insert(name.to_string(), file.clone());
-        Ok(file)
+        let inode: Arc<dyn InodeOp> = match ty {
+            InodeType::Regular => Arc::new(ShmFileInode::new(ino)),
+            InodeType::Directory => Arc::new(ShmDirInode::new(ino, 0o777)),
+            _ => return Err(Errno::EINVAL),
+        };
+        entries.insert(name.to_string(), inode.clone());
+        Ok(inode)
+    }
+
+    fn set_mode(&self, _path: &str, mode: u32) -> SysResult {
+        *self.mode.lock() = mode & 0o7777;
+        Ok(())
     }
 
     fn link(&self, _old_path: &str, _bare_dentry: Arc<Dentry>) -> SysResult {
@@ -121,16 +137,21 @@ impl InodeOp for ShmDirInode {
             .filter(|name| !name.is_empty())
             .ok_or(Errno::ENOENT)?;
 
-        self.files
-            .lock()
-            .remove(name)
-            .map(|_| ())
-            .ok_or(Errno::ENOENT)
+        let mut entries = self.entries.lock();
+        let inode = entries.get(name).cloned().ok_or(Errno::ENOENT)?;
+        if let Some(dir) = inode.as_any().downcast_ref::<ShmDirInode>() {
+            if !dir.entries.lock().is_empty() {
+                return Err(Errno::ENOTEMPTY);
+            }
+        }
+        entries.remove(name);
+        Ok(())
     }
 }
 
 struct ShmFileInode {
     ino: u64,
+    mode: Mutex<u32>,
     data: Mutex<Vec<u8>>,
 }
 
@@ -138,6 +159,7 @@ impl ShmFileInode {
     fn new(ino: u64) -> Self {
         Self {
             ino,
+            mode: Mutex::new(0o666),
             data: Mutex::new(Vec::new()),
         }
     }
@@ -157,7 +179,7 @@ impl InodeOp for ShmFileInode {
         Ok(KStat::minimal(size, InodeType::Regular)
             .with_dev(DEVFS_DEV)
             .with_ino(self.ino)
-            .with_mode(0o666))
+            .with_mode(*self.mode.lock()))
     }
 
     fn read_at(&self, _path: &str, off: usize, buf: &mut [u8]) -> SysResult<usize> {
@@ -183,6 +205,11 @@ impl InodeOp for ShmFileInode {
     fn truncate(&self, _path: &str, size: usize) -> SysResult<usize> {
         self.data.lock().resize(size, 0);
         Ok(0)
+    }
+
+    fn set_mode(&self, _path: &str, mode: u32) -> SysResult {
+        *self.mode.lock() = mode & 0o7777;
+        Ok(())
     }
 
     fn lookup(&self, _parent_path: &str, _name: &str) -> SysResult<Arc<dyn InodeOp>> {
