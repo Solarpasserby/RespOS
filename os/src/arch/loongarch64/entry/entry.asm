@@ -7,11 +7,13 @@
 # mm::init() 会建立临时高地址页表，然后切换到分页模式。
 
     .section .text.entry
+    .globl _start_phys
     .globl _start
 
     .equ CSR_DMW0, 0x180
     .equ CSR_DMW1, 0x181
 
+_start_phys:
 _start:
     # 参考固件启动路径保留当前执行段的 DMW 配置，随后内核会关闭 DMW1。
     pcaddi   $t0, 0x0

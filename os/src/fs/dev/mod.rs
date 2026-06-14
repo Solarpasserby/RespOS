@@ -6,6 +6,7 @@
 //! - `zero`  — `/dev/zero`，读取返回零字节，写入丢弃
 
 mod null;
+mod rtc;
 mod shm;
 mod zero;
 
@@ -15,8 +16,11 @@ const DEV_DIR_INO: u64 = 1;
 const NULL_INO: u64 = 2;
 const ZERO_INO: u64 = 3;
 const SHM_DIR_INO: u64 = 4;
+const MISC_DIR_INO: u64 = 5;
+const RTC_INO: u64 = 6;
 const NULL_RDEV: u64 = (1 << 8) | 3;
 const ZERO_RDEV: u64 = (1 << 8) | 5;
+const RTC_RDEV: u64 = (254 << 8) | 0;
 
 use super::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64, SuperBlockOp};
 use super::{KStat, Statfs64};
@@ -25,6 +29,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::any::Any;
 use null::NullInode;
+use rtc::RtcInode;
 use shm::shm_dir;
 use zero::ZeroInode;
 
@@ -58,6 +63,7 @@ impl InodeOp for DevDirInode {
             "null" => Ok(Arc::new(NullInode)),
             "zero" => Ok(Arc::new(ZeroInode)),
             "shm" => Ok(shm_dir()),
+            "misc" => Ok(Arc::new(MiscDirInode)),
             _ => Err(Errno::ENOENT),
         }
     }
@@ -69,6 +75,66 @@ impl InodeOp for DevDirInode {
             entry(NULL_INO, InodeType::CharDevice, 3, b"null\0"),
             entry(ZERO_INO, InodeType::CharDevice, 4, b"zero\0"),
             entry(SHM_DIR_INO, InodeType::Directory, 5, b"shm\0"),
+            entry(MISC_DIR_INO, InodeType::Directory, 6, b"misc\0"),
+        ])
+    }
+
+    fn read_at(&self, _path: &str, _off: usize, _buf: &mut [u8]) -> SysResult<usize> {
+        Err(Errno::EISDIR)
+    }
+    fn write_at(&self, _path: &str, _off: usize, _buf: &[u8]) -> SysResult<usize> {
+        Err(Errno::EACCES)
+    }
+    fn truncate(&self, _path: &str, _size: usize) -> SysResult<usize> {
+        Err(Errno::EACCES)
+    }
+    fn create(
+        &self,
+        _parent_path: &str,
+        _name: &str,
+        _ty: InodeType,
+    ) -> SysResult<Arc<dyn InodeOp>> {
+        Err(Errno::EACCES)
+    }
+    fn link(&self, _old_path: &str, _bare_dentry: Arc<Dentry>) -> SysResult {
+        Err(Errno::EACCES)
+    }
+    fn unlink(&self, _valid_dentry: &Arc<Dentry>) -> SysResult {
+        Err(Errno::EACCES)
+    }
+}
+
+struct MiscDirInode;
+
+impl InodeOp for MiscDirInode {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn node_type(&self) -> InodeType {
+        InodeType::Directory
+    }
+
+    fn stat(&self, _path: &str) -> SysResult<KStat> {
+        Ok(KStat::minimal(0, InodeType::Directory)
+            .with_dev(DEVFS_DEV)
+            .with_ino(MISC_DIR_INO)
+            .with_mode(0o555)
+            .with_nlink(2))
+    }
+
+    fn lookup(&self, _parent_path: &str, name: &str) -> SysResult<Arc<dyn InodeOp>> {
+        match name {
+            "rtc" => Ok(Arc::new(RtcInode)),
+            _ => Err(Errno::ENOENT),
+        }
+    }
+
+    fn readdir(&self, _path: &str) -> SysResult<Vec<LinuxDirent64>> {
+        Ok(vec![
+            dir_entry(MISC_DIR_INO, 1, b".\0"),
+            dir_entry(DEV_DIR_INO, 2, b"..\0"),
+            entry(RTC_INO, InodeType::CharDevice, 3, b"rtc\0"),
         ])
     }
 

@@ -697,6 +697,20 @@ struct WinSize {
     ypixel: u16,
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+struct RtcTime {
+    tm_sec: i32,
+    tm_min: i32,
+    tm_hour: i32,
+    tm_mday: i32,
+    tm_mon: i32,
+    tm_year: i32,
+    tm_wday: i32,
+    tm_yday: i32,
+    tm_isdst: i32,
+}
+
 /// 系统调用 sys-ioctl
 ///
 /// ioctl 是设备相关的杂项控制入口，真实 Linux 会按文件对应的驱动分发。
@@ -707,6 +721,7 @@ struct WinSize {
 /// 需要下沉到具体 FileOp/设备驱动中实现，不能长期放在 syscall 层硬编码。
 pub fn sys_ioctl(fd: usize, request: usize, arg: usize) -> SysResult<usize> {
     const TIOCGWINSZ: usize = 0x5413;
+    const RTC_RD_TIME: usize = 0x8024_7009;
 
     let task = current_task().expect("[kernel] current task is None.");
     let fd_entry = task.get_fd_entry(fd)?;
@@ -722,8 +737,73 @@ pub fn sys_ioctl(fd: usize, request: usize, arg: usize) -> SysResult<usize> {
             copy_to_user(arg as *mut WinSize, &winsize as *const WinSize, 1)?;
             Ok(0)
         }
+        request if is_rtc_file(&fd_entry.file) && request & 0xffff == RTC_RD_TIME & 0xffff => {
+            let rtc_time = rtc_time_from_unix(get_time_ms() / 1000);
+            copy_to_user(arg as *mut RtcTime, &rtc_time as *const RtcTime, 1)?;
+            Ok(0)
+        }
         _ => Err(Errno::ENOTTY),
     }
+}
+
+fn is_rtc_file(file: &alloc::sync::Arc<dyn FileOp>) -> bool {
+    file.as_any()
+        .downcast_ref::<File>()
+        .map(|file| file.path().abs_path().as_str().ends_with("/rtc"))
+        .unwrap_or(false)
+}
+
+fn rtc_time_from_unix(secs: usize) -> RtcTime {
+    const SECS_PER_DAY: usize = 86_400;
+    const DAYS_BEFORE_MONTH_COMMON: [usize; 12] =
+        [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+    const DAYS_BEFORE_MONTH_LEAP: [usize; 12] =
+        [0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335];
+
+    let days = secs / SECS_PER_DAY;
+    let mut rem = secs % SECS_PER_DAY;
+    let hour = rem / 3600;
+    rem %= 3600;
+    let min = rem / 60;
+    let sec = rem % 60;
+
+    let mut year = 1970usize;
+    let mut day_of_year = days;
+    loop {
+        let year_days = if is_leap_year(year) { 366 } else { 365 };
+        if day_of_year < year_days {
+            break;
+        }
+        day_of_year -= year_days;
+        year += 1;
+    }
+
+    let month_table = if is_leap_year(year) {
+        &DAYS_BEFORE_MONTH_LEAP
+    } else {
+        &DAYS_BEFORE_MONTH_COMMON
+    };
+    let mut month = 0usize;
+    while month + 1 < month_table.len() && day_of_year >= month_table[month + 1] {
+        month += 1;
+    }
+    let mday = day_of_year - month_table[month] + 1;
+
+    RtcTime {
+        tm_sec: sec as i32,
+        tm_min: min as i32,
+        tm_hour: hour as i32,
+        tm_mday: mday as i32,
+        tm_mon: month as i32,
+        tm_year: year as i32 - 1900,
+        tm_wday: ((days + 4) % 7) as i32,
+        tm_yday: day_of_year as i32,
+        tm_isdst: 0,
+    }
+}
+
+fn is_leap_year(year: usize) -> bool {
+    year.is_multiple_of(4) && !year.is_multiple_of(100) || year.is_multiple_of(400)
 }
 
 /// 系统调用 sys-fcntl
