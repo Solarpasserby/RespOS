@@ -142,6 +142,9 @@ pub fn unlink(path: &str) -> isize {
 pub fn link(oldpath: &str, newpath: &str) -> isize {
     sys_linkat(AT_FDCWD, oldpath, AT_FDCWD, newpath, 0)
 }
+pub fn symlink(target: &str, linkpath: &str) -> isize {
+    sys_symlinkat(target, AT_FDCWD, linkpath)
+}
 pub fn chdir(path: &str) -> isize {
     sys_chdir(path)
 }

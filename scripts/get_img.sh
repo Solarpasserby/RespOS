@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 # Download the OS competition test images into img/.
+# Keep downloaded .xz archives so missing images can be restored locally later.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,9 +30,9 @@ extract_xz() {
     local archive="$1"
 
     if command -v xz >/dev/null 2>&1; then
-        xz -dk "${archive}"
+        xz -dkf "${archive}"
     elif command -v unxz >/dev/null 2>&1; then
-        unxz -k "${archive}"
+        unxz -kf "${archive}"
     else
         echo "Neither xz nor unxz is available." >&2
         exit 1
@@ -49,14 +50,14 @@ for image in ${IMAGES}; do
         continue
     fi
 
-    if [[ ! -f "${archive_path}" ]]; then
+    if [[ -f "${archive_path}" ]]; then
+        echo "Using existing archive: ${archive_path}"
+    else
         echo "Downloading ${archive}..."
         download "${url}" "${archive_path}"
-    else
-        echo "Using existing archive: ${archive_path}"
     fi
 
-    echo "Extracting ${archive}..."
+    echo "Extracting ${archive_path}..."
     extract_xz "${archive_path}"
 
     if [[ ! -f "${image_path}" ]]; then
@@ -64,6 +65,6 @@ for image in ${IMAGES}; do
         exit 1
     fi
 
-    rm -f "${archive_path}"
     echo "Image ready: ${image_path}"
+    echo "Archive kept: ${archive_path}"
 done

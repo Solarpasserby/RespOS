@@ -8,7 +8,7 @@ extern crate alloc;
 
 use alloc::string::String;
 use user_lib::{
-    O_RDONLY, chdir, close, exec, execve, exit, fork, link, mkdir, open, poweroff, read, unlink,
+    O_RDONLY, chdir, close, exec, execve, exit, fork, mkdir, open, poweroff, read, symlink, unlink,
     waitpid,
 };
 
@@ -94,8 +94,8 @@ fn prepare_bin_shell(shell_path: &str) {
     let _ = mkdir("/bin\0", 0o755);
     let _ = unlink("/bin/busybox\0");
     let _ = unlink("/bin/sh\0");
-    let _ = link(shell_path, "/bin/busybox\0");
-    let _ = link(shell_path, "/bin/sh\0");
+    let _ = symlink(shell_path, "/bin/busybox\0");
+    let _ = symlink(shell_path, "/bin/sh\0");
 }
 
 fn _run_basic_musl() {
@@ -190,8 +190,8 @@ fn normalize_busybox_exit(line: &str, ec: i32) -> i32 {
 fn ensure_busybox_applet_links_musl() {
     let _ = mkdir("/bin\0", 0o755);
     cleanup_busybox_applet_links_musl();
-    let _ = link("/musl/busybox\0", "/bin/ls\0");
-    let _ = link("/musl/busybox\0", "/bin/sleep\0");
+    let _ = symlink("/musl/busybox\0", "/bin/ls\0");
+    let _ = symlink("/musl/busybox\0", "/bin/sleep\0");
 }
 
 fn cleanup_busybox_applet_links_musl() {
@@ -247,8 +247,8 @@ fn _run_busybox_musl() {
 fn ensure_busybox_applet_links_glibc() {
     let _ = mkdir("/bin\0", 0o755);
     cleanup_busybox_applet_links_glibc();
-    let _ = link("/glibc/busybox\0", "/bin/ls\0");
-    let _ = link("/glibc/busybox\0", "/bin/sleep\0");
+    let _ = symlink("/glibc/busybox\0", "/bin/ls\0");
+    let _ = symlink("/glibc/busybox\0", "/bin/sleep\0");
 }
 
 fn cleanup_busybox_applet_links_glibc() {
@@ -311,29 +311,11 @@ fn _run_lua_glibc() {
     run_shell_script("/glibc/\0", GLIBC_BUSYBOX_PATH, LUA_SCRIPT);
 }
 
-fn _run_iozone_musl() {
-    prepare_musl_loader_links();
-    let envp: &[*const u8] = &[
-        "LD_LIBRARY_PATH=/musl/lib:/musl\0".as_ptr(),
-        core::ptr::null(),
-    ];
-    run_shell_script_with_env("/musl/\0", BUSYBOX_PATH, IOZONE_SCRIPT, envp);
-}
-
-fn _run_iozone_glibc() {
-    prepare_glibc_loader_links();
-    let envp: &[*const u8] = &["LD_LIBRARY_PATH=/glibc/lib\0".as_ptr(), core::ptr::null()];
-    run_shell_script_with_env("/glibc/\0", GLIBC_BUSYBOX_PATH, IOZONE_SCRIPT, envp);
-}
-
-fn prepare_loader_dirs() {
-    let _ = mkdir("/lib\0", 0o755);
-    let _ = mkdir("/lib64\0", 0o755);
-}
+// ==== 动态链接设置 ==== //
 
 fn relink_loader(src: &str, dst: &str) {
     let _ = unlink(dst);
-    let _ = link(src, dst);
+    let _ = symlink(src, dst);
 }
 
 fn prepare_musl_loader_links() {
@@ -352,55 +334,122 @@ fn prepare_glibc_loader_links() {
     );
 }
 
+fn prepare_benchmark_dirs() {
+    let _ = mkdir("/tmp\0", 0o777);
+    let _ = mkdir("/var\0", 0o755);
+    let _ = mkdir("/var/tmp\0", 0o777);
+}
+
+fn cleanup_benchmark_state() {
+    // lmbench/iozone 都会压 /tmp 和 /var/tmp。先清掉已知大文件和脚本辅助链接，
+    // 避免前一个 benchmark 的文件系统状态污染后一个 benchmark。
+    let _ = unlink("/var/tmp/XXX\0");
+    let _ = unlink("/var/tmp/lmbench\0");
+    let _ = unlink("/tmp/hello\0");
+    let _ = unlink("/bin/busybox\0");
+    let _ = unlink("/bin/cp\0");
+    let _ = unlink("/bin/sh\0");
+    let _ = unlink("/musl/cp\0");
+    let _ = unlink("/musl/hello\0");
+    let _ = unlink("/glibc/cp\0");
+    let _ = unlink("/glibc/hello\0");
+    let _ = unlink("/code/lmbench_src/bin/build/lmbench_all\0");
+}
+
+fn _run_iozone_musl() {
+    cleanup_benchmark_state();
+    prepare_benchmark_dirs();
+    prepare_musl_loader_links();
+    prepare_bin_shell(BUSYBOX_PATH);
+    let envp: &[*const u8] = &[
+        "LD_LIBRARY_PATH=/musl/lib:/musl\0".as_ptr(),
+        core::ptr::null(),
+    ];
+    run_shell_script_with_env("/musl/\0", BUSYBOX_PATH, IOZONE_SCRIPT, envp);
+    cleanup_benchmark_state();
+}
+
+fn _run_iozone_glibc() {
+    cleanup_benchmark_state();
+    prepare_benchmark_dirs();
+    prepare_glibc_loader_links();
+    prepare_bin_shell(GLIBC_BUSYBOX_PATH);
+    let envp: &[*const u8] = &["LD_LIBRARY_PATH=/glibc/lib\0".as_ptr(), core::ptr::null()];
+    run_shell_script_with_env("/glibc/\0", GLIBC_BUSYBOX_PATH, IOZONE_SCRIPT, envp);
+    cleanup_benchmark_state();
+}
+
+fn prepare_loader_dirs() {
+    let _ = mkdir("/lib\0", 0o755);
+    let _ = mkdir("/lib64\0", 0o755);
+}
+
 fn _run_lmbench_musl() {
+    cleanup_benchmark_state();
     if chdir("/musl\0") < 0 {
         println!("[testrunner] cannot enter /musl");
         return;
     }
 
+    prepare_musl_loader_links();
     prepare_bin_shell(BUSYBOX_PATH);
-    let _ = mkdir("/tmp\0", 0o777);
+    prepare_benchmark_dirs();
     // hello 脚本硬编码了构建机路径 /code/lmbench_src/bin/build/lmbench_all
     let _ = mkdir("/code\0", 0o755);
     let _ = mkdir("/code/lmbench_src\0", 0o755);
     let _ = mkdir("/code/lmbench_src/bin\0", 0o755);
     let _ = mkdir("/code/lmbench_src/bin/build\0", 0o755);
-    let _ = link(
+    let _ = symlink(
         "/musl/lmbench_all\0",
         "/code/lmbench_src/bin/build/lmbench_all\0",
     );
-    let _ = link(BUSYBOX_PATH, "/bin/cp\0");
-    let _ = link(BUSYBOX_PATH, "cp\0");
+    let _ = symlink(BUSYBOX_PATH, "/bin/cp\0");
+    let _ = symlink(BUSYBOX_PATH, "cp\0");
     let _ = unlink("hello\0");
-    let _ = link("lmbench_all\0", "hello\0");
-    run_shell_script("/musl/\0", BUSYBOX_PATH, LMBENCH_SCRIPT);
+    let _ = symlink("/musl/lmbench_all\0", "hello\0");
+    let envp: &[*const u8] = &[
+        "TIMING_O=0\0".as_ptr(),
+        "LOOP_O=0\0".as_ptr(),
+        "ENOUGH=1000\0".as_ptr(),
+        core::ptr::null(),
+    ];
+    run_shell_script_with_env("/musl/\0", BUSYBOX_PATH, LMBENCH_SCRIPT, envp);
+    cleanup_benchmark_state();
 }
 
 fn _run_lmbench_glibc() {
+    cleanup_benchmark_state();
     if chdir("/glibc\0") < 0 {
         println!("[testrunner] cannot enter /glibc");
         return;
     }
 
     prepare_bin_shell(GLIBC_BUSYBOX_PATH);
-    let _ = mkdir("/tmp\0", 0o777);
+    prepare_benchmark_dirs();
     // hello 脚本硬编码了构建机路径 /code/lmbench_src/bin/build/lmbench_all
     let _ = mkdir("/code\0", 0o755);
     let _ = mkdir("/code/lmbench_src\0", 0o755);
     let _ = mkdir("/code/lmbench_src/bin\0", 0o755);
     let _ = mkdir("/code/lmbench_src/bin/build\0", 0o755);
-    let _ = link(
+    let _ = symlink(
         "/glibc/lmbench_all\0",
         "/code/lmbench_src/bin/build/lmbench_all\0",
     );
-    let _ = link(GLIBC_BUSYBOX_PATH, "/bin/cp\0");
-    let _ = link(GLIBC_BUSYBOX_PATH, "cp\0");
+    let _ = symlink(GLIBC_BUSYBOX_PATH, "/bin/cp\0");
+    let _ = symlink(GLIBC_BUSYBOX_PATH, "cp\0");
     let _ = unlink("hello\0");
-    let _ = link("lmbench_all\0", "hello\0");
-    run_shell_script("/glibc/\0", GLIBC_BUSYBOX_PATH, LMBENCH_SCRIPT);
+    let _ = symlink("/glibc/lmbench_all\0", "hello\0");
+    let envp: &[*const u8] = &[
+        "TIMING_O=0\0".as_ptr(),
+        "LOOP_O=0\0".as_ptr(),
+        "ENOUGH=1000\0".as_ptr(),
+        core::ptr::null(),
+    ];
+    run_shell_script_with_env("/glibc/\0", GLIBC_BUSYBOX_PATH, LMBENCH_SCRIPT, envp);
+    cleanup_benchmark_state();
 }
 
-// ==== LTP 测例 ====
+// ==== LTP 测例 ==== //
 
 const LTP_SKIP: &[&str] = &[
     "execl01_child",
@@ -578,10 +627,10 @@ fn main() -> i32 {
     _run_libctest_musl();
     _run_lua_musl();
     _run_lua_glibc();
+    _run_iozone_glibc();
+    _run_iozone_musl();
     _run_lmbench_musl();
     _run_lmbench_glibc();
-    _run_iozone_musl();
-    _run_iozone_glibc();
     _run_ltp_musl();
     _run_ltp_glibc();
     println!("[testrunner] all selected tests finished, powering off");
@@ -602,10 +651,10 @@ fn main() -> i32 {
     _run_libctest_musl();
     _run_lua_musl();
     _run_lua_glibc();
-    _run_lmbench_musl();
-    _run_lmbench_glibc(); // 会报错，还要修改
-    _run_iozone_musl();
     _run_iozone_glibc();
+    _run_iozone_musl();
+    _run_lmbench_musl();
+    _run_lmbench_glibc();
     _run_ltp_musl();
     _run_ltp_glibc();
     println!("[testrunner] all selected tests finished, powering off");

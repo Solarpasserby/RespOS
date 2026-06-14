@@ -46,7 +46,7 @@ const PTE_NR: usize = 1usize << 61;
 const PTE_NX: usize = 1usize << 62;
 const PTE_PPN_MASK: usize = ((1usize << PPN_WIDTH) - 1) << 12;
 
-const PAGE_TABLE_FRAME_QUARANTINE_LIMIT: usize = 1024;
+const PAGE_TABLE_FRAME_QUARANTINE_LIMIT: usize = 128;
 
 lazy_static! {
     static ref PAGE_TABLE_FRAME_QUARANTINE: Mutex<PageTableFrameQuarantine> =

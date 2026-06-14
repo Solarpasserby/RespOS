@@ -6,6 +6,7 @@ const SYSCALL_DUP: usize = 23;
 const SYSCALL_DUP3: usize = 24;
 const SYSCALL_MKDIRAT: usize = 34;
 const SYSCALL_UNLINKAT: usize = 35;
+const SYSCALL_SYMLINKAT: usize = 36;
 const SYSCALL_LINKAT: usize = 37;
 const SYSCALL_UMOUNT2: usize = 39;
 const SYSCALL_MOUNT: usize = 40;
@@ -308,6 +309,20 @@ pub fn sys_linkat(
             newdirfd as usize,
             newpath.as_ptr() as usize,
             flags,
+            0,
+        ],
+    )
+}
+
+pub fn sys_symlinkat(target: &str, newdirfd: isize, linkpath: &str) -> isize {
+    syscall(
+        SYSCALL_SYMLINKAT,
+        [
+            target.as_ptr() as usize,
+            newdirfd as usize,
+            linkpath.as_ptr() as usize,
+            0,
+            0,
             0,
         ],
     )
