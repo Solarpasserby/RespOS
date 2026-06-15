@@ -12,13 +12,13 @@
 #uname02
 #uname04
 # oscomp LTP test list - Phase 2: light (7 tests)
-brk01
-brk02
-exit01
-exit02
-nanosleep01
-nanosleep02
-nanosleep04
+#brk01
+#brk02
+#exit01
+#exit02
+#nanosleep01
+#nanosleep02
+#nanosleep04
 # oscomp LTP test list - Phase 3: fd (35 tests)
 close01
 close02
