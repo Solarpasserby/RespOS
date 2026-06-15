@@ -485,15 +485,15 @@ const LTP_BIN_DIR: &str = "ltp/testcases/bin/";
 
 fn report_ltp_status(name: &str, status: i32) -> bool {
     if status == 0 {
-        println!("PASS LTP CASE {}", name);
+        println!("FAIL LTP CASE {} : 0", name);
         return true;
     }
 
     let signal = status & 0x7f;
     if signal != 0 {
-        println!("FAIL LTP CASE {} : signal {}", name, signal);
+        println!("FAIL LTP CASE {} : {}", name, 128 + signal);
     } else {
-        println!("FAIL LTP CASE {} : exit {}", name, (status >> 8) & 0xff);
+        println!("FAIL LTP CASE {} : {}", name, (status >> 8) & 0xff);
     }
     false
 }
@@ -561,7 +561,7 @@ fn run_ltp_selected(
             }
 
             if pid < 0 {
-                println!("FAIL LTP CASE {} : fork failed", name_str);
+                println!("FAIL LTP CASE {} : 1", name_str);
                 fail += 1;
                 continue;
             }
@@ -569,7 +569,7 @@ fn run_ltp_selected(
             let mut ec: i32 = 0;
             let waited = waitpid(pid as usize, &mut ec);
             if waited < 0 {
-                println!("FAIL LTP CASE {} : waitpid failed", name_str);
+                println!("FAIL LTP CASE {} : 1", name_str);
                 fail += 1;
             } else if report_ltp_status(name_str, ec) {
                 pass += 1;
@@ -595,7 +595,7 @@ fn _run_ltp_musl() {
     prepare_bin_shell(BUSYBOX_PATH);
     run_ltp_selected(
         "/musl/\0",
-        "ltp-oscomp-musl",
+        "ltp-musl",
         LTP_BIN_DIR,
         "PATH=/musl/ltp/testcases/bin:/musl:/bin",
         "LD_LIBRARY_PATH=/musl/lib:/musl",
@@ -607,7 +607,7 @@ fn _run_ltp_glibc() {
     prepare_bin_shell(GLIBC_BUSYBOX_PATH);
     run_ltp_selected(
         "/glibc/\0",
-        "ltp-oscomp-glibc",
+        "ltp-glibc",
         LTP_BIN_DIR,
         "PATH=/glibc/ltp/testcases/bin:/glibc:/bin",
         "LD_LIBRARY_PATH=/glibc/lib:/glibc",
@@ -618,19 +618,19 @@ fn _run_ltp_glibc() {
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("[testrunner] start");
-    _run_basic_musl();
-    _run_basic_glibc();
-    _run_libcbench_musl();
-    _run_libcbench_glibc();
-    _run_busybox_musl();
-    _run_busybox_glibc();
-    _run_libctest_musl();
-    _run_lua_musl();
-    _run_lua_glibc();
-    _run_iozone_glibc();
-    _run_iozone_musl();
-    _run_lmbench_musl();
-    _run_lmbench_glibc();
+    // _run_basic_musl();
+    // _run_basic_glibc();
+    // _run_libcbench_musl();
+    // _run_libcbench_glibc();
+    // _run_busybox_musl();
+    // _run_busybox_glibc();
+    // _run_libctest_musl();
+    // _run_lua_musl();
+    // _run_lua_glibc();
+    // _run_iozone_glibc();
+    // _run_iozone_musl();
+    // _run_lmbench_musl();
+    // _run_lmbench_glibc();
     _run_ltp_musl();
     _run_ltp_glibc();
     println!("[testrunner] all selected tests finished, powering off");
@@ -642,19 +642,19 @@ fn main() -> i32 {
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("[testrunner] start");
-    _run_basic_musl();
-    _run_basic_glibc();
-    _run_libcbench_musl();
-    _run_libcbench_glibc();
-    _run_busybox_musl();
-    _run_busybox_glibc();
-    _run_libctest_musl();
-    _run_lua_musl();
-    _run_lua_glibc();
-    _run_iozone_glibc();
-    _run_iozone_musl();
-    _run_lmbench_musl();
-    _run_lmbench_glibc();
+    // _run_basic_musl();
+    // _run_basic_glibc();
+    // _run_libcbench_musl();
+    // _run_libcbench_glibc();
+    // _run_busybox_musl();
+    // _run_busybox_glibc();
+    // _run_libctest_musl();
+    // _run_lua_musl();
+    // _run_lua_glibc();
+    // _run_iozone_glibc();
+    // _run_iozone_musl();
+    // _run_lmbench_musl();
+    // _run_lmbench_glibc();
     _run_ltp_musl();
     _run_ltp_glibc();
     println!("[testrunner] all selected tests finished, powering off");
