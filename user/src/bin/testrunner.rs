@@ -464,13 +464,7 @@ const LTP_SKIP: &[&str] = &[
 ];
 
 #[cfg(target_arch = "loongarch64")]
-const LTP_ARCH_SKIP: &[&str] = &[
-    // TODO[ABI-COMPAT]: LoongArch 时间压力类用例会长时间停在忙等循环中，
-    // 先跳过以保证一阶段继续推进；后续单独审查稳定计数器频率、用户时间
-    // 和 times()/CPU tick 语义。
-    "gettimeofday02",
-    "times03",
-];
+const LTP_ARCH_SKIP: &[&str] = &[];
 
 #[cfg(not(target_arch = "loongarch64"))]
 const LTP_ARCH_SKIP: &[&str] = &[];
@@ -633,6 +627,7 @@ fn main() -> i32 {
     // _run_lmbench_glibc();
     _run_ltp_musl();
     _run_ltp_glibc();
+    // _run_ltp_all_musl();
     println!("[testrunner] all selected tests finished, powering off");
     poweroff();
     0
