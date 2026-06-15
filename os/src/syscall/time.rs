@@ -216,3 +216,26 @@ pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> SysResult<usiz
     }
     Ok(0)
 }
+
+pub fn sys_clock_nanosleep(
+    clock_id: usize,
+    flags: usize,
+    req: *const TimeSpec,
+    rem: *mut TimeSpec,
+) -> SysResult<usize> {
+    const CLOCK_REALTIME: usize = 0;
+    const CLOCK_MONOTONIC: usize = 1;
+    const TIMER_ABSTIME: usize = 1;
+
+    // glibc 的 nanosleep() 在 RISC-V/LoongArch 上会通过 clock_nanosleep()
+    // 进入内核。这里先覆盖 LTP 当前使用的相对睡眠语义；绝对时间睡眠需要
+    // 基于 clock_id 计算 deadline，不能简单复用 sys_nanosleep。
+    match clock_id {
+        CLOCK_REALTIME | CLOCK_MONOTONIC => {}
+        _ => return Err(Errno::EINVAL),
+    }
+    if flags & TIMER_ABSTIME != 0 {
+        return Err(Errno::EINVAL);
+    }
+    sys_nanosleep(req, rem)
+}

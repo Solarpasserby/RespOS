@@ -8,6 +8,7 @@
 //!
 //! 后续可在此目录下新增 `exe`、`maps`、`stat`、`status` 等子模块。
 
+mod cpuinfo;
 mod dirs;
 mod exe;
 mod meminfo;

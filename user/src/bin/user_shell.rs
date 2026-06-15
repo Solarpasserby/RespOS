@@ -52,7 +52,6 @@ fn run_builtin_cd(command: &str) -> bool {
     true
 }
 
-
 fn run_builtin_quit(command: &str) -> bool {
     let mut parts = command.split_whitespace();
     if parts.next() != Some("quit") {

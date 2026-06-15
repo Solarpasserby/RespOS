@@ -547,6 +547,9 @@ fn run_ltp_selected(
                     path_env_buf.as_ptr(),
                     ld_library_path_env_buf.as_ptr(),
                     "TMPDIR=/tmp\0".as_ptr(),
+                    // LTP honors this to skip spawning systemd-detect-virt, which is
+                    // not present in the official benchmark images.
+                    "LTP_VIRT_OVERRIDE=\0".as_ptr(),
                     core::ptr::null(),
                 ];
                 let ret = execve(&path, argv, envp);

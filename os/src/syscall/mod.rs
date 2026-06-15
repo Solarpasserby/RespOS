@@ -51,6 +51,7 @@ const SYSCALL_NANOSLEEP: usize = 101;
 const SYSCALL_GETITIMER: usize = 102;
 const SYSCALL_SETITIMER: usize = 103;
 const SYSCALL_CLOCK_GETTIME: usize = 113;
+const SYSCALL_CLOCK_NANOSLEEP: usize = 115;
 const SYSCALL_SYSLOG: usize = 116;
 const SYSCALL_SCHED_YIELD: usize = 124;
 const SYSCALL_KILL: usize = 129;
@@ -233,6 +234,12 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
             args[2] as *mut ITimerVal,
         ),
         SYSCALL_CLOCK_GETTIME => sys_clock_gettime(args[0], args[1] as *mut TimeSpec),
+        SYSCALL_CLOCK_NANOSLEEP => sys_clock_nanosleep(
+            args[0],
+            args[1],
+            args[2] as *const TimeSpec,
+            args[3] as *mut TimeSpec,
+        ),
         SYSCALL_SYSLOG => sys_syslog(args[0], args[1] as *mut u8, args[2] as isize),
         SYSCALL_SCHED_YIELD => sys_sched_yield(),
         SYSCALL_KILL => sys_kill(args[0], args[1] as i32),

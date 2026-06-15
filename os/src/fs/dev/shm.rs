@@ -58,11 +58,7 @@ impl InodeOp for ShmDirInode {
     }
 
     fn lookup(&self, _parent_path: &str, name: &str) -> SysResult<Arc<dyn InodeOp>> {
-        self.entries
-            .lock()
-            .get(name)
-            .cloned()
-            .ok_or(Errno::ENOENT)
+        self.entries.lock().get(name).cloned().ok_or(Errno::ENOENT)
     }
 
     fn readdir(&self, _path: &str) -> SysResult<Vec<LinuxDirent64>> {
@@ -72,7 +68,9 @@ impl InodeOp for ShmDirInode {
         for (idx, (name, inode)) in children.iter().enumerate() {
             let mut d_name = Vec::from(name.as_bytes());
             d_name.push(0);
-            let stat = inode.stat("").unwrap_or_else(|_| KStat::minimal(0, inode.node_type()));
+            let stat = inode
+                .stat("")
+                .unwrap_or_else(|_| KStat::minimal(0, inode.node_type()));
             entries.push(entry(
                 stat.ino,
                 inode.node_type(),

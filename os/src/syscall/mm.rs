@@ -16,25 +16,40 @@ pub fn sys_brk(addr: usize) -> SysResult<usize> {
             return Ok(memory_set.brk);
         }
 
-        let heap_start = VirtAddr::from(memory_set.heap_bottom);
-        let new_end = VirtAddr::from(addr);
+        let old_brk = memory_set.brk;
+        let old_end = VirtAddr::from(old_brk).ceil();
+        let new_end = VirtAddr::from(addr).ceil();
 
-        if addr == memory_set.heap_bottom {
-            memory_set.remove_area_with_start_vpn(heap_start.floor())?;
-        } else if memory_set.brk == memory_set.heap_bottom {
-            // 惰性分配
-            memory_set.insert_framed_area_va_lazy(
-                heap_start,
-                new_end,
-                MapPermission::READ | MapPermission::WRITE | MapPermission::USER,
-            );
-        } else {
-            // 惰性分配，惰态修改
-            let old_end = VirtAddr::from(memory_set.brk).ceil();
-            #[cfg(target_arch = "loongarch64")]
-            memory_set.remap_writable_area_eager_from_end(old_end, new_end.ceil())?;
-            #[cfg(target_arch = "riscv64")]
-            memory_set.remap_writable_area_lazy_from_end(old_end, new_end.ceil())?;
+        if addr < old_brk {
+            if new_end < old_end {
+                // Linux 允许用户用 munmap() 打洞或切碎 brk 区间；收缩 brk 时应删除
+                // 新旧堆顶之间所有重叠映射，而不是假设堆始终是一段连续 VMA。
+                memory_set.remove_area_with_overlap_range(VPNRange::new(new_end, old_end))?;
+            }
+        } else if new_end > old_end {
+            let remap_result = {
+                #[cfg(target_arch = "loongarch64")]
+                {
+                    memory_set.remap_writable_area_eager_from_end(old_end, new_end)
+                }
+                #[cfg(target_arch = "riscv64")]
+                {
+                    memory_set.remap_writable_area_lazy_from_end(old_end, new_end)
+                }
+            };
+            match remap_result {
+                Ok(()) => {}
+                Err(Errno::EINVAL) => {
+                    // 如果 brk 区间中间曾被 munmap()，旧堆顶所在的连续尾段可能已经
+                    // 不存在。此时从旧堆顶页边界新建一段匿名堆 VMA，保持 brk 可继续增长。
+                    memory_set.insert_framed_area_va_lazy(
+                        VirtAddr::from(old_end),
+                        VirtAddr::from(new_end),
+                        MapPermission::READ | MapPermission::WRITE | MapPermission::USER,
+                    );
+                }
+                Err(err) => return Err(err),
+            }
         }
 
         memory_set.brk = addr;
@@ -85,11 +100,11 @@ pub fn sys_mmap(
         }
         task.op_memory_set_write(|memory_set| {
             let start = if has_shared {
-                memory_set.mmap_shared_anonymous(
-                    fixed_addr, map_len, permission, replace, noreplace,
-                )?
+                memory_set
+                    .mmap_shared_anonymous(fixed_addr, map_len, permission, replace, noreplace)?
             } else {
-                memory_set.mmap_lazy_anonymous(fixed_addr, map_len, permission, replace, noreplace)?
+                memory_set
+                    .mmap_lazy_anonymous(fixed_addr, map_len, permission, replace, noreplace)?
             };
             memory_set.flush_tlb();
             Ok(start)
@@ -114,9 +129,8 @@ pub fn sys_mmap(
 
         task.op_memory_set_write(|memory_set| {
             let start = if has_shared {
-                memory_set.mmap_shared_framed(
-                    fixed_addr, map_len, permission, replace, noreplace,
-                )?
+                memory_set
+                    .mmap_shared_framed(fixed_addr, map_len, permission, replace, noreplace)?
             } else {
                 memory_set.mmap_framed(fixed_addr, map_len, permission, replace, noreplace)?
             };
