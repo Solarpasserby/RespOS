@@ -1,24 +1,24 @@
 # oscomp LTP test list - Phase 1: calc (12 tests)
-#getpid01
-#getpid02
-#getppid01
-#getppid02
-#gettimeofday01
-#gettimeofday02
-#sched_yield01
-#times01
-#times03
-#uname01
-#uname02
-#uname04
+getpid01
+getpid02
+getppid01
+getppid02
+gettimeofday01
+gettimeofday02
+sched_yield01
+times01
+times03
+uname01
+uname02
+uname04
 # oscomp LTP test list - Phase 2: light (7 tests)
-#brk01
-#brk02
-#exit01
-#exit02
-#nanosleep01
-#nanosleep02
-#nanosleep04
+brk01
+brk02
+exit01
+exit02
+nanosleep01
+nanosleep02
+nanosleep04
 # oscomp LTP test list - Phase 3: fd (35 tests)
 close01
 close02
