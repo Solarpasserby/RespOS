@@ -289,8 +289,7 @@ impl TaskControlBlock {
         };
 
         // 是否与父线程共享地址空间
-        let memory_set = if flags.contains(CloneFlags::CLONE_VM) {
-            // TODO: exec 替换地址空间时可能会出现问题
+        let memory_set = if flags.share_user_vm() {
             self.memory_set.clone()
         } else {
             Arc::new(RwLock::new(MemorySet::from_existed_user(
@@ -1451,5 +1450,12 @@ impl CloneFlags {
     /// 返回除退出信号之外的 `CLONE_*` 共享/命名空间标志。
     pub fn clone_flags(self) -> Self {
         self & !Self::EXIT_SIGNAL_MASK
+    }
+
+    /// 当前实现没有完整的 vfork 父进程阻塞模型；非线程 vfork 子进程需要独立
+    /// 地址空间，避免 exec 替换掉父进程地址空间。
+    pub fn share_user_vm(self) -> bool {
+        self.contains(Self::CLONE_VM)
+            && !(self.contains(Self::CLONE_VFORK) && !self.contains(Self::CLONE_THREAD))
     }
 }

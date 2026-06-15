@@ -55,7 +55,7 @@ pipe2_01
 pipe2_02
 pipe2_02_child
 pipe2_04
-# oscomp LTP test list - Phase 4: io (34 tests)
+  # oscomp LTP test list - Phase 4: io (34 tests)
 #open01
 #open02
 #open03

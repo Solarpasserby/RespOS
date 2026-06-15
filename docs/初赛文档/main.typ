@@ -2,33 +2,33 @@
 // Typst 0.11.1
 
 // ============================================================
-// 全局样式设置
+// 字体配置
 // ============================================================
 
-// 中文字体配置，Windows 字体需通过 --font-path 指定
-// Typst 会自动选择数组中第一个可用的字体
-#let font-hei  = ("SimHei", "微软雅黑", "Noto Sans CJK SC")     // 黑体 - 标题
-#let font-song = ("SimSun", "宋体", "Noto Serif CJK SC")      // 宋体 - 正文
-#let font-kai  = ("KaiTi", "楷体")                             // 楷体
-#let font-fang = ("FangSong", "仿宋")                          // 仿宋
-#let font-body = font-song + ("Times New Roman",)              // 正文字体组合
-#let font-mono = ("Cascadia Code", "Consolas", "Courier New")  // 等宽字体
+// 字体配置：Dev Container 用文鼎字体，WSL 回退到 Windows 字体
+#let font-hei  = ("AR PL UMing CN", "SimHei", "微软雅黑")
+#let font-song = ("AR PL SungtiL GB", "SimSun", "宋体")
+#let font-kai  = ("AR PL KaitiM GB", "KaiTi", "楷体")
+#let font-body = font-song + ("Times New Roman",)
+#let font-mono = ("DejaVu Sans Mono", "Cascadia Code", "Consolas", "Courier New")
 
-// 页面设置：A4 纸
+// ============================================================
+// 页面设置
+// ============================================================
+
 #set page(
   paper: "a4",
-  margin: (top: 3cm, bottom: 2.5cm, left: 2.5cm, right: 2.5cm),
-  // 正文页页眉
+  margin: (top: 2.5cm, bottom: 2cm, left: 2.2cm, right: 2.2cm),
   header: context {
     if counter(page).get().first() > 3 {
-      align(right, text(size: 9pt, font: font-hei)[RespOS 设计文档])
+      align(right, text(size: 9pt, font: font-hei, fill: gray)[RespOS 设计文档])
+      line(length: 100%, stroke: 0.5pt + gray)
     }
   },
-  // 页码
   footer: context {
     let n = counter(page).get().first()
     if n > 1 {
-      align(center, text(size: 9pt, {
+      align(center, text(size: 9pt, fill: gray, {
         if n <= 3 {
           numbering("I", n - 1)
         } else {
@@ -39,67 +39,63 @@
   },
 )
 
-// 正文字体
-#set text(
-  size: 12pt,
-  font: font-body,
-  lang: "zh",
-)
+// ============================================================
+// 样式设置
+// ============================================================
 
-// 标题样式
+// 正文
+#set text(size: 11pt, font: font-body, lang: "zh")
+#set par(justify: true, leading: 0.65em, first-line-indent: 2em)
+
+// 标题编号和样式
 #set heading(numbering: "1. 1.1 1.1.1")
 
 #show heading.where(level: 1): it => {
   pagebreak()
   set align(center)
-  set text(size: 17pt, font: font-hei, weight: "bold")
-  block(
-    spacing: 0.8em,
-    it.body
-  )
-  v(0.5em)
+  set par(first-line-indent: 0em)
+  set text(size: 16pt, font: font-hei, weight: "bold")
+  block(spacing: 0.5em, it.body)
+  v(0.4em)
 }
 
 #show heading.where(level: 2): it => {
-  set text(size: 14pt, font: font-hei, weight: "bold")
-  block(
-    spacing: 0.6em,
-    it.body
-  )
+  set par(first-line-indent: 0em)
+  set text(size: 13pt, font: font-hei, weight: "bold")
+  block(spacing: 0.4em, it.body)
+  v(0.2em)
 }
 
 #show heading.where(level: 3): it => {
-  set text(size: 12pt, font: font-hei, weight: "bold")
-  block(
-    spacing: 0.4em,
-    it.body
-  )
+  set par(first-line-indent: 0em)
+  set text(size: 11.5pt, font: font-hei, weight: "bold")
+  block(spacing: 0.3em, it.body)
 }
 
-// 段落间距
-#set par(justify: true, leading: 0.8em, first-line-indent: 2em)
-
-// 代码块样式
+// 代码块
 #show raw.where(block: true): it => {
-  set text(size: 8pt, font: font-mono)
+  set text(size: 7.5pt, font: font-mono)
+  set par(first-line-indent: 0em, leading: 0.5em)
   block(
-    fill: rgb("#f5f5f5"),
-    inset: 10pt,
-    radius: 4pt,
+    fill: rgb("#f2f3f5"),
+    inset: (x: 10pt, y: 8pt),
+    radius: 3pt,
     width: 100%,
     it
   )
 }
 
-// 表格样式
+// 表格
 #show table: it => {
-  set text(size: 10pt)
+  set text(size: 10pt, font: font-body)
+  set par(first-line-indent: 0em)
   align(center, it)
 }
 
-// 图片样式
+// 图片居中
 #show figure.where(kind: image): it => {
   set align(center)
+  set par(first-line-indent: 0em)
   it
 }
 
@@ -108,26 +104,47 @@
 // ============================================================
 
 #set align(center)
+#set par(first-line-indent: 0em)
+
 #block[
+  // 山大 logo + 校名
+  #v(1.5em)
+  #set align(center)
+  #block(
+    fill: rgb("#8B1A2B"),
+    width: 18em,
+    height: 3.8em,
+    radius: 3pt,
+  )[
+    #v(0.7em)
+    #image("sdu-logo.svg", width: 18em)
+  ]
+  #v(0.3em)
+  #set text(size: 13pt, font: font-kai)
+  山东大学（青岛）
+
   #v(4em)
 
-  #set text(size: 28pt, font: font-hei, weight: "bold")
+  // 大标题
+  #set text(size: 42pt, font: font-hei, weight: "bold")
   RespOS
-  #v(1em)
+  #v(0.3em)
+  #set text(size: 20pt, font: font-hei)
   设计文档
 
-  #v(6em)
+  #v(5em)
 
-  #set text(size: 14pt, font: font-hei)
+  // 队伍信息
+  #set text(size: 14pt, font: font-song)
   #table(
     columns: (auto, auto),
     align: (right + horizon, left + horizon),
     stroke: none,
-    gutter: 1em,
-    [参赛队名], [TODO: 队名],
-    [队伍成员], [TODO: 成员1、成员2],
-    [指导教师], [TODO: 指导老师],
-    [日 期], [2026 年 TODO 月 TODO 日],
+    gutter: 0.8em,
+    [参赛队名], [#text(font: font-hei)[比特工匠队]],
+    [队伍成员], [李欣悦、肖安康、张俞睿],
+    [指导教师], [颜廷坤、潘润宇],
+    [日 期], [2026 年 六 月],
   )
 ]
 
@@ -136,6 +153,7 @@
 // ============================================================
 
 #pagebreak()
+#set align(left)
 #set par(first-line-indent: 2em)
 
 #heading(outlined: false, level: 1)[摘 要]
@@ -144,7 +162,7 @@ RespOS 是一个使用 Rust 语言开发、支持 RISC-V 64 和 LoongArch 64 硬
 
 截至 TODO 日期，RespOS 已经通过初赛的 TODO 测试点，TODO 排行榜情况。
 
-#v(1em)
+#v(0.8em)
 #heading(level: 2)[模块完成情况]
 
 #figure(
@@ -155,8 +173,7 @@ RespOS 是一个使用 Rust 语言开发、支持 RISC-V 64 和 LoongArch 64 硬
   #table(
     columns: (auto, 1fr),
     align: (center + horizon, left + horizon),
-    stroke: (x, y) => if y == 1 { none } else { (bottom: 0.5pt + gray) },
-    inset: 8pt,
+    inset: 7pt,
     table.header(
       [模块], [完成情况],
     ),
@@ -178,7 +195,6 @@ RespOS 是一个使用 Rust 语言开发、支持 RISC-V 64 和 LoongArch 64 硬
 
 #pagebreak()
 #set heading(outlined: false)
-#set align(left)
 #set par(first-line-indent: 0em)
 #outline(
   title: [目 录],
@@ -186,7 +202,7 @@ RespOS 是一个使用 Rust 语言开发、支持 RISC-V 64 和 LoongArch 64 硬
 )
 
 // ============================================================
-// 正文开始（页码重置为 1）
+// 正文开始
 // ============================================================
 
 #set page(
@@ -221,7 +237,7 @@ RespOS 是一款 TODO: 项目介绍文字。
 │       │   └── loongarch64  // LoongArch 64 架构支持
 │       ├── drivers     // 设备驱动（VirtIO 块设备）
 │       ├── fs          // 文件系统
-│       │   ├── vfs     // 虚拟文件系统
+│       │   ├── vfs     // VFS 虚拟文件系统
 │       │   ├── ext4    // Ext4 磁盘文件系统
 │       │   ├── proc    // procfs 进程文件系统
 │       │   ├── dev     // devfs 设备文件系统
