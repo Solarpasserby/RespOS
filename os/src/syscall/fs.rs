@@ -1,12 +1,12 @@
 // os/src/syscall/fs.rs
 
 use super::{Errno, SysResult};
-use crate::config::PAGE_SIZE;
+use crate::config::{PAGE_SIZE, PIPE_BUFFER_SIZE};
 use crate::fs::mount::{do_mount, do_umount2};
 use crate::fs::vfs::InodeType;
 use crate::fs::{
     AT_EMPTY_PATH, AT_FDCWD, AT_NO_AUTOMOUNT, AT_SYMLINK_NOFOLLOW, FdEntry, File, FileOp, KStat,
-    OpenFlags, Stat, Statfs64, filename_create, filename_link, filename_lookup,
+    OpenFlags, Pipe, Stat, Statfs64, filename_create, filename_link, filename_lookup,
     filename_lookup_no_follow_final_symlink, filename_rename, filename_symlink, filename_unlink,
     init_fdset, make_pipe, path_open,
 };
@@ -14,6 +14,7 @@ use crate::mm::{
     VPNRange, VirtAddr, check_user_writable, copy_cstr_from_user, copy_from_user, copy_to_user,
 };
 use crate::signal::sig_struct::{Sig, SigSet};
+use crate::signal::{SiField, SigInfo};
 use crate::task::{current_task, yield_current_task};
 use crate::timer::{TimeSpec, get_time_ms, get_timeout_us};
 
@@ -39,14 +40,24 @@ pub fn sys_read(fd: usize, buf: *mut u8, len: usize) -> SysResult<usize> {
     check_user_writable(buf, len)?;
 
     let task = current_task().expect("[kernel] current task is None.");
-    let file = task.get_fd_entry(fd)?.file;
+    let fd_entry = task.get_fd_entry(fd)?;
+    let file = fd_entry.file.clone();
     if !file.readable() {
         return Err(Errno::EBADF);
+    }
+    if fd_entry.get_flags().contains(OpenFlags::O_NONBLOCK) && !file.read_ready() {
+        return Err(Errno::EAGAIN);
     }
 
     let mut kbuf = alloc::vec![0u8; len.min(IO_CHUNK_SIZE)];
     let mut total = 0usize;
     while total < len {
+        if fd_entry.get_flags().contains(OpenFlags::O_NONBLOCK) && !file.read_ready() {
+            if total == 0 {
+                return Err(Errno::EAGAIN);
+            }
+            break;
+        }
         let chunk_len = (len - total).min(kbuf.len());
         let ret = file.read(&mut kbuf[..chunk_len])?;
         if ret == 0 {
@@ -115,9 +126,13 @@ pub fn sys_pwrite64(fd: usize, buf: *mut u8, len: usize, offset: isize) -> SysRe
     }
 
     let task = current_task().expect("[kernel] current task is None.");
-    let file = task.get_fd_entry(fd)?.file;
+    let fd_entry = task.get_fd_entry(fd)?;
+    let file = fd_entry.file.clone();
     if !file.writable() {
         return Err(Errno::EBADF);
+    }
+    if fd_entry.get_flags().contains(OpenFlags::O_NONBLOCK) && !file.write_ready() {
+        return Err(Errno::EAGAIN);
     }
     file.can_seek()?;
 
@@ -161,7 +176,8 @@ pub fn sys_write(fd: usize, buf: *mut u8, len: usize) -> SysResult<usize> {
     }
 
     let task = current_task().expect("[kernel] current task is None.");
-    let file = task.get_fd_entry(fd)?.file;
+    let fd_entry = task.get_fd_entry(fd)?;
+    let file = fd_entry.file.clone();
     if !file.writable() {
         return Err(Errno::EBADF);
     }
@@ -169,9 +185,24 @@ pub fn sys_write(fd: usize, buf: *mut u8, len: usize) -> SysResult<usize> {
     let mut kbuf = alloc::vec![0u8; len.min(IO_CHUNK_SIZE)];
     let mut total = 0usize;
     while total < len {
+        if fd_entry.get_flags().contains(OpenFlags::O_NONBLOCK) && !file.write_ready() {
+            if total == 0 {
+                return Err(Errno::EAGAIN);
+            }
+            break;
+        }
         let chunk_len = (len - total).min(kbuf.len());
         copy_from_user(kbuf.as_mut_ptr(), unsafe { buf.add(total) }, chunk_len)?;
-        let written = file.write(&kbuf[..chunk_len])?;
+        let written = match file.write(&kbuf[..chunk_len]) {
+            Ok(written) => written,
+            Err(Errno::EPIPE) if total == 0 => {
+                let siginfo = SigInfo::new(Sig::SIGPIPE.raw(), SigInfo::KERNEL, SiField::None);
+                task.receive_siginfo(siginfo, false);
+                return Err(Errno::EPIPE);
+            }
+            Err(err) if total == 0 => return Err(err),
+            Err(_) => break,
+        };
         total += written;
         if written < chunk_len {
             break;
@@ -809,6 +840,7 @@ struct RtcTime {
 /// 需要下沉到具体 FileOp/设备驱动中实现，不能长期放在 syscall 层硬编码。
 pub fn sys_ioctl(fd: usize, request: usize, arg: usize) -> SysResult<usize> {
     const TIOCGWINSZ: usize = 0x5413;
+    const FIONREAD: usize = 0x541b;
     const RTC_RD_TIME: usize = 0x8024_7009;
 
     let task = current_task().expect("[kernel] current task is None.");
@@ -824,6 +856,15 @@ pub fn sys_ioctl(fd: usize, request: usize, arg: usize) -> SysResult<usize> {
             };
             copy_to_user(arg as *mut WinSize, &winsize as *const WinSize, 1)?;
             Ok(0)
+        }
+        FIONREAD => {
+            if let Some(pipe) = fd_entry.file.as_any().downcast_ref::<Pipe>() {
+                let nbytes = pipe.available_bytes() as i32;
+                copy_to_user(arg as *mut i32, &nbytes as *const i32, 1)?;
+                Ok(0)
+            } else {
+                Err(Errno::ENOTTY)
+            }
         }
         request if is_rtc_file(&fd_entry.file) && request & 0xffff == RTC_RD_TIME & 0xffff => {
             let rtc_time = rtc_time_from_unix(get_time_ms() / 1000);
@@ -902,13 +943,21 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SysResult<usize> {
     const F_GETFL: usize = 3;
     const F_SETFL: usize = 4;
     const F_DUPFD_CLOEXEC: usize = 1030;
+    const F_SETPIPE_SZ: usize = 1031;
+    const F_GETPIPE_SZ: usize = 1032;
     const FD_CLOEXEC: usize = 1;
 
     let task = current_task().expect("[kernel] current task is None.");
     let fd_entry = task.get_fd_entry(fd)?;
 
     match cmd {
-        F_DUPFD => task.alloc_fd_from(fd_entry, arg),
+        F_DUPFD => {
+            let mut entry = fd_entry;
+            let mut flags = entry.get_flags();
+            flags.remove(OpenFlags::O_CLOEXEC);
+            entry.set_flags(flags);
+            task.alloc_fd_from(entry, arg)
+        }
         F_DUPFD_CLOEXEC => {
             let mut entry = fd_entry;
             entry.set_flags(entry.get_flags() | OpenFlags::O_CLOEXEC);
@@ -936,9 +985,28 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SysResult<usize> {
         F_GETFL => Ok(fd_entry.get_flags().bits() as usize),
         F_SETFL => {
             let mut entry = fd_entry;
-            entry.set_flags(OpenFlags::from(arg));
+            let mut flags = entry.get_flags();
+            let status_flags =
+                OpenFlags::O_APPEND | OpenFlags::O_NONBLOCK | OpenFlags::O_DIRECT;
+            flags.remove(status_flags);
+            flags |= OpenFlags::from(arg) & status_flags;
+            entry.set_flags(flags);
             task.set_fd(fd, entry)?;
             Ok(0)
+        }
+        F_GETPIPE_SZ => {
+            if fd_entry.file.as_any().is::<Pipe>() {
+                Ok(PIPE_BUFFER_SIZE)
+            } else {
+                Err(Errno::EBADF)
+            }
+        }
+        F_SETPIPE_SZ => {
+            if fd_entry.file.as_any().is::<Pipe>() {
+                Ok(PIPE_BUFFER_SIZE)
+            } else {
+                Err(Errno::EBADF)
+            }
         }
         _ => Err(Errno::EINVAL),
     }
@@ -947,16 +1015,30 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SysResult<usize> {
 /// 系统调用 sys-dup
 pub fn sys_dup(fd: usize) -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
-    let fd_entry = task.get_fd_entry(fd)?;
+    let mut fd_entry = task.get_fd_entry(fd)?;
+    let mut flags = fd_entry.get_flags();
+    flags.remove(OpenFlags::O_CLOEXEC);
+    fd_entry.set_flags(flags);
     task.alloc_fd(fd_entry)
 }
 
 /// 系统调用 sys-dup3
 pub fn sys_dup3(fd_src: usize, fd_dst: usize, flags: usize) -> SysResult<usize> {
-    // TODO[ABI-COMPAT]: 当前忽略 flags，尚未完整实现 dup3 语义。
-    let _ = flags;
+    const O_CLOEXEC: usize = OpenFlags::O_CLOEXEC.bits() as usize;
+    if fd_src == fd_dst {
+        return Err(Errno::EINVAL);
+    }
+    if flags & !O_CLOEXEC != 0 {
+        return Err(Errno::EINVAL);
+    }
     let task = current_task().expect("[kernel] current task is None.");
-    let fd_entry = task.get_fd_entry(fd_src)?;
+    let mut fd_entry = task.get_fd_entry(fd_src)?;
+    let mut entry_flags = fd_entry.get_flags();
+    entry_flags.remove(OpenFlags::O_CLOEXEC);
+    if flags & O_CLOEXEC != 0 {
+        entry_flags |= OpenFlags::O_CLOEXEC;
+    }
+    fd_entry.set_flags(entry_flags);
     task.set_fd(fd_dst, fd_entry)?;
     Ok(fd_dst)
 }
@@ -965,6 +1047,20 @@ pub fn sys_dup3(fd_src: usize, fd_dst: usize, flags: usize) -> SysResult<usize> 
 pub fn sys_mkdirat(dirfd: isize, path: *const u8, mode: usize) -> SysResult<usize> {
     let path = copy_cstr_from_user(path)?;
     filename_create(dirfd, path.as_str(), InodeType::Directory, mode)?;
+    Ok(0)
+}
+
+pub fn sys_mknodat(dirfd: isize, path: *const u8, mode: usize, _dev: usize) -> SysResult<usize> {
+    const S_IFMT: usize = 0o170000;
+    const S_IFIFO: usize = 0o010000;
+    const S_IFREG: usize = 0o100000;
+
+    let path = copy_cstr_from_user(path)?;
+    match mode & S_IFMT {
+        S_IFIFO => filename_create(dirfd, path.as_str(), InodeType::Fifo, mode)?,
+        0 | S_IFREG => filename_create(dirfd, path.as_str(), InodeType::Regular, mode)?,
+        _ => return Err(Errno::EINVAL),
+    }
     Ok(0)
 }
 
@@ -1059,17 +1155,21 @@ pub fn sys_getcwd(buf: *mut u8, len: usize) -> SysResult<usize> {
 
 /// 系统调用 sys-pipe
 pub fn sys_pipe2(pipefd: *mut [i32; 2], flags: usize) -> SysResult<usize> {
-    // TODO[ABI-COMPAT]: 当前忽略 flags，尚未完整实现 pipe2 语义。
-    let _ = flags;
+    let allowed_flags = (OpenFlags::O_CLOEXEC | OpenFlags::O_NONBLOCK | OpenFlags::O_DIRECT).bits()
+        as usize;
+    if flags & !allowed_flags != 0 {
+        return Err(Errno::EINVAL);
+    }
     let task = current_task().expect("[kernel] current task is None.");
     let (pipe_read, pipe_write) = make_pipe();
     let mut fds = [0usize; 2];
+    let pipe_flags = OpenFlags::from(flags);
 
-    fds[0] = match task.alloc_fd(FdEntry::new(pipe_read, OpenFlags::O_RDONLY)) {
+    fds[0] = match task.alloc_fd(FdEntry::new(pipe_read, OpenFlags::O_RDONLY | pipe_flags)) {
         Ok(fd) => fd,
         Err(e) => return Err(e),
     };
-    fds[1] = match task.alloc_fd(FdEntry::new(pipe_write, OpenFlags::O_WRONLY)) {
+    fds[1] = match task.alloc_fd(FdEntry::new(pipe_write, OpenFlags::O_WRONLY | pipe_flags)) {
         Ok(fd) => fd,
         Err(e) => {
             task.close(fds[0])?;

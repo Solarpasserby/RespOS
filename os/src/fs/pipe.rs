@@ -15,6 +15,7 @@ use spin::Mutex;
 
 const PIPE_INO: u64 = 0x1000;
 const PIPE_DEV: u64 = 0x200;
+const PIPE_RING_BUFFER_CAPACITY: usize = PIPE_BUFFER_SIZE + 1;
 
 pub struct Pipe {
     buffer: Arc<Mutex<PipeRingBuffer>>,
@@ -64,6 +65,10 @@ impl Pipe {
             }
         }
         write_size
+    }
+
+    pub fn available_bytes(&self) -> usize {
+        self.buffer.lock().available_bytes()
     }
 }
 
@@ -280,7 +285,7 @@ enum RingBufferStatus {
 }
 
 struct PipeRingBuffer {
-    buffer: [u8; PIPE_BUFFER_SIZE],
+    buffer: [u8; PIPE_RING_BUFFER_CAPACITY],
     head: usize,
     tail: usize,
     status: RingBufferStatus,
@@ -293,7 +298,7 @@ struct PipeRingBuffer {
 impl PipeRingBuffer {
     pub fn new() -> Self {
         Self {
-            buffer: [0; PIPE_BUFFER_SIZE],
+            buffer: [0; PIPE_RING_BUFFER_CAPACITY],
             head: 0,
             tail: 0,
             status: RingBufferStatus::EMPTY,
@@ -308,7 +313,7 @@ impl PipeRingBuffer {
         assert_ne!(self.status, RingBufferStatus::EMPTY);
         self.status = RingBufferStatus::NORMAL;
         let byte = self.buffer[self.head];
-        self.head = (self.head + 1) % PIPE_BUFFER_SIZE;
+        self.head = (self.head + 1) % PIPE_RING_BUFFER_CAPACITY;
         if self.head == self.tail {
             self.status = RingBufferStatus::EMPTY;
         }
@@ -318,8 +323,8 @@ impl PipeRingBuffer {
         assert_ne!(self.status, RingBufferStatus::FULL);
         self.status = RingBufferStatus::NORMAL;
         self.buffer[self.tail] = byte;
-        self.tail = (self.tail + 1) % PIPE_BUFFER_SIZE;
-        if (self.tail + 1) % PIPE_BUFFER_SIZE == self.head {
+        self.tail = (self.tail + 1) % PIPE_RING_BUFFER_CAPACITY;
+        if (self.tail + 1) % PIPE_RING_BUFFER_CAPACITY == self.head {
             self.status = RingBufferStatus::FULL;
         }
     }
@@ -328,6 +333,19 @@ impl PipeRingBuffer {
     }
     fn write_closed(&self) -> bool {
         self.write_closed
+    }
+    fn available_bytes(&self) -> usize {
+        match self.status {
+            RingBufferStatus::EMPTY => 0,
+            RingBufferStatus::FULL => PIPE_BUFFER_SIZE,
+            RingBufferStatus::NORMAL => {
+                if self.tail >= self.head {
+                    self.tail - self.head
+                } else {
+                    PIPE_RING_BUFFER_CAPACITY - self.head + self.tail
+                }
+            }
+        }
     }
     /// 将读端 tid 加入等待队列（去重，避免同任务重复入队）
     fn push_read_waiter(&mut self, tid: usize) {

@@ -498,6 +498,7 @@ fn run_ltp_selected(
     case_path_prefix: &str,
     path_env: &str,
     ld_library_path_env: &str,
+    ltp_root_env: &str,
 ) {
     if chdir(workdir) < 0 {
         println!("[testrunner] cannot enter {}", strip_nul(workdir));
@@ -531,12 +532,13 @@ fn run_ltp_selected(
             let mut path = String::from(case_path_prefix);
             path.push_str(name_str);
             path.push('\0');
-            let mut argv0 = String::from(name_str);
-            argv0.push('\0');
+            let argv0 = path.clone();
             let mut path_env_buf = String::from(path_env);
             path_env_buf.push('\0');
             let mut ld_library_path_env_buf = String::from(ld_library_path_env);
             ld_library_path_env_buf.push('\0');
+            let mut ltp_root_env_buf = String::from(ltp_root_env);
+            ltp_root_env_buf.push('\0');
 
             println!("RUN LTP CASE {}", name_str);
 
@@ -546,6 +548,7 @@ fn run_ltp_selected(
                 let envp: &[*const u8] = &[
                     path_env_buf.as_ptr(),
                     ld_library_path_env_buf.as_ptr(),
+                    ltp_root_env_buf.as_ptr(),
                     "TMPDIR=/tmp\0".as_ptr(),
                     // LTP honors this to skip spawning systemd-detect-virt, which is
                     // not present in the official benchmark images.
@@ -596,6 +599,7 @@ fn _run_ltp_musl() {
         LTP_BIN_DIR,
         "PATH=/musl/ltp/testcases/bin:/musl:/bin",
         "LD_LIBRARY_PATH=/musl/lib:/musl",
+        "LTPROOT=/musl/ltp",
     );
 }
 
@@ -608,6 +612,7 @@ fn _run_ltp_glibc() {
         LTP_BIN_DIR,
         "PATH=/glibc/ltp/testcases/bin:/glibc:/bin",
         "LD_LIBRARY_PATH=/glibc/lib:/glibc",
+        "LTPROOT=/glibc/ltp",
     );
 }
 

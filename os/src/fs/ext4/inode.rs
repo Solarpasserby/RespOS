@@ -635,6 +635,15 @@ impl InodeOp for Ext4Inode {
                         .map_err(Self::map_lwext4_err)?;
                     new_file.file_close().map_err(Self::map_lwext4_err)?;
                 }
+                Ext4InodeTypes::EXT4_DE_FIFO => {
+                    new_file
+                        .file_open(
+                            &path,
+                            bindings::O_RDWR | bindings::O_CREAT | bindings::O_TRUNC,
+                        )
+                        .map_err(Self::map_lwext4_err)?;
+                    new_file.file_close().map_err(Self::map_lwext4_err)?;
+                }
                 _ => return Err(Errno::ENOSYS),
             }
         }

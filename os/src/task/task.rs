@@ -435,7 +435,7 @@ impl TaskControlBlock {
         self.close_other_threads_for_exec();
 
         /* ===== 修改文件描述符表 ===== */
-        // exec 保留 fd_table；后续可在这里处理 close-on-exec。
+        self.fd_table.lock().close_on_exec();
 
         /* ===== 修改信号处理 ===== */
         self.op_sig_handler_mut(|handler| handler.reset_user_handlers_for_exec());
@@ -896,6 +896,9 @@ impl TaskControlBlock {
     }
     pub fn get_fd_entry(&self, fd: usize) -> SysResult<FdEntry> {
         self.fd_table.lock().get_fd_entry(fd)
+    }
+    pub fn open_fds(&self) -> Vec<usize> {
+        self.fd_table.lock().open_fds()
     }
     pub fn nofile_limit(&self) -> (usize, usize) {
         self.fd_table.lock().nofile_limit()

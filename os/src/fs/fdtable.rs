@@ -161,6 +161,34 @@ impl FdTable {
         }
     }
 
+    pub fn open_fds(&self) -> Vec<usize> {
+        self.table
+            .lock()
+            .iter()
+            .enumerate()
+            .filter_map(|(fd, entry)| entry.as_ref().map(|_| fd))
+            .collect()
+    }
+
+    pub fn close_on_exec(&self) {
+        let old_entries = {
+            let mut table = self.table.lock();
+            let mut old_entries = Vec::new();
+            for entry in table.iter_mut() {
+                if entry
+                    .as_ref()
+                    .is_some_and(|entry| entry.flags.contains(OpenFlags::O_CLOEXEC))
+                {
+                    old_entries.push(entry.take().unwrap());
+                }
+            }
+            let next_fd = Self::update_next_fd(&table, 0);
+            self.next_fd.store(next_fd, Ordering::Relaxed);
+            old_entries
+        };
+        drop(old_entries);
+    }
+
     /// 清空文件描述符表
     pub fn clear(&self) {
         let old_table = {

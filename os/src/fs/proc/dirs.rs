@@ -9,7 +9,7 @@ use super::mounts::MountsInode;
 use super::smaps::SmapsInode;
 use super::stat::{ProcStatInode, TaskStatInode};
 use crate::syscall::{Errno, SysResult};
-use crate::task::{TASK_MANAGER, TaskStatus};
+use crate::task::{TASK_MANAGER, TaskStatus, current_task};
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
@@ -29,10 +29,14 @@ const PROC_SYS_INO: u64 = 9;
 const PROC_SYS_KERNEL_INO: u64 = 10;
 const PROC_SYS_KERNEL_PID_MAX_INO: u64 = 11;
 const PROC_CPUINFO_INO: u64 = 12;
+const PROC_SELF_FD_INO: u64 = 12;
+const PROC_SYS_FS_INO: u64 = 13;
+const PROC_SYS_FS_PIPE_USER_PAGES_SOFT_INO: u64 = 14;
 const PROC_PID_DIR_INO_BASE: u64 = 0x10000;
 const PROC_PID_STAT_INO_BASE: u64 = 0x20000;
 const PROC_DEV: u64 = 0x100;
 const PID_MAX_CONTENT: &str = "4194304\n";
+const PIPE_USER_PAGES_SOFT_CONTENT: &str = "128\n";
 
 // ── /proc ─────────────────────────────────────────────────────────
 
@@ -160,6 +164,7 @@ impl InodeOp for ProcSysInode {
     fn lookup(&self, _parent_path: &str, name: &str) -> SysResult<Arc<dyn InodeOp>> {
         match name {
             "kernel" => Ok(Arc::new(ProcSysKernelInode)),
+            "fs" => Ok(Arc::new(ProcSysFsInode)),
             _ => Err(Errno::ENOENT),
         }
     }
@@ -169,6 +174,71 @@ impl InodeOp for ProcSysInode {
             dir_entry(PROC_SYS_INO, 1, b".\0"),
             dir_entry(PROC_ROOT_INO, 2, b"..\0"),
             entry(PROC_SYS_KERNEL_INO, InodeType::Directory, 3, b"kernel\0"),
+            entry(PROC_SYS_FS_INO, InodeType::Directory, 4, b"fs\0"),
+        ])
+    }
+
+    fn read_at(&self, _path: &str, _off: usize, _buf: &mut [u8]) -> SysResult<usize> {
+        Err(Errno::EISDIR)
+    }
+    fn write_at(&self, _path: &str, _off: usize, _buf: &[u8]) -> SysResult<usize> {
+        Err(Errno::EACCES)
+    }
+    fn truncate(&self, _path: &str, _size: usize) -> SysResult<usize> {
+        Err(Errno::EACCES)
+    }
+    fn create(
+        &self,
+        _parent_path: &str,
+        _name: &str,
+        _ty: InodeType,
+    ) -> SysResult<Arc<dyn InodeOp>> {
+        Err(Errno::EACCES)
+    }
+    fn link(&self, _old_path: &str, _bare_dentry: Arc<Dentry>) -> SysResult {
+        Err(Errno::EACCES)
+    }
+    fn unlink(&self, _valid_dentry: &Arc<Dentry>) -> SysResult {
+        Err(Errno::EACCES)
+    }
+}
+
+pub(super) struct ProcSysFsInode;
+
+impl InodeOp for ProcSysFsInode {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn node_type(&self) -> InodeType {
+        InodeType::Directory
+    }
+
+    fn stat(&self, _path: &str) -> SysResult<KStat> {
+        Ok(KStat::minimal(0, InodeType::Directory)
+            .with_dev(PROC_DEV)
+            .with_ino(PROC_SYS_FS_INO)
+            .with_mode(0o555)
+            .with_nlink(2))
+    }
+
+    fn lookup(&self, _parent_path: &str, name: &str) -> SysResult<Arc<dyn InodeOp>> {
+        match name {
+            "pipe-user-pages-soft" => Ok(Arc::new(ProcPipeUserPagesSoftInode)),
+            _ => Err(Errno::ENOENT),
+        }
+    }
+
+    fn readdir(&self, _path: &str) -> SysResult<Vec<LinuxDirent64>> {
+        Ok(vec![
+            dir_entry(PROC_SYS_FS_INO, 1, b".\0"),
+            dir_entry(PROC_SYS_INO, 2, b"..\0"),
+            entry(
+                PROC_SYS_FS_PIPE_USER_PAGES_SOFT_INO,
+                InodeType::Regular,
+                3,
+                b"pipe-user-pages-soft\0",
+            ),
         ])
     }
 
@@ -317,6 +387,64 @@ impl InodeOp for ProcPidMaxInode {
     }
 }
 
+pub(super) struct ProcPipeUserPagesSoftInode;
+
+impl InodeOp for ProcPipeUserPagesSoftInode {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn node_type(&self) -> InodeType {
+        InodeType::Regular
+    }
+
+    fn stat(&self, _path: &str) -> SysResult<KStat> {
+        Ok(
+            KStat::minimal(PIPE_USER_PAGES_SOFT_CONTENT.len(), InodeType::Regular)
+                .with_dev(PROC_DEV)
+                .with_ino(PROC_SYS_FS_PIPE_USER_PAGES_SOFT_INO)
+                .with_mode(0o444),
+        )
+    }
+
+    fn read_at(&self, _path: &str, off: usize, buf: &mut [u8]) -> SysResult<usize> {
+        let bytes = PIPE_USER_PAGES_SOFT_CONTENT.as_bytes();
+        if off >= bytes.len() {
+            return Ok(0);
+        }
+        let n = buf.len().min(bytes.len() - off);
+        buf[..n].copy_from_slice(&bytes[off..off + n]);
+        Ok(n)
+    }
+
+    fn write_at(&self, _path: &str, _off: usize, _buf: &[u8]) -> SysResult<usize> {
+        Err(Errno::EACCES)
+    }
+    fn truncate(&self, _path: &str, _size: usize) -> SysResult<usize> {
+        Err(Errno::EACCES)
+    }
+    fn lookup(&self, _parent_path: &str, _name: &str) -> SysResult<Arc<dyn InodeOp>> {
+        Err(Errno::ENOTDIR)
+    }
+    fn readdir(&self, _path: &str) -> SysResult<Vec<LinuxDirent64>> {
+        Err(Errno::ENOTDIR)
+    }
+    fn create(
+        &self,
+        _parent_path: &str,
+        _name: &str,
+        _ty: InodeType,
+    ) -> SysResult<Arc<dyn InodeOp>> {
+        Err(Errno::EACCES)
+    }
+    fn link(&self, _old_path: &str, _bare_dentry: Arc<Dentry>) -> SysResult {
+        Err(Errno::EACCES)
+    }
+    fn unlink(&self, _valid_dentry: &Arc<Dentry>) -> SysResult {
+        Err(Errno::EACCES)
+    }
+}
+
 // ── /proc/self ────────────────────────────────────────────────────
 
 pub(super) struct ProcSelfInode;
@@ -344,6 +472,7 @@ impl InodeOp for ProcSelfInode {
             "exe" => Ok(Arc::new(ProcExeInode)),
             "mounts" => Ok(Arc::new(MountsInode)),
             "stat" => Ok(Arc::new(TaskStatInode::current())),
+            "fd" => Ok(Arc::new(ProcSelfFdInode)),
             _ => Err(Errno::ENOENT),
         }
     }
@@ -356,6 +485,7 @@ impl InodeOp for ProcSelfInode {
             entry(PROC_SELF_EXE_INO, InodeType::SymLink, 4, b"exe\0"),
             entry(PROC_MOUNTS_INO, InodeType::Regular, 5, b"mounts\0"),
             entry(PROC_SELF_STAT_INO, InodeType::Regular, 6, b"stat\0"),
+            entry(PROC_SELF_FD_INO, InodeType::Directory, 7, b"fd\0"),
         ])
     }
 
@@ -367,6 +497,132 @@ impl InodeOp for ProcSelfInode {
     }
     fn truncate(&self, _path: &str, _size: usize) -> SysResult<usize> {
         Err(Errno::EACCES)
+    }
+    fn create(
+        &self,
+        _parent_path: &str,
+        _name: &str,
+        _ty: InodeType,
+    ) -> SysResult<Arc<dyn InodeOp>> {
+        Err(Errno::EACCES)
+    }
+    fn link(&self, _old_path: &str, _bare_dentry: Arc<Dentry>) -> SysResult {
+        Err(Errno::EACCES)
+    }
+    fn unlink(&self, _valid_dentry: &Arc<Dentry>) -> SysResult {
+        Err(Errno::EACCES)
+    }
+}
+
+pub(super) struct ProcSelfFdInode;
+
+impl InodeOp for ProcSelfFdInode {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn node_type(&self) -> InodeType {
+        InodeType::Directory
+    }
+
+    fn stat(&self, _path: &str) -> SysResult<KStat> {
+        Ok(KStat::minimal(0, InodeType::Directory)
+            .with_dev(PROC_DEV)
+            .with_ino(PROC_SELF_FD_INO)
+            .with_mode(0o555)
+            .with_nlink(2))
+    }
+
+    fn lookup(&self, _parent_path: &str, name: &str) -> SysResult<Arc<dyn InodeOp>> {
+        let fd = name.parse::<usize>().map_err(|_| Errno::ENOENT)?;
+        let task = current_task().ok_or(Errno::ENOENT)?;
+        task.get_fd_entry(fd)?;
+        Ok(Arc::new(ProcSelfFdEntryInode { fd }))
+    }
+
+    fn readdir(&self, _path: &str) -> SysResult<Vec<LinuxDirent64>> {
+        let task = current_task().ok_or(Errno::ENOENT)?;
+        let mut entries = vec![
+            dir_entry(PROC_SELF_FD_INO, 1, b".\0"),
+            dir_entry(PROC_SELF_INO, 2, b"..\0"),
+        ];
+        let mut off = 3i64;
+        for fd in task.open_fds() {
+            let name = alloc::format!("{}\0", fd).into_bytes();
+            entries.push(entry(
+                PROC_SELF_FD_INO + 100 + fd as u64,
+                InodeType::SymLink,
+                off,
+                &name,
+            ));
+            off += 1;
+        }
+        Ok(entries)
+    }
+
+    fn read_at(&self, _path: &str, _off: usize, _buf: &mut [u8]) -> SysResult<usize> {
+        Err(Errno::EISDIR)
+    }
+    fn write_at(&self, _path: &str, _off: usize, _buf: &[u8]) -> SysResult<usize> {
+        Err(Errno::EACCES)
+    }
+    fn truncate(&self, _path: &str, _size: usize) -> SysResult<usize> {
+        Err(Errno::EACCES)
+    }
+    fn create(
+        &self,
+        _parent_path: &str,
+        _name: &str,
+        _ty: InodeType,
+    ) -> SysResult<Arc<dyn InodeOp>> {
+        Err(Errno::EACCES)
+    }
+    fn link(&self, _old_path: &str, _bare_dentry: Arc<Dentry>) -> SysResult {
+        Err(Errno::EACCES)
+    }
+    fn unlink(&self, _valid_dentry: &Arc<Dentry>) -> SysResult {
+        Err(Errno::EACCES)
+    }
+}
+
+pub(super) struct ProcSelfFdEntryInode {
+    fd: usize,
+}
+
+impl InodeOp for ProcSelfFdEntryInode {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn node_type(&self) -> InodeType {
+        InodeType::SymLink
+    }
+
+    fn stat(&self, _path: &str) -> SysResult<KStat> {
+        Ok(KStat::minimal(64, InodeType::SymLink)
+            .with_dev(PROC_DEV)
+            .with_ino(PROC_SELF_FD_INO + 100 + self.fd as u64)
+            .with_mode(0o777))
+    }
+
+    fn read_link(&self, _path: &str) -> SysResult<String> {
+        Ok(alloc::format!("anon_inode:[fd:{}]", self.fd))
+    }
+
+    fn read_at(&self, _path: &str, _off: usize, _buf: &mut [u8]) -> SysResult<usize> {
+        Err(Errno::EINVAL)
+    }
+    fn write_at(&self, _path: &str, _off: usize, _buf: &[u8]) -> SysResult<usize> {
+        Err(Errno::EACCES)
+    }
+    fn truncate(&self, _path: &str, _size: usize) -> SysResult<usize> {
+        Err(Errno::EACCES)
+    }
+    fn lookup(&self, _parent_path: &str, _name: &str) -> SysResult<Arc<dyn InodeOp>> {
+        Err(Errno::ENOTDIR)
+    }
+    fn readdir(&self, _path: &str) -> SysResult<Vec<LinuxDirent64>> {
+        Err(Errno::ENOTDIR)
     }
     fn create(
         &self,
