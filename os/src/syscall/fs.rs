@@ -891,7 +891,7 @@ fn rtc_time_from_unix(secs: usize) -> RtcTime {
 }
 
 fn is_leap_year(year: usize) -> bool {
-    year.is_multiple_of(4) && !year.is_multiple_of(100) || year.is_multiple_of(400)
+    year % 4 == 0 && year % 100 != 0 || year % 400 == 0
 }
 
 /// 系统调用 sys-fcntl
