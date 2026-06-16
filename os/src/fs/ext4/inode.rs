@@ -545,6 +545,16 @@ impl InodeOp for Ext4Inode {
         Ok(())
     }
 
+    fn set_owner(&self, path: &str, uid: u32, gid: u32) -> SysResult {
+        let _guard = EXT4_OP_LOCK.lock();
+        let c_path = CString::new(path).map_err(|_| Errno::EINVAL)?;
+        let ret = unsafe { bindings::ext4_owner_set(c_path.as_ptr(), uid, gid) };
+        if ret != 0 {
+            return Err(Self::map_lwext4_err(ret));
+        }
+        Ok(())
+    }
+
     /// 查找与 name 匹配的子索引节点，约定 name 为常规文件名
     fn lookup(&self, parent_path: &str, name: &str) -> SysResult<Arc<dyn InodeOp>> {
         self.check_type(InodeType::Directory)?;
@@ -729,7 +739,9 @@ impl InodeOp for Ext4Inode {
 
     fn read_link(&self, path: &str) -> SysResult<String> {
         // readlinkat 必须作用在 symlink inode 自身，传到这里的 path 不应已经被 namei 跟随。
-        self.check_type(InodeType::SymLink)?;
+        if self.node_type() != InodeType::SymLink {
+            return Err(Errno::EINVAL);
+        }
         Self::file_readlink(path)
     }
 }

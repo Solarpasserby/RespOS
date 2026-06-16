@@ -60,6 +60,14 @@ pub struct TaskControlBlock {
     tid: RwLock<TidHandle>,
     tgid: AtomicUsize,
     pgid: AtomicUsize,
+    uid: AtomicUsize,
+    euid: AtomicUsize,
+    suid: AtomicUsize,
+    gid: AtomicUsize,
+    egid: AtomicUsize,
+    sgid: AtomicUsize,
+    fsuid: AtomicUsize,
+    fsgid: AtomicUsize,
     thread_group: Arc<SpinLock<ThreadGroup>>,
     task_status: SpinLock<TaskStatus>,
     parent: Arc<SpinLock<Option<Weak<TaskControlBlock>>>>,
@@ -117,6 +125,14 @@ impl TaskControlBlock {
             tid: RwLock::new(TidHandle(0)),
             tgid: AtomicUsize::new(0),
             pgid: AtomicUsize::new(0),
+            uid: AtomicUsize::new(0),
+            euid: AtomicUsize::new(0),
+            suid: AtomicUsize::new(0),
+            gid: AtomicUsize::new(0),
+            egid: AtomicUsize::new(0),
+            sgid: AtomicUsize::new(0),
+            fsuid: AtomicUsize::new(0),
+            fsgid: AtomicUsize::new(0),
             thread_group: Arc::new(SpinLock::new(ThreadGroup::new())),
             task_status: SpinLock::new(TaskStatus::Ready),
             parent: Arc::new(SpinLock::new(None)),
@@ -185,6 +201,14 @@ impl TaskControlBlock {
             tid: RwLock::new(tid),
             tgid: AtomicUsize::new(tgid),
             pgid: AtomicUsize::new(tgid),
+            uid: AtomicUsize::new(0),
+            euid: AtomicUsize::new(0),
+            suid: AtomicUsize::new(0),
+            gid: AtomicUsize::new(0),
+            egid: AtomicUsize::new(0),
+            sgid: AtomicUsize::new(0),
+            fsuid: AtomicUsize::new(0),
+            fsgid: AtomicUsize::new(0),
             thread_group: Arc::new(SpinLock::new(ThreadGroup::new())),
             task_status: SpinLock::new(TaskStatus::Ready),
             parent: Arc::new(SpinLock::new(None)),
@@ -327,6 +351,14 @@ impl TaskControlBlock {
             tid: RwLock::new(tid),
             tgid: AtomicUsize::new(tgid),
             pgid: AtomicUsize::new(pgid),
+            uid: AtomicUsize::new(self.uid()),
+            euid: AtomicUsize::new(self.euid()),
+            suid: AtomicUsize::new(self.suid()),
+            gid: AtomicUsize::new(self.gid()),
+            egid: AtomicUsize::new(self.egid()),
+            sgid: AtomicUsize::new(self.sgid()),
+            fsuid: AtomicUsize::new(self.fsuid()),
+            fsgid: AtomicUsize::new(self.fsgid()),
             thread_group,
             task_status: SpinLock::new(TaskStatus::Ready),
             parent,
@@ -458,6 +490,30 @@ impl TaskControlBlock {
     pub fn pgid(&self) -> usize {
         self.pgid.load(Ordering::Relaxed)
     }
+    pub fn uid(&self) -> usize {
+        self.uid.load(Ordering::Relaxed)
+    }
+    pub fn euid(&self) -> usize {
+        self.euid.load(Ordering::Relaxed)
+    }
+    pub fn suid(&self) -> usize {
+        self.suid.load(Ordering::Relaxed)
+    }
+    pub fn gid(&self) -> usize {
+        self.gid.load(Ordering::Relaxed)
+    }
+    pub fn egid(&self) -> usize {
+        self.egid.load(Ordering::Relaxed)
+    }
+    pub fn sgid(&self) -> usize {
+        self.sgid.load(Ordering::Relaxed)
+    }
+    pub fn fsuid(&self) -> usize {
+        self.fsuid.load(Ordering::Relaxed)
+    }
+    pub fn fsgid(&self) -> usize {
+        self.fsgid.load(Ordering::Relaxed)
+    }
     pub fn status(&self) -> TaskStatus {
         self.task_status.lock().clone()
     }
@@ -542,6 +598,24 @@ impl TaskControlBlock {
     }
     pub fn set_pgid(&self, pgid: usize) {
         self.pgid.store(pgid, Ordering::Relaxed);
+    }
+    pub fn set_uid_triplet(&self, uid: usize, euid: usize, suid: usize) {
+        self.uid.store(uid, Ordering::Relaxed);
+        self.euid.store(euid, Ordering::Relaxed);
+        self.suid.store(suid, Ordering::Relaxed);
+        self.fsuid.store(euid, Ordering::Relaxed);
+    }
+    pub fn set_gid_triplet(&self, gid: usize, egid: usize, sgid: usize) {
+        self.gid.store(gid, Ordering::Relaxed);
+        self.egid.store(egid, Ordering::Relaxed);
+        self.sgid.store(sgid, Ordering::Relaxed);
+        self.fsgid.store(egid, Ordering::Relaxed);
+    }
+    pub fn set_fsuid(&self, uid: usize) {
+        self.fsuid.store(uid, Ordering::Relaxed);
+    }
+    pub fn set_fsgid(&self, gid: usize) {
+        self.fsgid.store(gid, Ordering::Relaxed);
     }
     pub fn set_cwd(&self, path: Arc<Path>) {
         *self.cwd.lock() = path;

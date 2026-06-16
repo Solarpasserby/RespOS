@@ -563,70 +563,184 @@ pub fn sys_get_robust_list(
 
 /// 系统调用 sys_getuid - 获取实际用户 ID
 pub fn sys_getuid() -> SysResult<usize> {
-    Ok(0)
+    Ok(current_task()
+        .expect("[kernel] current task is None.")
+        .uid())
 }
 
-/// 系统调用 sys_setuid - 单用户 root 模型下接受 uid 切换请求
-pub fn sys_setuid(_uid: usize) -> SysResult<usize> {
+pub fn sys_setuid(uid: usize) -> SysResult<usize> {
+    let task = current_task().expect("[kernel] current task is None.");
+    if task.euid() == 0 {
+        task.set_uid_triplet(uid, uid, uid);
+        return Ok(0);
+    }
+    if uid == task.uid() || uid == task.euid() || uid == task.suid() {
+        task.set_uid_triplet(task.uid(), uid, task.suid());
+        return Ok(0);
+    }
+    Err(Errno::EPERM)
+}
+
+fn is_unchanged_id(id: usize) -> bool {
+    id == usize::MAX || id == u32::MAX as usize
+}
+
+fn resolve_new_id(new_id: usize, old_id: usize) -> usize {
+    if is_unchanged_id(new_id) {
+        old_id
+    } else {
+        new_id
+    }
+}
+
+fn can_set_uid(task_uid: usize, task_euid: usize, task_suid: usize, target: usize) -> bool {
+    target == task_uid || target == task_euid || target == task_suid
+}
+
+fn can_set_gid(task_gid: usize, task_egid: usize, task_sgid: usize, target: usize) -> bool {
+    target == task_gid || target == task_egid || target == task_sgid
+}
+
+pub fn sys_setreuid(ruid: usize, euid: usize) -> SysResult<usize> {
+    let task = current_task().expect("[kernel] current task is None.");
+    let new_ruid = resolve_new_id(ruid, task.uid());
+    let new_euid = resolve_new_id(euid, task.euid());
+    if task.euid() != 0
+        && (!can_set_uid(task.uid(), task.euid(), task.suid(), new_ruid)
+            || !can_set_uid(task.uid(), task.euid(), task.suid(), new_euid))
+    {
+        return Err(Errno::EPERM);
+    }
+    let new_suid = if !is_unchanged_id(ruid) {
+        new_euid
+    } else {
+        task.suid()
+    };
+    task.set_uid_triplet(new_ruid, new_euid, new_suid);
     Ok(0)
 }
 
 /// 系统调用 sys_geteuid - 获取有效用户 ID
 pub fn sys_geteuid() -> SysResult<usize> {
-    Ok(0)
+    Ok(current_task()
+        .expect("[kernel] current task is None.")
+        .euid())
 }
 
 /// 系统调用 sys_getgid - 获取实际组 ID
 pub fn sys_getgid() -> SysResult<usize> {
-    Ok(0)
+    Ok(current_task()
+        .expect("[kernel] current task is None.")
+        .gid())
 }
 
-/// 系统调用 sys_setgid - 单用户 root 模型下接受 gid 切换请求
-pub fn sys_setgid(_gid: usize) -> SysResult<usize> {
+pub fn sys_setgid(gid: usize) -> SysResult<usize> {
+    let task = current_task().expect("[kernel] current task is None.");
+    if task.euid() == 0 {
+        task.set_gid_triplet(gid, gid, gid);
+        return Ok(0);
+    }
+    if gid == task.gid() || gid == task.egid() || gid == task.sgid() {
+        task.set_gid_triplet(task.gid(), gid, task.sgid());
+        return Ok(0);
+    }
+    Err(Errno::EPERM)
+}
+
+pub fn sys_setregid(rgid: usize, egid: usize) -> SysResult<usize> {
+    let task = current_task().expect("[kernel] current task is None.");
+    let new_rgid = resolve_new_id(rgid, task.gid());
+    let new_egid = resolve_new_id(egid, task.egid());
+    if task.euid() != 0
+        && (!can_set_gid(task.gid(), task.egid(), task.sgid(), new_rgid)
+            || !can_set_gid(task.gid(), task.egid(), task.sgid(), new_egid))
+    {
+        return Err(Errno::EPERM);
+    }
+    let new_sgid = if !is_unchanged_id(rgid) {
+        new_egid
+    } else {
+        task.sgid()
+    };
+    task.set_gid_triplet(new_rgid, new_egid, new_sgid);
     Ok(0)
 }
 
 /// 系统调用 sys_getegid - 获取有效组 ID
 pub fn sys_getegid() -> SysResult<usize> {
-    Ok(0)
+    Ok(current_task()
+        .expect("[kernel] current task is None.")
+        .egid())
 }
 
-pub fn sys_setreuid(_ruid: usize, _euid: usize) -> SysResult<usize> {
-    Ok(0)
-}
-
-pub fn sys_setregid(_rgid: usize, _egid: usize) -> SysResult<usize> {
-    Ok(0)
-}
-
-pub fn sys_setresuid(_ruid: usize, _euid: usize, _suid: usize) -> SysResult<usize> {
+pub fn sys_setresuid(ruid: usize, euid: usize, suid: usize) -> SysResult<usize> {
+    let task = current_task().expect("[kernel] current task is None.");
+    let new_ruid = resolve_new_id(ruid, task.uid());
+    let new_euid = resolve_new_id(euid, task.euid());
+    let new_suid = resolve_new_id(suid, task.suid());
+    if task.euid() != 0
+        && (!can_set_uid(task.uid(), task.euid(), task.suid(), new_ruid)
+            || !can_set_uid(task.uid(), task.euid(), task.suid(), new_euid)
+            || !can_set_uid(task.uid(), task.euid(), task.suid(), new_suid))
+    {
+        return Err(Errno::EPERM);
+    }
+    task.set_uid_triplet(new_ruid, new_euid, new_suid);
     Ok(0)
 }
 
 pub fn sys_getresuid(ruid: *mut u32, euid: *mut u32, suid: *mut u32) -> SysResult<usize> {
-    let uid = 0u32;
-    copy_to_user(ruid, &uid as *const u32, 1)?;
-    copy_to_user(euid, &uid as *const u32, 1)?;
-    copy_to_user(suid, &uid as *const u32, 1)?;
+    let task = current_task().expect("[kernel] current task is None.");
+    let r = task.uid() as u32;
+    let e = task.euid() as u32;
+    let s = task.suid() as u32;
+    copy_to_user(ruid, &r as *const u32, 1)?;
+    copy_to_user(euid, &e as *const u32, 1)?;
+    copy_to_user(suid, &s as *const u32, 1)?;
     Ok(0)
 }
 
-pub fn sys_setresgid(_rgid: usize, _egid: usize, _sgid: usize) -> SysResult<usize> {
+pub fn sys_setresgid(rgid: usize, egid: usize, sgid: usize) -> SysResult<usize> {
+    let task = current_task().expect("[kernel] current task is None.");
+    let new_rgid = resolve_new_id(rgid, task.gid());
+    let new_egid = resolve_new_id(egid, task.egid());
+    let new_sgid = resolve_new_id(sgid, task.sgid());
+    if task.euid() != 0
+        && (!can_set_gid(task.gid(), task.egid(), task.sgid(), new_rgid)
+            || !can_set_gid(task.gid(), task.egid(), task.sgid(), new_egid)
+            || !can_set_gid(task.gid(), task.egid(), task.sgid(), new_sgid))
+    {
+        return Err(Errno::EPERM);
+    }
+    task.set_gid_triplet(new_rgid, new_egid, new_sgid);
     Ok(0)
 }
 
 pub fn sys_getresgid(rgid: *mut u32, egid: *mut u32, sgid: *mut u32) -> SysResult<usize> {
-    let gid = 0u32;
-    copy_to_user(rgid, &gid as *const u32, 1)?;
-    copy_to_user(egid, &gid as *const u32, 1)?;
-    copy_to_user(sgid, &gid as *const u32, 1)?;
+    let task = current_task().expect("[kernel] current task is None.");
+    let r = task.gid() as u32;
+    let e = task.egid() as u32;
+    let s = task.sgid() as u32;
+    copy_to_user(rgid, &r as *const u32, 1)?;
+    copy_to_user(egid, &e as *const u32, 1)?;
+    copy_to_user(sgid, &s as *const u32, 1)?;
     Ok(0)
 }
 
-pub fn sys_setfsuid(_uid: usize) -> SysResult<usize> {
-    Ok(0)
+pub fn sys_setfsuid(uid: usize) -> SysResult<usize> {
+    let task = current_task().expect("[kernel] current task is None.");
+    let old = task.fsuid();
+    if task.euid() == 0 || can_set_uid(task.uid(), task.euid(), task.suid(), uid) {
+        task.set_fsuid(uid);
+    }
+    Ok(old)
 }
 
-pub fn sys_setfsgid(_gid: usize) -> SysResult<usize> {
-    Ok(0)
+pub fn sys_setfsgid(gid: usize) -> SysResult<usize> {
+    let task = current_task().expect("[kernel] current task is None.");
+    let old = task.fsgid();
+    if task.euid() == 0 || can_set_gid(task.gid(), task.egid(), task.sgid(), gid) {
+        task.set_fsgid(gid);
+    }
+    Ok(old)
 }

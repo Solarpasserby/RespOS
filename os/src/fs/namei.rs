@@ -173,6 +173,49 @@ fn dentry_name(dentry: &Arc<Dentry>) -> SysResult<String> {
         .ok_or(Errno::EBUSY)
 }
 
+fn inode_allows_write(dentry: &Arc<Dentry>) -> SysResult<bool> {
+    let task = current_task().expect("[kernel] current task is None.");
+    let euid = task.fsuid() as u32;
+    let egid = task.fsgid() as u32;
+    if euid == 0 {
+        return Ok(true);
+    }
+
+    let stat = dentry.get_inode().stat(dentry.abs_path.as_str())?;
+    let mode = stat.mode & 0o777;
+    let perm = if euid == stat.uid {
+        (mode >> 6) & 0o7
+    } else if egid == stat.gid {
+        (mode >> 3) & 0o7
+    } else {
+        mode & 0o7
+    };
+    Ok(perm & 0o2 != 0)
+}
+
+fn check_dir_write_permission(dentry: &Arc<Dentry>) -> SysResult {
+    if inode_allows_write(dentry)? {
+        Ok(())
+    } else {
+        Err(Errno::EACCES)
+    }
+}
+
+fn init_created_owner(
+    parent: &Arc<Dentry>,
+    inode: &Arc<dyn super::vfs::InodeOp>,
+    path: &str,
+) -> SysResult {
+    let task = current_task().expect("[kernel] current task is None.");
+    let parent_stat = parent.get_inode().stat(parent.abs_path.as_str())?;
+    let gid = if parent_stat.mode & 0o2000 != 0 {
+        parent_stat.gid
+    } else {
+        task.fsgid() as u32
+    };
+    inode.set_owner(path, task.fsuid() as u32, gid)
+}
+
 pub fn open_last_lookups(
     nd: &mut Nameidata,
     flags: usize,
@@ -237,6 +280,7 @@ pub fn open_last_lookups(
                     current_dir_inode.create(&nd.dentry.abs_path, name, InodeType::Regular)?;
                 let child_path = child_abs_path(&nd.dentry, name);
                 let _ = inode.set_mode(child_path.as_str(), (mode & 0o7777) as u32);
+                let _ = init_created_owner(&nd.dentry, &inode, child_path.as_str());
                 install_child_dentry(&nd.dentry, name, inode.clone())
             }
             Err(err) => return Err(err),
@@ -311,6 +355,7 @@ pub fn filename_create(dirfd: isize, path: &str, ty: InodeType, mode: usize) -> 
                 alloc::format!("{}/{}", nd.dentry.abs_path, name)
             };
             let _ = inode.set_mode(child_path.as_str(), (mode & 0o7777) as u32);
+            let _ = init_created_owner(&nd.dentry, &inode, child_path.as_str());
             install_child_dentry(&nd.dentry, name, inode);
             Ok(())
         }
@@ -590,6 +635,11 @@ pub fn filename_rename(
     }
 
     let old = filename_lookup(olddirfd, oldpath, 0)?;
+    let old_parent = old
+        .dentry
+        .get_parent()
+        .unwrap_or_else(|| old.dentry.clone());
+    check_dir_write_permission(&old_parent)?;
 
     let mut nd = Nameidata::new_at(newdirfd, newpath)?;
     link_path_walk(&mut nd)?;
@@ -625,10 +675,6 @@ pub fn filename_rename(
 
     // 更新 VFS dentry 树：Arc<Dentry> 可能已被多个 Path/File 共享，不能原地可变修改。
     // 这里为新路径创建新的 dentry，并从旧父目录移除旧名字。
-    let old_parent = old
-        .dentry
-        .get_parent()
-        .unwrap_or_else(|| old.dentry.clone());
     old_parent.remove_child(old.dentry.abs_path.rsplit('/').next().unwrap_or(""));
 
     remove_dentry_cache_tree(&old.abs_path().as_str());

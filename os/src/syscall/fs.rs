@@ -559,8 +559,8 @@ fn do_fchmodat(dirfd: isize, path: *const u8, mode: usize, flags: usize) -> SysR
 pub fn sys_fchownat(
     dirfd: isize,
     path: *const u8,
-    _owner: usize,
-    _group: usize,
+    owner: usize,
+    group: usize,
     flags: usize,
 ) -> SysResult<usize> {
     const FCHOWNAT_ALLOWED_FLAGS: usize = AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH;
@@ -570,22 +570,40 @@ pub fn sys_fchownat(
     }
 
     let path = copy_cstr_from_user(path)?;
-    if path.is_empty() {
+    let resolved = if path.is_empty() {
         if flags & AT_EMPTY_PATH == 0 {
             return Err(Errno::ENOENT);
         }
-        if dirfd != AT_FDCWD {
+        if dirfd == AT_FDCWD {
             let task = current_task().expect("[kernel] current task is None.");
-            let _ = task.get_fd_entry(dirfd as usize)?;
+            task.cwd()
+        } else {
+            let task = current_task().expect("[kernel] current task is None.");
+            let file = task.get_fd_entry(dirfd as usize)?.file;
+            let file = file.as_any().downcast_ref::<File>().ok_or(Errno::EINVAL)?;
+            file.path()
         }
     } else if flags & AT_SYMLINK_NOFOLLOW != 0 {
-        filename_lookup_no_follow_final_symlink(dirfd, path.as_str())?;
+        filename_lookup_no_follow_final_symlink(dirfd, path.as_str())?
     } else {
-        filename_lookup(dirfd, path.as_str(), 0)?;
-    }
+        filename_lookup(dirfd, path.as_str(), 0)?
+    };
 
-    // TODO[ABI-COMPAT]: 当前内核是单用户 root 模型，暂不维护 inode uid/gid。
-    // glibc/LTP 初始化会用 chown 修正临时目录/文件属主；路径存在即可视为成功。
+    let stat = resolved.dentry.get_inode().stat(&resolved.abs_path())?;
+    let uid = if owner == usize::MAX {
+        stat.uid
+    } else {
+        owner as u32
+    };
+    let gid = if group == usize::MAX {
+        stat.gid
+    } else {
+        group as u32
+    };
+    resolved
+        .dentry
+        .get_inode()
+        .set_owner(&resolved.abs_path(), uid, gid)?;
     Ok(0)
 }
 

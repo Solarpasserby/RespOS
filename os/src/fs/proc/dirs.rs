@@ -1,6 +1,6 @@
 // os/src/fs/proc/dirs.rs
 
-use super::super::KStat;
+use super::super::{File, KStat};
 use super::super::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
 use super::cpuinfo::CpuinfoInode;
 use super::exe::ProcExeInode;
@@ -606,6 +606,11 @@ impl InodeOp for ProcSelfFdEntryInode {
     }
 
     fn read_link(&self, _path: &str) -> SysResult<String> {
+        let task = current_task().ok_or(Errno::ENOENT)?;
+        let file = task.get_fd_entry(self.fd)?.get_file();
+        if let Some(file) = file.as_any().downcast_ref::<File>() {
+            return Ok(file.path().global_abs_path());
+        }
         Ok(alloc::format!("anon_inode:[fd:{}]", self.fd))
     }
 
