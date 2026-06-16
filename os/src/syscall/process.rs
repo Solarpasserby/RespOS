@@ -566,6 +566,11 @@ pub fn sys_getuid() -> SysResult<usize> {
     Ok(0)
 }
 
+/// 系统调用 sys_setuid - 单用户 root 模型下接受 uid 切换请求
+pub fn sys_setuid(_uid: usize) -> SysResult<usize> {
+    Ok(0)
+}
+
 /// 系统调用 sys_geteuid - 获取有效用户 ID
 pub fn sys_geteuid() -> SysResult<usize> {
     Ok(0)
@@ -576,7 +581,52 @@ pub fn sys_getgid() -> SysResult<usize> {
     Ok(0)
 }
 
+/// 系统调用 sys_setgid - 单用户 root 模型下接受 gid 切换请求
+pub fn sys_setgid(_gid: usize) -> SysResult<usize> {
+    Ok(0)
+}
+
 /// 系统调用 sys_getegid - 获取有效组 ID
 pub fn sys_getegid() -> SysResult<usize> {
+    Ok(0)
+}
+
+pub fn sys_setreuid(_ruid: usize, _euid: usize) -> SysResult<usize> {
+    Ok(0)
+}
+
+pub fn sys_setregid(_rgid: usize, _egid: usize) -> SysResult<usize> {
+    Ok(0)
+}
+
+pub fn sys_setresuid(_ruid: usize, _euid: usize, _suid: usize) -> SysResult<usize> {
+    Ok(0)
+}
+
+pub fn sys_getresuid(ruid: *mut u32, euid: *mut u32, suid: *mut u32) -> SysResult<usize> {
+    let uid = 0u32;
+    copy_to_user(ruid, &uid as *const u32, 1)?;
+    copy_to_user(euid, &uid as *const u32, 1)?;
+    copy_to_user(suid, &uid as *const u32, 1)?;
+    Ok(0)
+}
+
+pub fn sys_setresgid(_rgid: usize, _egid: usize, _sgid: usize) -> SysResult<usize> {
+    Ok(0)
+}
+
+pub fn sys_getresgid(rgid: *mut u32, egid: *mut u32, sgid: *mut u32) -> SysResult<usize> {
+    let gid = 0u32;
+    copy_to_user(rgid, &gid as *const u32, 1)?;
+    copy_to_user(egid, &gid as *const u32, 1)?;
+    copy_to_user(sgid, &gid as *const u32, 1)?;
+    Ok(0)
+}
+
+pub fn sys_setfsuid(_uid: usize) -> SysResult<usize> {
+    Ok(0)
+}
+
+pub fn sys_setfsgid(_gid: usize) -> SysResult<usize> {
     Ok(0)
 }

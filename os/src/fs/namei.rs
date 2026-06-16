@@ -1,7 +1,9 @@
 // os/src/fs/namei.rs
 
 use super::Path;
-use super::dentry_cache::{insert_dentry_cache, lookup_dentry_cache, remove_dentry_cache};
+use super::dentry_cache::{
+    insert_dentry_cache, lookup_dentry_cache, remove_dentry_cache_tree,
+};
 use super::mount::{VfsMount, get_mount_by_dentry, get_mount_by_vfsmount, root_path};
 use super::vfs::{Dentry, InodeType};
 use super::{File, OpenFlags};
@@ -16,6 +18,7 @@ pub const AT_EMPTY_PATH: usize = 0x1000;
 pub const AT_SYMLINK_NOFOLLOW: usize = 0x100;
 
 const MAX_SYMLINK_FOLLOWS: usize = 40;
+const NAME_MAX: usize = 255;
 
 /// 路径名解析状态量
 pub struct Nameidata<'a> {
@@ -32,6 +35,7 @@ impl<'a> Nameidata<'a> {
     }
 
     pub fn new_at(dirfd: isize, file_name: &'a str) -> SysResult<Self> {
+        validate_path_components(file_name)?;
         let base = base_path_from_dirfd(dirfd, file_name)?;
         Ok(Self::new_from_path(file_name, base))
     }
@@ -52,6 +56,13 @@ impl<'a> Nameidata<'a> {
             depth: 0,
         }
     }
+}
+
+fn validate_path_components(path: &str) -> SysResult {
+    if path.split('/').any(|name| name.len() > NAME_MAX) {
+        return Err(Errno::ENAMETOOLONG);
+    }
+    Ok(())
 }
 
 fn base_path_from_dirfd(dirfd: isize, file_name: &str) -> SysResult<Arc<Path>> {
@@ -165,7 +176,7 @@ fn dentry_name(dentry: &Arc<Dentry>) -> SysResult<String> {
 pub fn open_last_lookups(
     nd: &mut Nameidata,
     flags: usize,
-    _mode: usize, // TODO: mode 变量未被使用
+    mode: usize,
 ) -> SysResult<Arc<File>> {
     let flags = OpenFlags::from(flags);
 
@@ -224,6 +235,8 @@ pub fn open_last_lookups(
                 let current_dir_inode = nd.dentry.get_inode();
                 let inode =
                     current_dir_inode.create(&nd.dentry.abs_path, name, InodeType::Regular)?;
+                let child_path = child_abs_path(&nd.dentry, name);
+                let _ = inode.set_mode(child_path.as_str(), (mode & 0o7777) as u32);
                 install_child_dentry(&nd.dentry, name, inode.clone())
             }
             Err(err) => return Err(err),
@@ -292,14 +305,12 @@ pub fn filename_create(dirfd: isize, path: &str, ty: InodeType, mode: usize) -> 
         Err(Errno::ENOENT) => {
             let current_dir_inode = nd.dentry.get_inode();
             let inode = current_dir_inode.create(&nd.dentry.abs_path, name, ty)?;
-            if mode & 0o7777 != 0 {
-                let child_path = if nd.dentry.abs_path == "/" {
-                    alloc::format!("/{}", name)
-                } else {
-                    alloc::format!("{}/{}", nd.dentry.abs_path, name)
-                };
-                let _ = inode.set_mode(child_path.as_str(), mode as u32);
-            }
+            let child_path = if nd.dentry.abs_path == "/" {
+                alloc::format!("/{}", name)
+            } else {
+                alloc::format!("{}/{}", nd.dentry.abs_path, name)
+            };
+            let _ = inode.set_mode(child_path.as_str(), (mode & 0o7777) as u32);
             install_child_dentry(&nd.dentry, name, inode);
             Ok(())
         }
@@ -366,6 +377,7 @@ fn resolve_path(
     if path.is_empty() {
         return Err(Errno::ENOENT);
     }
+    validate_path_components(path)?;
     // dirfd 只决定相对路径的起点；绝对路径会在 Nameidata::new_from_path 中切回 root_path。
     let base = base_path_from_dirfd(dirfd, path)?;
     resolve_path_from(base, path, follow_final_symlink, follow_final_mount, 0)
@@ -511,7 +523,7 @@ pub fn filename_unlink(dirfd: isize, path: &str, remove_dir: bool) -> SysResult 
     let name = dentry_name(&target)?;
     parent.get_inode().unlink(&target)?;
     parent.remove_child(name.as_str());
-    remove_dentry_cache(&target.abs_path);
+    remove_dentry_cache_tree(&target.abs_path);
     Ok(())
 }
 
@@ -537,6 +549,15 @@ pub fn filename_link(olddirfd: isize, oldpath: &str, newdirfd: isize, newpath: &
     let name = nd.path_segments[nd.depth];
     if name == "." || name == ".." {
         return Err(Errno::EEXIST);
+    }
+
+    let old_stat = old_path
+        .dentry
+        .get_inode()
+        .stat(old_path.abs_path().as_str())?;
+    let parent_stat = nd.dentry.get_inode().stat(nd.dentry.abs_path.as_str())?;
+    if old_stat.dev != parent_stat.dev {
+        return Err(Errno::EXDEV);
     }
 
     match lookup_dentry(&mut nd) {
@@ -610,8 +631,8 @@ pub fn filename_rename(
         .unwrap_or_else(|| old.dentry.clone());
     old_parent.remove_child(old.dentry.abs_path.rsplit('/').next().unwrap_or(""));
 
-    remove_dentry_cache(&old.abs_path().as_str());
-    remove_dentry_cache(&new_abs);
+    remove_dentry_cache_tree(&old.abs_path().as_str());
+    remove_dentry_cache_tree(&new_abs);
     let renamed_dentry = Arc::new(Dentry::new(
         new_abs,
         Some(nd.dentry.clone()),

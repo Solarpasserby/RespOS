@@ -30,6 +30,7 @@ pub struct Ext4Inode {
     ty: Ext4InodeTypes,
     times: Mutex<Option<InodeTimes>>,
     mode_override: Mutex<Option<u32>>,
+    nlink_override: Mutex<Option<u32>>,
     /// 共享页缓存，挂载在 inode 上，同一 inode 的所有 File 共享
     page_cache: Arc<PageCache>,
 }
@@ -51,6 +52,7 @@ impl Ext4Inode {
             ty,
             times: Mutex::new(None),
             mode_override: Mutex::new(None),
+            nlink_override: Mutex::new(None),
             page_cache: PageCache::new(0),
         }
     }
@@ -330,6 +332,11 @@ impl Ext4Inode {
     fn set_cached_mode(&self, mode: u32) {
         *self.mode_override.lock() = Some(mode & 0o7777);
     }
+
+    fn bump_cached_nlink(&self) {
+        let mut nlink = self.nlink_override.lock();
+        *nlink = Some(nlink.unwrap_or(1).saturating_add(1));
+    }
 }
 
 impl InodeOp for Ext4Inode {
@@ -388,12 +395,14 @@ impl InodeOp for Ext4Inode {
 
         let times = self.cached_times(atime, mtime, ctime);
 
+        let nlink = self.nlink_override.lock().unwrap_or(1);
+
         Ok(KStat {
             dev: 0,
             size,
             ty,
             ino,
-            nlink: 1,
+            nlink,
             uid,
             gid,
             rdev: 0,
@@ -507,19 +516,21 @@ impl InodeOp for Ext4Inode {
     }
 
     fn set_mode(&self, path: &str, mode: u32) -> SysResult {
+        self.set_cached_mode(mode);
+        let mut cached_times = self.times.lock();
+        if let Some(mut times) = *cached_times {
+            times.ctime = Self::now_timespec();
+            *cached_times = Some(times);
+        }
+
         if self.node_type() == InodeType::Directory || path.starts_with("/tmp/LTP_") {
-            self.set_cached_mode(mode);
-            let mut cached_times = self.times.lock();
-            if let Some(mut times) = *cached_times {
-                times.ctime = Self::now_timespec();
-                *cached_times = Some(times);
-            }
             return Ok(());
         }
+        drop(cached_times);
 
         let _guard = EXT4_OP_LOCK.lock();
         let c_path = CString::new(path).map_err(|_| Errno::EINVAL)?;
-        let ret = unsafe { bindings::ext4_mode_set(c_path.as_ptr(), mode & 0o7777) };
+        let ret = unsafe { bindings::ext4_mode_set(c_path.as_ptr(), mode & 0o777) };
         if ret != 0 {
             return Err(Self::map_lwext4_err(ret));
         }
@@ -635,7 +646,9 @@ impl InodeOp for Ext4Inode {
                         .map_err(Self::map_lwext4_err)?;
                     new_file.file_close().map_err(Self::map_lwext4_err)?;
                 }
-                Ext4InodeTypes::EXT4_DE_FIFO => {
+                Ext4InodeTypes::EXT4_DE_FIFO
+                | Ext4InodeTypes::EXT4_DE_CHRDEV
+                | Ext4InodeTypes::EXT4_DE_BLKDEV => {
                     new_file
                         .file_open(
                             &path,
@@ -681,6 +694,7 @@ impl InodeOp for Ext4Inode {
         // }
 
         Self::file_link(old_path, &bare_dentry.abs_path)?;
+        self.bump_cached_nlink();
         Ok(())
     }
 

@@ -13,6 +13,8 @@ pub enum Errno {
     EINTR = 4,
     /// 输入输出错误，常用于底层块设备或文件系统读写失败。
     EIO = 5,
+    /// 没有这个设备或地址。
+    ENXIO = 6,
     /// 参数列表过长。
     E2BIG = 7,
     /// 可执行文件格式错误。
@@ -33,6 +35,8 @@ pub enum Errno {
     EBUSY = 16,
     /// 文件已经存在。
     EEXIST = 17,
+    /// 跨设备链接。
+    EXDEV = 18,
     /// 没有这个设备。
     ENODEV = 19,
     /// 路径中的某一项不是目录。
@@ -95,6 +99,7 @@ impl Errno {
             Errno::ESRCH => "No such process",
             Errno::EINTR => "Interrupted system call",
             Errno::EIO => "Input/output error",
+            Errno::ENXIO => "No such device or address",
             Errno::E2BIG => "Argument list too long",
             Errno::ENOEXEC => "Exec format error",
             Errno::EBADF => "Bad file descriptor",
@@ -105,6 +110,7 @@ impl Errno {
             Errno::EFAULT => "Bad address",
             Errno::EBUSY => "Device or resource busy",
             Errno::EEXIST => "File exists",
+            Errno::EXDEV => "Cross-device link",
             Errno::ENODEV => "No such device",
             Errno::ENOTDIR => "Not a directory",
             Errno::EISDIR => "Is a directory",

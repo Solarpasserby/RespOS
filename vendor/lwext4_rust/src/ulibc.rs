@@ -80,6 +80,7 @@ struct MemoryControlBlock {
     size: usize,
 }
 const CTRL_BLK_SIZE: usize = core::mem::size_of::<MemoryControlBlock>();
+const MALLOC_ALIGN: usize = 16;
 
 /// Allocate size bytes memory and return the memory address.
 #[linkage = "weak"]
@@ -91,13 +92,18 @@ pub extern "C" fn malloc(size: c_size_t) -> *mut c_void {
         warn!("malloc size overflow: {}", size);
         return core::ptr::null_mut();
     };
-    let Ok(layout) = Layout::from_size_align(alloc_size, 8) else {
+    let Ok(layout) = Layout::from_size_align(alloc_size, MALLOC_ALIGN) else {
         warn!("malloc invalid layout: {}", alloc_size);
         return core::ptr::null_mut();
     };
     unsafe {
         let ptr = alloc(layout);
-        assert!(!ptr.is_null(), "malloc failed");
+        assert!(
+            !ptr.is_null(),
+            "malloc failed: requested {} bytes, alloc_size {}",
+            size,
+            alloc_size
+        );
 
         let ptr = ptr.cast::<MemoryControlBlock>();
         ptr.write(MemoryControlBlock { size });
@@ -124,7 +130,7 @@ pub extern "C" fn free(ptr: *mut c_void) {
             warn!("free size overflow: {}", size);
             return;
         };
-        let Ok(layout) = Layout::from_size_align(alloc_size, 8) else {
+        let Ok(layout) = Layout::from_size_align(alloc_size, MALLOC_ALIGN) else {
             warn!("free invalid layout: {}", alloc_size);
             return;
         };

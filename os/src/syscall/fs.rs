@@ -2,6 +2,7 @@
 
 use super::{Errno, SysResult};
 use crate::config::{PAGE_SIZE, PIPE_BUFFER_SIZE};
+use crate::fs::dev::{LoopControlInode, LoopInode};
 use crate::fs::mount::{do_mount, do_umount2};
 use crate::fs::vfs::InodeType;
 use crate::fs::{
@@ -30,7 +31,7 @@ const AT_STATX_SYNC_TYPE: usize = 0x6000;
 // 使用 mm 实现的 `copy_cstr_from_user`, `copy_from_user`, `copy_to_user` 来访问用户空间的数据
 
 // TODO: write 和 read 借助堆上分配的空间中转数据，有额外开销，须优化
-const IO_CHUNK_SIZE: usize = PAGE_SIZE;
+const IO_CHUNK_SIZE: usize = PAGE_SIZE * 16;
 
 /// 系统调用 sys-read
 pub fn sys_read(fd: usize, buf: *mut u8, len: usize) -> SysResult<usize> {
@@ -523,12 +524,13 @@ pub fn sys_fchmodat(dirfd: isize, path: *const u8, mode: usize) -> SysResult<usi
 
 fn do_fchmodat(dirfd: isize, path: *const u8, mode: usize, flags: usize) -> SysResult<usize> {
     const FCHMODAT_ALLOWED_FLAGS: usize = AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH;
+    const S_IFMT: usize = 0o170000;
 
-    if mode & !0o7777 != 0 || flags & !FCHMODAT_ALLOWED_FLAGS != 0 {
+    if mode & !(S_IFMT | 0o7777) != 0 || flags & !FCHMODAT_ALLOWED_FLAGS != 0 {
         return Err(Errno::EINVAL);
     }
 
-    let mode = mode as u32;
+    let mode = (mode & 0o7777) as u32;
     let path = copy_cstr_from_user(path)?;
     if path.is_empty() {
         if flags & AT_EMPTY_PATH == 0 {
@@ -669,6 +671,29 @@ pub fn sys_ftruncate(fd: usize, length: isize) -> SysResult<usize> {
     }
     let file = file.as_any().downcast_ref::<File>().ok_or(Errno::EINVAL)?;
     file.truncate(length as usize)
+}
+
+pub fn sys_fallocate(fd: usize, mode: usize, offset: isize, len: isize) -> SysResult<usize> {
+    if offset < 0 || len <= 0 {
+        return Err(Errno::EINVAL);
+    }
+    if mode != 0 {
+        return Err(Errno::EOPNOTSUPP);
+    }
+
+    let end = (offset as usize)
+        .checked_add(len as usize)
+        .ok_or(Errno::EINVAL)?;
+    let task = current_task().expect("[kernel] current task is None.");
+    let file = task.get_fd_entry(fd)?.file;
+    if !file.writable() {
+        return Err(Errno::EBADF);
+    }
+    let file = file.as_any().downcast_ref::<File>().ok_or(Errno::EINVAL)?;
+    if file.get_stat()?.size < end {
+        file.truncate(end)?;
+    }
+    Ok(0)
 }
 
 /// 系统调用 sys-faccessat
@@ -871,8 +896,26 @@ pub fn sys_ioctl(fd: usize, request: usize, arg: usize) -> SysResult<usize> {
             copy_to_user(arg as *mut RtcTime, &rtc_time as *const RtcTime, 1)?;
             Ok(0)
         }
-        _ => Err(Errno::ENOTTY),
+        _ => device_ioctl(&fd_entry.file, request, arg),
     }
+}
+
+fn device_ioctl(
+    file: &alloc::sync::Arc<dyn FileOp>,
+    request: usize,
+    arg: usize,
+) -> SysResult<usize> {
+    let Some(file) = file.as_any().downcast_ref::<File>() else {
+        return Err(Errno::ENOTTY);
+    };
+    let inode = file.inode();
+    if let Some(loop_control) = inode.as_any().downcast_ref::<LoopControlInode>() {
+        return loop_control.ioctl(request, arg);
+    }
+    if let Some(loop_device) = inode.as_any().downcast_ref::<LoopInode>() {
+        return loop_device.ioctl(request, arg);
+    }
+    Err(Errno::ENOTTY)
 }
 
 fn is_rtc_file(file: &alloc::sync::Arc<dyn FileOp>) -> bool {
@@ -1053,11 +1096,15 @@ pub fn sys_mkdirat(dirfd: isize, path: *const u8, mode: usize) -> SysResult<usiz
 pub fn sys_mknodat(dirfd: isize, path: *const u8, mode: usize, _dev: usize) -> SysResult<usize> {
     const S_IFMT: usize = 0o170000;
     const S_IFIFO: usize = 0o010000;
+    const S_IFCHR: usize = 0o020000;
+    const S_IFBLK: usize = 0o060000;
     const S_IFREG: usize = 0o100000;
 
     let path = copy_cstr_from_user(path)?;
     match mode & S_IFMT {
         S_IFIFO => filename_create(dirfd, path.as_str(), InodeType::Fifo, mode)?,
+        S_IFCHR => filename_create(dirfd, path.as_str(), InodeType::CharDevice, mode)?,
+        S_IFBLK => filename_create(dirfd, path.as_str(), InodeType::BlockDevice, mode)?,
         0 | S_IFREG => filename_create(dirfd, path.as_str(), InodeType::Regular, mode)?,
         _ => return Err(Errno::EINVAL),
     }

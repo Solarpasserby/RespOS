@@ -5,6 +5,7 @@
 //! - `null`  — `/dev/null`，丢弃写入，读取始终返回 EOF
 //! - `zero`  — `/dev/zero`，读取返回零字节，写入丢弃
 
+mod loop_device;
 mod null;
 mod rtc;
 mod shm;
@@ -18,9 +19,13 @@ const ZERO_INO: u64 = 3;
 const SHM_DIR_INO: u64 = 4;
 const MISC_DIR_INO: u64 = 5;
 const RTC_INO: u64 = 6;
+const LOOP_CONTROL_INO: u64 = 7;
+const LOOP0_INO: u64 = 8;
 const NULL_RDEV: u64 = (1 << 8) | 3;
 const ZERO_RDEV: u64 = (1 << 8) | 5;
 const RTC_RDEV: u64 = (254 << 8) | 0;
+const LOOP_CONTROL_RDEV: u64 = (10 << 8) | 237;
+const LOOP0_RDEV: u64 = 7 << 8;
 
 use super::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64, SuperBlockOp};
 use super::{KStat, Statfs64};
@@ -28,6 +33,7 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::any::Any;
+pub use loop_device::{LoopControlInode, LoopInode};
 use null::NullInode;
 use rtc::RtcInode;
 use shm::shm_dir;
@@ -64,6 +70,8 @@ impl InodeOp for DevDirInode {
             "zero" => Ok(Arc::new(ZeroInode)),
             "shm" => Ok(shm_dir()),
             "misc" => Ok(Arc::new(MiscDirInode)),
+            "loop-control" => Ok(Arc::new(LoopControlInode)),
+            "loop0" => Ok(Arc::new(LoopInode::new(0))),
             _ => Err(Errno::ENOENT),
         }
     }
@@ -76,6 +84,13 @@ impl InodeOp for DevDirInode {
             entry(ZERO_INO, InodeType::CharDevice, 4, b"zero\0"),
             entry(SHM_DIR_INO, InodeType::Directory, 5, b"shm\0"),
             entry(MISC_DIR_INO, InodeType::Directory, 6, b"misc\0"),
+            entry(
+                LOOP_CONTROL_INO,
+                InodeType::CharDevice,
+                7,
+                b"loop-control\0",
+            ),
+            entry(LOOP0_INO, InodeType::BlockDevice, 8, b"loop0\0"),
         ])
     }
 

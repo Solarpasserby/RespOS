@@ -17,6 +17,7 @@ const SYSCALL_MOUNT: usize = 40;
 const SYSCALL_STATFS: usize = 43;
 const SYSCALL_FSTATFS: usize = 44;
 const SYSCALL_FTRUNCATE: usize = 46;
+const SYSCALL_FALLOCATE: usize = 47;
 const SYSCALL_FACCESSAT: usize = 48;
 const SYSCALL_CHDIR: usize = 49;
 const SYSCALL_FCHMODAT: usize = 53;
@@ -64,6 +65,16 @@ const SYSCALL_RT_SIGTIMEDWAIT: usize = 137;
 pub const SYSCALL_SIGRETURN: usize = 139;
 const SYSCALL_SETPRIORITY: usize = 140;
 const SYSCALL_REBOOT: usize = 142;
+const SYSCALL_SETREGID: usize = 143;
+const SYSCALL_SETGID: usize = 144;
+const SYSCALL_SETREUID: usize = 145;
+const SYSCALL_SETUID: usize = 146;
+const SYSCALL_SETRESUID: usize = 147;
+const SYSCALL_GETRESUID: usize = 148;
+const SYSCALL_SETRESGID: usize = 149;
+const SYSCALL_GETRESGID: usize = 150;
+const SYSCALL_SETFSUID: usize = 151;
+const SYSCALL_SETFSGID: usize = 152;
 const SYSCALL_TIMES: usize = 153;
 const SYSCALL_SETPGID: usize = 154;
 const SYSCALL_UNAME: usize = 160;
@@ -104,6 +115,7 @@ const SYSCALL_PRLIMIT64: usize = 261;
 const SYSCALL_RENAMEAT2: usize = 276;
 const SYSCALL_GETRANDOM: usize = 278;
 const SYSCALL_STATX: usize = 291;
+const SYSCALL_FACCESSAT2: usize = 439;
 
 mod errno;
 mod fs;
@@ -156,16 +168,13 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         ),
         SYSCALL_STATFS => sys_statfs(args[0] as *const u8, args[1] as *mut crate::fs::Statfs64),
         SYSCALL_FTRUNCATE => sys_ftruncate(args[0], args[1] as isize),
-        SYSCALL_FACCESSAT => {
+        SYSCALL_FALLOCATE => sys_fallocate(args[0], args[1], args[2] as isize, args[3] as isize),
+        SYSCALL_FACCESSAT => sys_faccessat(args[0] as isize, args[1] as *const u8, args[2], 0),
+        SYSCALL_FACCESSAT2 => {
             sys_faccessat(args[0] as isize, args[1] as *const u8, args[2], args[3])
         }
         SYSCALL_CHDIR => sys_chdir(args[0] as *const u8),
-        SYSCALL_MKNODAT => sys_mknodat(
-            args[0] as isize,
-            args[1] as *const u8,
-            args[2],
-            args[3],
-        ),
+        SYSCALL_MKNODAT => sys_mknodat(args[0] as isize, args[1] as *const u8, args[2], args[3]),
         SYSCALL_FCHMODAT => sys_fchmodat(args[0] as isize, args[1] as *const u8, args[2]),
         SYSCALL_FCHOWNAT => sys_fchownat(
             args[0] as isize,
@@ -260,6 +269,24 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         SYSCALL_SIGRETURN => sys_sigreturn(),
         SYSCALL_SETPRIORITY => sys_setpriority(args[0], args[1], args[2] as isize),
         SYSCALL_REBOOT => sys_reboot(),
+        SYSCALL_SETREGID => sys_setregid(args[0], args[1]),
+        SYSCALL_SETGID => sys_setgid(args[0]),
+        SYSCALL_SETREUID => sys_setreuid(args[0], args[1]),
+        SYSCALL_SETUID => sys_setuid(args[0]),
+        SYSCALL_SETRESUID => sys_setresuid(args[0], args[1], args[2]),
+        SYSCALL_GETRESUID => sys_getresuid(
+            args[0] as *mut u32,
+            args[1] as *mut u32,
+            args[2] as *mut u32,
+        ),
+        SYSCALL_SETRESGID => sys_setresgid(args[0], args[1], args[2]),
+        SYSCALL_GETRESGID => sys_getresgid(
+            args[0] as *mut u32,
+            args[1] as *mut u32,
+            args[2] as *mut u32,
+        ),
+        SYSCALL_SETFSUID => sys_setfsuid(args[0]),
+        SYSCALL_SETFSGID => sys_setfsgid(args[0]),
         SYSCALL_TIMES => sys_times(args[0] as *mut Tms),
         SYSCALL_SETPGID => sys_setpgid(args[0], args[1]),
         SYSCALL_UNAME => sys_uname(args[0] as *mut UtsName),

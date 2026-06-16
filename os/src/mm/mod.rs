@@ -78,7 +78,11 @@ pub fn copy_cstr_from_user(ptr: *const u8) -> SysResult<String> {
         cur += 1;
     }
 
-    Err(Errno::EFAULT)
+    if cur == (ptr as usize).saturating_add(USER_CSTR_MAX_LEN) {
+        Err(Errno::ENAMETOOLONG)
+    } else {
+        Err(Errno::EFAULT)
+    }
 }
 
 pub fn extract_cstrings_from_user(mut ptr: *const usize) -> SysResult<Vec<String>> {
