@@ -70,7 +70,9 @@ pub fn copy_cstr_from_user(ptr: *const u8) -> SysResult<String> {
     let mut ret = String::new();
 
     while cur < max_end {
-        let ch = unsafe { *(cur as *const u8) };
+        let mut byte = [0u8; 1];
+        copy_user_bytes_to_kernel(cur, &mut byte)?;
+        let ch = byte[0];
         if ch == 0 {
             return Ok(ret);
         }

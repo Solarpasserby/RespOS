@@ -1,11 +1,46 @@
-#!/usr/bin/env sh
-set -eu
+#!/usr/bin/env bash
+set -euo pipefail
 
 image="${1:-img/sdcard-rv.img}"
+grader_img_dir="${COURSEGRADER_TESTDATA:-/coursegrader/testdata}"
 
-if [ ! -f "$image" ]; then
+prepare_image() {
+    local image="$1"
+    local image_name
+    local image_dir
+
+    if [[ -f "$image" ]]; then
+        return
+    fi
+
+    image_name="$(basename "$image")"
+    image_dir="$(dirname "$image")"
+    mkdir -p "$image_dir"
+
+    if [[ -f "${grader_img_dir}/${image_name}" ]]; then
+        cp "${grader_img_dir}/${image_name}" "$image"
+    elif [[ -f "${grader_img_dir}/${image_name}.gz" ]]; then
+        gzip -dc "${grader_img_dir}/${image_name}.gz" > "$image"
+    elif [[ -f "${grader_img_dir}/${image_name}.xz" ]]; then
+        xz -dc "${grader_img_dir}/${image_name}.xz" > "$image"
+    fi
+}
+
+prepare_image "$image"
+
+if [[ ! -f "$image" ]]; then
     echo "image not found: $image" >&2
+    echo "also tried: ${grader_img_dir}/$(basename "$image")[.gz|.xz]" >&2
     exit 1
+fi
+
+if command -v e2fsck >/dev/null 2>&1; then
+    status=0
+    e2fsck -fy "$image" >/dev/null || status=$?
+    if (( status > 1 )); then
+        echo "e2fsck failed for $image with status $status" >&2
+        exit "$status"
+    fi
 fi
 
 tmp_passwd="/tmp/respos-ltp-passwd.$$"
@@ -21,7 +56,13 @@ printf 'root:x:0:\nnogroup:x:65534:\nnobody:x:65534:\n' > "$tmp_group"
 printf '#!/bin/sh\nexit 0\n' > "$tmp_mkfs"
 
 has_path() {
-    ! debugfs -R "stat $1" "$image" 2>&1 | grep -q 'File not found'
+    local output
+
+    if ! output="$(debugfs -R "stat $1" "$image" 2>&1)"; then
+        echo "$output" >&2
+        exit 1
+    fi
+    [[ "$output" != *"File not found"* ]]
 }
 
 if ! has_path /etc; then

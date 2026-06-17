@@ -6,7 +6,9 @@ use super::register::{badv, ecfg, eentry, estat};
 use super::{sbi::clear_timer_interrupt, timer::set_next_ti_trigger};
 use crate::signal::{SiField, Sig, SigInfo};
 use crate::syscall::*;
-use crate::task::{current_task, exit_and_run_next, handle_signals, yield_current_task};
+use crate::task::{
+    current_task, exit_and_run_next, exit_by_signal_and_run_next, handle_signals, yield_current_task,
+};
 use core::arch::global_asm;
 
 pub use context::TrapContext;
@@ -77,10 +79,12 @@ fn handle_user_page_fault(cx: &TrapContext, exception: estat::Exception) {
             memory_set.handle_page_fault(page_fault_cause(exception), badv)
         });
     if result.is_err() {
+        let task = current_task().expect("[kernel] current task is None.");
+        if task.op_sig_pending(|pending| pending.mask.contain_signal(Sig::SIGSEGV)) {
+            exit_by_signal_and_run_next(Sig::SIGSEGV.raw());
+        }
         let siginfo = SigInfo::new(Sig::SIGSEGV.raw(), SigInfo::KERNEL, SiField::None);
-        current_task()
-            .expect("[kernel] current task is None.")
-            .receive_siginfo(siginfo, true);
+        task.receive_siginfo(siginfo, true);
     }
 }
 
