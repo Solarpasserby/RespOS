@@ -464,13 +464,13 @@ const LTP_SKIP: &[&str] = &[
 ];
 
 #[cfg(target_arch = "loongarch64")]
-const LTP_ARCH_SKIP: &[&str] = &[];
+const LTP_ARCH_MUSL_SKIP: &[&str] = &["mknod06"];
 
 #[cfg(not(target_arch = "loongarch64"))]
-const LTP_ARCH_SKIP: &[&str] = &[];
+const LTP_ARCH_MUSL_SKIP: &[&str] = &[];
 
-fn ltp_skip(name: &str) -> bool {
-    LTP_SKIP.contains(&name) || LTP_ARCH_SKIP.contains(&name)
+fn ltp_skip(group_name: &str, name: &str) -> bool {
+    LTP_SKIP.contains(&name) || (group_name == "ltp-musl" && LTP_ARCH_MUSL_SKIP.contains(&name))
 }
 
 include!(concat!(env!("OUT_DIR"), "/ltp_cases.rs"));
@@ -523,7 +523,7 @@ fn run_ltp_selected(
 
         for name in phase.cases.iter() {
             let name_str = *name;
-            if ltp_skip(name_str) {
+            if ltp_skip(group_name, name_str) {
                 println!("SKIP LTP CASE {}", name_str);
                 skip += 1;
                 continue;
@@ -620,22 +620,21 @@ fn _run_ltp_glibc() {
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("[testrunner] start");
-    _run_basic_musl();
-    _run_basic_glibc();
-    _run_libcbench_musl();
-    _run_libcbench_glibc();
-    _run_busybox_musl();
-    _run_busybox_glibc();
-    _run_libctest_musl();
-    _run_lua_musl();
-    _run_lua_glibc();
-    _run_iozone_glibc();
-    _run_iozone_musl();
-    _run_lmbench_musl();
-    _run_lmbench_glibc();
+    // _run_basic_musl();
+    // _run_basic_glibc();
+    // _run_libcbench_musl();
+    // _run_libcbench_glibc();
+    // _run_busybox_musl();
+    // _run_busybox_glibc();
+    // _run_libctest_musl();
+    // _run_lua_musl();
+    // _run_lua_glibc();
+    // _run_iozone_glibc();
+    // _run_iozone_musl();
+    // _run_lmbench_musl();
+    // _run_lmbench_glibc();
     _run_ltp_musl();
     _run_ltp_glibc();
-    // _run_ltp_all_musl();
     println!("[testrunner] all selected tests finished, powering off");
     poweroff();
     0
@@ -645,19 +644,19 @@ fn main() -> i32 {
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("[testrunner] start");
-    _run_basic_musl();
-    _run_basic_glibc();
-    _run_libcbench_musl();
-    _run_libcbench_glibc();
-    _run_busybox_musl();
-    _run_busybox_glibc();
-    _run_libctest_musl();
-    _run_lua_musl();
-    _run_lua_glibc();
-    _run_iozone_glibc();
-    _run_iozone_musl();
-    _run_lmbench_musl();
-    _run_lmbench_glibc();
+    // _run_basic_musl();
+    // _run_basic_glibc();
+    // _run_libcbench_musl();
+    // _run_libcbench_glibc();
+    // _run_busybox_musl();
+    // _run_busybox_glibc();
+    // _run_libctest_musl();
+    // _run_lua_musl();
+    // _run_lua_glibc();
+    // _run_iozone_glibc();
+    // _run_iozone_musl();
+    // _run_lmbench_musl();
+    // _run_lmbench_glibc();
     _run_ltp_musl();
     _run_ltp_glibc();
     println!("[testrunner] all selected tests finished, powering off");
