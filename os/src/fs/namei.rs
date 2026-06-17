@@ -4,7 +4,7 @@ use super::Path;
 use super::dentry_cache::{insert_dentry_cache, lookup_dentry_cache, remove_dentry_cache_tree};
 use super::mount::{VfsMount, get_mount_by_dentry, get_mount_by_vfsmount, root_path};
 use super::vfs::{Dentry, InodeType};
-use super::{File, OpenFlags};
+use super::{File, OpenFlags, TmpFileMeta};
 use crate::fs::ext4::Ext4Inode;
 use crate::syscall::{Errno, SysResult};
 use crate::task::current_task;
@@ -204,6 +204,10 @@ fn inode_allows_write(dentry: &Arc<Dentry>) -> SysResult<bool> {
     inode_allows_perm(dentry, 0o2)
 }
 
+fn inode_allows_read(dentry: &Arc<Dentry>) -> SysResult<bool> {
+    inode_allows_perm(dentry, 0o4)
+}
+
 fn check_dir_write_permission(dentry: &Arc<Dentry>) -> SysResult {
     if inode_allows_write(dentry)? {
         Ok(())
@@ -240,6 +244,37 @@ pub fn check_dir_search_permission(dentry: &Arc<Dentry>) -> SysResult {
     }
 }
 
+fn check_open_permission(dentry: &Arc<Dentry>, flags: OpenFlags) -> SysResult {
+    let inode = dentry.get_inode();
+    let ty = inode.node_type();
+    if ty == InodeType::Directory && flags.intersects(OpenFlags::O_WRONLY | OpenFlags::O_RDWR) {
+        return Err(Errno::EISDIR);
+    }
+
+    if flags.contains(OpenFlags::O_NOATIME) {
+        let task = current_task().expect("[kernel] current task is None.");
+        let stat = inode.stat(dentry.abs_path.as_str())?;
+        let fsuid = task.fsuid() as u32;
+        if fsuid != 0 && fsuid != stat.uid {
+            return Err(Errno::EPERM);
+        }
+    }
+
+    if flags.contains(OpenFlags::O_RDWR) {
+        if !inode_allows_read(dentry)? || !inode_allows_write(dentry)? {
+            return Err(Errno::EACCES);
+        }
+    } else if flags.contains(OpenFlags::O_WRONLY) {
+        if !inode_allows_write(dentry)? {
+            return Err(Errno::EACCES);
+        }
+    } else if !inode_allows_read(dentry)? {
+        return Err(Errno::EACCES);
+    }
+
+    Ok(())
+}
+
 fn check_mount_writable(mnt: &Arc<VfsMount>) -> SysResult {
     if mnt.is_readonly() {
         Err(Errno::EROFS)
@@ -263,6 +298,32 @@ fn init_created_owner(
     inode.set_owner(path, task.fsuid() as u32, gid)
 }
 
+fn created_mode(parent: &Arc<Dentry>, requested_mode: usize, ty: InodeType) -> SysResult<u32> {
+    let task = current_task().expect("[kernel] current task is None.");
+    let parent_stat = parent.get_inode().stat(parent.abs_path.as_str())?;
+    let mut mode = (requested_mode & 0o7777) as u32;
+    mode &= !(task.umask() as u32);
+    if ty == InodeType::Regular && parent_stat.mode & 0o2000 != 0 {
+        mode &= !0o2000;
+    }
+    Ok(mode)
+}
+
+fn tmpfile_meta(parent: &Arc<Dentry>, mode: usize) -> SysResult<TmpFileMeta> {
+    let task = current_task().expect("[kernel] current task is None.");
+    let parent_stat = parent.get_inode().stat(parent.abs_path.as_str())?;
+    let gid = if parent_stat.mode & 0o2000 != 0 {
+        parent_stat.gid
+    } else {
+        task.fsgid() as u32
+    };
+    Ok(TmpFileMeta {
+        mode: created_mode(parent, mode, InodeType::Regular)?,
+        uid: task.fsuid() as u32,
+        gid,
+    })
+}
+
 pub fn open_last_lookups(nd: &mut Nameidata, flags: usize, mode: usize) -> SysResult<Arc<File>> {
     let flags = OpenFlags::from(flags);
 
@@ -274,7 +335,8 @@ pub fn open_last_lookups(nd: &mut Nameidata, flags: usize, mode: usize) -> SysRe
             if inode.node_type() != InodeType::Directory {
                 return Err(Errno::ENOTDIR);
             }
-            return Ok(Arc::new(File::new_tmpfile(path, inode, flags)));
+            let meta = tmpfile_meta(&nd.dentry, mode)?;
+            return Ok(Arc::new(File::new_tmpfile(path, inode, flags, meta)));
         }
         return Ok(Arc::new(File::new(path, inode, flags)));
     }
@@ -295,10 +357,12 @@ pub fn open_last_lookups(nd: &mut Nameidata, flags: usize, mode: usize) -> SysRe
                     if inode.node_type() != InodeType::Directory {
                         return Err(Errno::ENOTDIR);
                     }
+                    let meta = tmpfile_meta(&dentry, mode)?;
                     return Ok(Arc::new(File::new_tmpfile(
                         Path::new(nd.mnt.clone(), dentry),
                         inode,
                         flags,
+                        meta,
                     )));
                 }
                 if flags.contains(OpenFlags::O_CREATE | OpenFlags::O_EXCL) {
@@ -314,6 +378,7 @@ pub fn open_last_lookups(nd: &mut Nameidata, flags: usize, mode: usize) -> SysRe
                 {
                     return Err(Errno::ENOTDIR);
                 }
+                check_open_permission(&dentry, flags)?;
                 // TODO: 此处默认 dentry 不是负目录项，在引入缓存后需修改
                 dentry
             }
@@ -331,7 +396,10 @@ pub fn open_last_lookups(nd: &mut Nameidata, flags: usize, mode: usize) -> SysRe
                     InodeType::Regular,
                 )?;
                 let child_path = child_abs_path(&nd.dentry, name.as_str());
-                let _ = inode.set_mode(child_path.as_str(), (mode & 0o7777) as u32);
+                let _ = inode.set_mode(
+                    child_path.as_str(),
+                    created_mode(&nd.dentry, mode, InodeType::Regular)?,
+                );
                 let _ = init_created_owner(&nd.dentry, &inode, child_path.as_str());
                 install_child_dentry(&nd.dentry, name.as_str(), inode.clone())
             }
@@ -367,12 +435,14 @@ pub fn path_open(dirfd: isize, path: &str, flags: usize, mode: usize) -> SysResu
             if inode.node_type() != InodeType::Directory {
                 return Err(Errno::ENOTDIR);
             }
-            return Ok(Arc::new(File::new_tmpfile(path, inode, open_flags)));
+            let meta = tmpfile_meta(&path.dentry, mode)?;
+            return Ok(Arc::new(File::new_tmpfile(path, inode, open_flags, meta)));
         }
         if open_flags.contains(OpenFlags::O_DIRECTORY) && inode.node_type() != InodeType::Directory
         {
             return Err(Errno::ENOTDIR);
         }
+        check_open_permission(&path.dentry, open_flags)?;
         return Ok(Arc::new(File::new(path, inode, open_flags)));
     }
 
@@ -414,7 +484,7 @@ pub fn filename_create(dirfd: isize, path: &str, ty: InodeType, mode: usize) -> 
             } else {
                 alloc::format!("{}/{}", nd.dentry.abs_path, name)
             };
-            let _ = inode.set_mode(child_path.as_str(), (mode & 0o7777) as u32);
+            let _ = inode.set_mode(child_path.as_str(), created_mode(&nd.dentry, mode, ty)?);
             let _ = init_created_owner(&nd.dentry, &inode, child_path.as_str());
             install_child_dentry(&nd.dentry, name.as_str(), inode);
             Ok(())
@@ -634,6 +704,51 @@ pub fn filename_unlink(dirfd: isize, path: &str, remove_dir: bool) -> SysResult 
     parent.remove_child(name.as_str());
     remove_dentry_cache_tree(&target.abs_path);
     Ok(())
+}
+
+pub fn filename_link_tmpfile(file: &File, newdirfd: isize, newpath: &str) -> SysResult {
+    if newpath.is_empty() {
+        return Err(Errno::ENOENT);
+    }
+    let meta = file.tmpfile_meta().ok_or(Errno::EINVAL)?;
+
+    let mut nd = Nameidata::new_at(newdirfd, newpath)?;
+    link_path_walk(&mut nd)?;
+
+    if nd.path_segments.is_empty() {
+        return Err(Errno::EEXIST);
+    }
+
+    let name = nd.path_segments[nd.depth].clone();
+    if name == "." || name == ".." {
+        return Err(Errno::EEXIST);
+    }
+    check_mount_writable(&nd.mnt)?;
+    check_dir_write_permission(&nd.dentry)?;
+
+    match lookup_dentry(&mut nd) {
+        Ok(_) => Err(Errno::EEXIST),
+        Err(Errno::ENOENT) => {
+            let parent_inode = nd.dentry.get_inode();
+            let inode =
+                parent_inode.create(&nd.dentry.abs_path, name.as_str(), InodeType::Regular)?;
+            let child_path = child_abs_path(&nd.dentry, name.as_str());
+            let _ = inode.set_mode(child_path.as_str(), meta.mode);
+            let _ = inode.set_owner(child_path.as_str(), meta.uid, meta.gid);
+            let data = file.read_all()?;
+            let mut offset = 0usize;
+            while offset < data.len() {
+                let written = inode.write_at(child_path.as_str(), offset, &data[offset..])?;
+                if written == 0 {
+                    return Err(Errno::EIO);
+                }
+                offset += written;
+            }
+            install_child_dentry(&nd.dentry, name.as_str(), inode);
+            Ok(())
+        }
+        Err(err) => Err(err),
+    }
 }
 
 /// 根据两个路径创建硬链接。

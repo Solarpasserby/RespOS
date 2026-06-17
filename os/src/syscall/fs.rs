@@ -8,11 +8,13 @@ use crate::fs::vfs::InodeType;
 use crate::fs::{
     AT_EMPTY_PATH, AT_FDCWD, AT_NO_AUTOMOUNT, AT_SYMLINK_NOFOLLOW, FdEntry, File, FileOp, KStat,
     OpenFlags, Pipe, Stat, Statfs64, check_dir_search_permission, filename_create, filename_link,
-    filename_lookup, filename_lookup_no_follow_final_symlink, filename_rename, filename_symlink,
-    filename_unlink, init_fdset, make_pipe, path_open,
+    filename_link_tmpfile, filename_lookup, filename_lookup_no_follow_final_symlink,
+    filename_rename, filename_symlink, filename_unlink, init_fdset, make_pipe, open_named_fifo,
+    path_open,
 };
 use crate::mm::{
-    VPNRange, VirtAddr, check_user_writable, copy_cstr_from_user, copy_from_user, copy_to_user,
+    VPNRange, VirtAddr, check_user_readable, check_user_writable, copy_cstr_from_user,
+    copy_from_user, copy_to_user,
 };
 use crate::signal::sig_struct::{Sig, SigSet};
 use crate::signal::{SiField, SigInfo};
@@ -219,22 +221,58 @@ pub struct IoVec {
     pub len: usize,
 }
 
-pub fn sys_writev(fd: usize, iov: *const IoVec, iovcnt: usize) -> SysResult<usize> {
+fn read_iovecs(iov: *const IoVec, iovcnt: usize) -> SysResult<alloc::vec::Vec<IoVec>> {
     const IOV_MAX: usize = 1024;
     if iovcnt > IOV_MAX {
         return Err(Errno::EINVAL);
     }
+    if iovcnt == 0 {
+        return Ok(alloc::vec::Vec::new());
+    }
+    check_user_readable(iov, iovcnt)?;
 
-    let mut total: usize = 0;
+    let mut items = alloc::vec::Vec::new();
+    let mut total = 0usize;
     for idx in 0..iovcnt {
         let mut item = IoVec {
             base: core::ptr::null_mut(),
             len: 0,
         };
-        let iov_ret = unsafe { copy_from_user(&mut item as *mut IoVec, iov.add(idx), 1) };
-        if let Err(err) = iov_ret {
-            return if total > 0 { Ok(total) } else { Err(err) };
+        unsafe {
+            copy_from_user(&mut item as *mut IoVec, iov.add(idx), 1)?;
         }
+        total = total.checked_add(item.len).ok_or(Errno::EINVAL)?;
+        if total > isize::MAX as usize {
+            return Err(Errno::EINVAL);
+        }
+        items.push(item);
+    }
+    Ok(items)
+}
+
+fn check_iovec_buffers(items: &[IoVec], perm: IovecBufferPerm) -> SysResult {
+    for item in items {
+        if item.len == 0 {
+            continue;
+        }
+        match perm {
+            IovecBufferPerm::Read => check_user_readable(item.base as *const u8, item.len)?,
+            IovecBufferPerm::Write => check_user_writable(item.base, item.len)?,
+        }
+    }
+    Ok(())
+}
+
+enum IovecBufferPerm {
+    Read,
+    Write,
+}
+
+pub fn sys_writev(fd: usize, iov: *const IoVec, iovcnt: usize) -> SysResult<usize> {
+    let items = read_iovecs(iov, iovcnt)?;
+    check_iovec_buffers(&items, IovecBufferPerm::Read)?;
+    let mut total: usize = 0;
+    for item in items {
         if item.len == 0 {
             continue;
         }
@@ -251,21 +289,10 @@ pub fn sys_writev(fd: usize, iov: *const IoVec, iovcnt: usize) -> SysResult<usiz
 }
 
 pub fn sys_readv(fd: usize, iov: *const IoVec, iovcnt: usize) -> SysResult<usize> {
-    const IOV_MAX: usize = 1024;
-    if iovcnt > IOV_MAX {
-        return Err(Errno::EINVAL);
-    }
-
+    let items = read_iovecs(iov, iovcnt)?;
+    check_iovec_buffers(&items, IovecBufferPerm::Write)?;
     let mut total: usize = 0;
-    for idx in 0..iovcnt {
-        let mut item = IoVec {
-            base: core::ptr::null_mut(),
-            len: 0,
-        };
-        let iov_ret = unsafe { copy_from_user(&mut item as *mut IoVec, iov.add(idx), 1) };
-        if let Err(err) = iov_ret {
-            return if total > 0 { Ok(total) } else { Err(err) };
-        }
+    for item in items {
         if item.len == 0 {
             continue;
         }
@@ -286,8 +313,95 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: usize, mode: usize) -> S
     let task = current_task().expect("[kernel] current task is None.");
     let path = copy_cstr_from_user(path)?;
     let file = path_open(dirfd, path.as_str(), flags, mode)?;
+    let file: alloc::sync::Arc<dyn FileOp> = if file.inode().node_type() == InodeType::Fifo {
+        open_named_fifo(file.path().abs_path().as_str(), OpenFlags::from(flags))?
+    } else {
+        file
+    };
     let fd = task.alloc_fd(FdEntry::new(file, flags.into()))?;
     Ok(fd)
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct OpenHow {
+    flags: u64,
+    mode: u64,
+    resolve: u64,
+}
+
+pub fn sys_openat2(
+    dirfd: isize,
+    path: *const u8,
+    how: *const OpenHow,
+    size: usize,
+) -> SysResult<usize> {
+    const OPEN_HOW_SIZE: usize = core::mem::size_of::<OpenHow>();
+    const RESOLVE_NO_XDEV: u64 = 0x01;
+    const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
+    const RESOLVE_NO_SYMLINKS: u64 = 0x04;
+    const RESOLVE_BENEATH: u64 = 0x08;
+    const RESOLVE_IN_ROOT: u64 = 0x10;
+    const RESOLVE_ALLOWED: u64 = RESOLVE_NO_XDEV
+        | RESOLVE_NO_MAGICLINKS
+        | RESOLVE_NO_SYMLINKS
+        | RESOLVE_BENEATH
+        | RESOLVE_IN_ROOT;
+    const O_ACCMODE: u64 = 0o3;
+    const O_CREAT: u64 = 0o100;
+    const O_TMPFILE: u64 = 0o20200000;
+
+    if size < OPEN_HOW_SIZE {
+        return Err(Errno::EINVAL);
+    }
+
+    let mut khow = OpenHow {
+        flags: 0,
+        mode: 0,
+        resolve: 0,
+    };
+    copy_from_user(&mut khow as *mut OpenHow, how, 1)?;
+    if size > OPEN_HOW_SIZE {
+        let extra_len = size - OPEN_HOW_SIZE;
+        let extra_ptr = unsafe { (how as *const u8).add(OPEN_HOW_SIZE) };
+        let mut extra = alloc::vec![0u8; extra_len];
+        copy_from_user(extra.as_mut_ptr(), extra_ptr, extra_len)?;
+        if extra.iter().any(|byte| *byte != 0) {
+            return Err(Errno::E2BIG);
+        }
+    }
+
+    if khow.resolve & !RESOLVE_ALLOWED != 0 || khow.mode & !0o7777 != 0 {
+        return Err(Errno::EINVAL);
+    }
+    let has_create_mode = khow.flags & (O_CREAT | O_TMPFILE) != 0;
+    if !has_create_mode && khow.mode != 0 {
+        return Err(Errno::EINVAL);
+    }
+    if khow.flags & O_ACCMODE == O_ACCMODE {
+        return Err(Errno::EINVAL);
+    }
+
+    let path_str = copy_cstr_from_user(path)?;
+    if khow.resolve & RESOLVE_IN_ROOT != 0 && path_str.starts_with('/') {
+        return Err(Errno::ENOENT);
+    }
+    if khow.resolve & (RESOLVE_NO_XDEV | RESOLVE_BENEATH) != 0
+        && (path_str.starts_with("/proc/") || path_str == "/proc" || path_str.starts_with("../"))
+    {
+        return Err(Errno::EXDEV);
+    }
+    if khow.resolve & RESOLVE_NO_MAGICLINKS != 0 && path_str == "/proc/self/exe" {
+        return Err(Errno::ELOOP);
+    }
+    if khow.resolve & RESOLVE_NO_SYMLINKS != 0 {
+        let target = filename_lookup_no_follow_final_symlink(dirfd, path_str.as_str())?;
+        if target.dentry.get_inode().node_type() == InodeType::SymLink {
+            return Err(Errno::ELOOP);
+        }
+    }
+
+    sys_openat(dirfd, path, khow.flags as usize, khow.mode as usize)
 }
 
 /// 系统调用 sys-close
@@ -1003,6 +1117,9 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SysResult<usize> {
     const F_SETFD: usize = 2;
     const F_GETFL: usize = 3;
     const F_SETFL: usize = 4;
+    const F_GETLK: usize = 5;
+    const F_SETLK: usize = 6;
+    const F_SETLKW: usize = 7;
     const F_DUPFD_CLOEXEC: usize = 1030;
     const F_SETPIPE_SZ: usize = 1031;
     const F_GETPIPE_SZ: usize = 1032;
@@ -1068,6 +1185,7 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SysResult<usize> {
                 Err(Errno::EBADF)
             }
         }
+        F_GETLK | F_SETLK | F_SETLKW => Ok(0),
         _ => Err(Errno::EINVAL),
     }
 }
@@ -1165,6 +1283,21 @@ pub fn sys_linkat(
 
     let oldpath = copy_cstr_from_user(oldpath)?;
     let newpath = copy_cstr_from_user(newpath)?;
+    if flags & AT_SYMLINK_FOLLOW != 0 {
+        if let Some(fd) = oldpath
+            .strip_prefix("/proc/self/fd/")
+            .and_then(|fd| fd.parse::<usize>().ok())
+        {
+            let task = current_task().expect("[kernel] current task is None.");
+            let file = task.get_fd_entry(fd)?.file;
+            if let Some(file) = file.as_any().downcast_ref::<File>() {
+                if file.tmpfile_meta().is_some() {
+                    filename_link_tmpfile(file, newdirfd, newpath.as_str())?;
+                    return Ok(0);
+                }
+            }
+        }
+    }
     filename_link(olddirfd, oldpath.as_str(), newdirfd, newpath.as_str())?;
     Ok(0)
 }
@@ -1673,13 +1806,11 @@ pub fn sys_pwritev(
     iovcnt: usize,
     offset: isize,
 ) -> SysResult<usize> {
-    const IOV_MAX: usize = 1024;
-    if offset < 0 || iovcnt > IOV_MAX {
+    if offset < 0 {
         return Err(Errno::EINVAL);
     }
-    if iovcnt == 0 {
-        return Ok(0);
-    }
+    let items = read_iovecs(iov_ptr, iovcnt)?;
+    check_iovec_buffers(&items, IovecBufferPerm::Read)?;
 
     let task = current_task().expect("[kernel] current task is None.");
     let file = task.get_fd_entry(fd)?.file;
@@ -1692,16 +1823,7 @@ pub fn sys_pwritev(
     file.seek(offset)?; // 定位到写入起点
 
     let mut total: usize = 0;
-    for idx in 0..iovcnt {
-        let mut item = IoVec {
-            base: core::ptr::null_mut(),
-            len: 0,
-        };
-        let iov_ret = unsafe { copy_from_user(&mut item as *mut IoVec, iov_ptr.add(idx), 1) };
-        if let Err(err) = iov_ret {
-            let _ = file.seek(old_offset as isize);
-            return if total > 0 { Ok(total) } else { Err(err) };
-        }
+    for item in items {
         if item.len == 0 {
             continue;
         }

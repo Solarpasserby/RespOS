@@ -16,6 +16,13 @@ pub struct File {
     inner: Mutex<FileInner>,
 }
 
+#[derive(Clone, Copy)]
+pub struct TmpFileMeta {
+    pub mode: u32,
+    pub uid: u32,
+    pub gid: u32,
+}
+
 struct FileInner {
     offset: usize,
     path: Arc<Path>,
@@ -23,6 +30,7 @@ struct FileInner {
     /// 普通文件共享 inode 上的页缓存；tmpfile 使用独立页缓存。
     page_cache: Option<Arc<PageCache>>,
     write_back: bool,
+    tmpfile_meta: Option<TmpFileMeta>,
 }
 
 /// 文件操作 trait
@@ -93,11 +101,17 @@ impl File {
                 flags,
                 page_cache,
                 write_back,
+                tmpfile_meta: None,
             }),
         }
     }
 
-    pub fn new_tmpfile(path: Arc<Path>, inode: Arc<dyn InodeOp>, flags: OpenFlags) -> Self {
+    pub fn new_tmpfile(
+        path: Arc<Path>,
+        inode: Arc<dyn InodeOp>,
+        flags: OpenFlags,
+        meta: TmpFileMeta,
+    ) -> Self {
         let page_cache = Some(PageCache::new(0));
         Self {
             inode,
@@ -107,6 +121,7 @@ impl File {
                 flags,
                 page_cache,
                 write_back: false,
+                tmpfile_meta: Some(meta),
             }),
         }
     }
@@ -173,6 +188,10 @@ impl File {
 
     pub fn path(&self) -> Arc<Path> {
         self.inner.lock().path.clone()
+    }
+
+    pub fn tmpfile_meta(&self) -> Option<TmpFileMeta> {
+        self.inner.lock().tmpfile_meta
     }
 
     pub fn truncate(&self, size: usize) -> SysResult<usize> {
@@ -288,6 +307,13 @@ impl FileOp for File {
             };
             stat.size = pc.len();
             stat.blocks = KStat::blocks_for_size(stat.size as u64);
+            if let Some(meta) = inner.tmpfile_meta {
+                stat.ty = InodeType::Regular;
+                stat.mode = meta.mode;
+                stat.uid = meta.uid;
+                stat.gid = meta.gid;
+                stat.nlink = 0;
+            }
             return Ok(stat);
         }
         self.inode.stat(&path)
@@ -328,6 +354,7 @@ bitflags::bitflags! {
         const O_DIRECTORY = 1 << 16;
         const O_NOFOLLOW = 1 << 17;
         const O_CLOEXEC = 1 << 19;
+        const O_NOATIME = 1 << 18;
         const O_TMPFILE = 0x410000;
     }
 }

@@ -68,6 +68,7 @@ pub struct TaskControlBlock {
     sgid: AtomicUsize,
     fsuid: AtomicUsize,
     fsgid: AtomicUsize,
+    umask: AtomicUsize,
     thread_group: Arc<SpinLock<ThreadGroup>>,
     task_status: SpinLock<TaskStatus>,
     parent: Arc<SpinLock<Option<Weak<TaskControlBlock>>>>,
@@ -133,6 +134,7 @@ impl TaskControlBlock {
             sgid: AtomicUsize::new(0),
             fsuid: AtomicUsize::new(0),
             fsgid: AtomicUsize::new(0),
+            umask: AtomicUsize::new(0o022),
             thread_group: Arc::new(SpinLock::new(ThreadGroup::new())),
             task_status: SpinLock::new(TaskStatus::Ready),
             parent: Arc::new(SpinLock::new(None)),
@@ -209,6 +211,7 @@ impl TaskControlBlock {
             sgid: AtomicUsize::new(0),
             fsuid: AtomicUsize::new(0),
             fsgid: AtomicUsize::new(0),
+            umask: AtomicUsize::new(0o022),
             thread_group: Arc::new(SpinLock::new(ThreadGroup::new())),
             task_status: SpinLock::new(TaskStatus::Ready),
             parent: Arc::new(SpinLock::new(None)),
@@ -359,6 +362,7 @@ impl TaskControlBlock {
             sgid: AtomicUsize::new(self.sgid()),
             fsuid: AtomicUsize::new(self.fsuid()),
             fsgid: AtomicUsize::new(self.fsgid()),
+            umask: AtomicUsize::new(self.umask()),
             thread_group,
             task_status: SpinLock::new(TaskStatus::Ready),
             parent,
@@ -514,6 +518,9 @@ impl TaskControlBlock {
     pub fn fsgid(&self) -> usize {
         self.fsgid.load(Ordering::Relaxed)
     }
+    pub fn umask(&self) -> usize {
+        self.umask.load(Ordering::Relaxed)
+    }
     pub fn status(&self) -> TaskStatus {
         self.task_status.lock().clone()
     }
@@ -616,6 +623,9 @@ impl TaskControlBlock {
     }
     pub fn set_fsgid(&self, gid: usize) {
         self.fsgid.store(gid, Ordering::Relaxed);
+    }
+    pub fn set_umask(&self, mask: usize) -> usize {
+        self.umask.swap(mask & 0o777, Ordering::Relaxed)
     }
     pub fn set_cwd(&self, path: Arc<Path>) {
         *self.cwd.lock() = path;

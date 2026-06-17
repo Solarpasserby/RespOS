@@ -9,8 +9,13 @@ use crate::task::{
     current_task, prepare_current_task_blocked, remove_task, switch_to_next_task, wakeup_task,
     yield_current_task,
 };
-use alloc::{collections::VecDeque, sync::Arc};
+use alloc::{
+    collections::{BTreeMap, VecDeque},
+    string::String,
+    sync::Arc,
+};
 use core::any::Any;
+use lazy_static::lazy_static;
 use spin::Mutex;
 
 const PIPE_INO: u64 = 0x1000;
@@ -25,19 +30,19 @@ pub struct Pipe {
 
 impl Pipe {
     /// return (pipe_read, pipe_write)
-    fn read_end_with_buffer(buffer: Arc<Mutex<PipeRingBuffer>>) -> Self {
+    fn end_with_buffer(buffer: Arc<Mutex<PipeRingBuffer>>, readable: bool, writable: bool) -> Self {
         Self {
-            readable: true,
-            writable: false,
+            readable,
+            writable,
             buffer,
         }
     }
+
+    fn read_end_with_buffer(buffer: Arc<Mutex<PipeRingBuffer>>) -> Self {
+        Self::end_with_buffer(buffer, true, false)
+    }
     fn write_end_with_buffer(buffer: Arc<Mutex<PipeRingBuffer>>) -> Self {
-        Self {
-            readable: false,
-            writable: true,
-            buffer,
-        }
+        Self::end_with_buffer(buffer, false, true)
     }
 
     pub fn read_inner(&self, buf: &mut [u8]) -> usize {
@@ -70,6 +75,106 @@ impl Pipe {
     pub fn available_bytes(&self) -> usize {
         self.buffer.lock().available_bytes()
     }
+}
+
+struct NamedFifo {
+    buffer: Arc<Mutex<PipeRingBuffer>>,
+    readers: usize,
+    writers: usize,
+}
+
+struct NamedFifoEnd {
+    path: String,
+    inner: Pipe,
+}
+
+lazy_static! {
+    static ref NAMED_FIFOS: Mutex<BTreeMap<String, NamedFifo>> = Mutex::new(BTreeMap::new());
+}
+
+impl FileOp for NamedFifoEnd {
+    fn as_any(&self) -> &dyn Any {
+        self.inner.as_any()
+    }
+    fn read<'a>(&'a self, buf: &'a mut [u8]) -> SysResult<usize> {
+        self.inner.read(buf)
+    }
+    fn write<'a>(&'a self, buf: &'a [u8]) -> SysResult<usize> {
+        self.inner.write(buf)
+    }
+    fn seek(&self, offset: isize) -> SysResult<usize> {
+        self.inner.seek(offset)
+    }
+    fn can_seek(&self) -> SysResult {
+        self.inner.can_seek()
+    }
+    fn get_offset(&self) -> usize {
+        self.inner.get_offset()
+    }
+    fn readable(&self) -> bool {
+        self.inner.readable()
+    }
+    fn writable(&self) -> bool {
+        self.inner.writable()
+    }
+    fn read_ready(&self) -> bool {
+        self.inner.read_ready()
+    }
+    fn write_ready(&self) -> bool {
+        self.inner.write_ready()
+    }
+    fn get_flags(&self) -> OpenFlags {
+        self.inner.get_flags()
+    }
+    fn get_stat(&self) -> SysResult<KStat> {
+        self.inner.get_stat()
+    }
+}
+
+impl Drop for NamedFifoEnd {
+    fn drop(&mut self) {
+        let mut table = NAMED_FIFOS.lock();
+        if let Some(fifo) = table.get_mut(&self.path) {
+            if self.inner.readable && fifo.readers > 0 {
+                fifo.readers -= 1;
+            }
+            if self.inner.writable && fifo.writers > 0 {
+                fifo.writers -= 1;
+            }
+            if fifo.readers == 0 && fifo.writers == 0 {
+                table.remove(&self.path);
+            }
+        }
+    }
+}
+
+pub fn open_named_fifo(path: &str, flags: OpenFlags) -> SysResult<Arc<dyn FileOp>> {
+    let readable = !flags.contains(OpenFlags::O_WRONLY) || flags.contains(OpenFlags::O_RDWR);
+    let writable = flags.intersects(OpenFlags::O_WRONLY | OpenFlags::O_RDWR);
+    let mut table = NAMED_FIFOS.lock();
+    let fifo = table
+        .entry(String::from(path))
+        .or_insert_with(|| NamedFifo {
+            buffer: Arc::new(Mutex::new(PipeRingBuffer::new())),
+            readers: 0,
+            writers: 0,
+        });
+
+    if writable && !readable && flags.contains(OpenFlags::O_NONBLOCK) && fifo.readers == 0 {
+        return Err(Errno::ENXIO);
+    }
+
+    if readable {
+        fifo.readers += 1;
+    }
+    if writable {
+        fifo.writers += 1;
+    }
+
+    Ok(Arc::new(NamedFifoEnd {
+        path: String::from(path),
+        inner: Pipe::end_with_buffer(fifo.buffer.clone(), readable, writable),
+    }))
 }
 
 impl FileOp for Pipe {

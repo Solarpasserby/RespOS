@@ -55,6 +55,7 @@ const SYSCALL_SETITIMER: usize = 103;
 const SYSCALL_CLOCK_GETTIME: usize = 113;
 const SYSCALL_CLOCK_NANOSLEEP: usize = 115;
 const SYSCALL_SYSLOG: usize = 116;
+const SYSCALL_SCHED_GETAFFINITY: usize = 123;
 const SYSCALL_SCHED_YIELD: usize = 124;
 const SYSCALL_KILL: usize = 129;
 const SYSCALL_TKILL: usize = 130;
@@ -77,7 +78,10 @@ const SYSCALL_SETFSUID: usize = 151;
 const SYSCALL_SETFSGID: usize = 152;
 const SYSCALL_TIMES: usize = 153;
 const SYSCALL_SETPGID: usize = 154;
+const SYSCALL_GETGROUPS: usize = 158;
+const SYSCALL_SETGROUPS: usize = 159;
 const SYSCALL_UNAME: usize = 160;
+const SYSCALL_UMASK: usize = 166;
 const SYSCALL_GETTIMEOFDAY: usize = 169;
 const SYSCALL_GETPID: usize = 172;
 const SYSCALL_GETPPID: usize = 173;
@@ -115,6 +119,7 @@ const SYSCALL_PRLIMIT64: usize = 261;
 const SYSCALL_RENAMEAT2: usize = 276;
 const SYSCALL_GETRANDOM: usize = 278;
 const SYSCALL_STATX: usize = 291;
+const SYSCALL_OPENAT2: usize = 437;
 const SYSCALL_FACCESSAT2: usize = 439;
 
 mod errno;
@@ -257,6 +262,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
             args[3] as *mut TimeSpec,
         ),
         SYSCALL_SYSLOG => sys_syslog(args[0], args[1] as *mut u8, args[2] as isize),
+        SYSCALL_SCHED_GETAFFINITY => sys_sched_getaffinity(args[0], args[1], args[2] as *mut u8),
         SYSCALL_SCHED_YIELD => sys_sched_yield(),
         SYSCALL_KILL => sys_kill(args[0], args[1] as i32),
         SYSCALL_TKILL => sys_tkill(args[0], args[1] as i32),
@@ -289,7 +295,10 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         SYSCALL_SETFSGID => sys_setfsgid(args[0]),
         SYSCALL_TIMES => sys_times(args[0] as *mut Tms),
         SYSCALL_SETPGID => sys_setpgid(args[0], args[1]),
+        SYSCALL_GETGROUPS => sys_getgroups(args[0], args[1] as *mut u32),
+        SYSCALL_SETGROUPS => sys_setgroups(args[0], args[1] as *const u32),
         SYSCALL_UNAME => sys_uname(args[0] as *mut UtsName),
+        SYSCALL_UMASK => sys_umask(args[0]),
         SYSCALL_GETTIMEOFDAY => sys_gettimeofday(args[0] as *mut TimeVal, args[1] as *mut TimeZone),
         SYSCALL_GETPID => sys_getpid(),
         SYSCALL_GETPPID => sys_getppid(),
@@ -385,6 +394,12 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
             args[2],
             args[3] as u32,
             args[4] as *mut Statx,
+        ),
+        SYSCALL_OPENAT2 => sys_openat2(
+            args[0] as isize,
+            args[1] as *const u8,
+            args[2] as *const OpenHow,
+            args[3],
         ),
         _ => Err(Errno::ENOSYS),
     }

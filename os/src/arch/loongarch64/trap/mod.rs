@@ -7,7 +7,8 @@ use super::{sbi::clear_timer_interrupt, timer::set_next_ti_trigger};
 use crate::signal::{SiField, Sig, SigInfo};
 use crate::syscall::*;
 use crate::task::{
-    current_task, exit_and_run_next, exit_by_signal_and_run_next, handle_signals, yield_current_task,
+    current_task, exit_and_run_next, exit_by_signal_and_run_next, handle_signals,
+    yield_current_task,
 };
 use core::arch::global_asm;
 

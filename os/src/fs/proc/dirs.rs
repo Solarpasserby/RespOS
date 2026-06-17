@@ -8,6 +8,7 @@ use super::meminfo::MeminfoInode;
 use super::mounts::MountsInode;
 use super::smaps::SmapsInode;
 use super::stat::{ProcStatInode, TaskStatInode};
+use super::version::VersionInode;
 use crate::syscall::{Errno, SysResult};
 use crate::task::{TASK_MANAGER, TaskStatus, current_task};
 use alloc::string::String;
@@ -32,6 +33,7 @@ const PROC_CPUINFO_INO: u64 = 12;
 const PROC_SELF_FD_INO: u64 = 12;
 const PROC_SYS_FS_INO: u64 = 13;
 const PROC_SYS_FS_PIPE_USER_PAGES_SOFT_INO: u64 = 14;
+const PROC_VERSION_INO: u64 = 15;
 const PROC_PID_DIR_INO_BASE: u64 = 0x10000;
 const PROC_PID_STAT_INO_BASE: u64 = 0x20000;
 const PROC_DEV: u64 = 0x100;
@@ -70,6 +72,8 @@ impl InodeOp for ProcDirInode {
             Ok(Arc::new(ProcStatInode))
         } else if name == "cpuinfo" {
             Ok(Arc::new(CpuinfoInode))
+        } else if name == "version" {
+            Ok(Arc::new(VersionInode))
         } else if name == "sys" {
             Ok(Arc::new(ProcSysInode))
         } else if let Ok(pid) = name.parse::<usize>() {
@@ -92,7 +96,8 @@ impl InodeOp for ProcDirInode {
             entry(PROC_MOUNTS_INO, InodeType::Regular, 5, b"mounts\0"),
             entry(PROC_STAT_INO, InodeType::Regular, 6, b"stat\0"),
             entry(PROC_CPUINFO_INO, InodeType::Regular, 7, b"cpuinfo\0"),
-            entry(PROC_SYS_INO, InodeType::Directory, 8, b"sys\0"),
+            entry(PROC_VERSION_INO, InodeType::Regular, 8, b"version\0"),
+            entry(PROC_SYS_INO, InodeType::Directory, 9, b"sys\0"),
         ];
         let pids = core::cell::RefCell::new(Vec::new());
         TASK_MANAGER.for_each(|task| {
@@ -101,7 +106,7 @@ impl InodeOp for ProcDirInode {
                 pids.borrow_mut().push(task.tid());
             }
         });
-        let mut off: i64 = 9;
+        let mut off: i64 = 10;
         for pid in pids.into_inner() {
             let name = alloc::format!("{}\0", pid).into_bytes();
             entries.push(entry(
@@ -843,6 +848,10 @@ pub(super) fn proc_stat_ino() -> u64 {
 
 pub(super) fn proc_cpuinfo_ino() -> u64 {
     PROC_CPUINFO_INO
+}
+
+pub(super) fn proc_version_ino() -> u64 {
+    PROC_VERSION_INO
 }
 
 pub(super) fn proc_self_stat_ino() -> u64 {

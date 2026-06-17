@@ -15,6 +15,7 @@ mod meminfo;
 mod mounts;
 mod smaps;
 mod stat;
+mod version;
 
 use super::Statfs64;
 use super::vfs::{Dentry, InodeOp, SuperBlockOp};
