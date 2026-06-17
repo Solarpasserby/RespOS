@@ -92,10 +92,10 @@ fn run_shell_script_with_env(
 // 脚本解析环境配置
 fn prepare_bin_shell(shell_path: &str) {
     let _ = mkdir("/bin\0", 0o755);
-    let _ = unlink("/bin/busybox\0");
-    let _ = unlink("/bin/sh\0");
-    let _ = symlink(shell_path, "/bin/busybox\0");
-    let _ = symlink(shell_path, "/bin/sh\0");
+    for applet in ["/bin/busybox\0", "/bin/sh\0", "/bin/cp\0", "/bin/grep\0"] {
+        let _ = unlink(applet);
+        let _ = symlink(shell_path, applet);
+    }
 }
 
 fn _run_basic_musl() {
@@ -477,19 +477,13 @@ include!(concat!(env!("OUT_DIR"), "/ltp_cases.rs"));
 
 const LTP_BIN_DIR: &str = "ltp/testcases/bin/";
 
-fn report_ltp_status(name: &str, status: i32) -> bool {
-    if status == 0 {
-        println!("FAIL LTP CASE {} : 0", name);
-        return true;
-    }
-
+fn ltp_script_exit_code(status: i32) -> i32 {
     let signal = status & 0x7f;
     if signal != 0 {
-        println!("FAIL LTP CASE {} : {}", name, 128 + signal);
+        128 + signal
     } else {
-        println!("FAIL LTP CASE {} : {}", name, (status >> 8) & 0xff);
+        (status >> 8) & 0xff
     }
-    false
 }
 
 fn run_ltp_selected(
@@ -524,7 +518,6 @@ fn run_ltp_selected(
         for name in phase.cases.iter() {
             let name_str = *name;
             if ltp_skip(group_name, name_str) {
-                println!("SKIP LTP CASE {}", name_str);
                 skip += 1;
                 continue;
             }
@@ -571,10 +564,16 @@ fn run_ltp_selected(
             if waited < 0 {
                 println!("FAIL LTP CASE {} : 1", name_str);
                 fail += 1;
-            } else if report_ltp_status(name_str, ec) {
-                pass += 1;
             } else {
-                fail += 1;
+                let ret = ltp_script_exit_code(ec);
+                println!("FAIL LTP CASE {} : {}", name_str, ret);
+                if ret == 0 {
+                    pass += 1;
+                } else if ret == 32 {
+                    skip += 1;
+                } else {
+                    fail += 1;
+                }
             }
         }
     }

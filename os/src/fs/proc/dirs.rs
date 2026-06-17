@@ -4,6 +4,7 @@ use super::super::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
 use super::super::{File, KStat};
 use super::cpuinfo::CpuinfoInode;
 use super::exe::ProcExeInode;
+use super::maps::{MapsInode, PagemapInode, StatusInode};
 use super::meminfo::MeminfoInode;
 use super::mounts::MountsInode;
 use super::smaps::SmapsInode;
@@ -34,6 +35,9 @@ const PROC_SELF_FD_INO: u64 = 12;
 const PROC_SYS_FS_INO: u64 = 13;
 const PROC_SYS_FS_PIPE_USER_PAGES_SOFT_INO: u64 = 14;
 const PROC_VERSION_INO: u64 = 15;
+const PROC_SELF_MAPS_INO: u64 = 15;
+const PROC_SELF_STATUS_INO: u64 = 16;
+const PROC_SELF_PAGEMAP_INO: u64 = 17;
 const PROC_PID_DIR_INO_BASE: u64 = 0x10000;
 const PROC_PID_STAT_INO_BASE: u64 = 0x20000;
 const PROC_DEV: u64 = 0x100;
@@ -474,6 +478,9 @@ impl InodeOp for ProcSelfInode {
     fn lookup(&self, _parent_path: &str, name: &str) -> SysResult<Arc<dyn InodeOp>> {
         match name {
             "smaps" => Ok(Arc::new(SmapsInode)),
+            "maps" => Ok(Arc::new(MapsInode)),
+            "status" => Ok(Arc::new(StatusInode)),
+            "pagemap" => Ok(Arc::new(PagemapInode)),
             "exe" => Ok(Arc::new(ProcExeInode)),
             "mounts" => Ok(Arc::new(MountsInode)),
             "stat" => Ok(Arc::new(TaskStatInode::current())),
@@ -491,6 +498,9 @@ impl InodeOp for ProcSelfInode {
             entry(PROC_MOUNTS_INO, InodeType::Regular, 5, b"mounts\0"),
             entry(PROC_SELF_STAT_INO, InodeType::Regular, 6, b"stat\0"),
             entry(PROC_SELF_FD_INO, InodeType::Directory, 7, b"fd\0"),
+            entry(PROC_SELF_MAPS_INO, InodeType::Regular, 8, b"maps\0"),
+            entry(PROC_SELF_STATUS_INO, InodeType::Regular, 9, b"status\0"),
+            entry(PROC_SELF_PAGEMAP_INO, InodeType::Regular, 10, b"pagemap\0"),
         ])
     }
 
@@ -828,6 +838,18 @@ fn generate_pid_stat(pid: usize) -> SysResult<String> {
 
 pub(super) fn proc_self_smaps_ino() -> u64 {
     PROC_SELF_SMAPS_INO
+}
+
+pub(super) fn proc_self_maps_ino() -> u64 {
+    PROC_SELF_MAPS_INO
+}
+
+pub(super) fn proc_self_status_ino() -> u64 {
+    PROC_SELF_STATUS_INO
+}
+
+pub(super) fn proc_self_pagemap_ino() -> u64 {
+    PROC_SELF_PAGEMAP_INO
 }
 
 pub(super) fn proc_self_exe_ino() -> u64 {

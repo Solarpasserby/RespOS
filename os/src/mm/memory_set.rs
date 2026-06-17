@@ -235,6 +235,7 @@ impl MemorySet {
                         map_type: area.map_type,
                         map_perm: area.map_perm,
                         shared: area.shared,
+                        locked: area.locked,
                     };
                     area.vpn_range = VPNRange::new(area_start, overlap_start);
                     Some(right_area)
@@ -269,6 +270,7 @@ impl MemorySet {
         map_perm: MapPermission,
         replace: bool,
         noreplace: bool,
+        locked: bool,
     ) -> SysResult<usize> {
         let start = self.choose_mmap_start(addr, map_len)?;
         let end = start.checked_add(map_len).ok_or(Errno::ENOMEM)?;
@@ -284,7 +286,14 @@ impl MemorySet {
             self.remove_area_with_overlap_range(vpn_range)?;
         }
 
-        self.insert_framed_area_va_lazy(VirtAddr::from(start), VirtAddr::from(end), map_perm);
+        self.push_map_area_lazy(MapArea::new_with_flags(
+            VirtAddr::from(start),
+            VirtAddr::from(end),
+            MapType::Framed,
+            map_perm,
+            false,
+            locked,
+        ));
         if addr.is_none() {
             self.mmap_start = end;
         }
@@ -299,6 +308,7 @@ impl MemorySet {
         map_perm: MapPermission,
         replace: bool,
         noreplace: bool,
+        locked: bool,
     ) -> SysResult<usize> {
         let start = self.choose_mmap_start(addr, map_len)?;
         let end = start.checked_add(map_len).ok_or(Errno::ENOMEM)?;
@@ -314,7 +324,9 @@ impl MemorySet {
             self.remove_area_with_overlap_range(vpn_range)?;
         }
 
-        self.insert_shared_framed_area_va(VirtAddr::from(start), VirtAddr::from(end), map_perm);
+        let mut area = MapArea::new_shared(VirtAddr::from(start), VirtAddr::from(end), map_perm);
+        area.locked = locked;
+        self.push_empty_map_area(area, None, 0);
         if addr.is_none() {
             self.mmap_start = end;
         }
@@ -329,6 +341,7 @@ impl MemorySet {
         map_perm: MapPermission,
         replace: bool,
         noreplace: bool,
+        locked: bool,
     ) -> SysResult<usize> {
         let start = self.choose_mmap_start(addr, map_len)?;
         let end = start.checked_add(map_len).ok_or(Errno::ENOMEM)?;
@@ -344,7 +357,18 @@ impl MemorySet {
             self.remove_area_with_overlap_range(vpn_range)?;
         }
 
-        self.insert_framed_area_va(VirtAddr::from(start), VirtAddr::from(end), map_perm);
+        self.push_empty_map_area(
+            MapArea::new_with_flags(
+                VirtAddr::from(start),
+                VirtAddr::from(end),
+                MapType::Framed,
+                map_perm,
+                false,
+                locked,
+            ),
+            None,
+            0,
+        );
         if addr.is_none() {
             self.mmap_start = end;
         }
@@ -362,6 +386,7 @@ impl MemorySet {
         map_perm: MapPermission,
         replace: bool,
         noreplace: bool,
+        locked: bool,
     ) -> SysResult<usize> {
         let start = self.choose_mmap_start(addr, map_len)?;
         let end = start.checked_add(map_len).ok_or(Errno::ENOMEM)?;
@@ -377,7 +402,9 @@ impl MemorySet {
             self.remove_area_with_overlap_range(vpn_range)?;
         }
 
-        self.insert_shared_framed_area_va(VirtAddr::from(start), VirtAddr::from(end), map_perm);
+        let mut area = MapArea::new_shared(VirtAddr::from(start), VirtAddr::from(end), map_perm);
+        area.locked = locked;
+        self.push_empty_map_area(area, None, 0);
         if addr.is_none() {
             self.mmap_start = end;
         }
@@ -666,6 +693,7 @@ impl MemorySet {
                         map_type: old_map_type,
                         map_perm: old_map_perm,
                         shared: old_area.shared,
+                        locked: old_area.locked,
                     },
                 );
                 idx += 1;
@@ -680,6 +708,7 @@ impl MemorySet {
                     map_type: old_map_type,
                     map_perm: new_map_perm,
                     shared: old_area.shared,
+                    locked: old_area.locked,
                 },
             );
             idx += 1;
@@ -694,6 +723,7 @@ impl MemorySet {
                         map_type: old_map_type,
                         map_perm: old_map_perm,
                         shared: old_area.shared,
+                        locked: old_area.locked,
                     },
                 );
                 idx += 1;
@@ -758,11 +788,11 @@ impl MemorySet {
     /// 遍历所有映射区域，供外部观察者（如 /proc/self/smaps）使用。
     ///
     /// 闭包参数依次为：起始虚拟地址、结束虚拟地址、权限。
-    pub fn each_area(&self, mut f: impl FnMut(usize, usize, MapPermission)) {
+    pub fn each_area(&self, mut f: impl FnMut(usize, usize, MapPermission, bool, bool)) {
         for area in self.areas.iter() {
             let start = area.vpn_range.get_start().0 << PAGE_SIZE_BITS;
             let end = area.vpn_range.get_end().0 << PAGE_SIZE_BITS;
-            f(start, end, area.map_perm);
+            f(start, end, area.map_perm, area.shared, area.locked);
         }
     }
 
@@ -1314,6 +1344,7 @@ struct MapArea {
     map_type: MapType,
     map_perm: MapPermission,
     shared: bool,
+    locked: bool,
 }
 
 impl MapArea {
@@ -1334,7 +1365,22 @@ impl MapArea {
             map_type,
             map_perm,
             shared: false,
+            locked: false,
         }
+    }
+
+    pub fn new_with_flags(
+        start_va: VirtAddr,
+        end_va: VirtAddr,
+        map_type: MapType,
+        map_perm: MapPermission,
+        shared: bool,
+        locked: bool,
+    ) -> Self {
+        let mut area = Self::new(start_va, end_va, map_type, map_perm);
+        area.shared = shared;
+        area.locked = locked;
+        area
     }
 
     pub fn new_shared(start_va: VirtAddr, end_va: VirtAddr, map_perm: MapPermission) -> Self {
@@ -1353,6 +1399,7 @@ impl MapArea {
             map_type: another.map_type,
             map_perm: another.map_perm,
             shared: another.shared,
+            locked: another.locked,
         }
     }
 

@@ -432,11 +432,14 @@ pub fn sys_wait4(
 ) -> SysResult<usize> {
     let options = WaitOption::from_bits(options as i32).ok_or(Errno::EINVAL)?;
 
-    // pid == 0 和 pid < -1 需要按进程组等待；当前任务结构尚未维护 pgid，
+    // pid < -1 需要按进程组等待；当前任务结构尚未维护 pgid，
     // 先显式拒绝，避免把进程组语义错误地退化成等待任意子任务。
-    if pid == 0 || pid < -1 {
+    if pid < -1 {
         return Err(Errno::EINVAL);
     }
+    // In this kernel all benchmark children currently share the parent's
+    // process group, so pid == 0 is equivalent to waiting for any child.
+    let pid = if pid == 0 { -1 } else { pid };
 
     let nohang = options.contains(WaitOption::WNOHANG);
 

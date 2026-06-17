@@ -83,6 +83,7 @@ pub fn sys_mmap(
     }
     let replace = flags.contains(MMAPFLAGS::MAP_FIXED);
     let noreplace = flags.contains(MMAPFLAGS::MAP_FIXED_NOREPLACE);
+    let locked = flags.contains(MMAPFLAGS::MAP_LOCKED);
     let fixed = replace || noreplace;
     if fixed && (_addr % PAGE_SIZE != 0 || _addr == 0) {
         return Err(Errno::EINVAL);
@@ -100,11 +101,13 @@ pub fn sys_mmap(
         }
         task.op_memory_set_write(|memory_set| {
             let start = if has_shared {
-                memory_set
-                    .mmap_shared_anonymous(fixed_addr, map_len, permission, replace, noreplace)?
+                memory_set.mmap_shared_anonymous(
+                    fixed_addr, map_len, permission, replace, noreplace, locked,
+                )?
             } else {
-                memory_set
-                    .mmap_lazy_anonymous(fixed_addr, map_len, permission, replace, noreplace)?
+                memory_set.mmap_lazy_anonymous(
+                    fixed_addr, map_len, permission, replace, noreplace, locked,
+                )?
             };
             memory_set.flush_tlb();
             Ok(start)
@@ -129,10 +132,12 @@ pub fn sys_mmap(
 
         task.op_memory_set_write(|memory_set| {
             let start = if has_shared {
-                memory_set
-                    .mmap_shared_framed(fixed_addr, map_len, permission, replace, noreplace)?
+                memory_set.mmap_shared_framed(
+                    fixed_addr, map_len, permission, replace, noreplace, locked,
+                )?
             } else {
-                memory_set.mmap_framed(fixed_addr, map_len, permission, replace, noreplace)?
+                memory_set
+                    .mmap_framed(fixed_addr, map_len, permission, replace, noreplace, locked)?
             };
             memory_set.write_bytes_to_mapped_range(start, &file_data)?;
             memory_set.flush_tlb();

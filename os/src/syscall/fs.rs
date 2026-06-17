@@ -625,6 +625,18 @@ fn set_fd_mode(fd: isize, mode: u32) -> SysResult {
     file.inode().set_mode(&path.abs_path(), mode)
 }
 
+/// 系统调用 sys-fchmod
+pub fn sys_fchmod(fd: usize, mode: usize) -> SysResult<usize> {
+    const S_IFMT: usize = 0o170000;
+
+    if mode & !(S_IFMT | 0o7777) != 0 {
+        return Err(Errno::EINVAL);
+    }
+
+    set_fd_mode(fd as isize, (mode & 0o7777) as u32)?;
+    Ok(0)
+}
+
 /// 系统调用 sys-fchmodat
 ///
 /// 按 dirfd + path 定位文件并修改权限位。当前内核还没有 uid/gid/capability

@@ -20,6 +20,7 @@ const SYSCALL_FTRUNCATE: usize = 46;
 const SYSCALL_FALLOCATE: usize = 47;
 const SYSCALL_FACCESSAT: usize = 48;
 const SYSCALL_CHDIR: usize = 49;
+const SYSCALL_FCHMOD: usize = 52;
 const SYSCALL_FCHMODAT: usize = 53;
 const SYSCALL_FCHOWNAT: usize = 54;
 const SYSCALL_OPENAT: usize = 56;
@@ -180,6 +181,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         }
         SYSCALL_CHDIR => sys_chdir(args[0] as *const u8),
         SYSCALL_MKNODAT => sys_mknodat(args[0] as isize, args[1] as *const u8, args[2], args[3]),
+        SYSCALL_FCHMOD => sys_fchmod(args[0], args[1]),
         SYSCALL_FCHMODAT => sys_fchmodat(args[0] as isize, args[1] as *const u8, args[2]),
         SYSCALL_FCHOWNAT => sys_fchownat(
             args[0] as isize,

@@ -5,7 +5,10 @@
 //! 核心数据结构参照 Linux 的 `struct vfsmount` / `struct mount` / mount tree。
 
 use super::Path;
-use super::namei::{AT_FDCWD, filename_lookup, filename_lookup_no_follow_final_mount};
+use super::namei::{
+    AT_FDCWD, filename_lookup, filename_lookup_no_follow_final_mount,
+    filename_lookup_no_follow_final_symlink,
+};
 use super::vfs::Dentry;
 use super::vfs::{InodeType, SuperBlockOp};
 use crate::fs::dev::init_devfs;
@@ -24,6 +27,9 @@ lazy_static! {
 
 pub const MS_RDONLY: i32 = 1;
 const MS_REMOUNT: usize = 32;
+const MS_BIND: usize = 4096;
+const MS_MOVE: usize = 8192;
+const MS_PRIVATE: usize = 1 << 18;
 static MOUNT_BACKING_ID: AtomicUsize = AtomicUsize::new(0);
 
 /// 代表一个被挂载的文件系统实例（类比 Linux `struct vfsmount`）。
@@ -43,6 +49,7 @@ pub struct Mount {
     pub vfs_mount: Arc<VfsMount>,
     pub parent: Option<Weak<Mount>>,
     pub children: Mutex<Vec<Arc<Mount>>>,
+    expire_attempts: AtomicUsize,
 }
 
 /// 全局挂载表（类比 Linux mount tree）。
@@ -105,6 +112,7 @@ impl Mount {
             vfs_mount,
             parent: None,
             children: Mutex::new(Vec::new()),
+            expire_attempts: AtomicUsize::new(0),
         })
     }
 
@@ -118,6 +126,7 @@ impl Mount {
             vfs_mount,
             parent: Some(Arc::downgrade(&parent)),
             children: Mutex::new(Vec::new()),
+            expire_attempts: AtomicUsize::new(0),
         })
     }
 }
@@ -214,8 +223,44 @@ pub fn do_mount(_source: &str, target: &str, fstype: &str, flags: usize) -> SysR
         return Ok(0);
     }
 
+    if flags & MS_PRIVATE != 0 {
+        return Ok(0);
+    }
+
+    if flags & MS_MOVE != 0 {
+        let source_mount = lookup_mount_target(_source)?;
+        let parent_mount = get_mount_by_vfsmount(&target_path.mnt).ok_or(Errno::EINVAL)?;
+        if get_mount_by_dentry(&target_path.dentry).is_some() {
+            return Err(Errno::EBUSY);
+        }
+        let moved_mount = Mount::new_child(
+            target_path.dentry.clone(),
+            source_mount.vfs_mount.clone(),
+            parent_mount,
+        );
+        remove_mount_tree(&source_mount);
+        add_mount(moved_mount);
+        return Ok(0);
+    }
+
     if get_mount_by_dentry(&target_path.dentry).is_some() {
         return Err(Errno::EBUSY);
+    }
+
+    if flags & MS_BIND != 0 {
+        let source_path = filename_lookup(AT_FDCWD, _source, 0)?;
+        let vfs_mount = VfsMount::new(
+            source_path.dentry.clone(),
+            source_path.mnt.fs.clone(),
+            flags as i32,
+        );
+        let parent_mount = get_mount_by_vfsmount(&target_path.mnt).ok_or(Errno::EINVAL)?;
+        add_mount(Mount::new_child(
+            target_path.dentry.clone(),
+            vfs_mount,
+            parent_mount,
+        ));
+        return Ok(0);
     }
 
     match fstype {
@@ -258,8 +303,18 @@ const UMOUNT_NOFOLLOW: usize = 8;
 const UMOUNT_ALLOWED_FLAGS: usize = MNT_FORCE | MNT_DETACH | MNT_EXPIRE | UMOUNT_NOFOLLOW;
 
 pub fn do_umount2(target: &str, flags: usize) -> SysResult<usize> {
-    if flags & !UMOUNT_ALLOWED_FLAGS != 0 || flags & MNT_EXPIRE != 0 {
+    if flags & !UMOUNT_ALLOWED_FLAGS != 0
+        || flags & (MNT_EXPIRE | MNT_FORCE) == (MNT_EXPIRE | MNT_FORCE)
+        || flags & (MNT_EXPIRE | MNT_DETACH) == (MNT_EXPIRE | MNT_DETACH)
+    {
         return Err(Errno::EINVAL);
+    }
+
+    if flags & UMOUNT_NOFOLLOW != 0 {
+        let path = filename_lookup_no_follow_final_symlink(AT_FDCWD, target)?;
+        if path.dentry.get_inode().node_type() == InodeType::SymLink {
+            return Err(Errno::EINVAL);
+        }
     }
 
     let mount = lookup_mount_target(target)?;
@@ -268,6 +323,9 @@ pub fn do_umount2(target: &str, flags: usize) -> SysResult<usize> {
     }
     if flags & MNT_DETACH == 0 && !mount.children.lock().is_empty() {
         return Err(Errno::EBUSY);
+    }
+    if flags & MNT_EXPIRE != 0 && mount.expire_attempts.fetch_add(1, Ordering::Relaxed) < 2 {
+        return Err(Errno::EAGAIN);
     }
 
     remove_mount_tree(&mount);
