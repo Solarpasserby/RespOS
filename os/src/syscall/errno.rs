@@ -57,6 +57,8 @@ pub enum Errno {
     ESPIPE = 29,
     /// 只读文件系统。
     EROFS = 30,
+    /// 硬链接数过多。
+    EMLINK = 31,
     /// 管道破裂，例如向没有读端的 pipe 写入。
     EPIPE = 32,
     /// 结果过大，常用于用户缓冲区太小。
@@ -122,6 +124,7 @@ impl Errno {
             Errno::ESPIPE => "Illegal seek",
             Errno::ERANGE => "Result out of range",
             Errno::EROFS => "Read-only file system",
+            Errno::EMLINK => "Too many links",
             Errno::EPIPE => "Broken pipe",
             Errno::ENAMETOOLONG => "File name too long",
             Errno::ENOSYS => "Function not implemented",

@@ -82,7 +82,7 @@ fn collect_mount(mount: &Arc<Mount>, result: &mut String) {
     let dev = "none";
     let target = mount_point_path(mount);
     let fstype = mount_fstype(mount);
-    let opts = if mount.vfs_mount.flags & 1 != 0 {
+    let opts = if mount.vfs_mount.flags() & 1 != 0 {
         "ro"
     } else {
         "rw"

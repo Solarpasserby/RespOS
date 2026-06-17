@@ -7,9 +7,9 @@ use crate::fs::mount::{do_mount, do_umount2};
 use crate::fs::vfs::InodeType;
 use crate::fs::{
     AT_EMPTY_PATH, AT_FDCWD, AT_NO_AUTOMOUNT, AT_SYMLINK_NOFOLLOW, FdEntry, File, FileOp, KStat,
-    OpenFlags, Pipe, Stat, Statfs64, filename_create, filename_link, filename_lookup,
-    filename_lookup_no_follow_final_symlink, filename_rename, filename_symlink, filename_unlink,
-    init_fdset, make_pipe, path_open,
+    OpenFlags, Pipe, Stat, Statfs64, check_dir_search_permission, filename_create, filename_link,
+    filename_lookup, filename_lookup_no_follow_final_symlink, filename_rename, filename_symlink,
+    filename_unlink, init_fdset, make_pipe, path_open,
 };
 use crate::mm::{
     VPNRange, VirtAddr, check_user_writable, copy_cstr_from_user, copy_from_user, copy_to_user,
@@ -1047,8 +1047,7 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SysResult<usize> {
         F_SETFL => {
             let mut entry = fd_entry;
             let mut flags = entry.get_flags();
-            let status_flags =
-                OpenFlags::O_APPEND | OpenFlags::O_NONBLOCK | OpenFlags::O_DIRECT;
+            let status_flags = OpenFlags::O_APPEND | OpenFlags::O_NONBLOCK | OpenFlags::O_DIRECT;
             flags.remove(status_flags);
             flags |= OpenFlags::from(arg) & status_flags;
             entry.set_flags(flags);
@@ -1117,12 +1116,26 @@ pub fn sys_mknodat(dirfd: isize, path: *const u8, mode: usize, _dev: usize) -> S
     const S_IFCHR: usize = 0o020000;
     const S_IFBLK: usize = 0o060000;
     const S_IFREG: usize = 0o100000;
+    const S_IFSOCK: usize = 0o140000;
 
     let path = copy_cstr_from_user(path)?;
     match mode & S_IFMT {
         S_IFIFO => filename_create(dirfd, path.as_str(), InodeType::Fifo, mode)?,
-        S_IFCHR => filename_create(dirfd, path.as_str(), InodeType::CharDevice, mode)?,
-        S_IFBLK => filename_create(dirfd, path.as_str(), InodeType::BlockDevice, mode)?,
+        S_IFSOCK => filename_create(dirfd, path.as_str(), InodeType::Socket, mode)?,
+        S_IFCHR => {
+            let task = current_task().expect("[kernel] current task is None.");
+            if task.fsuid() != 0 {
+                return Err(Errno::EPERM);
+            }
+            filename_create(dirfd, path.as_str(), InodeType::CharDevice, mode)?
+        }
+        S_IFBLK => {
+            let task = current_task().expect("[kernel] current task is None.");
+            if task.fsuid() != 0 {
+                return Err(Errno::EPERM);
+            }
+            filename_create(dirfd, path.as_str(), InodeType::BlockDevice, mode)?
+        }
         0 | S_IFREG => filename_create(dirfd, path.as_str(), InodeType::Regular, mode)?,
         _ => return Err(Errno::EINVAL),
     }
@@ -1145,7 +1158,8 @@ pub fn sys_linkat(
     newpath: *const u8,
     flags: usize,
 ) -> SysResult<usize> {
-    if flags != 0 {
+    const AT_SYMLINK_FOLLOW: usize = 0x400;
+    if flags & !AT_SYMLINK_FOLLOW != 0 {
         return Err(Errno::EINVAL);
     }
 
@@ -1197,6 +1211,10 @@ pub fn sys_chdir(path: *const u8) -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
     let path = copy_cstr_from_user(path)?;
     let resolved = filename_lookup(AT_FDCWD, path.as_str(), 0)?;
+    if resolved.dentry.get_inode().node_type() != InodeType::Directory {
+        return Err(Errno::ENOTDIR);
+    }
+    check_dir_search_permission(&resolved.dentry)?;
     task.set_cwd(resolved);
     Ok(0)
 }
@@ -1220,8 +1238,8 @@ pub fn sys_getcwd(buf: *mut u8, len: usize) -> SysResult<usize> {
 
 /// 系统调用 sys-pipe
 pub fn sys_pipe2(pipefd: *mut [i32; 2], flags: usize) -> SysResult<usize> {
-    let allowed_flags = (OpenFlags::O_CLOEXEC | OpenFlags::O_NONBLOCK | OpenFlags::O_DIRECT).bits()
-        as usize;
+    let allowed_flags =
+        (OpenFlags::O_CLOEXEC | OpenFlags::O_NONBLOCK | OpenFlags::O_DIRECT).bits() as usize;
     if flags & !allowed_flags != 0 {
         return Err(Errno::EINVAL);
     }

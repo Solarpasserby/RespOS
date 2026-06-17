@@ -326,6 +326,7 @@ bitflags::bitflags! {
         const O_DIRECT = 1 << 14;
         const O_APPEND = 1 << 10;
         const O_DIRECTORY = 1 << 16;
+        const O_NOFOLLOW = 1 << 17;
         const O_CLOEXEC = 1 << 19;
         const O_TMPFILE = 0x410000;
     }

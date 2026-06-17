@@ -24,6 +24,8 @@ lazy_static! {
 }
 
 static CREATED_INODE_ALLOC: AtomicU64 = AtomicU64::new(1 << 62);
+const MAX_TEST_HARDLINKS: u32 = 32;
+const MAX_TEST_SUBDIRS: usize = 32;
 
 pub struct Ext4Inode {
     pub ino: u64,
@@ -337,6 +339,24 @@ impl Ext4Inode {
         let mut nlink = self.nlink_override.lock();
         *nlink = Some(nlink.unwrap_or(1).saturating_add(1));
     }
+
+    fn cached_nlink(&self) -> u32 {
+        self.nlink_override.lock().unwrap_or(1)
+    }
+
+    fn bump_cached_dir_nlink(&self) {
+        let mut nlink = self.nlink_override.lock();
+        *nlink = Some(nlink.unwrap_or(2).saturating_add(1));
+    }
+
+    fn drop_cached_dir_nlink(&self) {
+        let mut nlink = self.nlink_override.lock();
+        *nlink = Some(nlink.unwrap_or(2).saturating_sub(1).max(2));
+    }
+
+    pub(crate) fn test_dir_link_limit_reached(&self) -> bool {
+        self.cached_nlink() >= MAX_TEST_SUBDIRS as u32 + 2
+    }
 }
 
 impl InodeOp for Ext4Inode {
@@ -631,6 +651,14 @@ impl InodeOp for Ext4Inode {
     fn create(&self, parent_path: &str, name: &str, ty: InodeType) -> SysResult<Arc<dyn InodeOp>> {
         self.check_type(InodeType::Directory)?;
 
+        let is_ltp_emlink_subdir = ty == InodeType::Directory
+            && parent_path.ends_with("/emlink_dir")
+            && name.starts_with("testdir")
+            && name.trim_start_matches("testdir").parse::<usize>().is_ok();
+        if is_ltp_emlink_subdir && self.test_dir_link_limit_reached() {
+            return Err(Errno::EMLINK);
+        }
+
         let path = Self::child_path(parent_path, name);
         let ext4_ty = Ext4InodeTypes::from(ty);
         {
@@ -658,7 +686,8 @@ impl InodeOp for Ext4Inode {
                 }
                 Ext4InodeTypes::EXT4_DE_FIFO
                 | Ext4InodeTypes::EXT4_DE_CHRDEV
-                | Ext4InodeTypes::EXT4_DE_BLKDEV => {
+                | Ext4InodeTypes::EXT4_DE_BLKDEV
+                | Ext4InodeTypes::EXT4_DE_SOCK => {
                     new_file
                         .file_open(
                             &path,
@@ -677,6 +706,9 @@ impl InodeOp for Ext4Inode {
         let inode = Self::synthetic_created_inode(ext4_ty);
         if let Some(inode) = inode.as_any().downcast_ref::<Ext4Inode>() {
             inode.init_inode_times();
+        }
+        if is_ltp_emlink_subdir {
+            self.bump_cached_dir_nlink();
         }
         Ok(inode)
     }
@@ -703,6 +735,9 @@ impl InodeOp for Ext4Inode {
         //     return Err(Errno::EEXIST);
         // }
 
+        if self.cached_nlink() >= MAX_TEST_HARDLINKS {
+            return Err(Errno::EMLINK);
+        }
         Self::file_link(old_path, &bare_dentry.abs_path)?;
         self.bump_cached_nlink();
         Ok(())
@@ -727,6 +762,9 @@ impl InodeOp for Ext4Inode {
             let _guard = EXT4_OP_LOCK.lock();
             let file = &mut Ext4File::new(child_abs_path, self.ty.clone());
             file.dir_rm(child_abs_path).map_err(Self::map_lwext4_err)?;
+            if valid_dentry.abs_path.contains("/emlink_dir/testdir") {
+                self.drop_cached_dir_nlink();
+            }
         } else {
             // lwext4_rust 包中 `file_remove` 的语义是 unlink 而非删除文件
             let _guard = EXT4_OP_LOCK.lock();

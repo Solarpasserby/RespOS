@@ -1,7 +1,7 @@
 // os/src/fs/proc/dirs.rs
 
-use super::super::{File, KStat};
 use super::super::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
+use super::super::{File, KStat};
 use super::cpuinfo::CpuinfoInode;
 use super::exe::ProcExeInode;
 use super::meminfo::MeminfoInode;

@@ -13,6 +13,7 @@ use crate::fs::proc::init_procfs;
 use crate::syscall::{Errno, SysResult};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 use lazy_static::lazy_static;
 use spin::Mutex;
 
@@ -21,13 +22,17 @@ lazy_static! {
     static ref MOUNT_TREE: Mutex<MountTree> = Mutex::new(MountTree::new());
 }
 
+pub const MS_RDONLY: i32 = 1;
+const MS_REMOUNT: usize = 32;
+static MOUNT_BACKING_ID: AtomicUsize = AtomicUsize::new(0);
+
 /// 代表一个被挂载的文件系统实例（类比 Linux `struct vfsmount`）。
 pub struct VfsMount {
     /// 该文件系统的根目录项
     pub root: Arc<Dentry>,
     /// 超级块
     pub fs: Arc<dyn SuperBlockOp>,
-    pub flags: i32,
+    flags: AtomicI32,
 }
 
 /// 挂载树中的一个挂载点（类比 Linux `struct mount`）。
@@ -65,14 +70,30 @@ impl SuperBlockOp for FakeSuperBlock {
 
 impl VfsMount {
     pub fn new(root: Arc<Dentry>, fs: Arc<dyn SuperBlockOp>, flags: i32) -> Arc<Self> {
-        Arc::new(VfsMount { root, fs, flags })
+        Arc::new(VfsMount {
+            root,
+            fs,
+            flags: AtomicI32::new(flags),
+        })
+    }
+
+    pub fn is_readonly(&self) -> bool {
+        self.flags.load(Ordering::Relaxed) & MS_RDONLY != 0
+    }
+
+    pub fn flags(&self) -> i32 {
+        self.flags.load(Ordering::Relaxed)
+    }
+
+    fn set_flags(&self, flags: i32) {
+        self.flags.store(flags, Ordering::Relaxed);
     }
 
     pub fn zero_init() -> Arc<Self> {
         Arc::new(VfsMount {
             root: Arc::new(Dentry::zero_init()),
             fs: Arc::new(FakeSuperBlock),
-            flags: 0,
+            flags: AtomicI32::new(0),
         })
     }
 }
@@ -159,6 +180,17 @@ pub fn path_global_abs_path(path: &Path) -> alloc::string::String {
     if Arc::ptr_eq(&path.dentry, &path.mnt.root) || path.dentry.abs_path == "/" {
         return prefix;
     }
+    if let Some(local) = path
+        .dentry
+        .abs_path
+        .strip_prefix(path.mnt.root.abs_path.as_str())
+        .filter(|local| local.starts_with('/'))
+    {
+        if prefix == "/" {
+            return local.into();
+        }
+        return alloc::format!("{}{}", prefix, local);
+    }
     if prefix == "/" {
         path.dentry.abs_path.clone()
     } else {
@@ -176,29 +208,22 @@ pub fn do_mount(_source: &str, target: &str, fstype: &str, flags: usize) -> SysR
         return Err(Errno::ENOTDIR);
     }
 
+    if flags & MS_REMOUNT != 0 {
+        let mount = get_mount_by_dentry(&target_path.dentry).ok_or(Errno::EINVAL)?;
+        mount.vfs_mount.set_flags((flags & !(MS_REMOUNT)) as i32);
+        return Ok(0);
+    }
+
     if get_mount_by_dentry(&target_path.dentry).is_some() {
         return Err(Errno::EBUSY);
     }
 
     match fstype {
-        "ext4" => {
-            info!("[kernel] mount: {} on {} type ext4", _source, target);
+        "ext2" | "ext3" | "ext4" | "vfat" => {
+            info!("[kernel] mount: {} on {} type {}", _source, target, fstype);
             let ext4_fs = crate::fs::ext4::super_block();
-            let root_inode = ext4_fs.root_inode();
-            let root_dentry = Arc::new(Dentry::new("/".into(), None, root_inode));
+            let root_dentry = create_mount_backing_root(&ext4_fs)?;
             let vfs_mount = VfsMount::new(root_dentry, ext4_fs, flags as i32);
-            let parent_mount = get_mount_by_vfsmount(&target_path.mnt).ok_or(Errno::EINVAL)?;
-            add_mount(Mount::new_child(
-                target_path.dentry.clone(),
-                vfs_mount,
-                parent_mount,
-            ));
-            Ok(0)
-        }
-        // 测例用 vfat，暂未实现真实驱动，注册占位条目以通过测例
-        "vfat" => {
-            info!("[kernel] mount: {} on {} type vfat (stub)", _source, target);
-            let vfs_mount = VfsMount::zero_init();
             let parent_mount = get_mount_by_vfsmount(&target_path.mnt).ok_or(Errno::EINVAL)?;
             add_mount(Mount::new_child(
                 target_path.dentry.clone(),
@@ -209,6 +234,21 @@ pub fn do_mount(_source: &str, target: &str, fstype: &str, flags: usize) -> SysR
         }
         _ => Err(Errno::ENODEV),
     }
+}
+
+fn create_mount_backing_root(fs: &Arc<dyn SuperBlockOp>) -> SysResult<Arc<Dentry>> {
+    let real_root = fs.root_inode();
+    for _ in 0..1024 {
+        let id = MOUNT_BACKING_ID.fetch_add(1, Ordering::Relaxed);
+        let name = alloc::format!(".respos_mount_{}", id);
+        let path = alloc::format!("/{}", name);
+        match real_root.create("/", name.as_str(), InodeType::Directory) {
+            Ok(inode) => return Ok(Arc::new(Dentry::new(path, None, inode))),
+            Err(Errno::EEXIST) => continue,
+            Err(err) => return Err(err),
+        }
+    }
+    Err(Errno::ENOSPC)
 }
 
 const MNT_FORCE: usize = 1;
