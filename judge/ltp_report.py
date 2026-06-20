@@ -10,14 +10,15 @@ RESULT_KEYS = ("passed", "failed", "broken", "skipped", "warnings")
 GROUP_RE = re.compile(r"^#### OS COMP TEST GROUP START (ltp-(?:musl|glibc)) ####$")
 CASE_RE = re.compile(r"^RUN LTP CASE (?P<name>\S+)$")
 END_RE = re.compile(r"^FAIL LTP CASE (?P<name>\S+) : (?P<ret>-?\d+)$")
-
-ANSI_COUNTS = (
-    ("\x1b[1;32mTPASS: \x1b[0m", "passed"),
-    ("\x1b[1;31mTFAIL: \x1b[0m", "failed"),
-    ("\x1b[1;31mTBROK: \x1b[0m", "broken"),
-    ("\x1b[1;33mTCONF: \x1b[0m", "skipped"),
-    ("\x1b[1;35mTWARN: \x1b[0m", "warnings"),
-)
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+RESULT_TOKEN_RE = re.compile(r"\b(TPASS|TFAIL|TBROK|TCONF|TWARN)\b")
+TOKEN_COUNTS = {
+    "TPASS": "passed",
+    "TFAIL": "failed",
+    "TBROK": "broken",
+    "TCONF": "skipped",
+    "TWARN": "warnings",
+}
 
 
 def empty_counts():
@@ -109,10 +110,10 @@ def parse_ltp_log(path):
             continue
 
         if group == "ltp-glibc":
-            for needle, key in ANSI_COUNTS:
-                if needle in line:
-                    current["counts"][key] += 1
-                    break
+            plain = ANSI_RE.sub("", line)
+            token_match = RESULT_TOKEN_RE.search(plain)
+            if token_match:
+                current["counts"][TOKEN_COUNTS[token_match.group(1)]] += 1
 
     return rows
 

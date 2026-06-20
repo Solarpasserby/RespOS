@@ -73,6 +73,8 @@ pub enum Errno {
     ELOOP = 40,
     /// 操作不支持，例如给 preadv2/pwritev2 传了内核未实现的 flags。
     EOPNOTSUPP = 95,
+    /// 不支持该 socket address family。
+    EAFNOSUPPORT = 97,
     /// 操作超时。
     ETIMEDOUT = 110,
     /// 连接被拒绝。
@@ -131,6 +133,7 @@ impl Errno {
             Errno::ENOTEMPTY => "Directory not empty",
             Errno::ELOOP => "Too many levels of symbolic links",
             Errno::EOPNOTSUPP => "Operation not supported",
+            Errno::EAFNOSUPPORT => "Address family not supported by protocol",
             Errno::ETIMEDOUT => "Connection timed out",
             Errno::ECONNREFUSED => "Connection refused",
             Errno::EIDONTKNONW => "I don't know which is proper",

@@ -12,6 +12,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use lazy_static::lazy_static;
 
 const AF_INET: usize = 2;
+const AF_UNIX: usize = 1;
 const SOCK_STREAM: usize = 1;
 const SOCK_DGRAM: usize = 2;
 const SOCK_TYPE_MASK: usize = 0xf;
@@ -71,7 +72,14 @@ enum SocketKind {
     Datagram,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SocketDomain {
+    Inet,
+    Unix,
+}
+
 struct SocketInner {
+    domain: SocketDomain,
     kind: SocketKind,
     local_port: u16,
     nonblocking: bool,
@@ -84,9 +92,10 @@ pub struct SocketFile {
 }
 
 impl SocketFile {
-    fn new(kind: SocketKind, nonblocking: bool, cloexec: bool) -> Self {
+    fn new(domain: SocketDomain, kind: SocketKind, nonblocking: bool, cloexec: bool) -> Self {
         Self {
             inner: SpinLock::new(SocketInner {
+                domain,
                 kind,
                 local_port: 0,
                 nonblocking,
@@ -245,19 +254,34 @@ fn write_sockaddr(addr: usize, len_ptr: usize, sockaddr: SockAddrIn) -> SysResul
 }
 
 pub fn sys_socket(domain: usize, socket_type: usize, protocol: usize) -> SysResult<usize> {
-    if domain != AF_INET {
-        return Err(Errno::EINVAL);
-    }
-
-    let kind = match socket_type & SOCK_TYPE_MASK {
-        SOCK_STREAM if protocol == 0 || protocol == IPPROTO_TCP => SocketKind::Stream,
-        SOCK_DGRAM if protocol == 0 || protocol == IPPROTO_UDP => SocketKind::Datagram,
-        _ => return Err(Errno::EINVAL),
+    let (domain, kind) = match domain {
+        AF_INET => {
+            let kind = match socket_type & SOCK_TYPE_MASK {
+                SOCK_STREAM if protocol == 0 || protocol == IPPROTO_TCP => SocketKind::Stream,
+                SOCK_DGRAM if protocol == 0 || protocol == IPPROTO_UDP => SocketKind::Datagram,
+                _ => return Err(Errno::EINVAL),
+            };
+            (SocketDomain::Inet, kind)
+        }
+        AF_UNIX => {
+            let kind = match socket_type & SOCK_TYPE_MASK {
+                SOCK_STREAM | SOCK_DGRAM if protocol == 0 => {
+                    if socket_type & SOCK_TYPE_MASK == SOCK_STREAM {
+                        SocketKind::Stream
+                    } else {
+                        SocketKind::Datagram
+                    }
+                }
+                _ => return Err(Errno::EINVAL),
+            };
+            (SocketDomain::Unix, kind)
+        }
+        _ => return Err(Errno::EAFNOSUPPORT),
     };
 
     let nonblocking = socket_type & SOCK_NONBLOCK != 0;
     let cloexec = socket_type & SOCK_CLOEXEC != 0;
-    let socket = Arc::new(SocketFile::new(kind, nonblocking, cloexec));
+    let socket = Arc::new(SocketFile::new(domain, kind, nonblocking, cloexec));
     let flags = socket.fd_flags();
     let task = current_task().expect("[kernel] current task is None.");
     task.alloc_fd(FdEntry::new(socket, flags))
@@ -267,6 +291,9 @@ pub fn sys_bind(fd: usize, addr: usize, len: usize) -> SysResult<usize> {
     let sockaddr = read_sockaddr(addr, len)?;
     with_socket(fd, |socket| {
         let mut inner = socket.inner.lock();
+        if inner.domain != SocketDomain::Inet {
+            return Err(Errno::EOPNOTSUPP);
+        }
         let port = if sockaddr.port() == 0 {
             next_port()
         } else {
@@ -312,9 +339,11 @@ pub fn sys_sendto(
 ) -> SysResult<usize> {
     let dst = read_sockaddr(addr, addr_len)?;
     with_socket(fd, |socket| {
-        if socket.inner.lock().kind != SocketKind::Datagram {
+        let inner = socket.inner.lock();
+        if inner.domain != SocketDomain::Inet || inner.kind != SocketKind::Datagram {
             return Err(Errno::EINVAL);
         }
+        drop(inner);
         let mut data = alloc::vec![0u8; len];
         copy_from_user(data.as_mut_ptr(), buf, len)?;
         let src_port = {
@@ -344,7 +373,10 @@ pub fn sys_recvfrom(
     loop {
         let packet = with_socket(fd, |socket| {
             let inner = socket.inner.lock();
-            if inner.kind != SocketKind::Datagram || inner.local_port == 0 {
+            if inner.domain != SocketDomain::Inet
+                || inner.kind != SocketKind::Datagram
+                || inner.local_port == 0
+            {
                 return Err(Errno::EINVAL);
             }
             Ok(LOOPBACK.lock().udp_queue_mut(inner.local_port).pop_front())
@@ -366,7 +398,7 @@ pub fn sys_recvfrom(
 pub fn sys_listen(fd: usize, _backlog: usize) -> SysResult<usize> {
     with_socket(fd, |socket| {
         let mut inner = socket.inner.lock();
-        if inner.kind != SocketKind::Stream {
+        if inner.domain != SocketDomain::Inet || inner.kind != SocketKind::Stream {
             return Err(Errno::EINVAL);
         }
         if inner.local_port == 0 {
@@ -379,8 +411,20 @@ pub fn sys_listen(fd: usize, _backlog: usize) -> SysResult<usize> {
 }
 
 pub fn sys_connect(fd: usize, addr: usize, len: usize) -> SysResult<usize> {
-    let dst = read_sockaddr(addr, len)?;
     with_socket(fd, |socket| {
+        if socket.inner.lock().domain == SocketDomain::Unix {
+            if len < core::mem::size_of::<u16>() {
+                return Err(Errno::EINVAL);
+            }
+            let mut family = 0u16;
+            copy_from_user(&mut family as *mut u16, addr as *const u16, 1)?;
+            if family as usize != AF_UNIX {
+                return Err(Errno::EINVAL);
+            }
+            return Err(Errno::ENOENT);
+        }
+
+        let dst = read_sockaddr(addr, len)?;
         {
             let mut inner = socket.inner.lock();
             if inner.kind != SocketKind::Stream {
@@ -393,7 +437,12 @@ pub fn sys_connect(fd: usize, addr: usize, len: usize) -> SysResult<usize> {
         if !LOOPBACK.lock().tcp_listener_exists(dst.port()) {
             return Err(Errno::ECONNREFUSED);
         }
-        let accepted = Arc::new(SocketFile::new(SocketKind::Stream, false, false));
+        let accepted = Arc::new(SocketFile::new(
+            SocketDomain::Inet,
+            SocketKind::Stream,
+            false,
+            false,
+        ));
         accepted.inner.lock().local_port = dst.port();
         LOOPBACK
             .lock()
@@ -407,7 +456,10 @@ pub fn sys_accept(fd: usize, addr: usize, addr_len: usize) -> SysResult<usize> {
     loop {
         let accepted = with_socket(fd, |socket| {
             let inner = socket.inner.lock();
-            if inner.kind != SocketKind::Stream || !inner.listening {
+            if inner.domain != SocketDomain::Inet
+                || inner.kind != SocketKind::Stream
+                || !inner.listening
+            {
                 return Err(Errno::EINVAL);
             }
             Ok(LOOPBACK

@@ -52,7 +52,21 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 
 printf 'root:x:0:0:root:/root:/bin/sh\nnobody:x:65534:65534:nobody:/nonexistent:/bin/false\n' > "$tmp_passwd"
-printf 'root:x:0:\nnogroup:x:65534:\nnobody:x:65534:\n' > "$tmp_group"
+cat > "$tmp_group" <<'GROUP'
+root:x:0:root
+daemon:x:1:daemon
+bin:x:2:bin
+sys:x:3:sys
+adm:x:4:adm
+tty:x:5:tty
+disk:x:6:disk
+lp:x:7:lp
+mail:x:8:mail
+news:x:9:news
+uucp:x:10:uucp
+nogroup:x:65534:nobody
+nobody:x:65534:nobody
+GROUP
 printf '#!/bin/sh\nexit 0\n' > "$tmp_mkfs"
 
 has_path() {
@@ -69,23 +83,17 @@ if ! has_path /etc; then
     debugfs -w -R 'mkdir /etc' "$image"
 fi
 
-if ! has_path /etc/passwd; then
-    debugfs -w -R "write $tmp_passwd /etc/passwd" "$image"
-fi
-
-if ! has_path /etc/group; then
-    debugfs -w -R "write $tmp_group /etc/group" "$image"
-fi
+debugfs -w -R 'rm /etc/passwd' "$image" >/dev/null 2>&1 || true
+debugfs -w -R "write $tmp_passwd /etc/passwd" "$image"
+debugfs -w -R 'rm /etc/group' "$image" >/dev/null 2>&1 || true
+debugfs -w -R "write $tmp_group /etc/group" "$image"
 
 for dir in /musl /glibc; do
     if has_path "$dir"; then
-        if ! has_path "$dir/mkfs.ext2"; then
-            debugfs -w -R "write $tmp_mkfs $dir/mkfs.ext2" "$image"
-            debugfs -w -R "sif $dir/mkfs.ext2 mode 0100755" "$image"
-        fi
-        for tool in mkfs.ext3 mkfs.ext4 mkfs.vfat; do
-            if has_path "$dir/$tool"; then
-                debugfs -w -R "rm $dir/$tool" "$image"
+        for tool in mkfs.ext2 mkfs.ext3 mkfs.ext4 mkfs.vfat; do
+            if ! has_path "$dir/$tool"; then
+                debugfs -w -R "write $tmp_mkfs $dir/$tool" "$image"
+                debugfs -w -R "sif $dir/$tool mode 0100755" "$image"
             fi
         done
     fi

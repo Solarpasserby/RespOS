@@ -427,6 +427,7 @@ impl InodeOp for Ext4Inode {
             gid,
             rdev: 0,
             mode,
+            mode_valid: true,
             blksize: crate::config::BLOCK_SIZE as u32,
             blocks: KStat::blocks_for_size(size as u64),
             atime: times.atime,
@@ -543,14 +544,14 @@ impl InodeOp for Ext4Inode {
             *cached_times = Some(times);
         }
 
-        if self.node_type() == InodeType::Directory || path.starts_with("/tmp/LTP_") {
+        if self.node_type() == InodeType::Directory {
             return Ok(());
         }
         drop(cached_times);
 
         let _guard = EXT4_OP_LOCK.lock();
         let c_path = CString::new(path).map_err(|_| Errno::EINVAL)?;
-        let ret = unsafe { bindings::ext4_mode_set(c_path.as_ptr(), mode & 0o777) };
+        let ret = unsafe { bindings::ext4_mode_set(c_path.as_ptr(), mode & 0o7777) };
         if ret != 0 {
             return Err(Self::map_lwext4_err(ret));
         }

@@ -16,6 +16,7 @@ pub struct KStat {
     pub gid: u32,
     pub rdev: u64,
     pub mode: u32,
+    pub mode_valid: bool,
     pub blksize: u32,
     pub blocks: u64,
     pub atime: TimeSpec,
@@ -37,6 +38,7 @@ impl KStat {
             gid: 0,
             rdev: 0,
             mode: 0,
+            mode_valid: false,
             blksize: BLOCK_SIZE as u32,
             blocks: Self::blocks_for_size(size as u64),
             atime: TimeSpec::default(),
@@ -57,6 +59,7 @@ impl KStat {
 
     pub fn with_mode(mut self, mode: u32) -> Self {
         self.mode = mode;
+        self.mode_valid = true;
         self
     }
 
@@ -126,7 +129,8 @@ pub struct Stat {
 /// 简单实现 [`KStat`] 到 [`Stat`] 的转换
 impl From<KStat> for Stat {
     fn from(kstat: KStat) -> Self {
-        let st_mode = file_type_mode(kstat.ty) | file_perm_mode(kstat.ty, kstat.mode);
+        let st_mode =
+            file_type_mode(kstat.ty) | file_perm_mode(kstat.ty, kstat.mode, kstat.mode_valid);
         let st_size = kstat.size as u64;
         let st_blksize = kstat.blksize;
         let st_blocks = kstat.blocks;
@@ -173,11 +177,11 @@ fn file_type_mode(ty: InodeType) -> u32 {
     (ty as u32) << 12
 }
 
-fn file_perm_mode(ty: InodeType, mode: u32) -> u32 {
+fn file_perm_mode(ty: InodeType, mode: u32, mode_valid: bool) -> u32 {
     const S_IFMT: u32 = 0o170000;
     if mode & S_IFMT != 0 {
         mode & !S_IFMT
-    } else if mode != 0 {
+    } else if mode_valid {
         mode
     } else {
         default_perm(ty)
