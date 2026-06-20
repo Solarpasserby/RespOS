@@ -49,6 +49,9 @@ def parse_ltp_log(path):
         nonlocal current
         if current is None:
             return
+        counts = current["summary_counts"]
+        if not current["summary_seen"] or sum(counts.values()) == 0:
+            counts = current["token_counts"]
         row = {
             "file": path.name,
             "arch": "rv" if path.name.startswith("rv") else "la"
@@ -57,7 +60,7 @@ def parse_ltp_log(path):
             "group": group,
             "case": current["case"],
             "ret": ret,
-            **current["counts"],
+            **counts,
         }
         row["all"] = sum(row[key] for key in RESULT_KEYS)
         row["status"] = case_status(row)
@@ -82,7 +85,9 @@ def parse_ltp_log(path):
         if case_match:
             current = {
                 "case": case_match.group("name"),
-                "counts": empty_counts(),
+                "summary_counts": empty_counts(),
+                "token_counts": empty_counts(),
+                "summary_seen": False,
             }
             in_summary = False
             continue
@@ -96,24 +101,22 @@ def parse_ltp_log(path):
             in_summary = False
             continue
 
-        if group == "ltp-musl":
-            if line == "Summary:":
-                in_summary = True
-                continue
-            if in_summary:
-                if not line:
-                    in_summary = False
-                    continue
-                parts = line.split()
-                if len(parts) >= 2 and parts[0] in RESULT_KEYS:
-                    current["counts"][parts[0]] += int(parts[1])
-            continue
+        plain = ANSI_RE.sub("", line)
+        token_match = RESULT_TOKEN_RE.search(plain)
+        if token_match:
+            current["token_counts"][TOKEN_COUNTS[token_match.group(1)]] += 1
 
-        if group == "ltp-glibc":
-            plain = ANSI_RE.sub("", line)
-            token_match = RESULT_TOKEN_RE.search(plain)
-            if token_match:
-                current["counts"][TOKEN_COUNTS[token_match.group(1)]] += 1
+        if line == "Summary:":
+            current["summary_seen"] = True
+            in_summary = True
+            continue
+        if in_summary:
+            if not line:
+                in_summary = False
+                continue
+            parts = line.split()
+            if len(parts) >= 2 and parts[0] in RESULT_KEYS:
+                current["summary_counts"][parts[0]] += int(parts[1])
 
     return rows
 
