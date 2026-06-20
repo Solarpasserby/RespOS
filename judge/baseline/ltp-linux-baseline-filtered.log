@@ -1,0 +1,2806 @@
+RUN LTP CASE getpid01
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790857
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790858
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790859
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790860
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790861
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790862
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790863
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790864
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790865
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790866
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790867
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790868
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790869
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790870
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790871
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790872
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790873
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790874
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790875
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790876
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790877
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790878
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790879
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790880
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790881
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790882
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790883
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790884
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790885
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790886
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790887
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790888
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790889
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790890
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790891
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790892
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790893
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790894
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790895
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790896
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790897
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790898
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790899
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790900
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790901
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790902
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790903
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790904
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790905
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790906
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790907
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790908
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790909
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790910
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790911
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790912
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790913
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790914
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790915
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790916
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790917
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790918
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790919
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790920
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790921
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790922
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790923
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790924
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790925
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790926
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790927
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790928
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790929
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790930
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790931
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790932
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790933
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790934
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790935
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790936
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790937
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790938
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790939
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790940
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790941
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790942
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790943
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790944
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790945
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790946
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790947
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790948
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790949
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790950
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790951
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790952
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790953
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790954
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790955
+getpid01.c:34: [1;32mTPASS: [0mgetpid() returns 790956
+
+Summary:
+passed   100
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE getpid01 : 0
+RUN LTP CASE getpid02
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+getpid02.c:37: [1;32mTPASS: [0mchild getppid() == parent getpid() (790958)
+getpid02.c:50: [1;32mTPASS: [0mchild getpid() == parent fork() (790960)
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE getpid02 : 0
+RUN LTP CASE getppid01
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+getppid01.c:31: [1;32mTPASS: [0mgetppid() returned 790961
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE getppid01 : 0
+RUN LTP CASE getppid02
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+getppid02.c:31: [1;32mTPASS: [0mgetppid() returned parent pid (790966)
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE getppid02 : 0
+RUN LTP CASE uname01
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+uname01.c:21: [1;32mTPASS: [0muname(&un) passed
+uname01.c:31: [1;32mTPASS: [0msysname set to Linux
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE uname01 : 0
+RUN LTP CASE uname02
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+uname02.c:19: [1;32mTPASS: [0muname(bad_addr) : EFAULT (14)
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE uname02 : 0
+RUN LTP CASE uname04
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+uname04.c:70: [1;34mTINFO: [0mCalling uname with default personality
+uname04.c:62: [1;32mTPASS: [0mNo bytes leaked
+uname04.c:73: [1;34mTINFO: [0mCalling uname with UNAME26 personality
+uname04.c:62: [1;32mTPASS: [0mNo bytes leaked
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE uname04 : 0
+RUN LTP CASE gettimeofday01
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+gettimeofday01.c:36: [1;32mTPASS: [0mtst_syscall(__NR_gettimeofday, tc->tv, tc->tz) : EFAULT (14)
+gettimeofday01.c:36: [1;32mTPASS: [0mtst_syscall(__NR_gettimeofday, tc->tv, tc->tz) : EFAULT (14)
+gettimeofday01.c:36: [1;32mTPASS: [0mtst_syscall(__NR_gettimeofday, tc->tv, tc->tz) : EFAULT (14)
+
+Summary:
+passed   3
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE gettimeofday01 : 0
+RUN LTP CASE gettimeofday02
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 40s
+gettimeofday02.c:64: [1;34mTINFO: [0mgettimeofday() called 129346110 times
+gettimeofday02.c:65: [1;32mTPASS: [0mgettimeofday() monotonous in 10 seconds
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE gettimeofday02 : 0
+RUN LTP CASE times01
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+times01.c:25: [1;32mTPASS: [0mtimes(&mytimes) returned 433476130
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE times01 : 0
+RUN LTP CASE times03
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+times03.c:89: [1;32mTPASS: [0mbuf1.tms_utime <= 5
+times03.c:94: [1;32mTPASS: [0mbuf1.tms_stime <= 5
+times03.c:105: [1;32mTPASS: [0mbuf2.tms_utime = 146
+times03.c:111: [1;32mTPASS: [0mbuf1.tms_utime (0) < buf2.tms_utime (146)
+times03.c:118: [1;32mTPASS: [0mbuf2.tms_stime = 171
+times03.c:124: [1;32mTPASS: [0mbuf1.tms_stime (0) < buf2.tms_stime (171)
+times03.c:131: [1;32mTPASS: [0mbuf2.tms_cutime = 0
+times03.c:136: [1;32mTPASS: [0mbuf2.tms_cstime = 0
+times03.c:155: [1;32mTPASS: [0mbuf2.tms_utime (146) <= buf3.tms_utime (146)
+times03.c:163: [1;32mTPASS: [0mbuf2.tms_stime (171) <= buf3.tms_stime (171)
+times03.c:170: [1;32mTPASS: [0mbuf3.tms_cutime = 164
+times03.c:175: [1;32mTPASS: [0mbuf3.tms_cstime = 235
+
+Summary:
+passed   12
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE times03 : 0
+RUN LTP CASE nanosleep01
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+tst_timer_test.c:357: [1;34mTINFO: [0mCLOCK_MONOTONIC resolution 1ns
+tst_timer_test.c:369: [1;34mTINFO: [0mprctl(PR_GET_TIMERSLACK) = 50us
+tst_test.c:1625: [1;34mTINFO: [0mUpdating max runtime to 0h 00m 09s
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 39s
+tst_timer_test.c:263: [1;34mTINFO: [0mnanosleep() sleeping for 1000us 500 iterations, threshold 450.01us
+tst_timer_test.c:305: [1;34mTINFO: [0mmin 1003us, max 1059us, median 1052us, trunc mean 1050.10us (discarded 25)
+tst_timer_test.c:326: [1;32mTPASS: [0mMeasured times are within thresholds
+tst_timer_test.c:263: [1;34mTINFO: [0mnanosleep() sleeping for 2000us 500 iterations, threshold 450.01us
+tst_timer_test.c:305: [1;34mTINFO: [0mmin 2003us, max 2059us, median 2052us, trunc mean 2050.61us (discarded 25)
+tst_timer_test.c:326: [1;32mTPASS: [0mMeasured times are within thresholds
+tst_timer_test.c:263: [1;34mTINFO: [0mnanosleep() sleeping for 5000us 300 iterations, threshold 450.04us
+tst_timer_test.c:305: [1;34mTINFO: [0mmin 5003us, max 5238us, median 5052us, trunc mean 5051.85us (discarded 15)
+tst_timer_test.c:326: [1;32mTPASS: [0mMeasured times are within thresholds
+tst_timer_test.c:263: [1;34mTINFO: [0mnanosleep() sleeping for 10000us 100 iterations, threshold 450.33us
+tst_timer_test.c:305: [1;34mTINFO: [0mmin 10013us, max 10059us, median 10053us, trunc mean 10051.99us (discarded 5)
+tst_timer_test.c:326: [1;32mTPASS: [0mMeasured times are within thresholds
+tst_timer_test.c:263: [1;34mTINFO: [0mnanosleep() sleeping for 25000us 50 iterations, threshold 451.29us
+tst_timer_test.c:305: [1;34mTINFO: [0mmin 25032us, max 25057us, median 25053us, trunc mean 25052.81us (discarded 2)
+tst_timer_test.c:326: [1;32mTPASS: [0mMeasured times are within thresholds
+tst_timer_test.c:263: [1;34mTINFO: [0mnanosleep() sleeping for 100000us 10 iterations, threshold 537.00us
+tst_timer_test.c:305: [1;34mTINFO: [0mmin 100053us, max 100060us, median 100054us, trunc mean 100054.67us (discarded 1)
+tst_timer_test.c:326: [1;32mTPASS: [0mMeasured times are within thresholds
+tst_timer_test.c:263: [1;34mTINFO: [0mnanosleep() sleeping for 1000000us 2 iterations, threshold 4400.00us
+tst_timer_test.c:305: [1;34mTINFO: [0mmin 1000061us, max 1000061us, median 1000061us, trunc mean 1000061.00us (discarded 1)
+tst_timer_test.c:326: [1;32mTPASS: [0mMeasured times are within thresholds
+
+Summary:
+passed   7
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE nanosleep01 : 0
+RUN LTP CASE nanosleep02
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+nanosleep02.c:57: [1;32mTPASS: [0mnanosleep() returned -1, set errno to EINTR
+nanosleep02.c:70: [1;32mTPASS: [0mnanosleep() slept for 1000222us, remaining time difference 79us
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE nanosleep02 : 0
+RUN LTP CASE nanosleep04
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+nanosleep04.c:45: [1;32mTPASS: [0mnanosleep() failed with EINVAL
+nanosleep04.c:45: [1;32mTPASS: [0mnanosleep() failed with EINVAL
+nanosleep04.c:45: [1;32mTPASS: [0mnanosleep() failed with EINVAL
+
+Summary:
+passed   3
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE nanosleep04 : 0
+RUN LTP CASE exit01
+exit01      1  [1;32mTPASS[0m  :  exit() test PASSED
+FAIL LTP CASE exit01 : 0
+RUN LTP CASE exit02
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+exit02.c:46: [1;32mTPASS: [0mFile written by child read back correctly
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE exit02 : 0
+RUN LTP CASE close01
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+close01.c:50: [1;32mTPASS: [0mclose a file fd passed
+close01.c:50: [1;32mTPASS: [0mclose a pipe fd passed
+close01.c:50: [1;32mTPASS: [0mclose a socket fd passed
+
+Summary:
+passed   3
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE close01 : 0
+RUN LTP CASE close02
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+close02.c:20: [1;32mTPASS: [0mclose(-1) : EBADF (9)
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE close02 : 0
+RUN LTP CASE dup01
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+dup01.c:24: [1;32mTPASS: [0mdup(fd) returned fd 4
+dup01.c:27: [1;32mTPASS: [0mbuf1.st_ino == buf2.st_ino (13409873)
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE dup01 : 0
+RUN LTP CASE dup02
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+dup02.c:29: [1;32mTPASS: [0mdup(-1) : EBADF (9)
+dup02.c:29: [1;32mTPASS: [0mdup(1500) : EBADF (9)
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE dup02 : 0
+RUN LTP CASE dup03
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+dup03.c:22: [1;32mTPASS: [0mdup(3) : EMFILE (24)
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE dup03 : 0
+RUN LTP CASE dup04
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+dup04.c:24: [1;32mTPASS: [0mdup(3) read end of the pipe returned fd 5
+dup04.c:27: [1;32mTPASS: [0mdup(4) write end of the pipe returned fd 5
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE dup04 : 0
+RUN LTP CASE dup05
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+dup05.c:22: [1;32mTPASS: [0mdup(3) returned fd 4
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE dup05 : 0
+RUN LTP CASE dup06
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+dup06.c:64: [1;32mTPASS: [0mTest passed
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE dup06 : 0
+RUN LTP CASE dup07
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+dup07.c:44: [1;32mTPASS: [0mPassed in read only mode
+dup07.c:44: [1;32mTPASS: [0mPassed in write only mode
+dup07.c:44: [1;32mTPASS: [0mPassed in read/write mode
+
+Summary:
+passed   3
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE dup07 : 0
+RUN LTP CASE dup201
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+dup201.c:47: [1;32mTPASS: [0mdup2(-1, 5) : EBADF (9)
+dup201.c:47: [1;32mTPASS: [0mdup2(1024, 5) : EBADF (9)
+dup201.c:47: [1;32mTPASS: [0mdup2(0, -1) : EBADF (9)
+dup201.c:47: [1;32mTPASS: [0mdup2(0, 1024) : EBADF (9)
+
+Summary:
+passed   4
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE dup201 : 0
+RUN LTP CASE dup202
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+dup202.c:104: [1;32mTPASS: [0moriginal(100444) and duped(100444) are the same mode
+dup202.c:104: [1;32mTPASS: [0moriginal(100222) and duped(100222) are the same mode
+dup202.c:104: [1;32mTPASS: [0moriginal(100666) and duped(100666) are the same mode
+dup202.c:93: [1;34mTINFO: [0moriginal mode 0777, new mode 0444 after chmod
+dup202.c:104: [1;32mTPASS: [0moriginal(100444) and duped(100444) are the same mode
+dup202.c:93: [1;34mTINFO: [0moriginal mode 0777, new mode 0222 after chmod
+dup202.c:104: [1;32mTPASS: [0moriginal(100222) and duped(100222) are the same mode
+dup202.c:93: [1;34mTINFO: [0moriginal mode 0777, new mode 0666 after chmod
+dup202.c:104: [1;32mTPASS: [0moriginal(100666) and duped(100666) are the same mode
+
+Summary:
+passed   6
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE dup202 : 0
+RUN LTP CASE dup203
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+dup203.c:40: [1;34mTINFO: [0mTest duping over an open fd
+dup203.c:74: [1;32mTPASS: [0mtest the content of file is correct
+dup203.c:81: [1;32mTPASS: [0mtest the FD_CLOEXEC flag is correct
+dup203.c:40: [1;34mTINFO: [0mTest duping over a close fd
+dup203.c:74: [1;32mTPASS: [0mtest the content of file is correct
+dup203.c:81: [1;32mTPASS: [0mtest the FD_CLOEXEC flag is correct
+
+Summary:
+passed   4
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE dup203 : 0
+RUN LTP CASE dup204
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+dup204.c:38: [1;32mTPASS: [0mdup2(fd[i], nfd[i]) passed
+dup204.c:45: [1;32mTPASS: [0moldbuf.st_ino == newbuf.st_ino (5348795)
+dup204.c:38: [1;32mTPASS: [0mdup2(fd[i], nfd[i]) passed
+dup204.c:45: [1;32mTPASS: [0moldbuf.st_ino == newbuf.st_ino (5348795)
+
+Summary:
+passed   4
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE dup204 : 0
+RUN LTP CASE dup205
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+dup205.c:69: [1;32mTPASS: [0mTest passed
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE dup205 : 0
+RUN LTP CASE dup206
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+dup206.c:29: [1;32mTPASS: [0mdup2(3, 3) returns newfd(3)
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE dup206 : 0
+RUN LTP CASE dup207
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+dup207.c:55: [1;34mTINFO: [0mTest offset with lseek before dup2
+dup207.c:71: [1;32mTPASS: [0mGet expected buf bcdefg
+dup207.c:55: [1;34mTINFO: [0mTest offset with lseek after dup2
+dup207.c:71: [1;32mTPASS: [0mGet expected buf cdefg
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE dup207 : 0
+RUN LTP CASE pipe01
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+pipe01.c:48: [1;32mTPASS: [0mpipe() functionality is correct
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE pipe01 : 0
+RUN LTP CASE pipe02
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+pipe02.c:77: [1;32mTPASS: [0mChild killed by SIGPIPE
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE pipe02 : 0
+RUN LTP CASE pipe03
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+pipe03.c:24: [1;32mTPASS: [0mwrite(fd[0], "A", 1) : EBADF (9)
+pipe03.c:25: [1;32mTPASS: [0mread(fd[1], buf, 1) : EBADF (9)
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE pipe03 : 0
+RUN LTP CASE pipe04
+pipe04      1  [1;32mTPASS[0m  :  Child 1 killed while writing to a pipe
+pipe04      2  [1;32mTPASS[0m  :  Child 2 killed while writing to a pipe
+FAIL LTP CASE pipe04 : 0
+RUN LTP CASE pipe05
+pipe05      1  [1;32mTPASS[0m  :  expected failure - errno = 14 : Bad address
+FAIL LTP CASE pipe05 : 0
+RUN LTP CASE pipe06
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+pipe06.c:27: [1;34mTINFO: [0mgetdtablesize() = 1024
+pipe06.c:36: [1;34mTINFO: [0mNumber of fds opened by pipe calls: 1020
+pipe06.c:41: [1;32mTPASS: [0mpipe(fds) : EMFILE (24)
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE pipe06 : 0
+RUN LTP CASE pipe07
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+pipe07.c:58: [1;34mTINFO: [0mgetdtablesize() = 1024
+pipe07.c:62: [1;34mTINFO: [0mexpected max fds to be opened by pipe(): 1020
+pipe07.c:77: [1;32mTPASS: [0merrno == EMFILE (24)
+pipe07.c:78: [1;32mTPASS: [0mexp_num_pipes == num_pipe_fds (1020)
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE pipe07 : 0
+RUN LTP CASE pipe08
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+pipe08.c:37: [1;32mTPASS: [0msigpipe_cnt == 1 (1)
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE pipe08 : 0
+RUN LTP CASE pipe09
+pipe09      1  [1;32mTPASS[0m  :  functionality appears to be correct
+FAIL LTP CASE pipe09 : 0
+RUN LTP CASE pipe10
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+pipe10.c:31: [1;32mTPASS: [0mwr_cnt == rd_cnt (27)
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE pipe10 : 0
+RUN LTP CASE pipe11
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+pipe11.c:69: [1;34mTINFO: [0mReading 4096 per each of 1 children
+pipe11.c:50: [1;32mTPASS: [0mChild 17249 read pipe buffer correctly
+pipe11.c:69: [1;34mTINFO: [0mReading 2048 per each of 2 children
+pipe11.c:50: [1;32mTPASS: [0mChild 17252 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17253 read pipe buffer correctly
+pipe11.c:69: [1;34mTINFO: [0mReading 1365 per each of 3 children
+pipe11.c:50: [1;32mTPASS: [0mChild 17256 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17257 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17258 read pipe buffer correctly
+pipe11.c:69: [1;34mTINFO: [0mReading 1024 per each of 4 children
+pipe11.c:50: [1;32mTPASS: [0mChild 17260 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17262 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17263 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17264 read pipe buffer correctly
+pipe11.c:69: [1;34mTINFO: [0mReading 409 per each of 10 children
+pipe11.c:50: [1;32mTPASS: [0mChild 17267 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17268 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17270 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17271 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17272 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17274 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17275 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17277 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17278 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17280 read pipe buffer correctly
+pipe11.c:69: [1;34mTINFO: [0mReading 81 per each of 50 children
+pipe11.c:50: [1;32mTPASS: [0mChild 17282 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17283 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17285 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17286 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17288 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17289 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17290 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17292 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17293 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17295 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17296 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17298 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17299 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17301 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17302 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17303 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17305 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17306 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17308 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17309 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17310 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17312 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17313 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17315 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17316 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17317 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17318 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17320 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17321 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17323 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17324 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17325 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17327 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17328 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17330 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17331 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17332 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17334 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17335 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17337 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17338 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17340 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17341 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17342 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17344 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17345 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17347 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17348 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17350 read pipe buffer correctly
+pipe11.c:50: [1;32mTPASS: [0mChild 17351 read pipe buffer correctly
+
+Summary:
+passed   70
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE pipe11 : 0
+RUN LTP CASE pipe12
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+pipe12.c:45: [1;34mTINFO: [0mWrite to full pipe
+pipe12.c:54: [1;32mTPASS: [0mwrite failed as expected: EAGAIN/EWOULDBLOCK (11)
+pipe12.c:69: [1;32mTPASS: [0mwrite 65536 bytes
+pipe12.c:45: [1;34mTINFO: [0mWrite to non-empty pipe
+pipe12.c:64: [1;32mTPASS: [0mwrite succeeded as expectedly
+pipe12.c:74: [1;32mTPASS: [0mwrite 61441 bytes
+pipe12.c:45: [1;34mTINFO: [0mWrite to empty pipe
+pipe12.c:64: [1;32mTPASS: [0mwrite succeeded as expectedly
+pipe12.c:69: [1;32mTPASS: [0mwrite 65536 bytes
+
+Summary:
+passed   6
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE pipe12 : 0
+RUN LTP CASE pipe13
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+pipe13.c:50: [1;34mTINFO: [0mCreating 2 child processes
+pipe13.c:91: [1;32mTPASS: [0mClosed pipe waked up everyone
+pipe13.c:50: [1;34mTINFO: [0mCreating 10 child processes
+pipe13.c:91: [1;32mTPASS: [0mClosed pipe waked up everyone
+pipe13.c:50: [1;34mTINFO: [0mCreating 27 child processes
+pipe13.c:91: [1;32mTPASS: [0mClosed pipe waked up everyone
+pipe13.c:50: [1;34mTINFO: [0mCreating 100 child processes
+pipe13.c:91: [1;32mTPASS: [0mClosed pipe waked up everyone
+
+Summary:
+passed   4
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE pipe13 : 0
+RUN LTP CASE pipe14
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+pipe14.c:31: [1;32mTPASS: [0mSAFE_READ(0, fds[0], rdbuf, 1) passed
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE pipe14 : 0
+RUN LTP CASE pipe15
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+pipe15.c:58: [1;34mTINFO: [0mSoft limit for pipes: 16384 pages
+pipe15.c:59: [1;34mTINFO: [0mBuffer size: 65536 byte
+pipe15.c:60: [1;34mTINFO: [0mCreating 1024 pipes
+pipe15.c:34: [1;34mTINFO: [0mSoft-limited buffer size: 65536 bytes
+pipe15.c:38: [1;32mTPASS: [0mPipe operation did not block
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE pipe15 : 0
+RUN LTP CASE pipe2_01
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+pipe2_01.c:56: [1;34mTINFO: [0mTest pipe2 with 0 flag 
+pipe2_01.c:64: [1;32mTPASS: [0mpipe2 fds[0] gets expected flag(0)
+pipe2_01.c:64: [1;32mTPASS: [0mpipe2 fds[1] gets expected flag(0)
+pipe2_01.c:56: [1;34mTINFO: [0mTest pipe2 using O_CLOEXEC flag 
+pipe2_01.c:64: [1;32mTPASS: [0mpipe2 fds[0] gets expected flag(524288)
+pipe2_01.c:64: [1;32mTPASS: [0mpipe2 fds[1] gets expected flag(524288)
+pipe2_01.c:56: [1;34mTINFO: [0mTest pipe2 using O_DIRECT flag 
+pipe2_01.c:64: [1;32mTPASS: [0mpipe2 fds[1] gets expected flag(16384)
+pipe2_01.c:56: [1;34mTINFO: [0mTest pipe2 using O_NONBLOCK flag 
+pipe2_01.c:64: [1;32mTPASS: [0mpipe2 fds[0] gets expected flag(2048)
+pipe2_01.c:64: [1;32mTPASS: [0mpipe2 fds[1] gets expected flag(2048)
+
+Summary:
+passed   7
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE pipe2_01 : 0
+RUN LTP CASE pipe2_02
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+pipe2_02.c:43: [1;32mTPASS: [0mtest O_CLOEXEC for pipe2 success
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE pipe2_02 : 0
+RUN LTP CASE pipe2_02_child
+Only two arguments: /home/lorenash/Code/kernel/ltp/install/opt/ltp/testcases/bin/pipe2_02_child <fd>
+FAIL LTP CASE pipe2_02_child : 1
+RUN LTP CASE pipe2_04
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+pipe2_04.c:36: [1;32mTPASS: [0mwrite failed as expected: EAGAIN/EWOULDBLOCK (11)
+pipe2_04.c:52: [1;32mTPASS: [0mChild process is blocked
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE pipe2_04 : 0
+RUN LTP CASE open01
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+open01.c:59: [1;32mTPASS: [0msticky bit is set as expected
+open01.c:59: [1;32mTPASS: [0msirectory bit is set as expected
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE open01 : 0
+RUN LTP CASE open02
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+open02.c:49: [1;32mTPASS: [0mopen() new file without O_CREAT : ENOENT (2)
+open02.c:49: [1;32mTPASS: [0mopen() unprivileged O_RDONLY | O_NOATIME : EPERM (1)
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE open02 : 0
+RUN LTP CASE open03
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+open03.c:19: [1;32mTPASS: [0mopen(TEST_FILE, O_RDWR | O_CREAT, 0700) returned fd 3
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE open03 : 0
+RUN LTP CASE open04
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+open04.c:50: [1;32mTPASS: [0mopen(fname, O_RDWR | O_CREAT, 0777) : EMFILE (24)
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE open04 : 0
+RUN LTP CASE open06
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+open06.c:27: [1;32mTPASS: [0mopen(TEMP_FIFO, O_NONBLOCK | O_WRONLY) : ENXIO (6)
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE open06 : 0
+RUN LTP CASE open07
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+open07.c:60: [1;32mTPASS: [0mopen(O_NOFOLLOW) a symlink to file : ELOOP (40)
+open07.c:60: [1;32mTPASS: [0mopen(O_NOFOLLOW) a double symlink to file : ELOOP (40)
+open07.c:60: [1;32mTPASS: [0mopen(O_NOFOLLOW) a symlink to directory : ELOOP (40)
+open07.c:60: [1;32mTPASS: [0mopen(O_NOFOLLOW) a double symlink to directory : ELOOP (40)
+open07.c:63: [1;32mTPASS: [0mopen(O_NOFOLLOW) a file in symlinked directory returned fd 3
+
+Summary:
+passed   5
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE open07 : 0
+RUN LTP CASE open08
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+open08.c:52: [1;32mTPASS: [0mO_CREAT | O_EXCL : EEXIST (17)
+open08.c:52: [1;32mTPASS: [0mO_RDWR : EISDIR (21)
+open08.c:52: [1;32mTPASS: [0mO_DIRECTORY : ENOTDIR (20)
+open08.c:52: [1;32mTPASS: [0mO_RDWR : ENAMETOOLONG (36)
+open08.c:52: [1;32mTPASS: [0mO_WRONLY : EACCES (13)
+open08.c:52: [1;32mTPASS: [0mO_CREAT : EFAULT (14)
+
+Summary:
+passed   6
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE open08 : 0
+RUN LTP CASE open09
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+open09.c:32: [1;32mTPASS: [0mwrite(fd, pbuf, 1) : EBADF (9)
+open09.c:35: [1;32mTPASS: [0mread(fd, pbuf, 1) : EBADF (9)
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE open09 : 0
+RUN LTP CASE openat01
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+openat01.c:71: [1;32mTPASS: [0mopenat(*tc->dir_fd, tc->pathname, O_RDWR, 0600) returned fd 5
+openat01.c:71: [1;32mTPASS: [0mopenat(*tc->dir_fd, tc->pathname, O_RDWR, 0600) returned fd 5
+openat01.c:64: [1;32mTPASS: [0mopenat with a filefd instead of dirfd : ENOTDIR (20)
+openat01.c:67: [1;32mTPASS: [0mopenat with invalid fd : EBADF (9)
+openat01.c:71: [1;32mTPASS: [0mopenat(*tc->dir_fd, tc->pathname, O_RDWR, 0600) returned fd 5
+
+Summary:
+passed   5
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE openat01 : 0
+RUN LTP CASE openat02
+openat02    1  [1;32mTPASS[0m  :  test O_APPEND for openat success
+openat02    2  [1;32mTPASS[0m  :  test O_CLOEXEC for openat success
+openat02    3  [1;32mTPASS[0m  :  test O_LARGEFILE for openat success
+openat02    4  [1;33mTCONF[0m  :  openat02.c:222: test O_NOATIME flag for openat needs filesystems which are mounted without noatime and relatime
+openat02    5  [1;32mTPASS[0m  :  test O_NOFOLLOW for openat success
+openat02    6  [1;32mTPASS[0m  :  test O_TRUNC for openat success
+FAIL LTP CASE openat02 : 0
+RUN LTP CASE openat02_child
+/home/lorenash/Code/kernel/ltp/install/opt/ltp/testcases/bin/openat02_child <fd>
+FAIL LTP CASE openat02_child : 1
+RUN LTP CASE openat03
+openat03    0  [1;34mTINFO[0m  :  creating a file with O_TMPFILE flag
+openat03    0  [1;34mTINFO[0m  :  writing data to the file
+openat03    0  [1;34mTINFO[0m  :  file size is '4096'
+openat03    0  [1;34mTINFO[0m  :  looking for the file in '.'
+openat03    0  [1;34mTINFO[0m  :  file not found, OK
+openat03    0  [1;34mTINFO[0m  :  renaming '/tmp/LTP_opeDV3dk1/#13411070 (deleted)' -> 'tmpfile'
+openat03    0  [1;34mTINFO[0m  :  found a file: tmpfile
+openat03    1  [1;32mTPASS[0m  :  single file tests passed
+openat03    0  [1;34mTINFO[0m  :  create files in multiple directories
+openat03    0  [1;34mTINFO[0m  :  removing test directories
+openat03    0  [1;34mTINFO[0m  :  writing/reading temporary files
+openat03    0  [1;34mTINFO[0m  :  closing temporary files
+openat03    2  [1;32mTPASS[0m  :  multiple files tests passed
+openat03    0  [1;34mTINFO[0m  :  create multiple directories, link files into them
+openat03    0  [1;34mTINFO[0m  :  and check file permissions
+openat03    0  [1;34mTINFO[0m  :  remove files, directories
+openat03    3  [1;32mTPASS[0m  :  file permission tests passed
+FAIL LTP CASE openat03 : 0
+RUN LTP CASE openat04
+tst_device.c:96: [1;34mTINFO: [0mFound free device 5 '/dev/loop5'
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext2
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext2 does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext3
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext3 does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext4
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext4 does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports xfs
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.xfs does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports btrfs
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.btrfs does exist
+tst_supported_fs_types.c:105: [1;34mTINFO: [0mSkipping bcachefs because of FUSE blacklist
+tst_supported_fs_types.c:169: [1;34mTINFO: [0mSkipping vfat as requested by the test
+tst_supported_fs_types.c:169: [1;34mTINFO: [0mSkipping exfat as requested by the test
+tst_supported_fs_types.c:169: [1;34mTINFO: [0mSkipping ntfs as requested by the test
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports tmpfs
+tst_supported_fs_types.c:49: [1;34mTINFO: [0mmkfs is not needed for tmpfs
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext2 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop5 with ext2 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+openat04.c:54: [1;33mTCONF: [0mKernel does not support noacl feature
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext3 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop5 with ext3 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+openat04.c:54: [1;33mTCONF: [0mKernel does not support noacl feature
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext4 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop5 with ext4 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+openat04.c:54: [1;33mTCONF: [0mKernel does not support noacl feature
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on xfs ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop5 with xfs opts='' extra opts=''
+openat04.c:54: [1;33mTCONF: [0mKernel does not support noacl feature
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on btrfs ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop5 with btrfs opts='' extra opts=''
+openat04.c:92: [1;34mTINFO: [0mUser nobody: uid = 65534, gid = 65534
+openat04.c:94: [1;34mTINFO: [0mFound unused GID 4: SUCCESS (0)
+openat04.c:124: [1;32mTPASS: [0mbuf.st_gid == free_gid (4)
+openat04.c:129: [1;32mTPASS: [0mopen.tmp: Setgid bit not set
+openat04.c:134: [1;32mTPASS: [0mopen.tmp: S_IXGRP bit is not set
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on tmpfs ===
+tst_test.c:1106: [1;34mTINFO: [0mSkipping mkfs for TMPFS filesystem
+openat04.c:54: [1;33mTCONF: [0mKernel does not support noacl feature
+
+Summary:
+passed   3
+failed   0
+broken   0
+skipped  5
+warnings 0
+FAIL LTP CASE openat04 : 0
+RUN LTP CASE openat201
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+openat201.c:80: [1;32mTPASS: [0mopenat2() passed (0)
+openat201.c:80: [1;32mTPASS: [0mopenat2() passed (1)
+openat201.c:80: [1;32mTPASS: [0mopenat2() passed (2)
+openat201.c:80: [1;32mTPASS: [0mopenat2() passed (3)
+openat201.c:80: [1;32mTPASS: [0mopenat2() passed (4)
+openat201.c:80: [1;32mTPASS: [0mopenat2() passed (5)
+openat201.c:80: [1;32mTPASS: [0mopenat2() passed (6)
+openat201.c:80: [1;32mTPASS: [0mopenat2() passed (7)
+openat201.c:80: [1;32mTPASS: [0mopenat2() passed (8)
+openat201.c:80: [1;32mTPASS: [0mopenat2() passed (9)
+openat201.c:80: [1;32mTPASS: [0mopenat2() passed (10)
+openat201.c:80: [1;32mTPASS: [0mopenat2() passed (11)
+openat201.c:80: [1;32mTPASS: [0mopenat2() passed (12)
+openat201.c:80: [1;32mTPASS: [0mopenat2() passed (13)
+openat201.c:80: [1;32mTPASS: [0mopenat2() passed (14)
+openat201.c:80: [1;32mTPASS: [0mopenat2() passed (15)
+
+Summary:
+passed   16
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE openat201 : 0
+RUN LTP CASE openat202
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+openat202.c:58: [1;32mTPASS: [0mopen /proc/version: openat2() passed
+openat202.c:58: [1;32mTPASS: [0mopen magiclinks: openat2() passed
+openat202.c:58: [1;32mTPASS: [0mopen symlinks: openat2() passed
+openat202.c:73: [1;32mTPASS: [0mresolve-no-xdev: openat2() failed as expected: EXDEV (18)
+openat202.c:73: [1;32mTPASS: [0mresolve-no-magiclinks: openat2() failed as expected: ELOOP (40)
+openat202.c:73: [1;32mTPASS: [0mresolve-no-symlinks: openat2() failed as expected: ELOOP (40)
+openat202.c:73: [1;32mTPASS: [0mresolve-beneath: openat2() failed as expected: EXDEV (18)
+openat202.c:73: [1;32mTPASS: [0mresolve-beneath: openat2() failed as expected: EXDEV (18)
+openat202.c:73: [1;32mTPASS: [0mresolve-no-in-root: openat2() failed as expected: ENOENT (2)
+
+Summary:
+passed   9
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE openat202 : 0
+RUN LTP CASE openat203
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+openat203.c:67: [1;32mTPASS: [0minvalid-dfd: openat2() failed as expected: EBADF (9)
+openat203.c:67: [1;32mTPASS: [0minvalid-pathname: openat2() failed as expected: EFAULT (14)
+openat203.c:67: [1;32mTPASS: [0minvalid-flags: openat2() failed as expected: EINVAL (22)
+openat203.c:67: [1;32mTPASS: [0minvalid-mode: openat2() failed as expected: EINVAL (22)
+openat203.c:67: [1;32mTPASS: [0minvalid-resolve: openat2() failed as expected: EINVAL (22)
+openat203.c:67: [1;32mTPASS: [0minvalid-size-zero: openat2() failed as expected: EINVAL (22)
+openat203.c:67: [1;32mTPASS: [0minvalid-size-small: openat2() failed as expected: EINVAL (22)
+openat203.c:67: [1;32mTPASS: [0minvalid-size-big: openat2() failed as expected: EFAULT (14)
+openat203.c:67: [1;32mTPASS: [0minvalid-size-big-with-pad: openat2() failed as expected: E2BIG (7)
+
+Summary:
+passed   9
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE openat203 : 0
+RUN LTP CASE read01
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+read01.c:24: [1;32mTPASS: [0mread(2) returned 512
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE read01 : 0
+RUN LTP CASE read02
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+read02.c:84: [1;32mTPASS: [0mread() failed as expected: EBADF (9)
+read02.c:84: [1;32mTPASS: [0mread() failed as expected: EISDIR (21)
+read02.c:84: [1;32mTPASS: [0mread() failed as expected: EFAULT (14)
+read02.c:65: [1;33mTCONF: [0mO_DIRECT not supported on tmpfs filesystem
+read02.c:65: [1;33mTCONF: [0mO_DIRECT not supported on tmpfs filesystem
+
+Summary:
+passed   3
+failed   0
+broken   0
+skipped  2
+warnings 0
+FAIL LTP CASE read02 : 0
+RUN LTP CASE read03
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+read03.c:24: [1;32mTPASS: [0mread() when nothing is written to a pipe : EAGAIN/EWOULDBLOCK (11)
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE read03 : 0
+RUN LTP CASE read04
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+read04.c:41: [1;32mTPASS: [0mread() data correctly
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE read04 : 0
+RUN LTP CASE readv01
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+readv01.c:71: [1;32mTPASS: [0mreadv() with 0 I/O vectors
+readv01.c:85: [1;32mTPASS: [0mreadv() correctly read 0 bytes 
+readv01.c:71: [1;32mTPASS: [0mreadv() with NULL I/O vectors
+readv01.c:85: [1;32mTPASS: [0mreadv() correctly read 64 bytes 
+readv01.c:71: [1;32mTPASS: [0mreadv() with too big I/O vectors
+readv01.c:85: [1;32mTPASS: [0mreadv() correctly read 64 bytes 
+readv01.c:71: [1;32mTPASS: [0mreadv() with multiple I/O vectors
+readv01.c:85: [1;32mTPASS: [0mreadv() correctly read 48 bytes 
+readv01.c:71: [1;32mTPASS: [0mreadv() with zero-len buffer
+readv01.c:85: [1;32mTPASS: [0mreadv() correctly read 64 bytes 
+
+Summary:
+passed   10
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE readv01 : 0
+RUN LTP CASE readv02
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+readv02.c:74: [1;32mTPASS: [0mreadv(3, 0x559f0269e760, 1) : EINVAL (22)
+readv02.c:74: [1;32mTPASS: [0mreadv(3, 0x559f0269e6e0, 3) : EFAULT (14)
+readv02.c:74: [1;32mTPASS: [0mreadv(3, 0x559f0269e720, -1) : EINVAL (22)
+readv02.c:74: [1;32mTPASS: [0mreadv(4, 0x559f0269e6c0, 1) : EISDIR (21)
+readv02.c:74: [1;32mTPASS: [0mreadv(-1, 0x559f0269e6c0, 3) : EBADF (9)
+
+Summary:
+passed   5
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE readv02 : 0
+RUN LTP CASE write01
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+write01.c:40: [1;32mTPASS: [0mwrite() passed
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE write01 : 0
+RUN LTP CASE write02
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+write02.c:20: [1;32mTPASS: [0mwrite(fd, NULL, 0) returned 0
+write02.c:22: [1;32mTPASS: [0mExpect: write(fd, NULL, 0) == 0
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE write02 : 0
+RUN LTP CASE write03
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+write03.c:49: [1;32mTPASS: [0mfailure of write() did not corrupt the file
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE write03 : 0
+RUN LTP CASE write04
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+write04.c:31: [1;32mTPASS: [0mwrite(wfd, wbuf, sizeof(wbuf)) : EAGAIN/EWOULDBLOCK (11)
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE write04 : 0
+RUN LTP CASE write05
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+write05.c:62: [1;32mTPASS: [0mwrite(*tc->fd, *tc->buf, tc->size) : EBADF (9)
+write05.c:62: [1;32mTPASS: [0mwrite(*tc->fd, *tc->buf, tc->size) : EFAULT (14)
+write05.c:62: [1;32mTPASS: [0mwrite(*tc->fd, *tc->buf, tc->size) : EPIPE (32)
+
+Summary:
+passed   3
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE write05 : 0
+RUN LTP CASE write06
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+write06.c:59: [1;32mTPASS: [0mOffset is correct after write 3072
+write06.c:65: [1;32mTPASS: [0mCorrect file size after append 3072
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE write06 : 0
+RUN LTP CASE writev01
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+writev01.c:124: [1;32mTPASS: [0minvalid iov_len, expected: -1 (EINVAL), got: -1 (EINVAL)
+writev01.c:124: [1;32mTPASS: [0minvalid fd, expected: -1 (EBADF), got: -1 (EBADF)
+writev01.c:124: [1;32mTPASS: [0minvalid iovcnt, expected: -1 (EINVAL), got: -1 (EINVAL)
+writev01.c:129: [1;32mTPASS: [0mzero iovcnt, expected: 0, got: 0
+writev01.c:129: [1;32mTPASS: [0mNULL and zero length iovec, expected: 64, got: 64
+writev01.c:124: [1;32mTPASS: [0mwrite to closed pipe, expected: -1 (EPIPE), got: -1 (EPIPE)
+
+Summary:
+passed   6
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE writev01 : 0
+RUN LTP CASE writev02
+writev02    1  [1;32mTPASS[0m  :  Received EFAULT as expected
+FAIL LTP CASE writev02 : 0
+RUN LTP CASE writev03
+FAIL LTP CASE writev03 : -124
+RUN LTP CASE writev05
+writev05    1  [1;32mTPASS[0m  :  Received EFAULT as expected
+FAIL LTP CASE writev05 : 0
+RUN LTP CASE writev06
+writev06    1  [1;32mTPASS[0m  :  writev returned 2 as expected
+FAIL LTP CASE writev06 : 0
+RUN LTP CASE writev07
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+writev07.c:56: [1;34mTINFO: [0mstarting test with initial file offset: 0 
+writev07.c:100: [1;34mTINFO: [0mwritev() has written 64 bytes
+writev07.c:111: [1;32mTPASS: [0mfile has expected content
+writev07.c:122: [1;32mTPASS: [0moffset at 64 as expected
+writev07.c:56: [1;34mTINFO: [0mstarting test with initial file offset: 65 
+writev07.c:100: [1;34mTINFO: [0mwritev() has written 64 bytes
+writev07.c:111: [1;32mTPASS: [0mfile has expected content
+writev07.c:122: [1;32mTPASS: [0moffset at 129 as expected
+writev07.c:56: [1;34mTINFO: [0mstarting test with initial file offset: 4096 
+writev07.c:100: [1;34mTINFO: [0mwritev() has written 64 bytes
+writev07.c:111: [1;32mTPASS: [0mfile has expected content
+writev07.c:122: [1;32mTPASS: [0moffset at 4160 as expected
+writev07.c:56: [1;34mTINFO: [0mstarting test with initial file offset: 4097 
+writev07.c:100: [1;34mTINFO: [0mwritev() has written 64 bytes
+writev07.c:111: [1;32mTPASS: [0mfile has expected content
+writev07.c:122: [1;32mTPASS: [0moffset at 4161 as expected
+
+Summary:
+passed   8
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE writev07 : 0
+RUN LTP CASE fstat02
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+fstat02.c:30: [1;32mTPASS: [0mfstat(fildes, &stat_buf) passed
+fstat02.c:31: [1;32mTPASS: [0mstat_buf.st_uid == user_id (0)
+fstat02.c:32: [1;32mTPASS: [0mstat_buf.st_gid == group_id (0)
+fstat02.c:33: [1;32mTPASS: [0mstat_buf.st_size == FILE_SIZE (1024)
+fstat02.c:34: [1;32mTPASS: [0mstat_buf.st_mode & 0777 == FILE_MODE (420)
+fstat02.c:35: [1;32mTPASS: [0mstat_buf.st_nlink == NLINK (2)
+
+Summary:
+passed   6
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE fstat02 : 0
+RUN LTP CASE fstat02_64
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+fstat02.c:30: [1;32mTPASS: [0mfstat(fildes, &stat_buf) passed
+fstat02.c:31: [1;32mTPASS: [0mstat_buf.st_uid == user_id (0)
+fstat02.c:32: [1;32mTPASS: [0mstat_buf.st_gid == group_id (0)
+fstat02.c:33: [1;32mTPASS: [0mstat_buf.st_size == FILE_SIZE (1024)
+fstat02.c:34: [1;32mTPASS: [0mstat_buf.st_mode & 0777 == FILE_MODE (420)
+fstat02.c:35: [1;32mTPASS: [0mstat_buf.st_nlink == NLINK (2)
+
+Summary:
+passed   6
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE fstat02_64 : 0
+RUN LTP CASE fstat03
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+fstat03.c:47: [1;32mTPASS: [0mfstat() fails with expected error EBADF
+fstat03.c:47: [1;32mTPASS: [0mfstat() fails with expected error EFAULT
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE fstat03 : 0
+RUN LTP CASE fstat03_64
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+fstat03.c:47: [1;32mTPASS: [0mfstat() fails with expected error EBADF
+fstat03.c:47: [1;32mTPASS: [0mfstat() fails with expected error EFAULT
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE fstat03_64 : 0
+RUN LTP CASE chdir01
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+tst_device.c:96: [1;34mTINFO: [0mFound free device 6 '/dev/loop6'
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext2
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext2 does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext3
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext3 does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext4
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext4 does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports xfs
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.xfs does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports btrfs
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.btrfs does exist
+tst_supported_fs_types.c:105: [1;34mTINFO: [0mSkipping bcachefs because of FUSE blacklist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports vfat
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.vfat does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports exfat
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.exfat does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ntfs
+tst_supported_fs_types.c:58: [1;34mTINFO: [0mmkfs.ntfs does not exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports tmpfs
+tst_supported_fs_types.c:49: [1;34mTINFO: [0mmkfs is not needed for tmpfs
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext2 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with ext2 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_chdqYHOzQ/mntpoint fstyp=ext2 flags=0
+chdir01.c:119: [1;34mTINFO: [0mTesting 'testfile'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("testfile") returned correct value: ENOTDIR (20)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("testfile") returned correct value: ENOTDIR (20)
+chdir01.c:119: [1;34mTINFO: [0mTesting 'keep_out'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("keep_out") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("keep_out") returned correct value: EACCES (13)
+chdir01.c:119: [1;34mTINFO: [0mTesting 'subdir'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("subdir") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("subdir") returned correct value: SUCCESS (0)
+chdir01.c:119: [1;34mTINFO: [0mTesting '.'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir(".") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir(".") returned correct value: SUCCESS (0)
+chdir01.c:119: [1;34mTINFO: [0mTesting '..'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("..") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("..") returned correct value: SUCCESS (0)
+chdir01.c:119: [1;34mTINFO: [0mTesting '/'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("/") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("/") returned correct value: SUCCESS (0)
+chdir01.c:119: [1;34mTINFO: [0mTesting 'does_not_exist'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("does_not_exist") returned correct value: ENOENT (2)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("does_not_exist") returned correct value: ENOENT (2)
+chdir01.c:119: [1;34mTINFO: [0mTesting 'symloop'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("symloop") returned correct value: ELOOP (40)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("symloop") returned correct value: ELOOP (40)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext3 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with ext3 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_chdqYHOzQ/mntpoint fstyp=ext3 flags=0
+chdir01.c:119: [1;34mTINFO: [0mTesting 'testfile'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("testfile") returned correct value: ENOTDIR (20)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("testfile") returned correct value: ENOTDIR (20)
+chdir01.c:119: [1;34mTINFO: [0mTesting 'keep_out'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("keep_out") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("keep_out") returned correct value: EACCES (13)
+chdir01.c:119: [1;34mTINFO: [0mTesting 'subdir'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("subdir") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("subdir") returned correct value: SUCCESS (0)
+chdir01.c:119: [1;34mTINFO: [0mTesting '.'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir(".") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir(".") returned correct value: SUCCESS (0)
+chdir01.c:119: [1;34mTINFO: [0mTesting '..'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("..") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("..") returned correct value: SUCCESS (0)
+chdir01.c:119: [1;34mTINFO: [0mTesting '/'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("/") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("/") returned correct value: SUCCESS (0)
+chdir01.c:119: [1;34mTINFO: [0mTesting 'does_not_exist'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("does_not_exist") returned correct value: ENOENT (2)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("does_not_exist") returned correct value: ENOENT (2)
+chdir01.c:119: [1;34mTINFO: [0mTesting 'symloop'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("symloop") returned correct value: ELOOP (40)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("symloop") returned correct value: ELOOP (40)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext4 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with ext4 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_chdqYHOzQ/mntpoint fstyp=ext4 flags=0
+chdir01.c:119: [1;34mTINFO: [0mTesting 'testfile'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("testfile") returned correct value: ENOTDIR (20)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("testfile") returned correct value: ENOTDIR (20)
+chdir01.c:119: [1;34mTINFO: [0mTesting 'keep_out'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("keep_out") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("keep_out") returned correct value: EACCES (13)
+chdir01.c:119: [1;34mTINFO: [0mTesting 'subdir'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("subdir") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("subdir") returned correct value: SUCCESS (0)
+chdir01.c:119: [1;34mTINFO: [0mTesting '.'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir(".") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir(".") returned correct value: SUCCESS (0)
+chdir01.c:119: [1;34mTINFO: [0mTesting '..'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("..") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("..") returned correct value: SUCCESS (0)
+chdir01.c:119: [1;34mTINFO: [0mTesting '/'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("/") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("/") returned correct value: SUCCESS (0)
+chdir01.c:119: [1;34mTINFO: [0mTesting 'does_not_exist'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("does_not_exist") returned correct value: ENOENT (2)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("does_not_exist") returned correct value: ENOENT (2)
+chdir01.c:119: [1;34mTINFO: [0mTesting 'symloop'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("symloop") returned correct value: ELOOP (40)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("symloop") returned correct value: ELOOP (40)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on xfs ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with xfs opts='' extra opts=''
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_chdqYHOzQ/mntpoint fstyp=xfs flags=0
+chdir01.c:119: [1;34mTINFO: [0mTesting 'testfile'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("testfile") returned correct value: ENOTDIR (20)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("testfile") returned correct value: ENOTDIR (20)
+chdir01.c:119: [1;34mTINFO: [0mTesting 'keep_out'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("keep_out") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("keep_out") returned correct value: EACCES (13)
+chdir01.c:119: [1;34mTINFO: [0mTesting 'subdir'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("subdir") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("subdir") returned correct value: SUCCESS (0)
+chdir01.c:119: [1;34mTINFO: [0mTesting '.'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir(".") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir(".") returned correct value: SUCCESS (0)
+chdir01.c:119: [1;34mTINFO: [0mTesting '..'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("..") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("..") returned correct value: SUCCESS (0)
+chdir01.c:119: [1;34mTINFO: [0mTesting '/'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("/") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("/") returned correct value: SUCCESS (0)
+chdir01.c:119: [1;34mTINFO: [0mTesting 'does_not_exist'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("does_not_exist") returned correct value: ENOENT (2)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("does_not_exist") returned correct value: ENOENT (2)
+chdir01.c:119: [1;34mTINFO: [0mTesting 'symloop'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("symloop") returned correct value: ELOOP (40)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("symloop") returned correct value: ELOOP (40)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on btrfs ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with btrfs opts='' extra opts=''
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_chdqYHOzQ/mntpoint fstyp=btrfs flags=0
+chdir01.c:119: [1;34mTINFO: [0mTesting 'testfile'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("testfile") returned correct value: ENOTDIR (20)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("testfile") returned correct value: ENOTDIR (20)
+chdir01.c:119: [1;34mTINFO: [0mTesting 'keep_out'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("keep_out") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("keep_out") returned correct value: EACCES (13)
+chdir01.c:119: [1;34mTINFO: [0mTesting 'subdir'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("subdir") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("subdir") returned correct value: SUCCESS (0)
+chdir01.c:119: [1;34mTINFO: [0mTesting '.'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir(".") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir(".") returned correct value: SUCCESS (0)
+chdir01.c:119: [1;34mTINFO: [0mTesting '..'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("..") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("..") returned correct value: SUCCESS (0)
+chdir01.c:119: [1;34mTINFO: [0mTesting '/'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("/") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("/") returned correct value: SUCCESS (0)
+chdir01.c:119: [1;34mTINFO: [0mTesting 'does_not_exist'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("does_not_exist") returned correct value: ENOENT (2)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("does_not_exist") returned correct value: ENOENT (2)
+chdir01.c:119: [1;34mTINFO: [0mTesting 'symloop'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("symloop") returned correct value: ELOOP (40)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("symloop") returned correct value: ELOOP (40)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on vfat ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with vfat opts='' extra opts=''
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_chdqYHOzQ/mntpoint fstyp=vfat flags=0
+chdir01.c:119: [1;34mTINFO: [0mTesting 'testfile'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("testfile") returned correct value: ENOTDIR (20)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("testfile") returned correct value: ENOTDIR (20)
+chdir01.c:119: [1;34mTINFO: [0mTesting 'keep_out'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("keep_out") returned correct value: SUCCESS (0)
+chdir01.c:133: [1;33mTCONF: [0mSkipping unprivileged permission test, FS mangles dir mode
+chdir01.c:119: [1;34mTINFO: [0mTesting 'subdir'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("subdir") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("subdir") returned correct value: SUCCESS (0)
+chdir01.c:119: [1;34mTINFO: [0mTesting '.'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir(".") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir(".") returned correct value: SUCCESS (0)
+chdir01.c:119: [1;34mTINFO: [0mTesting '..'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("..") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("..") returned correct value: SUCCESS (0)
+chdir01.c:119: [1;34mTINFO: [0mTesting '/'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("/") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("/") returned correct value: SUCCESS (0)
+chdir01.c:119: [1;34mTINFO: [0mTesting 'does_not_exist'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("does_not_exist") returned correct value: ENOENT (2)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("does_not_exist") returned correct value: ENOENT (2)
+chdir01.c:119: [1;34mTINFO: [0mTesting 'symloop'
+chdir01.c:122: [1;33mTCONF: [0mSkipping symlink loop test, not supported
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on exfat ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with exfat opts='' extra opts=''
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_chdqYHOzQ/mntpoint fstyp=exfat flags=0
+chdir01.c:119: [1;34mTINFO: [0mTesting 'testfile'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("testfile") returned correct value: ENOTDIR (20)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("testfile") returned correct value: ENOTDIR (20)
+chdir01.c:119: [1;34mTINFO: [0mTesting 'keep_out'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("keep_out") returned correct value: SUCCESS (0)
+chdir01.c:133: [1;33mTCONF: [0mSkipping unprivileged permission test, FS mangles dir mode
+chdir01.c:119: [1;34mTINFO: [0mTesting 'subdir'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("subdir") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("subdir") returned correct value: SUCCESS (0)
+chdir01.c:119: [1;34mTINFO: [0mTesting '.'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir(".") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir(".") returned correct value: SUCCESS (0)
+chdir01.c:119: [1;34mTINFO: [0mTesting '..'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("..") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("..") returned correct value: SUCCESS (0)
+chdir01.c:119: [1;34mTINFO: [0mTesting '/'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("/") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("/") returned correct value: SUCCESS (0)
+chdir01.c:119: [1;34mTINFO: [0mTesting 'does_not_exist'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("does_not_exist") returned correct value: ENOENT (2)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("does_not_exist") returned correct value: ENOENT (2)
+chdir01.c:119: [1;34mTINFO: [0mTesting 'symloop'
+chdir01.c:122: [1;33mTCONF: [0mSkipping symlink loop test, not supported
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on tmpfs ===
+tst_test.c:1106: [1;34mTINFO: [0mSkipping mkfs for TMPFS filesystem
+tst_test.c:1087: [1;34mTINFO: [0mLimiting tmpfs size to 32MB
+tst_test.c:1120: [1;34mTINFO: [0mMounting ltp-tmpfs to /tmp/LTP_chdqYHOzQ/mntpoint fstyp=tmpfs flags=0
+chdir01.c:119: [1;34mTINFO: [0mTesting 'testfile'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("testfile") returned correct value: ENOTDIR (20)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("testfile") returned correct value: ENOTDIR (20)
+chdir01.c:119: [1;34mTINFO: [0mTesting 'keep_out'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("keep_out") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("keep_out") returned correct value: EACCES (13)
+chdir01.c:119: [1;34mTINFO: [0mTesting 'subdir'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("subdir") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("subdir") returned correct value: SUCCESS (0)
+chdir01.c:119: [1;34mTINFO: [0mTesting '.'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir(".") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir(".") returned correct value: SUCCESS (0)
+chdir01.c:119: [1;34mTINFO: [0mTesting '..'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("..") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("..") returned correct value: SUCCESS (0)
+chdir01.c:119: [1;34mTINFO: [0mTesting '/'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("/") returned correct value: SUCCESS (0)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("/") returned correct value: SUCCESS (0)
+chdir01.c:119: [1;34mTINFO: [0mTesting 'does_not_exist'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("does_not_exist") returned correct value: ENOENT (2)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("does_not_exist") returned correct value: ENOENT (2)
+chdir01.c:119: [1;34mTINFO: [0mTesting 'symloop'
+chdir01.c:111: [1;32mTPASS: [0mroot: chdir("symloop") returned correct value: ELOOP (40)
+chdir01.c:111: [1;32mTPASS: [0mnobody: chdir("symloop") returned correct value: ELOOP (40)
+
+Summary:
+passed   122
+failed   0
+broken   0
+skipped  4
+warnings 0
+FAIL LTP CASE chdir01 : 0
+RUN LTP CASE chdir04
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+chdir04.c:29: [1;32mTPASS: [0mchdir() : ENAMETOOLONG (36)
+chdir04.c:29: [1;32mTPASS: [0mchdir() : ENOENT (2)
+chdir04.c:29: [1;32mTPASS: [0mchdir() : EFAULT (14)
+
+Summary:
+passed   3
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE chdir04 : 0
+RUN LTP CASE getcwd01
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+getcwd01.c:48: [1;32mTPASS: [0mtst_syscall(__NR_getcwd, tc->buf, tc->size) : EFAULT (14)
+getcwd01.c:48: [1;32mTPASS: [0mtst_syscall(__NR_getcwd, tc->buf, tc->size) : EFAULT (14)
+getcwd01.c:48: [1;32mTPASS: [0mtst_syscall(__NR_getcwd, tc->buf, tc->size) : ERANGE (34)
+getcwd01.c:48: [1;32mTPASS: [0mtst_syscall(__NR_getcwd, tc->buf, tc->size) : ERANGE (34)
+getcwd01.c:48: [1;32mTPASS: [0mtst_syscall(__NR_getcwd, tc->buf, tc->size) : ERANGE (34)
+
+Summary:
+passed   5
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE getcwd01 : 0
+RUN LTP CASE getcwd02
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+getcwd02.c:85: [1;34mTINFO: [0mExpected path '/tmp'
+getcwd02.c:66: [1;32mTPASS: [0mgetcwd() returned expected directory: /tmp
+getcwd02.c:66: [1;32mTPASS: [0mgetcwd() returned expected directory: /tmp
+getcwd02.c:66: [1;32mTPASS: [0mgetcwd() returned expected directory: /tmp
+
+Summary:
+passed   3
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE getcwd02 : 0
+RUN LTP CASE getcwd03
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+getcwd03.c:75: [1;32mTPASS: [0mgetcwd() succeeded on a symbolic link
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE getcwd03 : 0
+RUN LTP CASE getcwd04
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+getcwd04.c:60: [1;32mTPASS: [0mBug is not reproduced!
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE getcwd04 : 0
+RUN LTP CASE getdents01
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+getdents.h:148: [1;34mTINFO: [0mTesting the SYS_getdents syscall
+getdents01.c:92: [1;34mTINFO: [0mFound '.'
+getdents01.c:92: [1;34mTINFO: [0mFound '..'
+getdents01.c:92: [1;34mTINFO: [0mFound 'symlink'
+getdents01.c:92: [1;34mTINFO: [0mFound 'file'
+getdents01.c:92: [1;34mTINFO: [0mFound 'dir'
+getdents01.c:126: [1;32mTPASS: [0mAll entries found
+getdents.h:151: [1;34mTINFO: [0mTesting the SYS_getdents64 syscall
+getdents01.c:92: [1;34mTINFO: [0mFound '.'
+getdents01.c:92: [1;34mTINFO: [0mFound '..'
+getdents01.c:92: [1;34mTINFO: [0mFound 'symlink'
+getdents01.c:92: [1;34mTINFO: [0mFound 'file'
+getdents01.c:92: [1;34mTINFO: [0mFound 'dir'
+getdents01.c:126: [1;32mTPASS: [0mAll entries found
+getdents.h:157: [1;33mTCONF: [0mlibc getdents() is not implemented
+getdents.h:162: [1;34mTINFO: [0mTesting libc getdents64()
+getdents01.c:92: [1;34mTINFO: [0mFound '.'
+getdents01.c:92: [1;34mTINFO: [0mFound '..'
+getdents01.c:92: [1;34mTINFO: [0mFound 'symlink'
+getdents01.c:92: [1;34mTINFO: [0mFound 'file'
+getdents01.c:92: [1;34mTINFO: [0mFound 'dir'
+getdents01.c:126: [1;32mTPASS: [0mAll entries found
+
+Summary:
+passed   3
+failed   0
+broken   0
+skipped  1
+warnings 0
+FAIL LTP CASE getdents01 : 0
+RUN LTP CASE getdents02
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+getdents.h:148: [1;34mTINFO: [0mTesting the SYS_getdents syscall
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+getdents02.c:83: [1;32mTPASS: [0mgetdents failed as expected: EBADF (9)
+getdents02.c:83: [1;32mTPASS: [0mgetdents failed as expected: EINVAL (22)
+getdents02.c:83: [1;32mTPASS: [0mgetdents failed as expected: ENOTDIR (20)
+getdents02.c:83: [1;32mTPASS: [0mgetdents failed as expected: ENOENT (2)
+getdents.h:151: [1;34mTINFO: [0mTesting the SYS_getdents64 syscall
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+getdents02.c:83: [1;32mTPASS: [0mgetdents failed as expected: EBADF (9)
+getdents02.c:83: [1;32mTPASS: [0mgetdents failed as expected: EINVAL (22)
+getdents02.c:83: [1;32mTPASS: [0mgetdents failed as expected: ENOTDIR (20)
+getdents02.c:83: [1;32mTPASS: [0mgetdents failed as expected: ENOENT (2)
+getdents.h:157: [1;33mTCONF: [0mlibc getdents() is not implemented
+getdents.h:162: [1;34mTINFO: [0mTesting libc getdents64()
+tst_buffers.c:57: [1;34mTINFO: [0mTest is using guarded buffers
+getdents02.c:83: [1;32mTPASS: [0mgetdents failed as expected: EBADF (9)
+getdents02.c:83: [1;32mTPASS: [0mgetdents failed as expected: EINVAL (22)
+getdents02.c:83: [1;32mTPASS: [0mgetdents failed as expected: ENOTDIR (20)
+getdents02.c:83: [1;32mTPASS: [0mgetdents failed as expected: ENOENT (2)
+
+Summary:
+passed   12
+failed   0
+broken   0
+skipped  1
+warnings 0
+FAIL LTP CASE getdents02 : 0
+RUN LTP CASE linkat01
+linkat01    1  [1;32mTPASS[0m  :  linkat is functionality correct
+linkat01    2  [1;32mTPASS[0m  :  linkat succeeded as expected
+linkat01    3  [1;32mTPASS[0m  :  linkat is functionality correct
+linkat01    4  [1;32mTPASS[0m  :  linkat is functionality correct
+linkat01    5  [1;32mTPASS[0m  :  linkat is functionality correct
+linkat01    6  [1;32mTPASS[0m  :  linkat succeeded as expected
+linkat01    7  [1;32mTPASS[0m  :  linkat is functionality correct
+linkat01    8  [1;32mTPASS[0m  :  linkat failed as expected: TEST_ERRNO=ENOTDIR(20): Not a directory
+linkat01    9  [1;32mTPASS[0m  :  linkat failed as expected: TEST_ERRNO=ENOTDIR(20): Not a directory
+linkat01   10  [1;32mTPASS[0m  :  linkat succeeded as expected
+linkat01   11  [1;32mTPASS[0m  :  linkat is functionality correct
+linkat01   12  [1;32mTPASS[0m  :  linkat failed as expected: TEST_ERRNO=EBADF(9): Bad file descriptor
+linkat01   13  [1;32mTPASS[0m  :  linkat failed as expected: TEST_ERRNO=EBADF(9): Bad file descriptor
+linkat01   14  [1;32mTPASS[0m  :  linkat succeeded as expected
+linkat01   15  [1;32mTPASS[0m  :  linkat is functionality correct
+linkat01   16  [1;32mTPASS[0m  :  linkat failed as expected: TEST_ERRNO=ENOENT(2): No such file or directory
+linkat01   17  [1;32mTPASS[0m  :  linkat failed as expected: TEST_ERRNO=ENOENT(2): No such file or directory
+linkat01   18  [1;32mTPASS[0m  :  linkat succeeded as expected
+linkat01   19  [1;32mTPASS[0m  :  linkat is functionality correct
+linkat01   20  [1;32mTPASS[0m  :  linkat failed as expected: TEST_ERRNO=EXDEV(18): Invalid cross-device link
+linkat01   21  [1;32mTPASS[0m  :  linkat failed as expected: TEST_ERRNO=EPERM(1): Operation not permitted
+linkat01   22  [1;32mTPASS[0m  :  linkat failed as expected: TEST_ERRNO=EINVAL(22): Invalid argument
+FAIL LTP CASE linkat01 : 0
+RUN LTP CASE linkat02
+linkat02    0  [1;34mTINFO[0m  :  Found free device 6 '/dev/loop6'
+linkat02    0  [1;34mTINFO[0m  :  Formatting /dev/loop6 with ext2 opts='' extra opts=''
+linkat02    0  [1;34mTINFO[0m  :  Mounting /dev/loop6 to /tmp/LTP_lindFCoqa/mntpoint fstyp=ext2 flags=0
+linkat02    0  [1;34mTINFO[0m  :  Failed reach the hardlinks limit
+linkat02    1  [1;32mTPASS[0m  :  linkat failed as expected: TEST_ERRNO=ENAMETOOLONG(36): File name too long
+linkat02    2  [1;32mTPASS[0m  :  linkat failed as expected: TEST_ERRNO=ENAMETOOLONG(36): File name too long
+linkat02    3  [1;32mTPASS[0m  :  linkat failed as expected: TEST_ERRNO=EEXIST(17): File exists
+linkat02    4  [1;32mTPASS[0m  :  linkat failed as expected: TEST_ERRNO=ELOOP(40): Too many levels of symbolic links
+linkat02    5  [1;32mTPASS[0m  :  linkat failed as expected: TEST_ERRNO=EACCES(13): Permission denied
+linkat02    0  [1;34mTINFO[0m  :  Mounting /dev/loop6 to /tmp/LTP_lindFCoqa/mntpoint fstyp=ext2 flags=21
+linkat02    6  [1;32mTPASS[0m  :  linkat failed as expected: TEST_ERRNO=EROFS(30): Read-only file system
+linkat02    7  [1;33mTCONF[0m  :  linkat02.c:107: EMLINK test is not appropriate
+
+mke2fs 1.47.4 (6-Mar-2025)
+FAIL LTP CASE linkat02 : 0
+RUN LTP CASE mkdirat01
+mkdirat01    1  [1;32mTPASS[0m  :  mkdirat() returned 0: TEST_ERRNO=SUCCESS(0): Success
+mkdirat01    2  [1;32mTPASS[0m  :  mkdirat() returned 0: TEST_ERRNO=SUCCESS(0): Success
+mkdirat01    3  [1;32mTPASS[0m  :  mkdirat() returned 0: TEST_ERRNO=SUCCESS(0): Success
+mkdirat01    4  [1;32mTPASS[0m  :  mkdirat() returned -1: TEST_ERRNO=ENOTDIR(20): Not a directory
+mkdirat01    5  [1;32mTPASS[0m  :  mkdirat() returned -1: TEST_ERRNO=EBADF(9): Bad file descriptor
+FAIL LTP CASE mkdirat01 : 0
+RUN LTP CASE mkdirat02
+tst_test.c:1017: [1;34mTINFO: [0mMounting (null) to /tmp/LTP_mkdWViGp3/mntpoint fstyp=tmpfs flags=21
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+mkdirat02.c:65: [1;32mTPASS: [0mmkdirat() failed as expected: EROFS (30)
+mkdirat02.c:65: [1;32mTPASS: [0mmkdirat() failed as expected: EROFS (30)
+mkdirat02.c:65: [1;32mTPASS: [0mmkdirat() failed as expected: ELOOP (40)
+mkdirat02.c:65: [1;32mTPASS: [0mmkdirat() failed as expected: ELOOP (40)
+
+Summary:
+passed   4
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE mkdirat02 : 0
+RUN LTP CASE mknod01
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+mknod01.c:39: [1;32mTPASS: [0mmknod(PATH, 100777, 0) passed
+mknod01.c:39: [1;32mTPASS: [0mmknod(PATH, 10777, 0) passed
+mknod01.c:39: [1;32mTPASS: [0mmknod(PATH, 20777, 259) passed
+mknod01.c:39: [1;32mTPASS: [0mmknod(PATH, 60777, 259) passed
+mknod01.c:39: [1;32mTPASS: [0mmknod(PATH, 104700, 0) passed
+mknod01.c:39: [1;32mTPASS: [0mmknod(PATH, 102700, 0) passed
+mknod01.c:39: [1;32mTPASS: [0mmknod(PATH, 106700, 0) passed
+
+Summary:
+passed   7
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE mknod01 : 0
+RUN LTP CASE mknod02
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+mknod02.c:43: [1;32mTPASS: [0mmknod(testnode, 10777, 0) passed
+mknod02.c:46: [1;32mTPASS: [0mbuf.st_gid == 0 (0)
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE mknod02 : 0
+RUN LTP CASE mknod03
+mknod03     1  [1;32mTPASS[0m  :  Functionality of mknod(tnode_25648, 012777, 0) successful
+FAIL LTP CASE mknod03 : 0
+RUN LTP CASE mknod04
+mknod04     1  [1;32mTPASS[0m  :  Functionality of mknod(tnode_25666, 010777, 0) successful
+FAIL LTP CASE mknod04 : 0
+RUN LTP CASE mknod05
+mknod05     1  [1;32mTPASS[0m  :  Functionality of mknod(tnode_25679, 012777, 0) successful
+FAIL LTP CASE mknod05 : 0
+RUN LTP CASE mknod06
+mknod06     1  [1;32mTPASS[0m  :  mknod() fails, Specified node already exists, errno:17
+mknod06     2  [1;32mTPASS[0m  :  mknod() fails, Invalid address, errno:14
+mknod06     3  [1;32mTPASS[0m  :  mknod() fails, Non-existent file, errno:2
+mknod06     4  [1;32mTPASS[0m  :  mknod() fails, Pathname is empty, errno:2
+mknod06     5  [1;32mTPASS[0m  :  mknod() fails, Pathname too long, errno:36
+mknod06     6  [1;32mTPASS[0m  :  mknod() fails, Path contains regular file, errno:20
+FAIL LTP CASE mknod06 : 0
+RUN LTP CASE mknod07
+mknod07     0  [1;34mTINFO[0m  :  Found free device 6 '/dev/loop6'
+mknod07     0  [1;34mTINFO[0m  :  Formatting /dev/loop6 with ext2 opts='' extra opts=''
+mknod07     0  [1;34mTINFO[0m  :  Mounting /dev/loop6 to /tmp/LTP_mknuaVn91/mntpoint fstyp=ext2 flags=1
+mknod07     1  [1;32mTPASS[0m  :  mknod failed as expected: TEST_ERRNO=EACCES(13): Permission denied
+mknod07     2  [1;32mTPASS[0m  :  mknod failed as expected: TEST_ERRNO=EACCES(13): Permission denied
+mknod07     3  [1;32mTPASS[0m  :  mknod failed as expected: TEST_ERRNO=EPERM(1): Operation not permitted
+mknod07     4  [1;32mTPASS[0m  :  mknod failed as expected: TEST_ERRNO=EPERM(1): Operation not permitted
+mknod07     5  [1;32mTPASS[0m  :  mknod failed as expected: TEST_ERRNO=EROFS(30): Read-only file system
+mknod07     6  [1;32mTPASS[0m  :  mknod failed as expected: TEST_ERRNO=ELOOP(40): Too many levels of symbolic links
+
+mke2fs 1.47.4 (6-Mar-2025)
+FAIL LTP CASE mknod07 : 0
+RUN LTP CASE mknod08
+mknod08     1  [1;32mTPASS[0m  :  Functionality of mknod(tnode_27175, 010777, 0) successful
+FAIL LTP CASE mknod08 : 0
+RUN LTP CASE mknod09
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+mknod09.c:21: [1;32mTPASS: [0mmknod("tnode", S_IFMT, 0) : EINVAL (22)
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE mknod09 : 0
+RUN LTP CASE rename01
+tst_device.c:96: [1;34mTINFO: [0mFound free device 6 '/dev/loop6'
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext2
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext2 does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext3
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext3 does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext4
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext4 does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports xfs
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.xfs does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports btrfs
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.btrfs does exist
+tst_supported_fs_types.c:105: [1;34mTINFO: [0mSkipping bcachefs because of FUSE blacklist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports vfat
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.vfat does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports exfat
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.exfat does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ntfs
+tst_supported_fs_types.c:58: [1;34mTINFO: [0mmkfs.ntfs does not exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports tmpfs
+tst_supported_fs_types.c:49: [1;34mTINFO: [0mmkfs is not needed for tmpfs
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext2 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with ext2 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_renohPrl2/mntpoint fstyp=ext2 flags=0
+rename01.c:46: [1;32mTPASS: [0mrename(oldfile, newfile) passed
+rename01.c:49: [1;32mTPASS: [0mrename(olddir, newdir) passed
+rename01.c:56: [1;32mTPASS: [0mold_file_st.st_dev == new_file_st.st_dev (1798)
+rename01.c:57: [1;32mTPASS: [0mold_file_st.st_ino == new_file_st.st_ino (12)
+rename01.c:59: [1;32mTPASS: [0mold_dir_st.st_dev == new_dir_st.st_dev (1798)
+rename01.c:60: [1;32mTPASS: [0mold_dir_st.st_ino == new_dir_st.st_ino (32385)
+rename01.c:62: [1;32mTPASS: [0mstat(oldfile, &old_file_st) : ENOENT (2)
+rename01.c:66: [1;32mTPASS: [0mstat(olddir, &old_dir_st) : ENOENT (2)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext3 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with ext3 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_renohPrl2/mntpoint fstyp=ext3 flags=0
+rename01.c:46: [1;32mTPASS: [0mrename(oldfile, newfile) passed
+rename01.c:49: [1;32mTPASS: [0mrename(olddir, newdir) passed
+rename01.c:56: [1;32mTPASS: [0mold_file_st.st_dev == new_file_st.st_dev (1798)
+rename01.c:57: [1;32mTPASS: [0mold_file_st.st_ino == new_file_st.st_ino (6073)
+rename01.c:59: [1;32mTPASS: [0mold_dir_st.st_dev == new_dir_st.st_dev (1798)
+rename01.c:60: [1;32mTPASS: [0mold_dir_st.st_ino == new_dir_st.st_ino (44529)
+rename01.c:62: [1;32mTPASS: [0mstat(oldfile, &old_file_st) : ENOENT (2)
+rename01.c:66: [1;32mTPASS: [0mstat(olddir, &old_dir_st) : ENOENT (2)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext4 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with ext4 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_renohPrl2/mntpoint fstyp=ext4 flags=0
+rename01.c:46: [1;32mTPASS: [0mrename(oldfile, newfile) passed
+rename01.c:49: [1;32mTPASS: [0mrename(olddir, newdir) passed
+rename01.c:56: [1;32mTPASS: [0mold_file_st.st_dev == new_file_st.st_dev (1798)
+rename01.c:57: [1;32mTPASS: [0mold_file_st.st_ino == new_file_st.st_ino (13)
+rename01.c:59: [1;32mTPASS: [0mold_dir_st.st_dev == new_dir_st.st_dev (1798)
+rename01.c:60: [1;32mTPASS: [0mold_dir_st.st_ino == new_dir_st.st_ino (32385)
+rename01.c:62: [1;32mTPASS: [0mstat(oldfile, &old_file_st) : ENOENT (2)
+rename01.c:66: [1;32mTPASS: [0mstat(olddir, &old_dir_st) : ENOENT (2)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on xfs ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with xfs opts='' extra opts=''
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_renohPrl2/mntpoint fstyp=xfs flags=0
+rename01.c:46: [1;32mTPASS: [0mrename(oldfile, newfile) passed
+rename01.c:49: [1;32mTPASS: [0mrename(olddir, newdir) passed
+rename01.c:56: [1;32mTPASS: [0mold_file_st.st_dev == new_file_st.st_dev (1798)
+rename01.c:57: [1;32mTPASS: [0mold_file_st.st_ino == new_file_st.st_ino (131)
+rename01.c:59: [1;32mTPASS: [0mold_dir_st.st_dev == new_dir_st.st_dev (1798)
+rename01.c:60: [1;32mTPASS: [0mold_dir_st.st_ino == new_dir_st.st_ino (132)
+rename01.c:62: [1;32mTPASS: [0mstat(oldfile, &old_file_st) : ENOENT (2)
+rename01.c:66: [1;32mTPASS: [0mstat(olddir, &old_dir_st) : ENOENT (2)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on btrfs ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with btrfs opts='' extra opts=''
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_renohPrl2/mntpoint fstyp=btrfs flags=0
+rename01.c:46: [1;32mTPASS: [0mrename(oldfile, newfile) passed
+rename01.c:49: [1;32mTPASS: [0mrename(olddir, newdir) passed
+rename01.c:56: [1;32mTPASS: [0mold_file_st.st_dev == new_file_st.st_dev (119)
+rename01.c:57: [1;32mTPASS: [0mold_file_st.st_ino == new_file_st.st_ino (257)
+rename01.c:59: [1;32mTPASS: [0mold_dir_st.st_dev == new_dir_st.st_dev (119)
+rename01.c:60: [1;32mTPASS: [0mold_dir_st.st_ino == new_dir_st.st_ino (258)
+rename01.c:62: [1;32mTPASS: [0mstat(oldfile, &old_file_st) : ENOENT (2)
+rename01.c:66: [1;32mTPASS: [0mstat(olddir, &old_dir_st) : ENOENT (2)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on vfat ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with vfat opts='' extra opts=''
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_renohPrl2/mntpoint fstyp=vfat flags=0
+rename01.c:46: [1;32mTPASS: [0mrename(oldfile, newfile) passed
+rename01.c:49: [1;32mTPASS: [0mrename(olddir, newdir) passed
+rename01.c:56: [1;32mTPASS: [0mold_file_st.st_dev == new_file_st.st_dev (1798)
+rename01.c:57: [1;32mTPASS: [0mold_file_st.st_ino == new_file_st.st_ino (218059)
+rename01.c:59: [1;32mTPASS: [0mold_dir_st.st_dev == new_dir_st.st_dev (1798)
+rename01.c:60: [1;32mTPASS: [0mold_dir_st.st_ino == new_dir_st.st_ino (218060)
+rename01.c:62: [1;32mTPASS: [0mstat(oldfile, &old_file_st) : ENOENT (2)
+rename01.c:66: [1;32mTPASS: [0mstat(olddir, &old_dir_st) : ENOENT (2)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on exfat ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with exfat opts='' extra opts=''
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_renohPrl2/mntpoint fstyp=exfat flags=0
+rename01.c:46: [1;32mTPASS: [0mrename(oldfile, newfile) passed
+rename01.c:49: [1;32mTPASS: [0mrename(olddir, newdir) passed
+rename01.c:56: [1;32mTPASS: [0mold_file_st.st_dev == new_file_st.st_dev (1798)
+rename01.c:57: [1;32mTPASS: [0mold_file_st.st_ino == new_file_st.st_ino (218061)
+rename01.c:59: [1;32mTPASS: [0mold_dir_st.st_dev == new_dir_st.st_dev (1798)
+rename01.c:60: [1;32mTPASS: [0mold_dir_st.st_ino == new_dir_st.st_ino (218062)
+rename01.c:62: [1;32mTPASS: [0mstat(oldfile, &old_file_st) : ENOENT (2)
+rename01.c:66: [1;32mTPASS: [0mstat(olddir, &old_dir_st) : ENOENT (2)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on tmpfs ===
+tst_test.c:1106: [1;34mTINFO: [0mSkipping mkfs for TMPFS filesystem
+tst_test.c:1087: [1;34mTINFO: [0mLimiting tmpfs size to 32MB
+tst_test.c:1120: [1;34mTINFO: [0mMounting ltp-tmpfs to /tmp/LTP_renohPrl2/mntpoint fstyp=tmpfs flags=0
+rename01.c:46: [1;32mTPASS: [0mrename(oldfile, newfile) passed
+rename01.c:49: [1;32mTPASS: [0mrename(olddir, newdir) passed
+rename01.c:56: [1;32mTPASS: [0mold_file_st.st_dev == new_file_st.st_dev (116)
+rename01.c:57: [1;32mTPASS: [0mold_file_st.st_ino == new_file_st.st_ino (2)
+rename01.c:59: [1;32mTPASS: [0mold_dir_st.st_dev == new_dir_st.st_dev (116)
+rename01.c:60: [1;32mTPASS: [0mold_dir_st.st_ino == new_dir_st.st_ino (3)
+rename01.c:62: [1;32mTPASS: [0mstat(oldfile, &old_file_st) : ENOENT (2)
+rename01.c:66: [1;32mTPASS: [0mstat(olddir, &old_dir_st) : ENOENT (2)
+
+Summary:
+passed   64
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE rename01 : 0
+RUN LTP CASE rename03
+tst_device.c:96: [1;34mTINFO: [0mFound free device 6 '/dev/loop6'
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext2
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext2 does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext3
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext3 does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext4
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext4 does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports xfs
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.xfs does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports btrfs
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.btrfs does exist
+tst_supported_fs_types.c:105: [1;34mTINFO: [0mSkipping bcachefs because of FUSE blacklist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports vfat
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.vfat does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports exfat
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.exfat does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ntfs
+tst_supported_fs_types.c:58: [1;34mTINFO: [0mmkfs.ntfs does not exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports tmpfs
+tst_supported_fs_types.c:49: [1;34mTINFO: [0mmkfs is not needed for tmpfs
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext2 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with ext2 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_renYXx1fC/mntpoint fstyp=ext2 flags=0
+rename03.c:37: [1;32mTPASS: [0mrename(mntpoint/oldfile, mntpoint/newfile) passed
+rename03.c:40: [1;32mTPASS: [0mrename(mntpoint/olddir, mntpoint/newdir) passed
+rename03.c:47: [1;32mTPASS: [0mold_file_st.st_dev == new_file_st.st_dev (1798)
+rename03.c:48: [1;32mTPASS: [0mold_file_st.st_ino == new_file_st.st_ino (12)
+rename03.c:50: [1;32mTPASS: [0mold_dir_st.st_dev == new_dir_st.st_dev (1798)
+rename03.c:51: [1;32mTPASS: [0mold_dir_st.st_ino == new_dir_st.st_ino (52625)
+rename03.c:53: [1;32mTPASS: [0mstat(mntpoint/oldfile, &old_file_st) : ENOENT (2)
+rename03.c:57: [1;32mTPASS: [0mstat(mntpoint/olddir, &old_dir_st) : ENOENT (2)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext3 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with ext3 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_renYXx1fC/mntpoint fstyp=ext3 flags=0
+rename03.c:37: [1;32mTPASS: [0mrename(mntpoint/oldfile, mntpoint/newfile) passed
+rename03.c:40: [1;32mTPASS: [0mrename(mntpoint/olddir, mntpoint/newdir) passed
+rename03.c:47: [1;32mTPASS: [0mold_file_st.st_dev == new_file_st.st_dev (1798)
+rename03.c:48: [1;32mTPASS: [0mold_file_st.st_ino == new_file_st.st_ino (6073)
+rename03.c:50: [1;32mTPASS: [0mold_dir_st.st_dev == new_dir_st.st_dev (1798)
+rename03.c:51: [1;32mTPASS: [0mold_dir_st.st_ino == new_dir_st.st_ino (72865)
+rename03.c:53: [1;32mTPASS: [0mstat(mntpoint/oldfile, &old_file_st) : ENOENT (2)
+rename03.c:57: [1;32mTPASS: [0mstat(mntpoint/olddir, &old_dir_st) : ENOENT (2)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext4 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with ext4 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_renYXx1fC/mntpoint fstyp=ext4 flags=0
+rename03.c:37: [1;32mTPASS: [0mrename(mntpoint/oldfile, mntpoint/newfile) passed
+rename03.c:40: [1;32mTPASS: [0mrename(mntpoint/olddir, mntpoint/newdir) passed
+rename03.c:47: [1;32mTPASS: [0mold_file_st.st_dev == new_file_st.st_dev (1798)
+rename03.c:48: [1;32mTPASS: [0mold_file_st.st_ino == new_file_st.st_ino (13)
+rename03.c:50: [1;32mTPASS: [0mold_dir_st.st_dev == new_dir_st.st_dev (1798)
+rename03.c:51: [1;32mTPASS: [0mold_dir_st.st_ino == new_dir_st.st_ino (32385)
+rename03.c:53: [1;32mTPASS: [0mstat(mntpoint/oldfile, &old_file_st) : ENOENT (2)
+rename03.c:57: [1;32mTPASS: [0mstat(mntpoint/olddir, &old_dir_st) : ENOENT (2)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on xfs ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with xfs opts='' extra opts=''
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_renYXx1fC/mntpoint fstyp=xfs flags=0
+rename03.c:37: [1;32mTPASS: [0mrename(mntpoint/oldfile, mntpoint/newfile) passed
+rename03.c:40: [1;32mTPASS: [0mrename(mntpoint/olddir, mntpoint/newdir) passed
+rename03.c:47: [1;32mTPASS: [0mold_file_st.st_dev == new_file_st.st_dev (1798)
+rename03.c:48: [1;32mTPASS: [0mold_file_st.st_ino == new_file_st.st_ino (131)
+rename03.c:50: [1;32mTPASS: [0mold_dir_st.st_dev == new_dir_st.st_dev (1798)
+rename03.c:51: [1;32mTPASS: [0mold_dir_st.st_ino == new_dir_st.st_ino (132)
+rename03.c:53: [1;32mTPASS: [0mstat(mntpoint/oldfile, &old_file_st) : ENOENT (2)
+rename03.c:57: [1;32mTPASS: [0mstat(mntpoint/olddir, &old_dir_st) : ENOENT (2)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on btrfs ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with btrfs opts='' extra opts=''
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_renYXx1fC/mntpoint fstyp=btrfs flags=0
+rename03.c:37: [1;32mTPASS: [0mrename(mntpoint/oldfile, mntpoint/newfile) passed
+rename03.c:40: [1;32mTPASS: [0mrename(mntpoint/olddir, mntpoint/newdir) passed
+rename03.c:47: [1;32mTPASS: [0mold_file_st.st_dev == new_file_st.st_dev (119)
+rename03.c:48: [1;32mTPASS: [0mold_file_st.st_ino == new_file_st.st_ino (257)
+rename03.c:50: [1;32mTPASS: [0mold_dir_st.st_dev == new_dir_st.st_dev (119)
+rename03.c:51: [1;32mTPASS: [0mold_dir_st.st_ino == new_dir_st.st_ino (258)
+rename03.c:53: [1;32mTPASS: [0mstat(mntpoint/oldfile, &old_file_st) : ENOENT (2)
+rename03.c:57: [1;32mTPASS: [0mstat(mntpoint/olddir, &old_dir_st) : ENOENT (2)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on vfat ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with vfat opts='' extra opts=''
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_renYXx1fC/mntpoint fstyp=vfat flags=0
+rename03.c:37: [1;32mTPASS: [0mrename(mntpoint/oldfile, mntpoint/newfile) passed
+rename03.c:40: [1;32mTPASS: [0mrename(mntpoint/olddir, mntpoint/newdir) passed
+rename03.c:47: [1;32mTPASS: [0mold_file_st.st_dev == new_file_st.st_dev (1798)
+rename03.c:48: [1;32mTPASS: [0mold_file_st.st_ino == new_file_st.st_ino (218063)
+rename03.c:50: [1;32mTPASS: [0mold_dir_st.st_dev == new_dir_st.st_dev (1798)
+rename03.c:51: [1;32mTPASS: [0mold_dir_st.st_ino == new_dir_st.st_ino (218064)
+rename03.c:53: [1;32mTPASS: [0mstat(mntpoint/oldfile, &old_file_st) : ENOENT (2)
+rename03.c:57: [1;32mTPASS: [0mstat(mntpoint/olddir, &old_dir_st) : ENOENT (2)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on exfat ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with exfat opts='' extra opts=''
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_renYXx1fC/mntpoint fstyp=exfat flags=0
+rename03.c:37: [1;32mTPASS: [0mrename(mntpoint/oldfile, mntpoint/newfile) passed
+rename03.c:40: [1;32mTPASS: [0mrename(mntpoint/olddir, mntpoint/newdir) passed
+rename03.c:47: [1;32mTPASS: [0mold_file_st.st_dev == new_file_st.st_dev (1798)
+rename03.c:48: [1;32mTPASS: [0mold_file_st.st_ino == new_file_st.st_ino (218067)
+rename03.c:50: [1;32mTPASS: [0mold_dir_st.st_dev == new_dir_st.st_dev (1798)
+rename03.c:51: [1;32mTPASS: [0mold_dir_st.st_ino == new_dir_st.st_ino (218068)
+rename03.c:53: [1;32mTPASS: [0mstat(mntpoint/oldfile, &old_file_st) : ENOENT (2)
+rename03.c:57: [1;32mTPASS: [0mstat(mntpoint/olddir, &old_dir_st) : ENOENT (2)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on tmpfs ===
+tst_test.c:1106: [1;34mTINFO: [0mSkipping mkfs for TMPFS filesystem
+tst_test.c:1087: [1;34mTINFO: [0mLimiting tmpfs size to 32MB
+tst_test.c:1120: [1;34mTINFO: [0mMounting ltp-tmpfs to /tmp/LTP_renYXx1fC/mntpoint fstyp=tmpfs flags=0
+rename03.c:37: [1;32mTPASS: [0mrename(mntpoint/oldfile, mntpoint/newfile) passed
+rename03.c:40: [1;32mTPASS: [0mrename(mntpoint/olddir, mntpoint/newdir) passed
+rename03.c:47: [1;32mTPASS: [0mold_file_st.st_dev == new_file_st.st_dev (116)
+rename03.c:48: [1;32mTPASS: [0mold_file_st.st_ino == new_file_st.st_ino (2)
+rename03.c:50: [1;32mTPASS: [0mold_dir_st.st_dev == new_dir_st.st_dev (116)
+rename03.c:51: [1;32mTPASS: [0mold_dir_st.st_ino == new_dir_st.st_ino (3)
+rename03.c:53: [1;32mTPASS: [0mstat(mntpoint/oldfile, &old_file_st) : ENOENT (2)
+rename03.c:57: [1;32mTPASS: [0mstat(mntpoint/olddir, &old_dir_st) : ENOENT (2)
+
+Summary:
+passed   64
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE rename03 : 0
+RUN LTP CASE rename04
+tst_device.c:96: [1;34mTINFO: [0mFound free device 6 '/dev/loop6'
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext2
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext2 does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext3
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext3 does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext4
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext4 does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports xfs
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.xfs does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports btrfs
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.btrfs does exist
+tst_supported_fs_types.c:105: [1;34mTINFO: [0mSkipping bcachefs because of FUSE blacklist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports vfat
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.vfat does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports exfat
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.exfat does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ntfs
+tst_supported_fs_types.c:58: [1;34mTINFO: [0mmkfs.ntfs does not exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports tmpfs
+tst_supported_fs_types.c:49: [1;34mTINFO: [0mmkfs is not needed for tmpfs
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext2 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with ext2 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_rens7Xpbq/mntpoint fstyp=ext2 flags=0
+rename04.c:36: [1;32mTPASS: [0mrename() failed as expected: ENOTEMPTY (39)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext3 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with ext3 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_rens7Xpbq/mntpoint fstyp=ext3 flags=0
+rename04.c:36: [1;32mTPASS: [0mrename() failed as expected: ENOTEMPTY (39)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext4 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with ext4 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_rens7Xpbq/mntpoint fstyp=ext4 flags=0
+rename04.c:36: [1;32mTPASS: [0mrename() failed as expected: ENOTEMPTY (39)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on xfs ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with xfs opts='' extra opts=''
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_rens7Xpbq/mntpoint fstyp=xfs flags=0
+rename04.c:36: [1;32mTPASS: [0mrename() failed as expected: EEXIST (17)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on btrfs ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with btrfs opts='' extra opts=''
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_rens7Xpbq/mntpoint fstyp=btrfs flags=0
+rename04.c:36: [1;32mTPASS: [0mrename() failed as expected: ENOTEMPTY (39)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on vfat ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with vfat opts='' extra opts=''
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_rens7Xpbq/mntpoint fstyp=vfat flags=0
+rename04.c:36: [1;32mTPASS: [0mrename() failed as expected: ENOTEMPTY (39)
+tst_device.c:408: [1;34mTINFO: [0mumount('mntpoint') failed with EBUSY, try  1...
+tst_device.c:412: [1;34mTINFO: [0mLikely gvfsd-trash is probing newly mounted fs, kill it to speed up tests.
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on exfat ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with exfat opts='' extra opts=''
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_rens7Xpbq/mntpoint fstyp=exfat flags=0
+rename04.c:36: [1;32mTPASS: [0mrename() failed as expected: ENOTEMPTY (39)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on tmpfs ===
+tst_test.c:1106: [1;34mTINFO: [0mSkipping mkfs for TMPFS filesystem
+tst_test.c:1087: [1;34mTINFO: [0mLimiting tmpfs size to 32MB
+tst_test.c:1120: [1;34mTINFO: [0mMounting ltp-tmpfs to /tmp/LTP_rens7Xpbq/mntpoint fstyp=tmpfs flags=0
+rename04.c:36: [1;32mTPASS: [0mrename() failed as expected: ENOTEMPTY (39)
+
+Summary:
+passed   8
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE rename04 : 0
+RUN LTP CASE rename05
+tst_device.c:96: [1;34mTINFO: [0mFound free device 6 '/dev/loop6'
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext2
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext2 does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext3
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext3 does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext4
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext4 does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports xfs
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.xfs does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports btrfs
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.btrfs does exist
+tst_supported_fs_types.c:105: [1;34mTINFO: [0mSkipping bcachefs because of FUSE blacklist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports vfat
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.vfat does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports exfat
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.exfat does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ntfs
+tst_supported_fs_types.c:58: [1;34mTINFO: [0mmkfs.ntfs does not exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports tmpfs
+tst_supported_fs_types.c:49: [1;34mTINFO: [0mmkfs is not needed for tmpfs
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext2 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with ext2 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_renWttfuy/mntpoint fstyp=ext2 flags=0
+rename05.c:31: [1;32mTPASS: [0mrename(TEMP_FILE, TEMP_DIR) : EISDIR (21)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext3 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with ext3 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_renWttfuy/mntpoint fstyp=ext3 flags=0
+rename05.c:31: [1;32mTPASS: [0mrename(TEMP_FILE, TEMP_DIR) : EISDIR (21)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext4 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with ext4 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_renWttfuy/mntpoint fstyp=ext4 flags=0
+rename05.c:31: [1;32mTPASS: [0mrename(TEMP_FILE, TEMP_DIR) : EISDIR (21)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on xfs ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with xfs opts='' extra opts=''
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_renWttfuy/mntpoint fstyp=xfs flags=0
+rename05.c:31: [1;32mTPASS: [0mrename(TEMP_FILE, TEMP_DIR) : EISDIR (21)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on btrfs ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with btrfs opts='' extra opts=''
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_renWttfuy/mntpoint fstyp=btrfs flags=0
+rename05.c:31: [1;32mTPASS: [0mrename(TEMP_FILE, TEMP_DIR) : EISDIR (21)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on vfat ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with vfat opts='' extra opts=''
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_renWttfuy/mntpoint fstyp=vfat flags=0
+rename05.c:31: [1;32mTPASS: [0mrename(TEMP_FILE, TEMP_DIR) : EISDIR (21)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on exfat ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with exfat opts='' extra opts=''
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_renWttfuy/mntpoint fstyp=exfat flags=0
+rename05.c:31: [1;32mTPASS: [0mrename(TEMP_FILE, TEMP_DIR) : EISDIR (21)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on tmpfs ===
+tst_test.c:1106: [1;34mTINFO: [0mSkipping mkfs for TMPFS filesystem
+tst_test.c:1087: [1;34mTINFO: [0mLimiting tmpfs size to 32MB
+tst_test.c:1120: [1;34mTINFO: [0mMounting ltp-tmpfs to /tmp/LTP_renWttfuy/mntpoint fstyp=tmpfs flags=0
+rename05.c:31: [1;32mTPASS: [0mrename(TEMP_FILE, TEMP_DIR) : EISDIR (21)
+
+Summary:
+passed   8
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE rename05 : 0
+RUN LTP CASE rename06
+tst_device.c:96: [1;34mTINFO: [0mFound free device 6 '/dev/loop6'
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext2
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext2 does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext3
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext3 does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext4
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext4 does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports xfs
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.xfs does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports btrfs
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.btrfs does exist
+tst_supported_fs_types.c:105: [1;34mTINFO: [0mSkipping bcachefs because of FUSE blacklist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports vfat
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.vfat does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports exfat
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.exfat does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ntfs
+tst_supported_fs_types.c:58: [1;34mTINFO: [0mmkfs.ntfs does not exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports tmpfs
+tst_supported_fs_types.c:49: [1;34mTINFO: [0mmkfs is not needed for tmpfs
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext2 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with ext2 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_ren8ZK0Ix/mntpoint fstyp=ext2 flags=0
+rename06.c:31: [1;32mTPASS: [0mrename(DIR1, DIR2) : EINVAL (22)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext3 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with ext3 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_ren8ZK0Ix/mntpoint fstyp=ext3 flags=0
+rename06.c:31: [1;32mTPASS: [0mrename(DIR1, DIR2) : EINVAL (22)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext4 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with ext4 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_ren8ZK0Ix/mntpoint fstyp=ext4 flags=0
+rename06.c:31: [1;32mTPASS: [0mrename(DIR1, DIR2) : EINVAL (22)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on xfs ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with xfs opts='' extra opts=''
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_ren8ZK0Ix/mntpoint fstyp=xfs flags=0
+rename06.c:31: [1;32mTPASS: [0mrename(DIR1, DIR2) : EINVAL (22)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on btrfs ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with btrfs opts='' extra opts=''
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_ren8ZK0Ix/mntpoint fstyp=btrfs flags=0
+rename06.c:31: [1;32mTPASS: [0mrename(DIR1, DIR2) : EINVAL (22)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on vfat ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with vfat opts='' extra opts=''
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_ren8ZK0Ix/mntpoint fstyp=vfat flags=0
+rename06.c:31: [1;32mTPASS: [0mrename(DIR1, DIR2) : EINVAL (22)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on exfat ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with exfat opts='' extra opts=''
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_ren8ZK0Ix/mntpoint fstyp=exfat flags=0
+rename06.c:31: [1;32mTPASS: [0mrename(DIR1, DIR2) : EINVAL (22)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on tmpfs ===
+tst_test.c:1106: [1;34mTINFO: [0mSkipping mkfs for TMPFS filesystem
+tst_test.c:1087: [1;34mTINFO: [0mLimiting tmpfs size to 32MB
+tst_test.c:1120: [1;34mTINFO: [0mMounting ltp-tmpfs to /tmp/LTP_ren8ZK0Ix/mntpoint fstyp=tmpfs flags=0
+rename06.c:31: [1;32mTPASS: [0mrename(DIR1, DIR2) : EINVAL (22)
+
+Summary:
+passed   8
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE rename06 : 0
+RUN LTP CASE rename07
+tst_device.c:96: [1;34mTINFO: [0mFound free device 6 '/dev/loop6'
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext2
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext2 does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext3
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext3 does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext4
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext4 does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports xfs
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.xfs does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports btrfs
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.btrfs does exist
+tst_supported_fs_types.c:105: [1;34mTINFO: [0mSkipping bcachefs because of FUSE blacklist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports vfat
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.vfat does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports exfat
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.exfat does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ntfs
+tst_supported_fs_types.c:58: [1;34mTINFO: [0mmkfs.ntfs does not exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports tmpfs
+tst_supported_fs_types.c:49: [1;34mTINFO: [0mmkfs is not needed for tmpfs
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext2 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with ext2 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_ren0mFKBp/mntpoint fstyp=ext2 flags=0
+rename07.c:32: [1;32mTPASS: [0mrename(TEMP_DIR, TEMP_FILE) : ENOTDIR (20)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext3 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with ext3 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_ren0mFKBp/mntpoint fstyp=ext3 flags=0
+rename07.c:32: [1;32mTPASS: [0mrename(TEMP_DIR, TEMP_FILE) : ENOTDIR (20)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext4 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with ext4 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_ren0mFKBp/mntpoint fstyp=ext4 flags=0
+rename07.c:32: [1;32mTPASS: [0mrename(TEMP_DIR, TEMP_FILE) : ENOTDIR (20)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on xfs ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with xfs opts='' extra opts=''
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_ren0mFKBp/mntpoint fstyp=xfs flags=0
+rename07.c:32: [1;32mTPASS: [0mrename(TEMP_DIR, TEMP_FILE) : ENOTDIR (20)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on btrfs ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with btrfs opts='' extra opts=''
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_ren0mFKBp/mntpoint fstyp=btrfs flags=0
+rename07.c:32: [1;32mTPASS: [0mrename(TEMP_DIR, TEMP_FILE) : ENOTDIR (20)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on vfat ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with vfat opts='' extra opts=''
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_ren0mFKBp/mntpoint fstyp=vfat flags=0
+rename07.c:32: [1;32mTPASS: [0mrename(TEMP_DIR, TEMP_FILE) : ENOTDIR (20)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on exfat ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with exfat opts='' extra opts=''
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_ren0mFKBp/mntpoint fstyp=exfat flags=0
+rename07.c:32: [1;32mTPASS: [0mrename(TEMP_DIR, TEMP_FILE) : ENOTDIR (20)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on tmpfs ===
+tst_test.c:1106: [1;34mTINFO: [0mSkipping mkfs for TMPFS filesystem
+tst_test.c:1087: [1;34mTINFO: [0mLimiting tmpfs size to 32MB
+tst_test.c:1120: [1;34mTINFO: [0mMounting ltp-tmpfs to /tmp/LTP_ren0mFKBp/mntpoint fstyp=tmpfs flags=0
+rename07.c:32: [1;32mTPASS: [0mrename(TEMP_DIR, TEMP_FILE) : ENOTDIR (20)
+
+Summary:
+passed   8
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE rename07 : 0
+RUN LTP CASE rename08
+tst_device.c:96: [1;34mTINFO: [0mFound free device 6 '/dev/loop6'
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext2
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext2 does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext3
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext3 does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext4
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext4 does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports xfs
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.xfs does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports btrfs
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.btrfs does exist
+tst_supported_fs_types.c:105: [1;34mTINFO: [0mSkipping bcachefs because of FUSE blacklist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports vfat
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.vfat does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports exfat
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.exfat does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ntfs
+tst_supported_fs_types.c:58: [1;34mTINFO: [0mmkfs.ntfs does not exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports tmpfs
+tst_supported_fs_types.c:49: [1;34mTINFO: [0mmkfs is not needed for tmpfs
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext2 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with ext2 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_rensvfyd7/mntpoint fstyp=ext2 flags=0
+rename08.c:30: [1;32mTPASS: [0mrename(INVALID_PATH, TEMP_FILE) : EFAULT (14)
+rename08.c:32: [1;32mTPASS: [0mrename(TEMP_FILE, INVALID_PATH) : EFAULT (14)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext3 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with ext3 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_rensvfyd7/mntpoint fstyp=ext3 flags=0
+rename08.c:30: [1;32mTPASS: [0mrename(INVALID_PATH, TEMP_FILE) : EFAULT (14)
+rename08.c:32: [1;32mTPASS: [0mrename(TEMP_FILE, INVALID_PATH) : EFAULT (14)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext4 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with ext4 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_rensvfyd7/mntpoint fstyp=ext4 flags=0
+rename08.c:30: [1;32mTPASS: [0mrename(INVALID_PATH, TEMP_FILE) : EFAULT (14)
+rename08.c:32: [1;32mTPASS: [0mrename(TEMP_FILE, INVALID_PATH) : EFAULT (14)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on xfs ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with xfs opts='' extra opts=''
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_rensvfyd7/mntpoint fstyp=xfs flags=0
+rename08.c:30: [1;32mTPASS: [0mrename(INVALID_PATH, TEMP_FILE) : EFAULT (14)
+rename08.c:32: [1;32mTPASS: [0mrename(TEMP_FILE, INVALID_PATH) : EFAULT (14)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on btrfs ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with btrfs opts='' extra opts=''
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_rensvfyd7/mntpoint fstyp=btrfs flags=0
+rename08.c:30: [1;32mTPASS: [0mrename(INVALID_PATH, TEMP_FILE) : EFAULT (14)
+rename08.c:32: [1;32mTPASS: [0mrename(TEMP_FILE, INVALID_PATH) : EFAULT (14)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on vfat ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with vfat opts='' extra opts=''
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_rensvfyd7/mntpoint fstyp=vfat flags=0
+rename08.c:30: [1;32mTPASS: [0mrename(INVALID_PATH, TEMP_FILE) : EFAULT (14)
+rename08.c:32: [1;32mTPASS: [0mrename(TEMP_FILE, INVALID_PATH) : EFAULT (14)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on exfat ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with exfat opts='' extra opts=''
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_rensvfyd7/mntpoint fstyp=exfat flags=0
+rename08.c:30: [1;32mTPASS: [0mrename(INVALID_PATH, TEMP_FILE) : EFAULT (14)
+rename08.c:32: [1;32mTPASS: [0mrename(TEMP_FILE, INVALID_PATH) : EFAULT (14)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on tmpfs ===
+tst_test.c:1106: [1;34mTINFO: [0mSkipping mkfs for TMPFS filesystem
+tst_test.c:1087: [1;34mTINFO: [0mLimiting tmpfs size to 32MB
+tst_test.c:1120: [1;34mTINFO: [0mMounting ltp-tmpfs to /tmp/LTP_rensvfyd7/mntpoint fstyp=tmpfs flags=0
+rename08.c:30: [1;32mTPASS: [0mrename(INVALID_PATH, TEMP_FILE) : EFAULT (14)
+rename08.c:32: [1;32mTPASS: [0mrename(TEMP_FILE, INVALID_PATH) : EFAULT (14)
+
+Summary:
+passed   16
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE rename08 : 0
+RUN LTP CASE rename09
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+rename09.c:53: [1;32mTPASS: [0mrename() : EACCES (13)
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE rename09 : 0
+RUN LTP CASE rename10
+tst_device.c:96: [1;34mTINFO: [0mFound free device 6 '/dev/loop6'
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext2
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext2 does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext3
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext3 does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext4
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext4 does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports xfs
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.xfs does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports btrfs
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.btrfs does exist
+tst_supported_fs_types.c:105: [1;34mTINFO: [0mSkipping bcachefs because of FUSE blacklist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports vfat
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.vfat does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports exfat
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.exfat does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ntfs
+tst_supported_fs_types.c:58: [1;34mTINFO: [0mmkfs.ntfs does not exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports tmpfs
+tst_supported_fs_types.c:49: [1;34mTINFO: [0mmkfs is not needed for tmpfs
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext2 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with ext2 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_renszCJOK/mntpoint fstyp=ext2 flags=0
+rename10.c:37: [1;32mTPASS: [0mrename(TEMP_FILE, long_path) : ENAMETOOLONG (36)
+rename10.c:39: [1;32mTPASS: [0mrename(TEMP_FILE, long_name) : ENAMETOOLONG (36)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext3 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with ext3 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_renszCJOK/mntpoint fstyp=ext3 flags=0
+rename10.c:37: [1;32mTPASS: [0mrename(TEMP_FILE, long_path) : ENAMETOOLONG (36)
+rename10.c:39: [1;32mTPASS: [0mrename(TEMP_FILE, long_name) : ENAMETOOLONG (36)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext4 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with ext4 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_renszCJOK/mntpoint fstyp=ext4 flags=0
+rename10.c:37: [1;32mTPASS: [0mrename(TEMP_FILE, long_path) : ENAMETOOLONG (36)
+rename10.c:39: [1;32mTPASS: [0mrename(TEMP_FILE, long_name) : ENAMETOOLONG (36)
+tst_device.c:408: [1;34mTINFO: [0mumount('mntpoint') failed with EBUSY, try  1...
+tst_device.c:412: [1;34mTINFO: [0mLikely gvfsd-trash is probing newly mounted fs, kill it to speed up tests.
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on xfs ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with xfs opts='' extra opts=''
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_renszCJOK/mntpoint fstyp=xfs flags=0
+rename10.c:37: [1;32mTPASS: [0mrename(TEMP_FILE, long_path) : ENAMETOOLONG (36)
+rename10.c:39: [1;32mTPASS: [0mrename(TEMP_FILE, long_name) : ENAMETOOLONG (36)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on btrfs ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with btrfs opts='' extra opts=''
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_renszCJOK/mntpoint fstyp=btrfs flags=0
+rename10.c:37: [1;32mTPASS: [0mrename(TEMP_FILE, long_path) : ENAMETOOLONG (36)
+rename10.c:39: [1;32mTPASS: [0mrename(TEMP_FILE, long_name) : ENAMETOOLONG (36)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on vfat ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with vfat opts='' extra opts=''
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_renszCJOK/mntpoint fstyp=vfat flags=0
+rename10.c:37: [1;32mTPASS: [0mrename(TEMP_FILE, long_path) : ENAMETOOLONG (36)
+rename10.c:39: [1;32mTPASS: [0mrename(TEMP_FILE, long_name) : ENAMETOOLONG (36)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on exfat ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with exfat opts='' extra opts=''
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_renszCJOK/mntpoint fstyp=exfat flags=0
+rename10.c:37: [1;32mTPASS: [0mrename(TEMP_FILE, long_path) : ENAMETOOLONG (36)
+rename10.c:39: [1;32mTPASS: [0mrename(TEMP_FILE, long_name) : ENAMETOOLONG (36)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on tmpfs ===
+tst_test.c:1106: [1;34mTINFO: [0mSkipping mkfs for TMPFS filesystem
+tst_test.c:1087: [1;34mTINFO: [0mLimiting tmpfs size to 32MB
+tst_test.c:1120: [1;34mTINFO: [0mMounting ltp-tmpfs to /tmp/LTP_renszCJOK/mntpoint fstyp=tmpfs flags=0
+rename10.c:37: [1;32mTPASS: [0mrename(TEMP_FILE, long_path) : ENAMETOOLONG (36)
+rename10.c:39: [1;32mTPASS: [0mrename(TEMP_FILE, long_name) : ENAMETOOLONG (36)
+
+Summary:
+passed   16
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE rename10 : 0
+RUN LTP CASE rename11
+rename11    0  [1;34mTINFO[0m  :  Found free device 6 '/dev/loop6'
+rename11    0  [1;34mTINFO[0m  :  Formatting /dev/loop6 with ext2 opts='' extra opts=''
+rename11    0  [1;34mTINFO[0m  :  Mounting /dev/loop6 to /tmp/LTP_renJIpZx1/mntpoint fstyp=ext2 flags=0
+rename11    0  [1;34mTINFO[0m  :  subdir limit is not availiable for tmpfs filesystem
+rename11    1  [1;32mTPASS[0m  :  failed as expected: TEST_ERRNO=ELOOP(40): Too many levels of symbolic links
+rename11    0  [1;34mTINFO[0m  :  Mounting /dev/loop6 to /tmp/LTP_renJIpZx1/mntpoint fstyp=ext2 flags=21
+rename11    2  [1;32mTPASS[0m  :  failed as expected: TEST_ERRNO=EROFS(30): Read-only file system
+rename11    0  [1;34mTINFO[0m  :  Mounting /dev/loop6 to /tmp/LTP_renJIpZx1/mntpoint fstyp=ext2 flags=20
+rename11    3  [1;33mTCONF[0m  :  rename11.c:167: EMLINK test is not appropriate
+
+mke2fs 1.47.4 (6-Mar-2025)
+FAIL LTP CASE rename11 : 0
+RUN LTP CASE rename12
+tst_device.c:96: [1;34mTINFO: [0mFound free device 6 '/dev/loop6'
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext2
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext2 does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext3
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext3 does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext4
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext4 does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports xfs
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.xfs does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports btrfs
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.btrfs does exist
+tst_supported_fs_types.c:105: [1;34mTINFO: [0mSkipping bcachefs because of FUSE blacklist
+tst_supported_fs_types.c:169: [1;34mTINFO: [0mSkipping vfat as requested by the test
+tst_supported_fs_types.c:169: [1;34mTINFO: [0mSkipping exfat as requested by the test
+tst_supported_fs_types.c:169: [1;34mTINFO: [0mSkipping ntfs as requested by the test
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports tmpfs
+tst_supported_fs_types.c:49: [1;34mTINFO: [0mmkfs is not needed for tmpfs
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext2 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with ext2 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_renrOt4yT/mntpoint fstyp=ext2 flags=0
+rename12.c:48: [1;32mTPASS: [0mrename() failed as expected: EACCES (13)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext3 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with ext3 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_renrOt4yT/mntpoint fstyp=ext3 flags=0
+rename12.c:48: [1;32mTPASS: [0mrename() failed as expected: EACCES (13)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext4 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with ext4 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_renrOt4yT/mntpoint fstyp=ext4 flags=0
+rename12.c:48: [1;32mTPASS: [0mrename() failed as expected: EACCES (13)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on xfs ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with xfs opts='' extra opts=''
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_renrOt4yT/mntpoint fstyp=xfs flags=0
+rename12.c:48: [1;32mTPASS: [0mrename() failed as expected: EACCES (13)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on btrfs ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with btrfs opts='' extra opts=''
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_renrOt4yT/mntpoint fstyp=btrfs flags=0
+rename12.c:48: [1;32mTPASS: [0mrename() failed as expected: EACCES (13)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on tmpfs ===
+tst_test.c:1106: [1;34mTINFO: [0mSkipping mkfs for TMPFS filesystem
+tst_test.c:1087: [1;34mTINFO: [0mLimiting tmpfs size to 32MB
+tst_test.c:1120: [1;34mTINFO: [0mMounting ltp-tmpfs to /tmp/LTP_renrOt4yT/mntpoint fstyp=tmpfs flags=0
+rename12.c:48: [1;32mTPASS: [0mrename() failed as expected: EACCES (13)
+
+Summary:
+passed   6
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE rename12 : 0
+RUN LTP CASE rename13
+tst_device.c:96: [1;34mTINFO: [0mFound free device 6 '/dev/loop6'
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext2
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext2 does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext3
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext3 does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ext4
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.ext4 does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports xfs
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.xfs does exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports btrfs
+tst_supported_fs_types.c:62: [1;34mTINFO: [0mmkfs.btrfs does exist
+tst_supported_fs_types.c:105: [1;34mTINFO: [0mSkipping bcachefs because of FUSE blacklist
+tst_supported_fs_types.c:169: [1;34mTINFO: [0mSkipping vfat as requested by the test
+tst_supported_fs_types.c:169: [1;34mTINFO: [0mSkipping exfat as requested by the test
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports ntfs
+tst_supported_fs_types.c:58: [1;34mTINFO: [0mmkfs.ntfs does not exist
+tst_supported_fs_types.c:97: [1;34mTINFO: [0mKernel supports tmpfs
+tst_supported_fs_types.c:49: [1;34mTINFO: [0mmkfs is not needed for tmpfs
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext2 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with ext2 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_renFCqIa1/mntpoint fstyp=ext2 flags=0
+rename13.c:33: [1;32mTPASS: [0mrename(TEMP_FILE1, TEMP_FILE1) passed
+rename13.c:38: [1;32mTPASS: [0mbuf1.st_dev == buf2.st_dev (1798)
+rename13.c:39: [1;32mTPASS: [0mbuf1.st_ino == buf2.st_ino (12)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext3 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with ext3 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_renFCqIa1/mntpoint fstyp=ext3 flags=0
+rename13.c:33: [1;32mTPASS: [0mrename(TEMP_FILE1, TEMP_FILE1) passed
+rename13.c:38: [1;32mTPASS: [0mbuf1.st_dev == buf2.st_dev (1798)
+rename13.c:39: [1;32mTPASS: [0mbuf1.st_ino == buf2.st_ino (6073)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on ext4 ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with ext4 opts='' extra opts=''
+mke2fs 1.47.4 (6-Mar-2025)
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_renFCqIa1/mntpoint fstyp=ext4 flags=0
+rename13.c:33: [1;32mTPASS: [0mrename(TEMP_FILE1, TEMP_FILE1) passed
+rename13.c:38: [1;32mTPASS: [0mbuf1.st_dev == buf2.st_dev (1798)
+rename13.c:39: [1;32mTPASS: [0mbuf1.st_ino == buf2.st_ino (13)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on xfs ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with xfs opts='' extra opts=''
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_renFCqIa1/mntpoint fstyp=xfs flags=0
+rename13.c:33: [1;32mTPASS: [0mrename(TEMP_FILE1, TEMP_FILE1) passed
+rename13.c:38: [1;32mTPASS: [0mbuf1.st_dev == buf2.st_dev (1798)
+rename13.c:39: [1;32mTPASS: [0mbuf1.st_ino == buf2.st_ino (131)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on btrfs ===
+tst_test.c:1106: [1;34mTINFO: [0mFormatting /dev/loop6 with btrfs opts='' extra opts=''
+tst_test.c:1120: [1;34mTINFO: [0mMounting /dev/loop6 to /tmp/LTP_renFCqIa1/mntpoint fstyp=btrfs flags=0
+rename13.c:33: [1;32mTPASS: [0mrename(TEMP_FILE1, TEMP_FILE1) passed
+rename13.c:38: [1;32mTPASS: [0mbuf1.st_dev == buf2.st_dev (119)
+rename13.c:39: [1;32mTPASS: [0mbuf1.st_ino == buf2.st_ino (257)
+tst_test.c:1693: [1;34mTINFO: [0m=== Testing on tmpfs ===
+tst_test.c:1106: [1;34mTINFO: [0mSkipping mkfs for TMPFS filesystem
+tst_test.c:1087: [1;34mTINFO: [0mLimiting tmpfs size to 32MB
+tst_test.c:1120: [1;34mTINFO: [0mMounting ltp-tmpfs to /tmp/LTP_renFCqIa1/mntpoint fstyp=tmpfs flags=0
+rename13.c:33: [1;32mTPASS: [0mrename(TEMP_FILE1, TEMP_FILE1) passed
+rename13.c:38: [1;32mTPASS: [0mbuf1.st_dev == buf2.st_dev (116)
+rename13.c:39: [1;32mTPASS: [0mbuf1.st_ino == buf2.st_ino (2)
+
+Summary:
+passed   18
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE rename13 : 0
+RUN LTP CASE rename14
+rename14    1  [1;32mTPASS[0m  :  Test Passed
+FAIL LTP CASE rename14 : 0
+RUN LTP CASE unlinkat01
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+unlinkat01.c:79: [1;32mTPASS: [0munlinkat() returned expected errno: SUCCESS (0)
+unlinkat01.c:79: [1;32mTPASS: [0munlinkat() returned expected errno: SUCCESS (0)
+unlinkat01.c:79: [1;32mTPASS: [0munlinkat() returned expected errno: ENOTDIR (20)
+unlinkat01.c:79: [1;32mTPASS: [0munlinkat() returned expected errno: EBADF (9)
+unlinkat01.c:79: [1;32mTPASS: [0munlinkat() returned expected errno: EINVAL (22)
+unlinkat01.c:79: [1;32mTPASS: [0munlinkat() returned expected errno: SUCCESS (0)
+unlinkat01.c:79: [1;32mTPASS: [0munlinkat() returned expected errno: SUCCESS (0)
+
+Summary:
+passed   7
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE unlinkat01 : 0
+RUN LTP CASE sched_yield01
+sched_yield01    1  [1;32mTPASS[0m  :  sched_yield() call succeeded
+FAIL LTP CASE sched_yield01 : 0
+RUN LTP CASE brk01
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+brk01.c:24: [1;34mTINFO: [0mTesting libc variant
+brk01.c:70: [1;32mTPASS: [0mbrk() works fine
+brk01.c:21: [1;34mTINFO: [0mTesting syscall variant
+brk01.c:70: [1;32mTPASS: [0mbrk() works fine
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE brk01 : 0
+RUN LTP CASE brk02
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 00m 30s
+brk02.c:42: [1;34mTINFO: [0mTesting libc variant
+brk02.c:86: [1;32mTPASS: [0mmunmap at least two VMAs of brk() passed
+brk02.c:39: [1;34mTINFO: [0mTesting syscall variant
+brk02.c:86: [1;32mTPASS: [0mmunmap at least two VMAs of brk() passed
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+FAIL LTP CASE brk02 : 0
