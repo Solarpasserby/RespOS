@@ -37,12 +37,15 @@ const SYSCALL_PWRITE64: usize = 68;
 const SYSCALL_PREADV: usize = 69;
 const SYSCALL_PWRITEV: usize = 70;
 const SYSCALL_PSELECT6: usize = 72;
+const SYSCALL_PPOLL: usize = 73;
 const SYSCALL_READLINKAT: usize = 78;
 const SYSCALL_FSTATAT: usize = 79;
 const SYSCALL_FSTAT: usize = 80;
 const SYSCALL_FSYNC: usize = 82;
 const SYSCALL_FDATASYNC: usize = 83;
 const SYSCALL_UTIMENSAT: usize = 88;
+const SYSCALL_CAPGET: usize = 90;
+const SYSCALL_CAPSET: usize = 91;
 const SYSCALL_PERSONALITY: usize = 92;
 const SYSCALL_EXIT: usize = 93;
 const SYSCALL_EXIT_GROUP: usize = 94;
@@ -54,6 +57,7 @@ const SYSCALL_GET_ROBUST_LIST: usize = 100;
 const SYSCALL_NANOSLEEP: usize = 101;
 const SYSCALL_GETITIMER: usize = 102;
 const SYSCALL_SETITIMER: usize = 103;
+const SYSCALL_CLOCK_SETTIME: usize = 112;
 const SYSCALL_CLOCK_GETTIME: usize = 113;
 const SYSCALL_CLOCK_NANOSLEEP: usize = 115;
 const SYSCALL_SYSLOG: usize = 116;
@@ -86,6 +90,7 @@ const SYSCALL_SETGROUPS: usize = 159;
 const SYSCALL_UNAME: usize = 160;
 const SYSCALL_UMASK: usize = 166;
 const SYSCALL_GETTIMEOFDAY: usize = 169;
+const SYSCALL_SETTIMEOFDAY: usize = 170;
 const SYSCALL_GETPID: usize = 172;
 const SYSCALL_GETPPID: usize = 173;
 const SYSCALL_GETUID: usize = 174;
@@ -138,6 +143,7 @@ mod time;
 
 use crate::fs::Stat;
 use crate::signal::LinuxSigInfo;
+use crate::signal::SigSet;
 use crate::timer::TimeSpec;
 pub use errno::*;
 use fs::*;
@@ -215,6 +221,13 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
             args[4] as *const TimeSpec,
             args[5],
         ),
+        SYSCALL_PPOLL => sys_ppoll(
+            args[0] as *mut PollFd,
+            args[1],
+            args[2] as *const TimeSpec,
+            args[3] as *const SigSet,
+            args[4],
+        ),
         SYSCALL_READLINKAT => sys_readlinkat(
             args[0] as isize,
             args[1] as *const u8,
@@ -236,6 +249,11 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
             args[1] as *const u8,
             args[2] as *const TimeSpec,
             args[3],
+        ),
+        SYSCALL_CAPGET => sys_capget(args[0] as *mut CapUserHeader, args[1] as *mut CapUserData),
+        SYSCALL_CAPSET => sys_capset(
+            args[0] as *const CapUserHeader,
+            args[1] as *const CapUserData,
         ),
         SYSCALL_PERSONALITY => sys_personality(args[0]),
         SYSCALL_EXIT => sys_exit(args[0] as i32),
@@ -267,6 +285,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
             args[1] as *const ITimerVal,
             args[2] as *mut ITimerVal,
         ),
+        SYSCALL_CLOCK_SETTIME => sys_clock_settime(args[0], args[1] as *const TimeSpec),
         SYSCALL_CLOCK_GETTIME => sys_clock_gettime(args[0], args[1] as *mut TimeSpec),
         SYSCALL_CLOCK_NANOSLEEP => sys_clock_nanosleep(
             args[0],
@@ -314,6 +333,9 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         SYSCALL_UNAME => sys_uname(args[0] as *mut UtsName),
         SYSCALL_UMASK => sys_umask(args[0]),
         SYSCALL_GETTIMEOFDAY => sys_gettimeofday(args[0] as *mut TimeVal, args[1] as *mut TimeZone),
+        SYSCALL_SETTIMEOFDAY => {
+            sys_settimeofday(args[0] as *const TimeVal, args[1] as *const TimeZone)
+        }
         SYSCALL_GETPID => sys_getpid(),
         SYSCALL_GETPPID => sys_getppid(),
         SYSCALL_GETUID => sys_getuid(),

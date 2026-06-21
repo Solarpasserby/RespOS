@@ -18,7 +18,10 @@ use crate::mm::{
 };
 use crate::signal::sig_struct::{Sig, SigSet};
 use crate::signal::{SiField, SigInfo};
-use crate::task::{current_task, yield_current_task};
+use crate::task::{
+    current_task, prepare_current_task_blocked, remove_task, switch_to_next_task,
+    yield_current_task,
+};
 use crate::timer::{TimeSpec, get_time_ms, get_timeout_us};
 
 const UTIME_NOW: isize = 1_073_741_823;
@@ -1519,6 +1522,19 @@ struct Pselect6Sigmask {
     sigsetsize: usize,
 }
 
+const POLLIN: i16 = 0x0001;
+const POLLOUT: i16 = 0x0004;
+const POLLNVAL: i16 = 0x0020;
+const PPOLL_MAXFDS: usize = 4096;
+
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+pub struct PollFd {
+    fd: i32,
+    events: i16,
+    revents: i16,
+}
+
 /// 解析 pselect6 超时参数。
 ///
 /// - `None`   → 无限等待，直到有 fd 就绪或信号中断
@@ -1565,6 +1581,152 @@ fn pselect_sigmask(sigmask: usize) -> SysResult<Option<SigSet>> {
     new_mask.remove_signal(Sig::SIGKILL);
     new_mask.remove_signal(Sig::SIGSTOP);
     Ok(Some(new_mask))
+}
+
+/// 解析 ppoll 信号掩码参数。
+///
+/// ppoll 直接传入 sigset_t 指针和 sigsetsize，而不像 pselect6 那样再包一层结构。
+fn ppoll_sigmask(sigmask: *const SigSet, sigsetsize: usize) -> SysResult<Option<SigSet>> {
+    if sigmask.is_null() {
+        return Ok(None);
+    }
+    if sigsetsize != core::mem::size_of::<SigSet>() {
+        return Err(Errno::EINVAL);
+    }
+
+    let mut new_mask = SigSet::empty();
+    copy_from_user(&mut new_mask as *mut SigSet, sigmask, 1)?;
+    new_mask.remove_signal(Sig::SIGKILL);
+    new_mask.remove_signal(Sig::SIGSTOP);
+    Ok(Some(new_mask))
+}
+
+fn ppoll_scan_ready(pollfds: &mut [PollFd]) -> usize {
+    let task = current_task().expect("[kernel] current task is None.");
+    let mut ready = 0;
+
+    for pollfd in pollfds {
+        pollfd.revents = 0;
+        if pollfd.fd < 0 {
+            continue;
+        }
+
+        let Ok(fd_entry) = task.get_fd_entry(pollfd.fd as usize) else {
+            pollfd.revents = POLLNVAL;
+            ready += 1;
+            continue;
+        };
+
+        let file = fd_entry.file;
+        if pollfd.events & POLLIN != 0 && file.readable() && file.read_ready() {
+            pollfd.revents |= POLLIN;
+        }
+        if pollfd.events & POLLOUT != 0 && file.writable() && file.write_ready() {
+            pollfd.revents |= POLLOUT;
+        }
+        if pollfd.revents != 0 {
+            ready += 1;
+        }
+    }
+
+    ready
+}
+
+fn ppoll_write_back(fds: *mut PollFd, pollfds: &[PollFd]) -> SysResult<()> {
+    if pollfds.is_empty() {
+        return Ok(());
+    }
+    copy_to_user(fds, pollfds.as_ptr(), pollfds.len())?;
+    Ok(())
+}
+
+fn ppoll_wait_interruptible(task: &alloc::sync::Arc<crate::task::TaskControlBlock>) {
+    if prepare_current_task_blocked() {
+        if task.is_ready() {
+            remove_task(task.tid());
+            task.set_running();
+        } else {
+            switch_to_next_task();
+        }
+    } else {
+        yield_current_task();
+    }
+}
+
+/// ppoll — 等待 pollfd 数组中的 fd 就绪，带超时和信号掩码。
+///
+/// libc 的 pause() 在部分架构上会走 ppoll(NULL, 0, NULL, mask)，因此 nfds=0
+/// 且无限超时时需要进入可中断睡眠，让 /proc/<pid>/stat 能观察到 S 状态。
+pub fn sys_ppoll(
+    fds: *mut PollFd,
+    nfds: usize,
+    timeout: *const TimeSpec,
+    sigmask: *const SigSet,
+    sigsetsize: usize,
+) -> SysResult<usize> {
+    if nfds > PPOLL_MAXFDS {
+        return Err(Errno::EINVAL);
+    }
+
+    let timeout_us = pselect_timeout_us(timeout)?;
+    let new_mask = ppoll_sigmask(sigmask, sigsetsize)?;
+    let task = current_task().expect("[kernel] current task is None.");
+    let origin_mask = task.op_sig_pending(|pending| pending.mask);
+    if let Some(mask) = new_mask {
+        task.op_sig_pending_mut(|pending| pending.mask = mask);
+    }
+
+    let result = (|| {
+        let mut pollfds = alloc::vec![PollFd::default(); nfds];
+        if nfds > 0 {
+            copy_from_user(pollfds.as_mut_ptr(), fds, nfds)?;
+        }
+
+        let start_us = get_timeout_us();
+        loop {
+            let ready = ppoll_scan_ready(&mut pollfds);
+            if ready > 0 {
+                ppoll_write_back(fds, &pollfds)?;
+                return Ok(ready);
+            }
+
+            if let Some(timeout_us) = timeout_us {
+                if timeout_us == 0 {
+                    ppoll_write_back(fds, &pollfds)?;
+                    return Ok(0);
+                }
+                let elapsed_us = get_timeout_us().saturating_sub(start_us);
+                if elapsed_us >= timeout_us {
+                    ppoll_write_back(fds, &pollfds)?;
+                    return Ok(0);
+                }
+            }
+
+            task.set_interruptible(true);
+            if task.check_signal_interrupt() || task.is_interrupted() {
+                task.clear_interrupted();
+                return Err(Errno::EINTR);
+            }
+
+            if timeout_us.is_none() && nfds == 0 {
+                ppoll_wait_interruptible(&task);
+            } else {
+                yield_current_task();
+            }
+
+            if task.check_signal_interrupt() || task.is_interrupted() {
+                task.clear_interrupted();
+                return Err(Errno::EINTR);
+            }
+        }
+    })();
+
+    task.set_interruptible(false);
+    if new_mask.is_some() {
+        task.op_sig_pending_mut(|pending| pending.mask = origin_mask);
+    }
+
+    result
 }
 
 /// pselect6 — 等待多个文件描述符就绪，带超时和信号掩码。

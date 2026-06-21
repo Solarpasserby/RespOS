@@ -73,6 +73,33 @@ pub fn sys_gettimeofday(tv: *mut TimeVal, tz: *mut TimeZone) -> SysResult<usize>
     Ok(0)
 }
 
+pub fn sys_settimeofday(tv: *const TimeVal, _tz: *const TimeZone) -> SysResult<usize> {
+    if !tv.is_null() {
+        let mut time_val = TimeVal::default();
+        copy_from_user(&mut time_val as *mut TimeVal, tv, 1)?;
+        if (time_val.sec as isize) < 0 || time_val.usec >= 1_000_000 {
+            return Err(Errno::EINVAL);
+        }
+    }
+    Err(Errno::EPERM)
+}
+
+pub fn sys_clock_settime(clock_id: usize, tp: *const TimeSpec) -> SysResult<usize> {
+    const CLOCK_REALTIME: usize = 0;
+
+    if clock_id != CLOCK_REALTIME {
+        return Err(Errno::EINVAL);
+    }
+
+    let mut time_spec = TimeSpec::default();
+    copy_from_user(&mut time_spec as *mut TimeSpec, tp, 1)?;
+    if !time_spec.is_valid_duration() {
+        return Err(Errno::EINVAL);
+    }
+
+    Err(Errno::EPERM)
+}
+
 pub fn sys_clock_gettime(clock_id: usize, tp: *mut TimeSpec) -> SysResult<usize> {
     const CLOCK_REALTIME: usize = 0;
     const CLOCK_MONOTONIC: usize = 1;

@@ -103,6 +103,21 @@ pub struct RLimit {
     pub max: usize,
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct CapUserHeader {
+    pub version: u32,
+    pub pid: i32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct CapUserData {
+    pub effective: u32,
+    pub permitted: u32,
+    pub inheritable: u32,
+}
+
 impl Default for RUsage {
     fn default() -> Self {
         Self {
@@ -159,6 +174,49 @@ pub fn sys_sched_getaffinity(pid: usize, cpusetsize: usize, mask: *mut u8) -> Sy
     kbuf[0] = if cpusetsize > 0 { 0b11 } else { 0 };
     copy_to_user(mask, kbuf.as_ptr(), cpusetsize)?;
     Ok(cpusetsize)
+}
+
+fn check_cap_header(header: CapUserHeader) -> SysResult<CapUserHeader> {
+    const LINUX_CAPABILITY_VERSION_1: u32 = 0x1998_0330;
+    const LINUX_CAPABILITY_VERSION_2: u32 = 0x2007_1026;
+    const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
+
+    match header.version {
+        LINUX_CAPABILITY_VERSION_1 | LINUX_CAPABILITY_VERSION_2 | LINUX_CAPABILITY_VERSION_3 => {}
+        _ => return Err(Errno::EINVAL),
+    }
+
+    let task = current_task().expect("[kernel] current task is None.");
+    if header.pid < 0 {
+        return Err(Errno::EINVAL);
+    }
+    if header.pid != 0 && header.pid as usize != task.tid() && header.pid as usize != task.tgid() {
+        return Err(Errno::ESRCH);
+    }
+
+    Ok(header)
+}
+
+pub fn sys_capget(hdrp: *mut CapUserHeader, datap: *mut CapUserData) -> SysResult<usize> {
+    let mut header = CapUserHeader::default();
+    copy_from_user(&mut header as *mut CapUserHeader, hdrp, 1)?;
+    let _ = check_cap_header(header)?;
+
+    if !datap.is_null() {
+        let data = [CapUserData::default(); 2];
+        copy_to_user(datap, data.as_ptr(), data.len())?;
+    }
+    Ok(0)
+}
+
+pub fn sys_capset(hdrp: *const CapUserHeader, datap: *const CapUserData) -> SysResult<usize> {
+    let mut header = CapUserHeader::default();
+    copy_from_user(&mut header as *mut CapUserHeader, hdrp, 1)?;
+    let _ = check_cap_header(header)?;
+
+    let mut data = [CapUserData::default(); 2];
+    copy_from_user(data.as_mut_ptr(), datap, data.len())?;
+    Ok(0)
 }
 
 pub fn sys_gettid() -> SysResult<usize> {
@@ -562,8 +620,6 @@ pub fn sys_wait4(
             task.op_children_mut(|children| {
                 children.remove(&child_tid).unwrap();
             });
-
-            warn! {"[kernel] (wait4) parent:{}, child:{}.", task.tid(), child_tid};
 
             return Ok(child_tid);
         }
