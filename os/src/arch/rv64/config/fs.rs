@@ -4,7 +4,7 @@
 pub const FTB_RLIMIT: usize = 1024;
 
 /// 管道缓存大小
-pub const PIPE_BUFFER_SIZE: usize = 4096;
+pub const PIPE_BUFFER_SIZE: usize = 64 * 1024;
 
 /// inode 缓存容量上限
 pub const INODE_CACHE_CAPACITY: usize = 1024;

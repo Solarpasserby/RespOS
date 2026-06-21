@@ -3,7 +3,7 @@
 use super::KStat;
 use super::vfs::InodeType;
 use super::{FileOp, OpenFlags};
-use crate::config::PIPE_BUFFER_SIZE;
+use crate::config::{PAGE_SIZE, PIPE_BUFFER_SIZE};
 use crate::syscall::{Errno, SysResult};
 use crate::task::{
     current_task, prepare_current_task_blocked, remove_task, switch_to_next_task, wakeup_task,
@@ -20,7 +20,27 @@ use spin::Mutex;
 
 const PIPE_INO: u64 = 0x1000;
 const PIPE_DEV: u64 = 0x200;
-const PIPE_RING_BUFFER_CAPACITY: usize = PIPE_BUFFER_SIZE + 1;
+const PIPE_SIZE_LIMIT: usize = 1 << 31;
+
+lazy_static! {
+    static ref PIPE_MAX_SIZE: Mutex<usize> = Mutex::new(PIPE_BUFFER_SIZE);
+}
+
+pub fn pipe_max_size() -> usize {
+    *PIPE_MAX_SIZE.lock()
+}
+
+pub fn pipe_max_size_string() -> String {
+    alloc::format!("{}\n", pipe_max_size())
+}
+
+pub fn set_pipe_max_size(value: usize) -> SysResult {
+    if value < PAGE_SIZE || value > PIPE_SIZE_LIMIT {
+        return Err(Errno::EINVAL);
+    }
+    *PIPE_MAX_SIZE.lock() = value;
+    Ok(())
+}
 
 pub struct Pipe {
     buffer: Arc<Mutex<PipeRingBuffer>>,
@@ -49,7 +69,7 @@ impl Pipe {
         let mut read_size = 0;
         let mut buffer = self.buffer.lock();
         for char in buf {
-            if buffer.status != RingBufferStatus::EMPTY {
+            if buffer.available_bytes() != 0 {
                 *char = buffer.read_byte();
                 read_size += 1;
             } else {
@@ -62,7 +82,7 @@ impl Pipe {
         let mut write_size = 0;
         let mut buffer = self.buffer.lock();
         for char in buf {
-            if buffer.status != RingBufferStatus::FULL {
+            if buffer.available_bytes() < buffer.capacity {
                 buffer.write_byte(*char);
                 write_size += 1;
             } else {
@@ -74,6 +94,44 @@ impl Pipe {
 
     pub fn available_bytes(&self) -> usize {
         self.buffer.lock().available_bytes()
+    }
+
+    pub fn writable_bytes(&self) -> usize {
+        let buffer = self.buffer.lock();
+        buffer.capacity.saturating_sub(buffer.available_bytes())
+    }
+
+    pub fn buffer_id(&self) -> usize {
+        Arc::as_ptr(&self.buffer) as usize
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.buffer.lock().capacity
+    }
+
+    pub fn set_capacity(&self, requested: usize) -> SysResult<usize> {
+        let requested = if requested == 0 { PAGE_SIZE } else { requested };
+        if requested > PIPE_SIZE_LIMIT {
+            return Err(Errno::EINVAL);
+        }
+        let capacity = requested
+            .checked_add(PAGE_SIZE - 1)
+            .ok_or(Errno::EINVAL)?
+            / PAGE_SIZE
+            * PAGE_SIZE;
+        if capacity > pipe_max_size() {
+            return Err(Errno::EPERM);
+        }
+        let mut buffer = self.buffer.lock();
+        if capacity < buffer.available_bytes() {
+            return Err(Errno::EBUSY);
+        }
+        buffer.capacity = capacity;
+        Ok(capacity)
+    }
+
+    pub fn peek_inner(&self, buf: &mut [u8]) -> usize {
+        self.buffer.lock().peek(buf)
     }
 }
 
@@ -197,7 +255,7 @@ impl FileOp for Pipe {
                 let mut buffer = self.buffer.lock();
                 let mut read_size = 0;
                 for ch in buf.iter_mut() {
-                    if buffer.status == RingBufferStatus::EMPTY {
+                    if buffer.available_bytes() == 0 {
                         break;
                     }
                     *ch = buffer.read_byte();
@@ -273,7 +331,7 @@ impl FileOp for Pipe {
 
                 let mut write_size = 0;
                 for ch in buf {
-                    if buffer.status == RingBufferStatus::FULL {
+                    if buffer.available_bytes() >= buffer.capacity {
                         break;
                     }
                     buffer.write_byte(*ch);
@@ -341,11 +399,12 @@ impl FileOp for Pipe {
     // 缓冲区非空，或者写端已关闭
     fn read_ready(&self) -> bool {
         let buf = self.buffer.lock();
-        buf.status != RingBufferStatus::EMPTY || buf.write_closed
+        buf.available_bytes() != 0 || buf.write_closed
     }
     // 管道写端是否有空间可立即写入而不阻塞
     fn write_ready(&self) -> bool {
-        self.buffer.lock().status != RingBufferStatus::FULL
+        let buffer = self.buffer.lock();
+        buffer.available_bytes() < buffer.capacity
     }
 
     fn get_flags(&self) -> OpenFlags {
@@ -382,18 +441,9 @@ impl Drop for Pipe {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum RingBufferStatus {
-    FULL,
-    EMPTY,
-    NORMAL,
-}
-
 struct PipeRingBuffer {
-    buffer: [u8; PIPE_RING_BUFFER_CAPACITY],
-    head: usize,
-    tail: usize,
-    status: RingBufferStatus,
+    buffer: VecDeque<u8>,
+    capacity: usize,
     read_closed: bool,  // 管道读端是否关闭
     write_closed: bool, // 管道写端是否关闭
     read_waiters: VecDeque<usize>,
@@ -402,11 +452,18 @@ struct PipeRingBuffer {
 
 impl PipeRingBuffer {
     pub fn new() -> Self {
+        let is_privileged = current_task()
+            .map(|task| task.fsuid() == 0)
+            .unwrap_or(true);
+        let capacity = if is_privileged {
+            PIPE_BUFFER_SIZE
+        } else {
+            PIPE_BUFFER_SIZE.min(pipe_max_size())
+        };
+
         Self {
-            buffer: [0; PIPE_RING_BUFFER_CAPACITY],
-            head: 0,
-            tail: 0,
-            status: RingBufferStatus::EMPTY,
+            buffer: VecDeque::new(),
+            capacity,
             read_closed: false,
             write_closed: false,
             read_waiters: VecDeque::new(),
@@ -415,23 +472,19 @@ impl PipeRingBuffer {
     }
 
     fn read_byte(&mut self) -> u8 {
-        assert_ne!(self.status, RingBufferStatus::EMPTY);
-        self.status = RingBufferStatus::NORMAL;
-        let byte = self.buffer[self.head];
-        self.head = (self.head + 1) % PIPE_RING_BUFFER_CAPACITY;
-        if self.head == self.tail {
-            self.status = RingBufferStatus::EMPTY;
-        }
-        byte
+        self.buffer.pop_front().expect("empty pipe buffer")
     }
     fn write_byte(&mut self, byte: u8) {
-        assert_ne!(self.status, RingBufferStatus::FULL);
-        self.status = RingBufferStatus::NORMAL;
-        self.buffer[self.tail] = byte;
-        self.tail = (self.tail + 1) % PIPE_RING_BUFFER_CAPACITY;
-        if (self.tail + 1) % PIPE_RING_BUFFER_CAPACITY == self.head {
-            self.status = RingBufferStatus::FULL;
+        assert!(self.buffer.len() < self.capacity);
+        self.buffer.push_back(byte);
+    }
+    fn peek(&self, buf: &mut [u8]) -> usize {
+        let mut read_size = 0usize;
+        for (dst, src) in buf.iter_mut().zip(self.buffer.iter()) {
+            *dst = *src;
+            read_size += 1;
         }
+        read_size
     }
     fn read_closed(&self) -> bool {
         self.read_closed
@@ -440,17 +493,7 @@ impl PipeRingBuffer {
         self.write_closed
     }
     fn available_bytes(&self) -> usize {
-        match self.status {
-            RingBufferStatus::EMPTY => 0,
-            RingBufferStatus::FULL => PIPE_BUFFER_SIZE,
-            RingBufferStatus::NORMAL => {
-                if self.tail >= self.head {
-                    self.tail - self.head
-                } else {
-                    PIPE_RING_BUFFER_CAPACITY - self.head + self.tail
-                }
-            }
-        }
+        self.buffer.len()
     }
     /// 将读端 tid 加入等待队列（去重，避免同任务重复入队）
     fn push_read_waiter(&mut self, tid: usize) {

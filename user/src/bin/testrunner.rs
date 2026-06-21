@@ -539,7 +539,7 @@ const LTP_ARCH_MUSL_SKIP: &[&str] = &["mknod06", "rename11"];
 const LTP_ARCH_MUSL_SKIP: &[&str] = &[];
 
 #[cfg(target_arch = "loongarch64")]
-const LTP_ARCH_GLIBC_SKIP: &[&str] = &["pipe2_02"];
+const LTP_ARCH_GLIBC_SKIP: &[&str] = &[];
 
 #[cfg(not(target_arch = "loongarch64"))]
 const LTP_ARCH_GLIBC_SKIP: &[&str] = &[];

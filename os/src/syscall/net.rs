@@ -1,7 +1,7 @@
 use super::{Errno, SysResult};
 use crate::fs::vfs::InodeType;
 use crate::fs::{FdEntry, FileOp, KStat, OpenFlags};
-use crate::mm::{copy_from_user, copy_to_user};
+use crate::mm::{check_user_writable, copy_from_user, copy_to_user};
 use crate::mutex::SpinLock;
 use crate::task::{current_task, yield_current_task};
 use alloc::collections::VecDeque;
@@ -85,10 +85,12 @@ struct SocketInner {
     nonblocking: bool,
     cloexec: bool,
     listening: bool,
+    peer_rx: Option<Arc<SpinLock<VecDeque<u8>>>>,
 }
 
 pub struct SocketFile {
     inner: SpinLock<SocketInner>,
+    rx: Arc<SpinLock<VecDeque<u8>>>,
 }
 
 impl SocketFile {
@@ -101,7 +103,9 @@ impl SocketFile {
                 nonblocking,
                 cloexec,
                 listening: false,
+                peer_rx: None,
             }),
+            rx: Arc::new(SpinLock::new(VecDeque::new())),
         }
     }
 
@@ -120,6 +124,10 @@ impl SocketFile {
     fn is_nonblocking(&self) -> bool {
         self.inner.lock().nonblocking
     }
+
+    fn connect_peer(&self, peer_rx: Arc<SpinLock<VecDeque<u8>>>) {
+        self.inner.lock().peer_rx = Some(peer_rx);
+    }
 }
 
 impl FileOp for SocketFile {
@@ -127,12 +135,50 @@ impl FileOp for SocketFile {
         self
     }
 
-    fn read<'a>(&'a self, _buf: &'a mut [u8]) -> SysResult<usize> {
-        Err(Errno::EINVAL)
+    fn read<'a>(&'a self, buf: &'a mut [u8]) -> SysResult<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        {
+            let inner = self.inner.lock();
+            if inner.domain != SocketDomain::Unix || inner.peer_rx.is_none() {
+                return Err(Errno::EINVAL);
+            }
+        }
+        loop {
+            let mut rx = self.rx.lock();
+            if !rx.is_empty() {
+                let mut read_len = 0;
+                for byte in buf {
+                    let Some(value) = rx.pop_front() else {
+                        break;
+                    };
+                    *byte = value;
+                    read_len += 1;
+                }
+                return Ok(read_len);
+            }
+            drop(rx);
+            if self.is_nonblocking() {
+                return Err(Errno::EAGAIN);
+            }
+            yield_current_task();
+        }
     }
 
-    fn write<'a>(&'a self, _buf: &'a [u8]) -> SysResult<usize> {
-        Err(Errno::EINVAL)
+    fn write<'a>(&'a self, buf: &'a [u8]) -> SysResult<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let peer_rx = {
+            let inner = self.inner.lock();
+            if inner.domain != SocketDomain::Unix {
+                return Err(Errno::EINVAL);
+            }
+            inner.peer_rx.clone().ok_or(Errno::EINVAL)?
+        };
+        peer_rx.lock().extend(buf.iter().copied());
+        Ok(buf.len())
     }
 
     fn seek(&self, _offset: isize) -> SysResult<usize> {
@@ -161,6 +207,15 @@ impl FileOp for SocketFile {
 
     fn writable(&self) -> bool {
         true
+    }
+
+    fn read_ready(&self) -> bool {
+        self.inner.lock().domain == SocketDomain::Unix && !self.rx.lock().is_empty()
+    }
+
+    fn write_ready(&self) -> bool {
+        let inner = self.inner.lock();
+        inner.domain == SocketDomain::Unix && inner.peer_rx.is_some()
     }
 }
 
@@ -285,6 +340,60 @@ pub fn sys_socket(domain: usize, socket_type: usize, protocol: usize) -> SysResu
     let flags = socket.fd_flags();
     let task = current_task().expect("[kernel] current task is None.");
     task.alloc_fd(FdEntry::new(socket, flags))
+}
+
+pub fn sys_socketpair(
+    domain: usize,
+    socket_type: usize,
+    protocol: usize,
+    sv: *mut i32,
+) -> SysResult<usize> {
+    let type_bits = socket_type & SOCK_TYPE_MASK;
+    let kind = match type_bits {
+        SOCK_STREAM => SocketKind::Stream,
+        SOCK_DGRAM => SocketKind::Datagram,
+        _ => return Err(Errno::EINVAL),
+    };
+    if domain == AF_INET {
+        match (type_bits, protocol) {
+            (SOCK_DGRAM, IPPROTO_UDP) | (SOCK_STREAM, IPPROTO_TCP) => {
+                return Err(Errno::EOPNOTSUPP);
+            }
+            _ => return Err(Errno::EPROTONOSUPPORT),
+        }
+    }
+    if domain != AF_UNIX {
+        return Err(Errno::EAFNOSUPPORT);
+    }
+    if protocol != 0 {
+        return Err(Errno::EPROTONOSUPPORT);
+    }
+    check_user_writable(sv, 2)?;
+
+    let nonblocking = socket_type & SOCK_NONBLOCK != 0;
+    let cloexec = socket_type & SOCK_CLOEXEC != 0;
+
+    let left = Arc::new(SocketFile::new(SocketDomain::Unix, kind, nonblocking, cloexec));
+    let right = Arc::new(SocketFile::new(SocketDomain::Unix, kind, nonblocking, cloexec));
+    left.connect_peer(right.rx.clone());
+    right.connect_peer(left.rx.clone());
+
+    let task = current_task().expect("[kernel] current task is None.");
+    let left_fd = task.alloc_fd(FdEntry::new(left.clone(), left.fd_flags()))?;
+    let right_fd = match task.alloc_fd(FdEntry::new(right.clone(), right.fd_flags())) {
+        Ok(fd) => fd,
+        Err(err) => {
+            let _ = task.close(left_fd);
+            return Err(err);
+        }
+    };
+    let fds = [left_fd as i32, right_fd as i32];
+    if let Err(err) = copy_to_user(sv, fds.as_ptr(), fds.len()) {
+        let _ = task.close(left_fd);
+        let _ = task.close(right_fd);
+        return Err(err);
+    }
+    Ok(0)
 }
 
 pub fn sys_bind(fd: usize, addr: usize, len: usize) -> SysResult<usize> {

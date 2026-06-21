@@ -71,6 +71,8 @@ pub enum Errno {
     ENOTEMPTY = 39,
     /// 符号链接层数过多，通常表示符号链接循环。
     ELOOP = 40,
+    /// 协议不支持，常用于 socket domain/type/protocol 组合无效。
+    EPROTONOSUPPORT = 93,
     /// 操作不支持，例如给 preadv2/pwritev2 传了内核未实现的 flags。
     EOPNOTSUPP = 95,
     /// 不支持该 socket address family。
@@ -132,6 +134,7 @@ impl Errno {
             Errno::ENOSYS => "Function not implemented",
             Errno::ENOTEMPTY => "Directory not empty",
             Errno::ELOOP => "Too many levels of symbolic links",
+            Errno::EPROTONOSUPPORT => "Protocol not supported",
             Errno::EOPNOTSUPP => "Operation not supported",
             Errno::EAFNOSUPPORT => "Address family not supported by protocol",
             Errno::ETIMEDOUT => "Connection timed out",

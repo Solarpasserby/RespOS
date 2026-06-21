@@ -38,6 +38,9 @@ const SYSCALL_PREADV: usize = 69;
 const SYSCALL_PWRITEV: usize = 70;
 const SYSCALL_PSELECT6: usize = 72;
 const SYSCALL_PPOLL: usize = 73;
+const SYSCALL_VMSPLICE: usize = 75;
+const SYSCALL_SPLICE: usize = 76;
+const SYSCALL_TEE: usize = 77;
 const SYSCALL_READLINKAT: usize = 78;
 const SYSCALL_FSTATAT: usize = 79;
 const SYSCALL_FSTAT: usize = 80;
@@ -104,6 +107,7 @@ const SYSCALL_SHMCTL: usize = 195;
 const SYSCALL_SHMAT: usize = 196;
 const SYSCALL_SHMDT: usize = 197;
 const SYSCALL_SOCKET: usize = 198;
+const SYSCALL_SOCKETPAIR: usize = 199;
 const SYSCALL_BIND: usize = 200;
 const SYSCALL_LISTEN: usize = 201;
 const SYSCALL_ACCEPT: usize = 202;
@@ -228,6 +232,16 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
             args[3] as *const SigSet,
             args[4],
         ),
+        SYSCALL_VMSPLICE => sys_vmsplice(args[0], args[1] as *const IoVec, args[2], args[3]),
+        SYSCALL_SPLICE => sys_splice(
+            args[0],
+            args[1] as *mut i64,
+            args[2],
+            args[3] as *mut i64,
+            args[4],
+            args[5],
+        ),
+        SYSCALL_TEE => sys_tee(args[0], args[1], args[2], args[3]),
         SYSCALL_READLINKAT => sys_readlinkat(
             args[0] as isize,
             args[1] as *const u8,
@@ -349,6 +363,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         SYSCALL_SHMAT => sys_shmat(args[0], args[1], args[2]),
         SYSCALL_SHMDT => sys_shmdt(args[0]),
         SYSCALL_SOCKET => sys_socket(args[0], args[1], args[2]),
+        SYSCALL_SOCKETPAIR => sys_socketpair(args[0], args[1], args[2], args[3] as *mut i32),
         SYSCALL_BIND => sys_bind(args[0], args[1], args[2]),
         SYSCALL_LISTEN => sys_listen(args[0], args[1]),
         SYSCALL_ACCEPT => sys_accept(args[0], args[1], args[2]),

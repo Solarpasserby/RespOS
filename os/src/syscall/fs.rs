@@ -1,7 +1,7 @@
 // os/src/syscall/fs.rs
 
 use super::{Errno, SysResult};
-use crate::config::{PAGE_SIZE, PIPE_BUFFER_SIZE};
+use crate::config::PAGE_SIZE;
 use crate::fs::dev::{LoopControlInode, LoopInode};
 use crate::fs::mount::{do_mount, do_umount2};
 use crate::fs::vfs::InodeType;
@@ -308,6 +308,286 @@ pub fn sys_readv(fd: usize, iov: *const IoVec, iovcnt: usize) -> SysResult<usize
             break;
         }
     }
+    Ok(total)
+}
+
+const SPLICE_F_MOVE: usize = 0x01;
+const SPLICE_F_NONBLOCK: usize = 0x02;
+const SPLICE_F_MORE: usize = 0x04;
+const SPLICE_F_GIFT: usize = 0x08;
+const SPLICE_ALLOWED_FLAGS: usize =
+    SPLICE_F_MOVE | SPLICE_F_NONBLOCK | SPLICE_F_MORE | SPLICE_F_GIFT;
+
+fn is_pipe(file: &alloc::sync::Arc<dyn FileOp>) -> bool {
+    file.as_any().is::<Pipe>()
+}
+
+fn pipe_ref(file: &alloc::sync::Arc<dyn FileOp>) -> Option<&Pipe> {
+    file.as_any().downcast_ref::<Pipe>()
+}
+
+fn read_user_offset(off: *mut i64) -> SysResult<Option<usize>> {
+    if off.is_null() {
+        return Ok(None);
+    }
+    let mut value = 0i64;
+    copy_from_user(&mut value as *mut i64, off as *const i64, 1)?;
+    if value < 0 {
+        return Err(Errno::EINVAL);
+    }
+    Ok(Some(value as usize))
+}
+
+fn write_user_offset(off: *mut i64, value: usize) -> SysResult {
+    if off.is_null() {
+        return Ok(());
+    }
+    let value = i64::try_from(value).map_err(|_| Errno::EINVAL)?;
+    copy_to_user(off, &value as *const i64, 1)?;
+    Ok(())
+}
+
+fn splice_copy(
+    input: &alloc::sync::Arc<dyn FileOp>,
+    output: &alloc::sync::Arc<dyn FileOp>,
+    len: usize,
+    flags: usize,
+) -> SysResult<usize> {
+    if len == 0 {
+        return Ok(0);
+    }
+    if flags & SPLICE_F_NONBLOCK != 0 {
+        if is_pipe(input) && !input.read_ready() {
+            return Err(Errno::EAGAIN);
+        }
+        if is_pipe(output) && !output.write_ready() {
+            return Err(Errno::EAGAIN);
+        }
+    }
+
+    let mut kbuf = alloc::vec![0u8; len.min(IO_CHUNK_SIZE)];
+    let mut total = 0usize;
+    while total < len {
+        let mut chunk_len = (len - total).min(kbuf.len());
+        if let Some(out_pipe) = pipe_ref(output) {
+            let writable = out_pipe.writable_bytes();
+            chunk_len = chunk_len.min(if writable == 0 { 1 } else { writable });
+        }
+        let read_len = match input.read(&mut kbuf[..chunk_len]) {
+            Ok(0) => break,
+            Ok(read_len) => read_len,
+            Err(err) => return if total > 0 { Ok(total) } else { Err(err) },
+        };
+        let mut written_total = 0usize;
+        while written_total < read_len {
+            let written = match output.write(&kbuf[written_total..read_len]) {
+                Ok(0) => break,
+                Ok(written) => written,
+                Err(err) => return if total > 0 { Ok(total) } else { Err(err) },
+            };
+            written_total += written;
+        }
+        total += written_total;
+        if written_total < read_len || read_len < chunk_len {
+            break;
+        }
+    }
+    Ok(total)
+}
+
+pub fn sys_splice(
+    fd_in: usize,
+    off_in: *mut i64,
+    fd_out: usize,
+    off_out: *mut i64,
+    len: usize,
+    flags: usize,
+) -> SysResult<usize> {
+    if flags & !SPLICE_ALLOWED_FLAGS != 0 {
+        return Err(Errno::EINVAL);
+    }
+
+    let task = current_task().expect("[kernel] current task is None.");
+    let in_entry = task.get_fd_entry(fd_in)?;
+    let out_entry = task.get_fd_entry(fd_out)?;
+    let input = in_entry.file.clone();
+    let output = out_entry.file.clone();
+    let in_is_pipe = is_pipe(&input);
+    let out_is_pipe = is_pipe(&output);
+
+    if in_entry.get_flags().contains(OpenFlags::O_PATH)
+        || out_entry.get_flags().contains(OpenFlags::O_PATH)
+    {
+        return Err(Errno::EBADF);
+    }
+    if !in_is_pipe && !out_is_pipe {
+        return Err(Errno::EINVAL);
+    }
+    if in_is_pipe && !off_in.is_null() {
+        return Err(Errno::ESPIPE);
+    }
+    if out_is_pipe && !off_out.is_null() {
+        return Err(Errno::ESPIPE);
+    }
+    if !input.readable() || in_entry.get_flags().contains(OpenFlags::O_WRONLY) {
+        return Err(Errno::EBADF);
+    }
+    if !in_is_pipe && input.get_stat()?.ty == InodeType::Directory {
+        return Err(Errno::EINVAL);
+    }
+    if !output.writable() {
+        return Err(Errno::EBADF);
+    }
+    if out_entry.get_flags().contains(OpenFlags::O_APPEND) {
+        return Err(Errno::EINVAL);
+    }
+
+    let old_in_offset = input.get_offset();
+    let old_out_offset = output.get_offset();
+    let explicit_in_offset = read_user_offset(off_in)?;
+    let explicit_out_offset = read_user_offset(off_out)?;
+
+    if let Some(offset) = explicit_in_offset {
+        input.can_seek()?;
+        input.seek(offset as isize)?;
+    }
+    if let Some(offset) = explicit_out_offset {
+        output.can_seek()?;
+        output.seek(offset as isize)?;
+    }
+
+    let ret = splice_copy(&input, &output, len, flags);
+    let new_in_offset = input.get_offset();
+    let new_out_offset = output.get_offset();
+
+    if explicit_in_offset.is_some() {
+        let _ = input.seek(old_in_offset as isize);
+        if ret.is_ok() {
+            write_user_offset(off_in, new_in_offset)?;
+        }
+    }
+    if explicit_out_offset.is_some() {
+        let _ = output.seek(old_out_offset as isize);
+        if ret.is_ok() {
+            write_user_offset(off_out, new_out_offset)?;
+        }
+    }
+
+    ret
+}
+
+pub fn sys_tee(fd_in: usize, fd_out: usize, len: usize, flags: usize) -> SysResult<usize> {
+    if flags & !SPLICE_ALLOWED_FLAGS != 0 {
+        return Err(Errno::EINVAL);
+    }
+    if len == 0 {
+        return Ok(0);
+    }
+
+    let task = current_task().expect("[kernel] current task is None.");
+    let in_entry = task.get_fd_entry(fd_in)?;
+    let out_entry = task.get_fd_entry(fd_out)?;
+    let input = in_entry.file.clone();
+    let output = out_entry.file.clone();
+    let in_pipe = pipe_ref(&input).ok_or(Errno::EINVAL)?;
+    let out_pipe = pipe_ref(&output).ok_or(Errno::EINVAL)?;
+
+    if in_pipe.buffer_id() == out_pipe.buffer_id() {
+        return Err(Errno::EINVAL);
+    }
+    if !input.readable() || !output.writable() {
+        return Err(Errno::EBADF);
+    }
+    if flags & SPLICE_F_NONBLOCK != 0 {
+        if !input.read_ready() || !output.write_ready() {
+            return Err(Errno::EAGAIN);
+        }
+    }
+
+    let mut kbuf = alloc::vec![0u8; len.min(IO_CHUNK_SIZE)];
+    let mut total = 0usize;
+    while total < len {
+        let writable = out_pipe.writable_bytes();
+        let chunk_len = (len - total)
+            .min(kbuf.len())
+            .min(if writable == 0 { 1 } else { writable });
+        let peeked = in_pipe.peek_inner(&mut kbuf[..chunk_len]);
+        if peeked == 0 {
+            break;
+        }
+        let written = match output.write(&kbuf[..peeked]) {
+            Ok(0) => break,
+            Ok(written) => written,
+            Err(err) => return if total > 0 { Ok(total) } else { Err(err) },
+        };
+        total += written;
+        if written < peeked || peeked < chunk_len {
+            break;
+        }
+    }
+    Ok(total)
+}
+
+pub fn sys_vmsplice(fd: usize, iov: *const IoVec, iovcnt: usize, flags: usize) -> SysResult<usize> {
+    if flags & !SPLICE_ALLOWED_FLAGS != 0 {
+        return Err(Errno::EINVAL);
+    }
+    let task = current_task().expect("[kernel] current task is None.");
+    let fd_entry = task.get_fd_entry(fd)?;
+    let file = fd_entry.file.clone();
+    if !is_pipe(&file) {
+        return Err(Errno::EBADF);
+    }
+
+    let items = read_iovecs(iov, iovcnt)?;
+    let mut total = 0usize;
+    if file.writable() {
+        let pipe = pipe_ref(&file).ok_or(Errno::EBADF)?;
+        check_iovec_buffers(&items, IovecBufferPerm::Read)?;
+        for item in items {
+            if item.len == 0 {
+                continue;
+            }
+            let writable = pipe.writable_bytes();
+            let write_len = if writable == 0 {
+                if flags & SPLICE_F_NONBLOCK != 0 {
+                    return if total > 0 { Ok(total) } else { Err(Errno::EAGAIN) };
+                }
+                1
+            } else {
+                item.len.min(writable)
+            };
+            let written = match sys_write(fd, item.base, write_len) {
+                Ok(written) => written,
+                Err(err) => return if total > 0 { Ok(total) } else { Err(err) },
+            };
+            total = total.checked_add(written).ok_or(Errno::EINVAL)?;
+            if written < item.len {
+                break;
+            }
+        }
+    } else if file.readable() {
+        check_iovec_buffers(&items, IovecBufferPerm::Write)?;
+        for item in items {
+            if item.len == 0 {
+                continue;
+            }
+            if flags & SPLICE_F_NONBLOCK != 0 && !file.read_ready() {
+                return if total > 0 { Ok(total) } else { Err(Errno::EAGAIN) };
+            }
+            let read = match sys_read(fd, item.base, item.len) {
+                Ok(read) => read,
+                Err(err) => return if total > 0 { Ok(total) } else { Err(err) },
+            };
+            total = total.checked_add(read).ok_or(Errno::EINVAL)?;
+            if read < item.len {
+                break;
+            }
+        }
+    } else {
+        return Err(Errno::EBADF);
+    }
+
     Ok(total)
 }
 
@@ -1187,18 +1467,12 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SysResult<usize> {
             Ok(0)
         }
         F_GETPIPE_SZ => {
-            if fd_entry.file.as_any().is::<Pipe>() {
-                Ok(PIPE_BUFFER_SIZE)
-            } else {
-                Err(Errno::EBADF)
-            }
+            let pipe = pipe_ref(&fd_entry.file).ok_or(Errno::EBADF)?;
+            Ok(pipe.capacity())
         }
         F_SETPIPE_SZ => {
-            if fd_entry.file.as_any().is::<Pipe>() {
-                Ok(PIPE_BUFFER_SIZE)
-            } else {
-                Err(Errno::EBADF)
-            }
+            let pipe = pipe_ref(&fd_entry.file).ok_or(Errno::EBADF)?;
+            pipe.set_capacity(arg)
         }
         F_GETLK | F_SETLK | F_SETLKW => Ok(0),
         _ => Err(Errno::EINVAL),

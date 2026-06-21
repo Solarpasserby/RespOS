@@ -10,6 +10,7 @@ use super::mounts::MountsInode;
 use super::smaps::SmapsInode;
 use super::stat::{ProcStatInode, TaskStatInode};
 use super::version::VersionInode;
+use crate::fs::pipe::{pipe_max_size_string, set_pipe_max_size};
 use crate::syscall::{Errno, SysResult};
 use crate::task::{TASK_MANAGER, TaskStatus, current_task};
 use alloc::string::String;
@@ -42,16 +43,20 @@ const PROC_SELF_STATUS_INO: u64 = 17;
 const PROC_SELF_PAGEMAP_INO: u64 = 18;
 const PROC_SYS_KERNEL_TAINTED_INO: u64 = 19;
 const PROC_SYS_KERNEL_CORE_PATTERN_INO: u64 = 20;
+const PROC_SYS_FS_PIPE_MAX_SIZE_INO: u64 = 21;
+const PROC_SYS_KERNEL_DOMAINNAME_INO: u64 = 22;
 const PROC_PID_DIR_INO_BASE: u64 = 0x10000;
 const PROC_PID_STAT_INO_BASE: u64 = 0x20000;
 const PROC_DEV: u64 = 0x100;
 const PID_MAX_CONTENT: &str = "4194304\n";
 const PIPE_USER_PAGES_SOFT_CONTENT: &str = "128\n";
+const DOMAINNAME_CONTENT: &str = "(none)\n";
 const TAINTED_CONTENT: &str = "0\n";
 const CORE_PATTERN_CONTENT: &str = "core\n";
 
 lazy_static! {
     static ref PID_MAX_VALUE: Mutex<String> = Mutex::new(String::from(PID_MAX_CONTENT));
+    static ref DOMAINNAME_VALUE: Mutex<String> = Mutex::new(String::from(DOMAINNAME_CONTENT));
 }
 
 // ── /proc ─────────────────────────────────────────────────────────
@@ -243,6 +248,7 @@ impl InodeOp for ProcSysFsInode {
 
     fn lookup(&self, _parent_path: &str, name: &str) -> SysResult<Arc<dyn InodeOp>> {
         match name {
+            "pipe-max-size" => Ok(Arc::new(ProcPipeMaxSizeInode)),
             "pipe-user-pages-soft" => Ok(Arc::new(ProcPipeUserPagesSoftInode)),
             _ => Err(Errno::ENOENT),
         }
@@ -257,6 +263,12 @@ impl InodeOp for ProcSysFsInode {
                 InodeType::Regular,
                 3,
                 b"pipe-user-pages-soft\0",
+            ),
+            entry(
+                PROC_SYS_FS_PIPE_MAX_SIZE_INO,
+                InodeType::Regular,
+                4,
+                b"pipe-max-size\0",
             ),
         ])
     }
@@ -307,6 +319,10 @@ impl InodeOp for ProcSysKernelInode {
 
     fn lookup(&self, _parent_path: &str, name: &str) -> SysResult<Arc<dyn InodeOp>> {
         match name {
+            "domainname" => Ok(Arc::new(ProcWritableStringInode::new(
+                PROC_SYS_KERNEL_DOMAINNAME_INO,
+                &DOMAINNAME_VALUE,
+            ))),
             "pid_max" => Ok(Arc::new(ProcPidMaxInode)),
             "tainted" => Ok(Arc::new(ProcReadOnlyInode::new(
                 PROC_SYS_KERNEL_TAINTED_INO,
@@ -341,6 +357,12 @@ impl InodeOp for ProcSysKernelInode {
                 InodeType::Regular,
                 5,
                 b"core_pattern\0",
+            ),
+            entry(
+                PROC_SYS_KERNEL_DOMAINNAME_INO,
+                InodeType::Regular,
+                6,
+                b"domainname\0",
             ),
         ])
     }
@@ -413,6 +435,88 @@ impl InodeOp for ProcReadOnlyInode {
     fn truncate(&self, _path: &str, _size: usize) -> SysResult<usize> {
         Err(Errno::EACCES)
     }
+    fn lookup(&self, _parent_path: &str, _name: &str) -> SysResult<Arc<dyn InodeOp>> {
+        Err(Errno::ENOTDIR)
+    }
+    fn readdir(&self, _path: &str) -> SysResult<Vec<LinuxDirent64>> {
+        Err(Errno::ENOTDIR)
+    }
+    fn create(
+        &self,
+        _parent_path: &str,
+        _name: &str,
+        _ty: InodeType,
+    ) -> SysResult<Arc<dyn InodeOp>> {
+        Err(Errno::EACCES)
+    }
+    fn link(&self, _old_path: &str, _bare_dentry: Arc<Dentry>) -> SysResult {
+        Err(Errno::EACCES)
+    }
+    fn unlink(&self, _valid_dentry: &Arc<Dentry>) -> SysResult {
+        Err(Errno::EACCES)
+    }
+}
+
+pub(super) struct ProcWritableStringInode {
+    ino: u64,
+    value: &'static Mutex<String>,
+}
+
+impl ProcWritableStringInode {
+    fn new(ino: u64, value: &'static Mutex<String>) -> Self {
+        Self { ino, value }
+    }
+}
+
+impl InodeOp for ProcWritableStringInode {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn node_type(&self) -> InodeType {
+        InodeType::Regular
+    }
+
+    fn stat(&self, _path: &str) -> SysResult<KStat> {
+        Ok(KStat::minimal(self.value.lock().len(), InodeType::Regular)
+            .with_dev(PROC_DEV)
+            .with_ino(self.ino)
+            .with_mode(0o644))
+    }
+
+    fn read_at(&self, _path: &str, off: usize, buf: &mut [u8]) -> SysResult<usize> {
+        let value = self.value.lock();
+        let bytes = value.as_bytes();
+        if off >= bytes.len() {
+            return Ok(0);
+        }
+        let n = buf.len().min(bytes.len() - off);
+        buf[..n].copy_from_slice(&bytes[off..off + n]);
+        Ok(n)
+    }
+
+    fn write_at(&self, _path: &str, off: usize, buf: &[u8]) -> SysResult<usize> {
+        if off == 0 {
+            let value = String::from_utf8(buf.to_vec()).map_err(|_| Errno::EINVAL)?;
+            *self.value.lock() = value;
+            return Ok(buf.len());
+        }
+        let end = off.checked_add(buf.len()).ok_or(Errno::EINVAL)?;
+        let mut bytes = self.value.lock().as_bytes().to_vec();
+        if bytes.len() < end {
+            bytes.resize(end, 0);
+        }
+        bytes[off..end].copy_from_slice(buf);
+        let value = String::from_utf8(bytes).map_err(|_| Errno::EINVAL)?;
+        *self.value.lock() = value;
+        Ok(buf.len())
+    }
+
+    fn truncate(&self, _path: &str, size: usize) -> SysResult<usize> {
+        self.value.lock().truncate(size);
+        Ok(0)
+    }
+
     fn lookup(&self, _parent_path: &str, _name: &str) -> SysResult<Arc<dyn InodeOp>> {
         Err(Errno::ENOTDIR)
     }
@@ -539,6 +643,81 @@ impl InodeOp for ProcPipeUserPagesSoftInode {
     fn truncate(&self, _path: &str, _size: usize) -> SysResult<usize> {
         Err(Errno::EACCES)
     }
+    fn lookup(&self, _parent_path: &str, _name: &str) -> SysResult<Arc<dyn InodeOp>> {
+        Err(Errno::ENOTDIR)
+    }
+    fn readdir(&self, _path: &str) -> SysResult<Vec<LinuxDirent64>> {
+        Err(Errno::ENOTDIR)
+    }
+    fn create(
+        &self,
+        _parent_path: &str,
+        _name: &str,
+        _ty: InodeType,
+    ) -> SysResult<Arc<dyn InodeOp>> {
+        Err(Errno::EACCES)
+    }
+    fn link(&self, _old_path: &str, _bare_dentry: Arc<Dentry>) -> SysResult {
+        Err(Errno::EACCES)
+    }
+    fn unlink(&self, _valid_dentry: &Arc<Dentry>) -> SysResult {
+        Err(Errno::EACCES)
+    }
+}
+
+pub(super) struct ProcPipeMaxSizeInode;
+
+impl InodeOp for ProcPipeMaxSizeInode {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn node_type(&self) -> InodeType {
+        InodeType::Regular
+    }
+
+    fn stat(&self, _path: &str) -> SysResult<KStat> {
+        Ok(KStat::minimal(pipe_max_size_string().len(), InodeType::Regular)
+            .with_dev(PROC_DEV)
+            .with_ino(PROC_SYS_FS_PIPE_MAX_SIZE_INO)
+            .with_mode(0o644))
+    }
+
+    fn read_at(&self, _path: &str, off: usize, buf: &mut [u8]) -> SysResult<usize> {
+        let content = pipe_max_size_string();
+        let bytes = content.as_bytes();
+        if off >= bytes.len() {
+            return Ok(0);
+        }
+        let n = buf.len().min(bytes.len() - off);
+        buf[..n].copy_from_slice(&bytes[off..off + n]);
+        Ok(n)
+    }
+
+    fn write_at(&self, _path: &str, off: usize, buf: &[u8]) -> SysResult<usize> {
+        let mut bytes = if off == 0 {
+            Vec::new()
+        } else {
+            pipe_max_size_string().into_bytes()
+        };
+        let end = off.checked_add(buf.len()).ok_or(Errno::EINVAL)?;
+        if bytes.len() < end {
+            bytes.resize(end, 0);
+        }
+        bytes[off..end].copy_from_slice(buf);
+        let value = core::str::from_utf8(&bytes).map_err(|_| Errno::EINVAL)?;
+        let value = value.trim().parse::<usize>().map_err(|_| Errno::EINVAL)?;
+        set_pipe_max_size(value)?;
+        Ok(buf.len())
+    }
+
+    fn truncate(&self, _path: &str, size: usize) -> SysResult<usize> {
+        if size == 0 {
+            return Ok(0);
+        }
+        Err(Errno::EINVAL)
+    }
+
     fn lookup(&self, _parent_path: &str, _name: &str) -> SysResult<Arc<dyn InodeOp>> {
         Err(Errno::ENOTDIR)
     }

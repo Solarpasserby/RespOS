@@ -355,6 +355,7 @@ bitflags::bitflags! {
         const O_NOFOLLOW = 1 << 17;
         const O_CLOEXEC = 1 << 19;
         const O_NOATIME = 1 << 18;
+        const O_PATH = 0o10000000;
         const O_TMPFILE = 0x410000;
     }
 }
