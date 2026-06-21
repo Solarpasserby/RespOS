@@ -373,8 +373,18 @@ pub fn sys_socketpair(
     let nonblocking = socket_type & SOCK_NONBLOCK != 0;
     let cloexec = socket_type & SOCK_CLOEXEC != 0;
 
-    let left = Arc::new(SocketFile::new(SocketDomain::Unix, kind, nonblocking, cloexec));
-    let right = Arc::new(SocketFile::new(SocketDomain::Unix, kind, nonblocking, cloexec));
+    let left = Arc::new(SocketFile::new(
+        SocketDomain::Unix,
+        kind,
+        nonblocking,
+        cloexec,
+    ));
+    let right = Arc::new(SocketFile::new(
+        SocketDomain::Unix,
+        kind,
+        nonblocking,
+        cloexec,
+    ));
     left.connect_peer(right.rx.clone());
     right.connect_peer(left.rx.clone());
 

@@ -114,11 +114,8 @@ impl Pipe {
         if requested > PIPE_SIZE_LIMIT {
             return Err(Errno::EINVAL);
         }
-        let capacity = requested
-            .checked_add(PAGE_SIZE - 1)
-            .ok_or(Errno::EINVAL)?
-            / PAGE_SIZE
-            * PAGE_SIZE;
+        let capacity =
+            requested.checked_add(PAGE_SIZE - 1).ok_or(Errno::EINVAL)? / PAGE_SIZE * PAGE_SIZE;
         if capacity > pipe_max_size() {
             return Err(Errno::EPERM);
         }
@@ -452,9 +449,7 @@ struct PipeRingBuffer {
 
 impl PipeRingBuffer {
     pub fn new() -> Self {
-        let is_privileged = current_task()
-            .map(|task| task.fsuid() == 0)
-            .unwrap_or(true);
+        let is_privileged = current_task().map(|task| task.fsuid() == 0).unwrap_or(true);
         let capacity = if is_privileged {
             PIPE_BUFFER_SIZE
         } else {

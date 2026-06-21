@@ -7,6 +7,9 @@ const SYSCALL_DUP: usize = 23;
 const SYSCALL_DUP3: usize = 24;
 const SYSCALL_FCNTL: usize = 25;
 const SYSCALL_IOCTL: usize = 29;
+const SYSCALL_EVENTFD2: usize = 19;
+const SYSCALL_EPOLL_CREATE1: usize = 20;
+const SYSCALL_INOTIFY_INIT1: usize = 26;
 const SYSCALL_MKNODAT: usize = 33;
 const SYSCALL_MKDIRAT: usize = 34;
 const SYSCALL_UNLINKAT: usize = 35;
@@ -38,6 +41,7 @@ const SYSCALL_PREADV: usize = 69;
 const SYSCALL_PWRITEV: usize = 70;
 const SYSCALL_PSELECT6: usize = 72;
 const SYSCALL_PPOLL: usize = 73;
+const SYSCALL_SIGNALFD4: usize = 74;
 const SYSCALL_VMSPLICE: usize = 75;
 const SYSCALL_SPLICE: usize = 76;
 const SYSCALL_TEE: usize = 77;
@@ -46,6 +50,7 @@ const SYSCALL_FSTATAT: usize = 79;
 const SYSCALL_FSTAT: usize = 80;
 const SYSCALL_FSYNC: usize = 82;
 const SYSCALL_FDATASYNC: usize = 83;
+const SYSCALL_TIMERFD_CREATE: usize = 85;
 const SYSCALL_UTIMENSAT: usize = 88;
 const SYSCALL_CAPGET: usize = 90;
 const SYSCALL_CAPSET: usize = 91;
@@ -124,16 +129,27 @@ const SYSCALL_MMAP: usize = 222;
 const SYSCALL_MPROTECT: usize = 226;
 const SYSCALL_MSYNC: usize = 227;
 const SYSCALL_MADVISE: usize = 233;
+const SYSCALL_PERF_EVENT_OPEN: usize = 241;
 const SYSCALL_PREADV2: usize = 286;
 const SYSCALL_PWRITEV2: usize = 287;
 const SYSCALL_WAIT4: usize = 260;
 const SYSCALL_PRLIMIT64: usize = 261;
+const SYSCALL_FANOTIFY_INIT: usize = 262;
 const SYSCALL_RENAMEAT2: usize = 276;
 const SYSCALL_GETRANDOM: usize = 278;
+const SYSCALL_MEMFD_CREATE: usize = 279;
+const SYSCALL_BPF: usize = 280;
 const SYSCALL_EXECVEAT: usize = 281;
+const SYSCALL_USERFAULTFD: usize = 282;
 const SYSCALL_STATX: usize = 291;
+const SYSCALL_IO_URING_SETUP: usize = 425;
+const SYSCALL_OPEN_TREE: usize = 428;
+const SYSCALL_FSOPEN: usize = 430;
+const SYSCALL_FSPICK: usize = 433;
+const SYSCALL_PIDFD_OPEN: usize = 434;
 const SYSCALL_OPENAT2: usize = 437;
 const SYSCALL_FACCESSAT2: usize = 439;
+const SYSCALL_MEMFD_SECRET: usize = 447;
 
 mod errno;
 mod fs;
@@ -142,6 +158,7 @@ mod mm;
 mod net;
 mod process;
 mod signal;
+mod special_fd;
 mod system;
 mod time;
 
@@ -156,6 +173,7 @@ use mm::*;
 use net::*;
 use process::*;
 use signal::*;
+use special_fd::*;
 use system::*;
 use time::*;
 
@@ -164,6 +182,9 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         SYSCALL_GETCWD => sys_getcwd(args[0] as *mut u8, args[1]),
         SYSCALL_DUP => sys_dup(args[0]),
         SYSCALL_DUP3 => sys_dup3(args[0], args[1], args[2]),
+        SYSCALL_EVENTFD2 => sys_eventfd2(args[0], args[1]),
+        SYSCALL_EPOLL_CREATE1 => sys_epoll_create1(args[0]),
+        SYSCALL_INOTIFY_INIT1 => sys_inotify_init1(args[0]),
         SYSCALL_FCNTL => sys_fcntl(args[0], args[1], args[2]),
         SYSCALL_IOCTL => sys_ioctl(args[0], args[1], args[2]),
         SYSCALL_MKDIRAT => sys_mkdirat(args[0] as isize, args[1] as *const u8, args[2]),
@@ -232,6 +253,9 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
             args[3] as *const SigSet,
             args[4],
         ),
+        SYSCALL_SIGNALFD4 => {
+            sys_signalfd4(args[0] as isize, args[1] as *const u8, args[2], args[3])
+        }
         SYSCALL_VMSPLICE => sys_vmsplice(args[0], args[1] as *const IoVec, args[2], args[3]),
         SYSCALL_SPLICE => sys_splice(
             args[0],
@@ -257,6 +281,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         SYSCALL_FSTAT => sys_fstat(args[0], args[1] as *mut Stat),
         SYSCALL_FSYNC => sys_fsync(args[0]),
         SYSCALL_FDATASYNC => sys_fdatasync(args[0]),
+        SYSCALL_TIMERFD_CREATE => sys_timerfd_create(args[0], args[1]),
         SYSCALL_FSTATFS => sys_fstatfs(args[0], args[1] as *mut crate::fs::Statfs64),
         SYSCALL_UTIMENSAT => sys_utimensat(
             args[0] as isize,
@@ -411,6 +436,13 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         ),
         SYSCALL_MPROTECT => sys_mprotect(args[0], args[1], args[2] as u32),
         SYSCALL_MSYNC => sys_msync(args[0], args[1], args[2] as i32),
+        SYSCALL_PERF_EVENT_OPEN => sys_perf_event_open(
+            args[0] as *const u8,
+            args[1] as isize,
+            args[2] as isize,
+            args[3] as isize,
+            args[4],
+        ),
         SYSCALL_PREADV2 => sys_preadv2(
             args[0],
             args[1] as *const IoVec,
@@ -438,6 +470,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
             args[2] as *const RLimit,
             args[3] as *mut RLimit,
         ),
+        SYSCALL_FANOTIFY_INIT => sys_fanotify_init(args[0], args[1]),
         SYSCALL_RENAMEAT2 => sys_renameat2(
             args[0] as isize,
             args[1] as *const u8,
@@ -446,6 +479,14 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
             args[4],
         ),
         SYSCALL_GETRANDOM => sys_getrandom(args[0] as *mut u8, args[1], args[2]),
+        SYSCALL_MEMFD_CREATE => sys_memfd_create(args[0] as *const u8, args[1]),
+        SYSCALL_BPF => sys_bpf(args[0], args[1] as *const u8, args[2]),
+        SYSCALL_USERFAULTFD => sys_userfaultfd(args[0]),
+        SYSCALL_IO_URING_SETUP => sys_io_uring_setup(args[0], args[1] as *const u8),
+        SYSCALL_OPEN_TREE => sys_open_tree(args[0] as isize, args[1] as *const u8, args[2]),
+        SYSCALL_FSOPEN => sys_fsopen(args[0] as *const u8, args[1]),
+        SYSCALL_FSPICK => sys_fspick(args[0] as isize, args[1] as *const u8, args[2]),
+        SYSCALL_PIDFD_OPEN => sys_pidfd_open(args[0], args[1]),
         SYSCALL_STATX => sys_statx(
             args[0] as isize,
             args[1] as *const u8,
@@ -459,6 +500,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
             args[2] as *const OpenHow,
             args[3],
         ),
+        SYSCALL_MEMFD_SECRET => sys_memfd_secret(args[0]),
         _ => Err(Errno::ENOSYS),
     }
 }

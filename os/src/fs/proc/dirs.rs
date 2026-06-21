@@ -677,10 +677,12 @@ impl InodeOp for ProcPipeMaxSizeInode {
     }
 
     fn stat(&self, _path: &str) -> SysResult<KStat> {
-        Ok(KStat::minimal(pipe_max_size_string().len(), InodeType::Regular)
-            .with_dev(PROC_DEV)
-            .with_ino(PROC_SYS_FS_PIPE_MAX_SIZE_INO)
-            .with_mode(0o644))
+        Ok(
+            KStat::minimal(pipe_max_size_string().len(), InodeType::Regular)
+                .with_dev(PROC_DEV)
+                .with_ino(PROC_SYS_FS_PIPE_MAX_SIZE_INO)
+                .with_mode(0o644),
+        )
     }
 
     fn read_at(&self, _path: &str, off: usize, buf: &mut [u8]) -> SysResult<usize> {

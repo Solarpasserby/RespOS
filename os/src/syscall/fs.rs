@@ -551,7 +551,11 @@ pub fn sys_vmsplice(fd: usize, iov: *const IoVec, iovcnt: usize, flags: usize) -
             let writable = pipe.writable_bytes();
             let write_len = if writable == 0 {
                 if flags & SPLICE_F_NONBLOCK != 0 {
-                    return if total > 0 { Ok(total) } else { Err(Errno::EAGAIN) };
+                    return if total > 0 {
+                        Ok(total)
+                    } else {
+                        Err(Errno::EAGAIN)
+                    };
                 }
                 1
             } else {
@@ -573,7 +577,11 @@ pub fn sys_vmsplice(fd: usize, iov: *const IoVec, iovcnt: usize, flags: usize) -
                 continue;
             }
             if flags & SPLICE_F_NONBLOCK != 0 && !file.read_ready() {
-                return if total > 0 { Ok(total) } else { Err(Errno::EAGAIN) };
+                return if total > 0 {
+                    Ok(total)
+                } else {
+                    Err(Errno::EAGAIN)
+                };
             }
             let read = match sys_read(fd, item.base, item.len) {
                 Ok(read) => read,
