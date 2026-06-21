@@ -23,7 +23,8 @@ lazy_static! {
     static ref EXT4_OP_LOCK: Mutex<()> = Mutex::new(());
 }
 
-static CREATED_INODE_ALLOC: AtomicU64 = AtomicU64::new(1 << 62);
+const CREATED_INODE_BASE: u64 = 1 << 62;
+static CREATED_INODE_ALLOC: AtomicU64 = AtomicU64::new(CREATED_INODE_BASE);
 const MAX_TEST_HARDLINKS: u32 = 32;
 const MAX_TEST_SUBDIRS: usize = 32;
 
@@ -32,6 +33,7 @@ pub struct Ext4Inode {
     ty: Ext4InodeTypes,
     times: Mutex<Option<InodeTimes>>,
     mode_override: Mutex<Option<u32>>,
+    owner_override: Mutex<Option<(u32, u32)>>,
     nlink_override: Mutex<Option<u32>>,
     /// 共享页缓存，挂载在 inode 上，同一 inode 的所有 File 共享
     page_cache: Arc<PageCache>,
@@ -54,6 +56,7 @@ impl Ext4Inode {
             ty,
             times: Mutex::new(None),
             mode_override: Mutex::new(None),
+            owner_override: Mutex::new(None),
             nlink_override: Mutex::new(None),
             page_cache: PageCache::new(0),
         }
@@ -298,6 +301,10 @@ impl Ext4Inode {
         self.times.lock().is_some()
     }
 
+    fn is_synthetic_created_inode(&self) -> bool {
+        self.ino >= CREATED_INODE_BASE
+    }
+
     fn write_lower_time(
         c_path: *const core::ffi::c_char,
         ts: TimeSpec,
@@ -333,6 +340,10 @@ impl Ext4Inode {
 
     fn set_cached_mode(&self, mode: u32) {
         *self.mode_override.lock() = Some(mode & 0o7777);
+    }
+
+    fn set_cached_owner(&self, uid: u32, gid: u32) {
+        *self.owner_override.lock() = Some((uid, gid));
     }
 
     fn bump_cached_nlink(&self) {
@@ -379,16 +390,48 @@ impl InodeOp for Ext4Inode {
     fn stat(&self, path: &str) -> SysResult<KStat> {
         let ty = self.node_type();
         let size = match ty {
-            InodeType::Regular => match self.file_size(path) {
-                Ok(size) => size.max(self.page_cache.len()),
-                Err(Errno::ENOENT) if self.has_cached_times() => 0,
-                Err(err) => return Err(err),
-            },
+            InodeType::Regular if self.is_synthetic_created_inode() => self.page_cache.len(),
+            InodeType::Regular => {
+                let cached_size = self.page_cache.len();
+                match self.file_size(path) {
+                    Ok(size) => size.max(cached_size),
+                    Err(Errno::ENOENT) if self.has_cached_times() => cached_size,
+                    Err(err) => return Err(err),
+                }
+            }
             // lstat(symlink) 的 st_size 是链接目标字符串长度，不是目标文件大小。
             InodeType::SymLink => Self::file_readlink(path)?.len(),
             _ => 0,
         };
         let ino = self.ino;
+
+        if self.is_synthetic_created_inode() {
+            let times = self.times.lock().unwrap_or_else(|| {
+                let now = Self::now_timespec();
+                InodeTimes {
+                    atime: now,
+                    mtime: now,
+                    ctime: now,
+                }
+            });
+            let (uid, gid) = self.owner_override.lock().unwrap_or((0, 0));
+            return Ok(KStat {
+                dev: 0,
+                size,
+                ty,
+                ino,
+                nlink: self.nlink_override.lock().unwrap_or(1),
+                uid,
+                gid,
+                rdev: 0,
+                mode: self.mode_override.lock().unwrap_or(0),
+                blksize: crate::config::BLOCK_SIZE as u32,
+                blocks: KStat::blocks_for_size(size as u64),
+                atime: times.atime,
+                mtime: times.mtime,
+                ctime: times.ctime,
+            });
+        }
 
         let _guard = EXT4_OP_LOCK.lock();
         let c_path = CString::new(path).map_err(|_| Errno::EINVAL)?;
@@ -403,6 +446,10 @@ impl InodeOp for Ext4Inode {
         let mut uid: u32 = 0;
         let mut gid: u32 = 0;
         let _ = unsafe { bindings::ext4_owner_get(c_path, &mut uid, &mut gid) };
+        if let Some((override_uid, override_gid)) = *self.owner_override.lock() {
+            uid = override_uid;
+            gid = override_gid;
+        }
 
         let mut atime: u32 = 0;
         let mut mtime: u32 = 0;
@@ -518,19 +565,29 @@ impl InodeOp for Ext4Inode {
                 })
         };
 
+        if let Some(atime) = atime {
+            times.atime = atime;
+        }
+        if let Some(mtime) = mtime {
+            times.mtime = mtime;
+        }
+        times.ctime = Self::now_timespec();
+
+        if self.is_synthetic_created_inode() {
+            self.set_cached_times(times);
+            return Ok(());
+        }
+
         let _guard = EXT4_OP_LOCK.lock();
         let c_path = CString::new(path).map_err(|_| Errno::EINVAL)?;
 
         if let Some(atime) = atime {
             Self::write_lower_time(c_path.as_ptr(), atime, bindings::ext4_atime_set)?;
-            times.atime = atime;
         }
         if let Some(mtime) = mtime {
             Self::write_lower_time(c_path.as_ptr(), mtime, bindings::ext4_mtime_set)?;
-            times.mtime = mtime;
         }
 
-        times.ctime = Self::now_timespec();
         Self::write_lower_time(c_path.as_ptr(), times.ctime, bindings::ext4_ctime_set)?;
         self.set_cached_times(times);
         Ok(())
@@ -567,6 +624,11 @@ impl InodeOp for Ext4Inode {
     }
 
     fn set_owner(&self, path: &str, uid: u32, gid: u32) -> SysResult {
+        self.set_cached_owner(uid, gid);
+        if self.is_synthetic_created_inode() {
+            return Ok(());
+        }
+
         let _guard = EXT4_OP_LOCK.lock();
         let c_path = CString::new(path).map_err(|_| Errno::EINVAL)?;
         let ret = unsafe { bindings::ext4_owner_set(c_path.as_ptr(), uid, gid) };

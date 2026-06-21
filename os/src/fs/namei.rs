@@ -757,17 +757,29 @@ pub fn filename_link_tmpfile(file: &File, newdirfd: isize, newpath: &str) -> Sys
             let inode =
                 parent_inode.create(&nd.dentry.abs_path, name.as_str(), InodeType::Regular)?;
             let child_path = child_abs_path(&nd.dentry, name.as_str());
-            let _ = inode.set_mode(child_path.as_str(), meta.mode);
-            let _ = inode.set_owner(child_path.as_str(), meta.uid, meta.gid);
             let data = file.read_all()?;
-            let mut offset = 0usize;
-            while offset < data.len() {
-                let written = inode.write_at(child_path.as_str(), offset, &data[offset..])?;
-                if written == 0 {
-                    return Err(Errno::EIO);
+            if let Some(page_cache) = inode.get_page_cache() {
+                let mut offset = 0usize;
+                while offset < data.len() {
+                    let written = page_cache.write_at(offset, &data[offset..], None)?;
+                    if written == 0 {
+                        return Err(Errno::EIO);
+                    }
+                    offset += written;
                 }
-                offset += written;
+                let _ = inode.set_times(child_path.as_str(), None, None);
+            } else {
+                let mut offset = 0usize;
+                while offset < data.len() {
+                    let written = inode.write_at(child_path.as_str(), offset, &data[offset..])?;
+                    if written == 0 {
+                        return Err(Errno::EIO);
+                    }
+                    offset += written;
+                }
             }
+            let _ = inode.set_owner(child_path.as_str(), meta.uid, meta.gid);
+            let _ = inode.set_mode(child_path.as_str(), meta.mode);
             install_child_dentry(&nd.dentry, name.as_str(), inode);
             Ok(())
         }
