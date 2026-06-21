@@ -89,6 +89,63 @@ fn run_shell_script_with_env(
     let _ = chdir("/\0");
 }
 
+fn ensure_text_file(path: &str, content: &[u8]) {
+    let _ = unlink(path);
+    let fd = open(path, O_WRONLY | O_CREATE | O_TRUNC, 0o644);
+    if fd < 0 {
+        println!("[testrunner] cannot create {}", strip_nul(path));
+        return;
+    }
+    let written = write(fd as usize, content);
+    if written != content.len() as isize {
+        println!("[testrunner] cannot write {}", strip_nul(path));
+    }
+    let _ = close(fd as usize);
+}
+
+fn ensure_executable_file(path: &str, content: &[u8]) {
+    let _ = unlink(path);
+    let fd = open(path, O_WRONLY | O_CREATE | O_TRUNC, 0o755);
+    if fd < 0 {
+        println!("[testrunner] cannot create {}", strip_nul(path));
+        return;
+    }
+    let written = write(fd as usize, content);
+    if written != content.len() as isize {
+        println!("[testrunner] cannot write {}", strip_nul(path));
+    }
+    let _ = close(fd as usize);
+}
+
+fn ensure_noop_mkfs(path: &str) {
+    ensure_executable_file(path, b"#!/bin/sh\nexit 0\n");
+}
+
+fn prepare_ltp_common_files() {
+    let _ = mkdir("/tmp\0", 0o777);
+    let _ = mkdir("/etc\0", 0o755);
+    ensure_text_file(
+        "/etc/passwd\0",
+        b"root:x:0:0:root:/root:/bin/sh\nnobody:x:65534:65534:nobody:/nonexistent:/bin/false\n",
+    );
+    ensure_text_file(
+        "/etc/group\0",
+        b"root:x:0:root\n\
+daemon:x:1:daemon\n\
+bin:x:2:bin\n\
+sys:x:3:sys\n\
+adm:x:4:adm\n\
+tty:x:5:tty\n\
+disk:x:6:disk\n\
+lp:x:7:lp\n\
+mail:x:8:mail\n\
+news:x:9:news\n\
+uucp:x:10:uucp\n\
+nogroup:x:65534:nobody\n\
+nobody:x:65534:nobody\n",
+    );
+}
+
 // 脚本解析环境配置
 fn prepare_bin_shell(shell_path: &str) {
     let _ = mkdir("/bin\0", 0o755);
@@ -104,21 +161,6 @@ fn prepare_bin_shell(shell_path: &str) {
     ] {
         ensure_noop_mkfs(mkfs);
     }
-}
-
-fn ensure_noop_mkfs(path: &str) {
-    let _ = unlink(path);
-    let fd = open(path, O_WRONLY | O_CREATE | O_TRUNC, 0o755);
-    if fd < 0 {
-        println!("[testrunner] cannot create {}", strip_nul(path));
-        return;
-    }
-    let script = b"#!/bin/sh\nexit 0\n";
-    let written = write(fd as usize, script);
-    if written != script.len() as isize {
-        println!("[testrunner] cannot write {}", strip_nul(path));
-    }
-    let _ = close(fd as usize);
 }
 
 fn _run_basic_musl() {
@@ -626,6 +668,7 @@ fn run_ltp_selected(
 
 fn _run_ltp_musl() {
     prepare_musl_loader_links();
+    prepare_ltp_common_files();
     prepare_bin_shell(BUSYBOX_PATH);
     run_ltp_selected(
         "/musl/\0",
@@ -639,6 +682,7 @@ fn _run_ltp_musl() {
 
 fn _run_ltp_glibc() {
     prepare_glibc_loader_links();
+    prepare_ltp_common_files();
     prepare_bin_shell(GLIBC_BUSYBOX_PATH);
     run_ltp_selected(
         "/glibc/\0",

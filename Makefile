@@ -8,7 +8,6 @@ MEM ?= 128M
 SMP ?= 1
 RV_FS_IMG ?= img/sdcard-rv.img
 LA_FS_IMG ?= img/sdcard-la.img
-LTP_IMAGE_SOURCE_DIR ?= /coursegrader/testdata
 RV_DISK_IMG ?= disk.img
 LA_DISK_IMG ?= disk-la.img
 QEMU_RV ?= qemu-system-riscv64
@@ -63,7 +62,7 @@ LA_QEMU_DISK_ARGS += -drive file=$(LA_DISK_IMG),if=none,format=raw,id=x1 \
 	-device virtio-blk-pci,drive=x1
 endif
 
-.PHONY: all build-rv build-la patch-rv-ltp-image patch-la-ltp-image rv la prepare-rv-cargo-config prepare-la-cargo-config clean check-submit
+.PHONY: all build-rv build-la rv la prepare-rv-cargo-config prepare-la-cargo-config clean check-submit
 
 all: build-rv build-la
 
@@ -93,13 +92,7 @@ build-la: prepare-la-cargo-config
 	cp $(LA_ELF) $(KERNEL_LA)
 	@rust-readobj -h -l $(KERNEL_LA) | awk '/Entry:/ || /VirtualAddress:/ || /PhysicalAddress:/ { print }'
 
-patch-rv-ltp-image:
-	COURSEGRADER_TESTDATA=$(LTP_IMAGE_SOURCE_DIR) ./scripts/patch_ltp_image.sh $(RV_FS_IMG)
-
-patch-la-ltp-image:
-	COURSEGRADER_TESTDATA=$(LTP_IMAGE_SOURCE_DIR) ./scripts/patch_ltp_image.sh $(LA_FS_IMG)
-
-rv: build-rv patch-rv-ltp-image
+rv: build-rv
 	$(QEMU_RV) -machine virt \
 		-kernel $(KERNEL_RV) \
 		-m $(MEM) \
@@ -114,7 +107,7 @@ rv: build-rv patch-rv-ltp-image
 		-rtc base=utc \
 		$(RV_QEMU_DISK_ARGS) |& tee $(RV_OUTPUT)
 
-la: build-la patch-la-ltp-image
+la: build-la
 	$(QEMU_LA) -machine virt \
 		-kernel $(KERNEL_LA) \
 		-m $(MEM) \
