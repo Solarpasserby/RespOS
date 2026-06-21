@@ -415,6 +415,7 @@ impl InodeOp for Ext4Inode {
                 }
             });
             let (uid, gid) = self.owner_override.lock().unwrap_or((0, 0));
+            let mode_override = *self.mode_override.lock();
             return Ok(KStat {
                 dev: 0,
                 size,
@@ -424,7 +425,8 @@ impl InodeOp for Ext4Inode {
                 uid,
                 gid,
                 rdev: 0,
-                mode: self.mode_override.lock().unwrap_or(0),
+                mode: mode_override.unwrap_or(0),
+                mode_valid: mode_override.is_some(),
                 blksize: crate::config::BLOCK_SIZE as u32,
                 blocks: KStat::blocks_for_size(size as u64),
                 atime: times.atime,
