@@ -163,6 +163,7 @@ fn generate_task_stat(pid: Option<usize>) -> SysResult<String> {
     let state = match task.status() {
         TaskStatus::Ready | TaskStatus::Running => 'R',
         TaskStatus::Blocked => 'S',
+        TaskStatus::Stopped => 'T',
         TaskStatus::Exited => 'Z',
     };
 

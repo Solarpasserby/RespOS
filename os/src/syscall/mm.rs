@@ -2,10 +2,21 @@
 
 use super::{Errno, SysResult};
 use crate::config::{MMAP_MIN_ADDR, PAGE_SIZE};
-use crate::mm::{MapPermission, VPNRange, VirtAddr};
+use crate::fs::File;
+use crate::mm::{FrameTracker, MapPermission, VPNRange, VirtAddr, frame_alloc};
 use crate::task::current_task;
-use alloc::vec;
+use alloc::collections::BTreeMap;
+use alloc::string::String;
+use alloc::sync::Arc;
+use alloc::{vec, vec::Vec};
 use bitflags::bitflags;
+use lazy_static::lazy_static;
+use spin::Mutex;
+
+lazy_static! {
+    static ref SHARED_FILE_FRAMES: Mutex<BTreeMap<String, BTreeMap<usize, Arc<FrameTracker>>>> =
+        Mutex::new(BTreeMap::new());
+}
 
 /// 系统调用 sys-brk
 pub fn sys_brk(addr: usize) -> SysResult<usize> {
@@ -122,28 +133,76 @@ pub fn sys_mmap(
             return Err(Errno::EACCES);
         }
 
-        let mut file_data = vec![0u8; map_len];
-        let origin_offset = file.get_offset();
-        file.seek(offset as isize)?;
-        let read_result = file.read(&mut file_data[..len]);
-        let restore_result = file.seek(origin_offset as isize);
-        read_result?;
-        restore_result?;
+        let file_data = read_mmap_file_data(file.clone(), offset, len, map_len)?;
 
         task.op_memory_set_write(|memory_set| {
             let start = if has_shared {
-                memory_set.mmap_shared_framed(
-                    fixed_addr, map_len, permission, replace, noreplace, locked,
-                )?
+                if let Some(file) = file.as_any().downcast_ref::<File>() {
+                    let frames = shared_file_frames(file, offset, map_len, &file_data)?;
+                    memory_set.mmap_shared_frames(fixed_addr, map_len, permission, &frames)?
+                } else {
+                    memory_set.mmap_shared_framed(
+                        fixed_addr, map_len, permission, replace, noreplace, locked,
+                    )?
+                }
             } else {
                 memory_set
                     .mmap_framed(fixed_addr, map_len, permission, replace, noreplace, locked)?
             };
-            memory_set.write_bytes_to_mapped_range(start, &file_data)?;
+            if !has_shared || file.as_any().downcast_ref::<File>().is_none() {
+                memory_set.write_bytes_to_mapped_range(start, &file_data)?;
+            }
             memory_set.flush_tlb();
             Ok(start)
         })
     }
+}
+
+fn read_mmap_file_data(
+    file: Arc<dyn crate::fs::FileOp>,
+    offset: usize,
+    len: usize,
+    map_len: usize,
+) -> SysResult<Vec<u8>> {
+    let mut file_data = vec![0u8; map_len];
+    let origin_offset = file.get_offset();
+    file.seek(offset as isize)?;
+    let read_result = file.read(&mut file_data[..len]);
+    let restore_result = file.seek(origin_offset as isize);
+    read_result?;
+    restore_result?;
+    Ok(file_data)
+}
+
+fn shared_file_frames(
+    file: &File,
+    offset: usize,
+    map_len: usize,
+    file_data: &[u8],
+) -> SysResult<Vec<Arc<FrameTracker>>> {
+    let key = file.path().global_abs_path();
+    let first_page = offset / PAGE_SIZE;
+    let page_count = map_len / PAGE_SIZE;
+    let mut registry = SHARED_FILE_FRAMES.lock();
+    let frames = registry.entry(key).or_default();
+    let mut out = Vec::with_capacity(page_count);
+
+    for i in 0..page_count {
+        let page_idx = first_page + i;
+        let frame = if let Some(frame) = frames.get(&page_idx) {
+            frame.clone()
+        } else {
+            let frame = Arc::new(frame_alloc().ok_or(Errno::ENOMEM)?);
+            let start = i * PAGE_SIZE;
+            let end = (start + PAGE_SIZE).min(file_data.len());
+            frame.ppn().get_bytes_array()[..end - start].copy_from_slice(&file_data[start..end]);
+            frames.insert(page_idx, frame.clone());
+            frame
+        };
+        out.push(frame);
+    }
+
+    Ok(out)
 }
 
 /// 系统调用 sys-munmap

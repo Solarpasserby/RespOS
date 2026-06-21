@@ -557,7 +557,31 @@ fn resolve_path(
     validate_path_components(path)?;
     // dirfd 只决定相对路径的起点；绝对路径会在 Nameidata::new_from_path 中切回 root_path。
     let base = base_path_from_dirfd(dirfd, path)?;
-    resolve_path_from(base, path, follow_final_symlink, follow_final_mount, 0)
+    match resolve_path_from(base, path, follow_final_symlink, follow_final_mount, 0) {
+        Err(Errno::ENOENT) => {
+            if let Some(alias) = glibc_default_lib_alias(path) {
+                resolve_path_from(
+                    root_path(),
+                    &alias,
+                    follow_final_symlink,
+                    follow_final_mount,
+                    0,
+                )
+            } else {
+                Err(Errno::ENOENT)
+            }
+        }
+        result => result,
+    }
+}
+
+fn glibc_default_lib_alias(path: &str) -> Option<String> {
+    for prefix in ["/lib/", "/lib64/", "/usr/lib/", "/usr/lib64/"] {
+        if let Some(rest) = path.strip_prefix(prefix) {
+            return Some(format!("/glibc/lib/{}", rest));
+        }
+    }
+    None
 }
 
 fn resolve_path_from(

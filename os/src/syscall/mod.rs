@@ -46,6 +46,7 @@ const SYSCALL_UTIMENSAT: usize = 88;
 const SYSCALL_PERSONALITY: usize = 92;
 const SYSCALL_EXIT: usize = 93;
 const SYSCALL_EXIT_GROUP: usize = 94;
+const SYSCALL_WAITID: usize = 95;
 const SYSCALL_SET_TID_ADDRESS: usize = 96;
 const SYSCALL_FUTEX: usize = 98;
 const SYSCALL_SET_ROBUST_LIST: usize = 99;
@@ -79,6 +80,7 @@ const SYSCALL_SETFSUID: usize = 151;
 const SYSCALL_SETFSGID: usize = 152;
 const SYSCALL_TIMES: usize = 153;
 const SYSCALL_SETPGID: usize = 154;
+const SYSCALL_GETPGID: usize = 155;
 const SYSCALL_GETGROUPS: usize = 158;
 const SYSCALL_SETGROUPS: usize = 159;
 const SYSCALL_UNAME: usize = 160;
@@ -119,6 +121,7 @@ const SYSCALL_WAIT4: usize = 260;
 const SYSCALL_PRLIMIT64: usize = 261;
 const SYSCALL_RENAMEAT2: usize = 276;
 const SYSCALL_GETRANDOM: usize = 278;
+const SYSCALL_EXECVEAT: usize = 281;
 const SYSCALL_STATX: usize = 291;
 const SYSCALL_OPENAT2: usize = 437;
 const SYSCALL_FACCESSAT2: usize = 439;
@@ -134,6 +137,7 @@ mod system;
 mod time;
 
 use crate::fs::Stat;
+use crate::signal::LinuxSigInfo;
 use crate::timer::TimeSpec;
 pub use errno::*;
 use fs::*;
@@ -236,6 +240,13 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         SYSCALL_PERSONALITY => sys_personality(args[0]),
         SYSCALL_EXIT => sys_exit(args[0] as i32),
         SYSCALL_EXIT_GROUP => sys_exit_group(args[0] as i32),
+        SYSCALL_WAITID => sys_waitid(
+            args[0],
+            args[1],
+            args[2] as *mut LinuxSigInfo,
+            args[3],
+            args[4],
+        ),
         SYSCALL_SET_TID_ADDRESS => sys_set_tid_address(args[0]),
         SYSCALL_FUTEX => sys_futex(
             args[0] as *const i32,
@@ -297,6 +308,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         SYSCALL_SETFSGID => sys_setfsgid(args[0]),
         SYSCALL_TIMES => sys_times(args[0] as *mut Tms),
         SYSCALL_SETPGID => sys_setpgid(args[0], args[1]),
+        SYSCALL_GETPGID => sys_getpgid(args[0]),
         SYSCALL_GETGROUPS => sys_getgroups(args[0], args[1] as *mut u32),
         SYSCALL_SETGROUPS => sys_setgroups(args[0], args[1] as *const u32),
         SYSCALL_UNAME => sys_uname(args[0] as *mut UtsName),
@@ -344,6 +356,13 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
             args[0] as *const u8,
             args[1] as *const usize,
             args[2] as *const usize,
+        ),
+        SYSCALL_EXECVEAT => sys_execveat(
+            args[0] as isize,
+            args[1] as *const u8,
+            args[2] as *const usize,
+            args[3] as *const usize,
+            args[4],
         ),
         SYSCALL_MMAP => sys_mmap(
             args[0],

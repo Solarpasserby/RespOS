@@ -11,7 +11,7 @@ use crate::fs::mount::init_root_fs;
 use crate::fs::{FdEntry, FdTable, Path};
 use crate::mm::{MemorySet, copy_from_user, copy_to_user};
 use crate::mutex::SpinLock;
-use crate::signal::sig_handler::SigHandler;
+use crate::signal::sig_handler::{ActionType, SigHandler};
 use crate::signal::sig_info::SigInfo;
 use crate::signal::sig_stack::{SS_DISABLE, SignalStack};
 use crate::signal::sig_struct::SigPending;
@@ -75,6 +75,8 @@ pub struct TaskControlBlock {
     children: Arc<SpinLock<BTreeMap<usize, Arc<TaskControlBlock>>>>,
     exit_code: AtomicI32,
     exit_signal: AtomicI32,
+    wait_event_code: AtomicI32,
+    wait_event_status: AtomicI32,
     // task_context: TaskContext, // 注意任务上下文的处理
 
     // 内存管理
@@ -141,6 +143,8 @@ impl TaskControlBlock {
             children: Arc::new(SpinLock::new(BTreeMap::new())),
             exit_code: AtomicI32::new(0),
             exit_signal: AtomicI32::new(0),
+            wait_event_code: AtomicI32::new(0),
+            wait_event_status: AtomicI32::new(0),
             // task_context: TaskContext, // 注意任务上下文的处理
 
             // 内存管理
@@ -218,6 +222,8 @@ impl TaskControlBlock {
             children: Arc::new(SpinLock::new(BTreeMap::new())),
             exit_code: AtomicI32::new(0),
             exit_signal: AtomicI32::new(0),
+            wait_event_code: AtomicI32::new(0),
+            wait_event_status: AtomicI32::new(0),
 
             // 内存管理
             memory_set: Arc::new(RwLock::new(memory_set)),
@@ -369,6 +375,8 @@ impl TaskControlBlock {
             children,
             exit_code: AtomicI32::new(0),
             exit_signal: AtomicI32::new(0),
+            wait_event_code: AtomicI32::new(0),
+            wait_event_status: AtomicI32::new(0),
 
             // 内存管理
             memory_set,
@@ -536,7 +544,7 @@ impl TaskControlBlock {
     pub fn wait_status(&self) -> i32 {
         let signal = self.exit_signal.load(Ordering::Relaxed);
         if signal != 0 {
-            signal & 0x7f
+            signal & 0xff
         } else {
             (self.exit_code() & 0xff) << 8
         }
@@ -551,6 +559,9 @@ impl TaskControlBlock {
     }
     pub fn is_blocked(&self) -> bool {
         self.status() == TaskStatus::Blocked
+    }
+    pub fn is_stopped(&self) -> bool {
+        self.status() == TaskStatus::Stopped
     }
     // ===== 可中断状态管理 =====
 
@@ -638,8 +649,35 @@ impl TaskControlBlock {
         self.exit_code.swap(exit_code, Ordering::Relaxed);
     }
     pub fn set_exit_signal(&self, signal: i32) {
+        let signal = signal & 0x7f;
+        let core_dumped = ActionType::default(Sig::from(signal)) == ActionType::Core;
         self.exit_code.store(0, Ordering::Relaxed);
-        self.exit_signal.store(signal & 0x7f, Ordering::Relaxed);
+        self.exit_signal.store(
+            signal | if core_dumped { 0x80 } else { 0 },
+            Ordering::Relaxed,
+        );
+    }
+    pub fn set_wait_event(&self, code: i32, status: i32) {
+        self.wait_event_status.store(status, Ordering::Relaxed);
+        self.wait_event_code.store(code, Ordering::Release);
+    }
+    pub fn take_wait_event(&self) -> Option<(i32, i32)> {
+        let code = self.wait_event_code.swap(0, Ordering::AcqRel);
+        (code != 0).then(|| (code, self.wait_event_status.load(Ordering::Acquire)))
+    }
+    pub fn peek_wait_event(&self) -> Option<(i32, i32)> {
+        let code = self.wait_event_code.load(Ordering::Acquire);
+        (code != 0).then(|| (code, self.wait_event_status.load(Ordering::Acquire)))
+    }
+    pub fn notify_parent_sigchld(&self, code: i32) {
+        self.op_parent(|parent| {
+            if let Some(parent) = parent.as_ref().and_then(|parent| parent.upgrade()) {
+                let siginfo =
+                    SigInfo::new(Sig::SIGCHLD.raw(), code, SiField::Kill { tid: self.tid() });
+                parent.receive_siginfo(siginfo, false);
+                crate::task::scheduler::wakeup_task(parent.tid());
+            }
+        });
     }
     pub fn set_parent(&self, parent: &Arc<TaskControlBlock>) {
         *self.parent.lock() = Some(Arc::downgrade(parent));
@@ -659,6 +697,9 @@ impl TaskControlBlock {
     }
     pub fn set_blocked(&self) {
         *self.task_status.lock() = TaskStatus::Blocked;
+    }
+    pub fn set_stopped(&self) {
+        *self.task_status.lock() = TaskStatus::Stopped;
     }
     pub fn set_exited(&self) {
         *self.task_status.lock() = TaskStatus::Exited;
@@ -1227,6 +1268,7 @@ pub fn task_group_exit(task: Arc<TaskControlBlock>, exit_code: i32) {
                 SiField::Kill { tid: leader.tid() },
             );
             parent.receive_siginfo(siginfo, false);
+            crate::task::scheduler::wakeup_task(parent.tid());
         }
     });
 
@@ -1277,6 +1319,7 @@ pub fn task_group_exit_by_signal(task: Arc<TaskControlBlock>, signal: i32) {
                 SiField::Kill { tid: leader.tid() },
             );
             parent.receive_siginfo(siginfo, false);
+            crate::task::scheduler::wakeup_task(parent.tid());
         }
     });
 
@@ -1460,6 +1503,7 @@ pub enum TaskStatus {
     Ready,   // 已就绪
     Running, // 正在运行
     Blocked, // 阻塞
+    Stopped, // 已被停止信号暂停
     Exited,  // 已退出
 }
 

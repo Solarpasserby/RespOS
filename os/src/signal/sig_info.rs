@@ -92,6 +92,22 @@ impl From<LinuxSigInfo> for SigInfo {
     }
 }
 
+impl LinuxSigInfo {
+    pub fn new_child(pid: usize, status: i32, code: i32) -> Self {
+        let mut info = Self {
+            si_signo: super::sig_struct::Sig::SIGCHLD.raw(),
+            si_errno: 0,
+            si_code: code,
+            _pad: [0; 29],
+            _align: [],
+        };
+        info._pad[1] = pid as i32;
+        info._pad[2] = 0;
+        info._pad[3] = status;
+        info
+    }
+}
+
 #[allow(unused)]
 impl SigInfo {
     /// 由 kill、sigsend、raise 发送

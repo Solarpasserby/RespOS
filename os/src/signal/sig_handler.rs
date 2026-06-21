@@ -96,6 +96,7 @@ impl ActionType {
             | Sig::SIGILL
             | Sig::SIGQUIT
             | Sig::SIGSEGV
+            | Sig::SIGTRAP
             | Sig::SIGXCPU
             | Sig::SIGXFSZ
             | Sig::SIGSYS => ActionType::Core,

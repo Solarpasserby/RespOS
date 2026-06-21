@@ -44,6 +44,11 @@ pub fn sys_kill(pid: usize, signum: i32) -> SysResult<usize> {
         );
         // 主线程 → 进程级信号（整个线程组）；普通线程 → 线程级信号
         task.receive_siginfo(siginfo, !task.is_process_leader());
+        if sig == Sig::SIGCONT && task.is_stopped() {
+            task.set_wait_event(SigInfo::CLD_CONTINUED, sig.raw());
+            task.notify_parent_sigchld(SigInfo::CLD_CONTINUED);
+            crate::task::wakeup_stopped_task(task);
+        }
         Ok(0)
     } else {
         Err(Errno::ESRCH)

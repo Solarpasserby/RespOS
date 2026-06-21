@@ -56,6 +56,13 @@ pub fn block_task(task: Arc<TaskControlBlock>) {
     SCHEDULER.lock().block(task);
 }
 
+pub fn wakeup_stopped_task(task: Arc<TaskControlBlock>) {
+    if task.is_stopped() {
+        task.set_ready();
+        SCHEDULER.lock().add(task);
+    }
+}
+
 /// 将当前任务标记为阻塞并加入阻塞队列，但暂不切换。
 ///
 /// 返回 `false` 表示当前没有可运行任务，调用者不应让当前任务睡眠。
@@ -155,6 +162,29 @@ pub fn blocking_and_run_next() {
         let current_task_ptr = Arc::as_ptr(&task) as usize;
         task.set_blocked();
         block_task(task);
+
+        let next_task_kernel_stack = next_task.kstack();
+        next_task.set_running();
+        PROCESSOR.lock().switch_to(next_task);
+        schedule_barrier();
+        unsafe {
+            __switch(next_task_kernel_stack, current_task_ptr);
+        }
+        schedule_barrier();
+        cleanup_dead_tasks();
+    }
+}
+
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub fn stop_current_and_run_next() {
+    let Some(task) = current_task() else {
+        return;
+    };
+
+    if let Some(next_task) = fetch_task() {
+        let current_task_ptr = Arc::as_ptr(&task) as usize;
+        task.set_stopped();
 
         let next_task_kernel_stack = next_task.kstack();
         next_task.set_running();

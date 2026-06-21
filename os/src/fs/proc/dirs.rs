@@ -18,6 +18,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::any::Any;
 use core::fmt::Write;
+use lazy_static::lazy_static;
+use spin::Mutex;
 
 const PROC_ROOT_INO: u64 = 1;
 const PROC_SELF_INO: u64 = 2;
@@ -35,14 +37,22 @@ const PROC_SELF_FD_INO: u64 = 12;
 const PROC_SYS_FS_INO: u64 = 13;
 const PROC_SYS_FS_PIPE_USER_PAGES_SOFT_INO: u64 = 14;
 const PROC_VERSION_INO: u64 = 15;
-const PROC_SELF_MAPS_INO: u64 = 15;
-const PROC_SELF_STATUS_INO: u64 = 16;
-const PROC_SELF_PAGEMAP_INO: u64 = 17;
+const PROC_SELF_MAPS_INO: u64 = 16;
+const PROC_SELF_STATUS_INO: u64 = 17;
+const PROC_SELF_PAGEMAP_INO: u64 = 18;
+const PROC_SYS_KERNEL_TAINTED_INO: u64 = 19;
+const PROC_SYS_KERNEL_CORE_PATTERN_INO: u64 = 20;
 const PROC_PID_DIR_INO_BASE: u64 = 0x10000;
 const PROC_PID_STAT_INO_BASE: u64 = 0x20000;
 const PROC_DEV: u64 = 0x100;
 const PID_MAX_CONTENT: &str = "4194304\n";
 const PIPE_USER_PAGES_SOFT_CONTENT: &str = "128\n";
+const TAINTED_CONTENT: &str = "0\n";
+const CORE_PATTERN_CONTENT: &str = "core\n";
+
+lazy_static! {
+    static ref PID_MAX_VALUE: Mutex<String> = Mutex::new(String::from(PID_MAX_CONTENT));
+}
 
 // ── /proc ─────────────────────────────────────────────────────────
 
@@ -298,6 +308,14 @@ impl InodeOp for ProcSysKernelInode {
     fn lookup(&self, _parent_path: &str, name: &str) -> SysResult<Arc<dyn InodeOp>> {
         match name {
             "pid_max" => Ok(Arc::new(ProcPidMaxInode)),
+            "tainted" => Ok(Arc::new(ProcReadOnlyInode::new(
+                PROC_SYS_KERNEL_TAINTED_INO,
+                TAINTED_CONTENT,
+            ))),
+            "core_pattern" => Ok(Arc::new(ProcReadOnlyInode::new(
+                PROC_SYS_KERNEL_CORE_PATTERN_INO,
+                CORE_PATTERN_CONTENT,
+            ))),
             _ => Err(Errno::ENOENT),
         }
     }
@@ -311,6 +329,18 @@ impl InodeOp for ProcSysKernelInode {
                 InodeType::Regular,
                 3,
                 b"pid_max\0",
+            ),
+            entry(
+                PROC_SYS_KERNEL_TAINTED_INO,
+                InodeType::Regular,
+                4,
+                b"tainted\0",
+            ),
+            entry(
+                PROC_SYS_KERNEL_CORE_PATTERN_INO,
+                InodeType::Regular,
+                5,
+                b"core_pattern\0",
             ),
         ])
     }
@@ -340,9 +370,18 @@ impl InodeOp for ProcSysKernelInode {
     }
 }
 
-pub(super) struct ProcPidMaxInode;
+pub(super) struct ProcReadOnlyInode {
+    ino: u64,
+    content: &'static str,
+}
 
-impl InodeOp for ProcPidMaxInode {
+impl ProcReadOnlyInode {
+    fn new(ino: u64, content: &'static str) -> Self {
+        Self { ino, content }
+    }
+}
+
+impl InodeOp for ProcReadOnlyInode {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -352,14 +391,14 @@ impl InodeOp for ProcPidMaxInode {
     }
 
     fn stat(&self, _path: &str) -> SysResult<KStat> {
-        Ok(KStat::minimal(PID_MAX_CONTENT.len(), InodeType::Regular)
+        Ok(KStat::minimal(self.content.len(), InodeType::Regular)
             .with_dev(PROC_DEV)
-            .with_ino(PROC_SYS_KERNEL_PID_MAX_INO)
+            .with_ino(self.ino)
             .with_mode(0o444))
     }
 
     fn read_at(&self, _path: &str, off: usize, buf: &mut [u8]) -> SysResult<usize> {
-        let bytes = PID_MAX_CONTENT.as_bytes();
+        let bytes = self.content.as_bytes();
         if off >= bytes.len() {
             return Ok(0);
         }
@@ -373,6 +412,74 @@ impl InodeOp for ProcPidMaxInode {
     }
     fn truncate(&self, _path: &str, _size: usize) -> SysResult<usize> {
         Err(Errno::EACCES)
+    }
+    fn lookup(&self, _parent_path: &str, _name: &str) -> SysResult<Arc<dyn InodeOp>> {
+        Err(Errno::ENOTDIR)
+    }
+    fn readdir(&self, _path: &str) -> SysResult<Vec<LinuxDirent64>> {
+        Err(Errno::ENOTDIR)
+    }
+    fn create(
+        &self,
+        _parent_path: &str,
+        _name: &str,
+        _ty: InodeType,
+    ) -> SysResult<Arc<dyn InodeOp>> {
+        Err(Errno::EACCES)
+    }
+    fn link(&self, _old_path: &str, _bare_dentry: Arc<Dentry>) -> SysResult {
+        Err(Errno::EACCES)
+    }
+    fn unlink(&self, _valid_dentry: &Arc<Dentry>) -> SysResult {
+        Err(Errno::EACCES)
+    }
+}
+
+pub(super) struct ProcPidMaxInode;
+
+impl InodeOp for ProcPidMaxInode {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn node_type(&self) -> InodeType {
+        InodeType::Regular
+    }
+
+    fn stat(&self, _path: &str) -> SysResult<KStat> {
+        Ok(
+            KStat::minimal(PID_MAX_VALUE.lock().len(), InodeType::Regular)
+                .with_dev(PROC_DEV)
+                .with_ino(PROC_SYS_KERNEL_PID_MAX_INO)
+                .with_mode(0o644),
+        )
+    }
+
+    fn read_at(&self, _path: &str, off: usize, buf: &mut [u8]) -> SysResult<usize> {
+        let value = PID_MAX_VALUE.lock();
+        let bytes = value.as_bytes();
+        if off >= bytes.len() {
+            return Ok(0);
+        }
+        let n = buf.len().min(bytes.len() - off);
+        buf[..n].copy_from_slice(&bytes[off..off + n]);
+        Ok(n)
+    }
+
+    fn write_at(&self, _path: &str, off: usize, buf: &[u8]) -> SysResult<usize> {
+        let end = off.checked_add(buf.len()).ok_or(Errno::EINVAL)?;
+        let mut bytes = PID_MAX_VALUE.lock().as_bytes().to_vec();
+        if bytes.len() < end {
+            bytes.resize(end, 0);
+        }
+        bytes[off..end].copy_from_slice(buf);
+        let value = String::from_utf8(bytes).map_err(|_| Errno::EINVAL)?;
+        *PID_MAX_VALUE.lock() = value;
+        Ok(buf.len())
+    }
+    fn truncate(&self, _path: &str, size: usize) -> SysResult<usize> {
+        PID_MAX_VALUE.lock().truncate(size);
+        Ok(0)
     }
     fn lookup(&self, _parent_path: &str, _name: &str) -> SysResult<Arc<dyn InodeOp>> {
         Err(Errno::ENOTDIR)
@@ -812,6 +919,7 @@ fn generate_pid_stat(pid: usize) -> SysResult<String> {
     let state = match task.status() {
         TaskStatus::Ready | TaskStatus::Running => 'R',
         TaskStatus::Blocked => 'S',
+        TaskStatus::Stopped => 'T',
         TaskStatus::Exited => 'Z',
     };
 
