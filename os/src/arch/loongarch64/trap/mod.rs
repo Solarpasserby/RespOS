@@ -184,6 +184,7 @@ pub fn trap_handler(cx: &mut TrapContext) {
     }
     if let Some(task) = current_task() {
         task.check_real_timer();
+        check_posix_timers(&task);
     }
     handle_signals();
 }

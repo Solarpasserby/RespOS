@@ -1114,9 +1114,14 @@ fn generate_pid_stat(pid: usize) -> SysResult<String> {
             .collect::<String>()
     };
 
+    let ticks = task.elapsed_ticks();
     let mut result = String::new();
-    let _ = write!(result, "{} ({}) {} {}", pid, comm, state, ppid);
-    for _ in 0..48 {
+    let _ = write!(
+        result,
+        "{} ({}) {} {} 0 0 0 0 0 0 0 0 0 {} {}",
+        pid, comm, state, ppid, ticks, ticks
+    );
+    for _ in 0..39 {
         result.push_str(" 0");
     }
     result.push('\n');

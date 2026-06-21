@@ -162,6 +162,40 @@ impl Default for RUsage {
     }
 }
 
+fn rusage_from_ticks(utime: usize, stime: usize) -> RUsage {
+    RUsage {
+        ru_utime: TimeVal {
+            sec: utime / CLK_TCK,
+            usec: (utime % CLK_TCK) * (1_000_000 / CLK_TCK),
+        },
+        ru_stime: TimeVal {
+            sec: stime / CLK_TCK,
+            usec: (stime % CLK_TCK) * (1_000_000 / CLK_TCK),
+        },
+        ..RUsage::default()
+    }
+}
+
+pub fn sys_getrusage(who: isize, usage: *mut RUsage) -> SysResult<usize> {
+    const RUSAGE_SELF: isize = 0;
+    const RUSAGE_CHILDREN: isize = -1;
+
+    let task = current_task().expect("[kernel] current task is None.");
+    let rusage = match who {
+        RUSAGE_SELF => {
+            let ticks = task.elapsed_ticks();
+            rusage_from_ticks(ticks, ticks)
+        }
+        RUSAGE_CHILDREN => {
+            let (utime, stime) = task.child_ticks();
+            rusage_from_ticks(utime, stime)
+        }
+        _ => return Err(Errno::EINVAL),
+    };
+    copy_to_user(usage, &rusage as *const RUsage, 1)?;
+    Ok(0)
+}
+
 /// 系统调用 sys_exit_group
 ///
 /// 退出单个线程
@@ -427,6 +461,10 @@ pub fn sys_clone(
     }
 
     let current_task = current_task().expect("[kernel] current task is None.");
+    if flags.contains(CloneFlags::CLONE_NEWUTS) && current_task.euid() != 0 {
+        return Err(Errno::EPERM);
+    }
+
     let share_vm = flags.share_user_vm();
     // 此处发生任务复制
     let new_task = current_task.clone_(flags);

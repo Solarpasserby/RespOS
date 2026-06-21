@@ -104,6 +104,10 @@ pub struct TaskControlBlock {
     interrupted: AtomicBool,
     alarm_deadline_ms: AtomicUsize,
     alarm_interval_ms: AtomicUsize,
+    virtual_timer_deadline_ms: AtomicUsize,
+    virtual_timer_interval_ms: AtomicUsize,
+    prof_timer_deadline_ms: AtomicUsize,
+    prof_timer_interval_ms: AtomicUsize,
     personality: AtomicUsize,
     did_exec: AtomicBool,
     start_time_ms: AtomicUsize,
@@ -174,6 +178,10 @@ impl TaskControlBlock {
             interrupted: AtomicBool::new(false),
             alarm_deadline_ms: AtomicUsize::new(0),
             alarm_interval_ms: AtomicUsize::new(0),
+            virtual_timer_deadline_ms: AtomicUsize::new(0),
+            virtual_timer_interval_ms: AtomicUsize::new(0),
+            prof_timer_deadline_ms: AtomicUsize::new(0),
+            prof_timer_interval_ms: AtomicUsize::new(0),
             personality: AtomicUsize::new(0),
             did_exec: AtomicBool::new(false),
             start_time_ms: AtomicUsize::new(get_accounting_ms()),
@@ -255,6 +263,10 @@ impl TaskControlBlock {
             interrupted: AtomicBool::new(false),
             alarm_deadline_ms: AtomicUsize::new(0),
             alarm_interval_ms: AtomicUsize::new(0),
+            virtual_timer_deadline_ms: AtomicUsize::new(0),
+            virtual_timer_interval_ms: AtomicUsize::new(0),
+            prof_timer_deadline_ms: AtomicUsize::new(0),
+            prof_timer_interval_ms: AtomicUsize::new(0),
             personality: AtomicUsize::new(0),
             did_exec: AtomicBool::new(false),
             start_time_ms: AtomicUsize::new(get_accounting_ms()),
@@ -413,6 +425,10 @@ impl TaskControlBlock {
             interrupted: AtomicBool::new(false),
             alarm_deadline_ms: AtomicUsize::new(0),
             alarm_interval_ms: AtomicUsize::new(0),
+            virtual_timer_deadline_ms: AtomicUsize::new(0),
+            virtual_timer_interval_ms: AtomicUsize::new(0),
+            prof_timer_deadline_ms: AtomicUsize::new(0),
+            prof_timer_interval_ms: AtomicUsize::new(0),
             personality: AtomicUsize::new(self.personality()),
             did_exec: AtomicBool::new(false),
             start_time_ms: AtomicUsize::new(get_accounting_ms()),
@@ -962,43 +978,93 @@ impl TaskControlBlock {
     }
 
     pub fn real_timer_remaining_ms(&self) -> usize {
-        let deadline = self.alarm_deadline_ms.load(Ordering::Relaxed);
+        self.itimer_remaining_ms(0)
+    }
+
+    pub fn real_timer_interval_ms(&self) -> usize {
+        self.itimer_interval_ms(0)
+    }
+
+    fn itimer_fields(&self, which: usize) -> Option<(&AtomicUsize, &AtomicUsize, Sig)> {
+        match which {
+            0 => Some((
+                &self.alarm_deadline_ms,
+                &self.alarm_interval_ms,
+                Sig::SIGALRM,
+            )),
+            1 => Some((
+                &self.virtual_timer_deadline_ms,
+                &self.virtual_timer_interval_ms,
+                Sig::SIGVTALRM,
+            )),
+            2 => Some((
+                &self.prof_timer_deadline_ms,
+                &self.prof_timer_interval_ms,
+                Sig::SIGPROF,
+            )),
+            _ => None,
+        }
+    }
+
+    pub fn itimer_remaining_ms(&self, which: usize) -> usize {
+        let Some((deadline, _, _)) = self.itimer_fields(which) else {
+            return 0;
+        };
+        let deadline = deadline.load(Ordering::Relaxed);
         if deadline == 0 {
             return 0;
         }
         deadline.saturating_sub(get_timeout_ms())
     }
 
-    pub fn real_timer_interval_ms(&self) -> usize {
-        self.alarm_interval_ms.load(Ordering::Relaxed)
+    pub fn itimer_interval_ms(&self, which: usize) -> usize {
+        let Some((_, interval, _)) = self.itimer_fields(which) else {
+            return 0;
+        };
+        interval.load(Ordering::Relaxed)
     }
 
     pub fn set_real_timer_ms(&self, value_ms: usize, interval_ms: usize) -> usize {
-        let old_remaining = self.real_timer_remaining_ms();
+        self.set_itimer_ms(0, value_ms, interval_ms)
+    }
+
+    pub fn set_itimer_ms(&self, which: usize, value_ms: usize, interval_ms: usize) -> usize {
+        let Some((deadline_ref, interval_ref, _)) = self.itimer_fields(which) else {
+            return 0;
+        };
+        let old_remaining = self.itimer_remaining_ms(which);
         let deadline = if value_ms == 0 {
             0
         } else {
             get_timeout_ms().saturating_add(value_ms)
         };
-        self.alarm_deadline_ms.store(deadline, Ordering::Relaxed);
-        self.alarm_interval_ms.store(interval_ms, Ordering::Relaxed);
+        deadline_ref.store(deadline, Ordering::Relaxed);
+        interval_ref.store(interval_ms, Ordering::Relaxed);
         old_remaining
     }
 
     pub fn check_real_timer(&self) {
-        let deadline = self.alarm_deadline_ms.load(Ordering::Relaxed);
+        self.check_itimer(0);
+        self.check_itimer(1);
+        self.check_itimer(2);
+    }
+
+    fn check_itimer(&self, which: usize) {
+        let Some((deadline_ref, interval_ref, sig)) = self.itimer_fields(which) else {
+            return;
+        };
+        let deadline = deadline_ref.load(Ordering::Relaxed);
         if deadline == 0 || get_timeout_ms() < deadline {
             return;
         }
 
-        let interval = self.alarm_interval_ms.load(Ordering::Relaxed);
+        let interval = interval_ref.load(Ordering::Relaxed);
         let next_deadline = if interval == 0 {
             0
         } else {
             get_timeout_ms().saturating_add(interval)
         };
-        if self
-            .alarm_deadline_ms
+        if deadline_ref
             .compare_exchange(
                 deadline,
                 next_deadline,
@@ -1010,7 +1076,7 @@ impl TaskControlBlock {
             return;
         }
 
-        let siginfo = SigInfo::new(Sig::SIGALRM.raw(), SigInfo::KERNEL, SiField::None);
+        let siginfo = SigInfo::new(sig.raw(), SigInfo::KERNEL, SiField::None);
         self.receive_siginfo(siginfo, false);
     }
 

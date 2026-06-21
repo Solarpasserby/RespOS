@@ -219,7 +219,25 @@ fn generate_status() -> String {
         "Name:\t{}",
         task.exe_path().rsplit('/').next().unwrap_or("")
     );
+    let _ = writeln!(result, "Tgid:\t{}", task.tgid());
     let _ = writeln!(result, "Pid:\t{}", task.tid());
+    let _ = writeln!(result, "PPid:\t0");
+    let _ = writeln!(
+        result,
+        "Uid:\t{}\t{}\t{}\t{}",
+        task.uid(),
+        task.euid(),
+        task.suid(),
+        task.fsuid()
+    );
+    let _ = writeln!(
+        result,
+        "Gid:\t{}\t{}\t{}\t{}",
+        task.gid(),
+        task.egid(),
+        task.sgid(),
+        task.fsgid()
+    );
     let _ = writeln!(result, "VmLck:\t{:8} kB", locked_bytes / 1024);
     result
 }

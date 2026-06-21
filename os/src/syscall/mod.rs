@@ -78,8 +78,14 @@ const SYSCALL_GET_ROBUST_LIST: usize = 100;
 const SYSCALL_NANOSLEEP: usize = 101;
 const SYSCALL_GETITIMER: usize = 102;
 const SYSCALL_SETITIMER: usize = 103;
+const SYSCALL_TIMER_CREATE: usize = 107;
+const SYSCALL_TIMER_GETTIME: usize = 108;
+const SYSCALL_TIMER_GETOVERRUN: usize = 109;
+const SYSCALL_TIMER_SETTIME: usize = 110;
+const SYSCALL_TIMER_DELETE: usize = 111;
 const SYSCALL_CLOCK_SETTIME: usize = 112;
 const SYSCALL_CLOCK_GETTIME: usize = 113;
+const SYSCALL_CLOCK_GETRES: usize = 114;
 const SYSCALL_CLOCK_NANOSLEEP: usize = 115;
 const SYSCALL_SYSLOG: usize = 116;
 const SYSCALL_SCHED_GETAFFINITY: usize = 123;
@@ -114,9 +120,13 @@ const SYSCALL_SETSID: usize = 157;
 const SYSCALL_GETGROUPS: usize = 158;
 const SYSCALL_SETGROUPS: usize = 159;
 const SYSCALL_UNAME: usize = 160;
+const SYSCALL_SETHOSTNAME: usize = 161;
+const SYSCALL_SETDOMAINNAME: usize = 162;
+const SYSCALL_GETRUSAGE: usize = 165;
 const SYSCALL_UMASK: usize = 166;
 const SYSCALL_GETTIMEOFDAY: usize = 169;
 const SYSCALL_SETTIMEOFDAY: usize = 170;
+const SYSCALL_ADJTIMEX: usize = 171;
 const SYSCALL_GETPID: usize = 172;
 const SYSCALL_GETPPID: usize = 173;
 const SYSCALL_GETUID: usize = 174;
@@ -162,6 +172,7 @@ const SYSCALL_PWRITEV2: usize = 287;
 const SYSCALL_WAIT4: usize = 260;
 const SYSCALL_PRLIMIT64: usize = 261;
 const SYSCALL_FANOTIFY_INIT: usize = 262;
+const SYSCALL_CLOCK_ADJTIME: usize = 266;
 const SYSCALL_SENDMMSG: usize = 269;
 const SYSCALL_RENAMEAT2: usize = 276;
 const SYSCALL_GETRANDOM: usize = 278;
@@ -205,6 +216,8 @@ use signal::*;
 use special_fd::*;
 use system::*;
 use time::*;
+
+pub use time::check_posix_timers;
 
 fn merge_offset_arg(low: usize, high: usize) -> isize {
     (((high as u64) << 32) | ((low as u64) & 0xffff_ffff)) as i64 as isize
@@ -400,8 +413,21 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
             args[1] as *const ITimerVal,
             args[2] as *mut ITimerVal,
         ),
+        SYSCALL_TIMER_CREATE => {
+            sys_timer_create(args[0], args[1] as *const SigEvent, args[2] as *mut i32)
+        }
+        SYSCALL_TIMER_GETTIME => sys_timer_gettime(args[0], args[1] as *mut ITimerSpec),
+        SYSCALL_TIMER_GETOVERRUN => sys_timer_getoverrun(args[0]),
+        SYSCALL_TIMER_SETTIME => sys_timer_settime(
+            args[0],
+            args[1],
+            args[2] as *const ITimerSpec,
+            args[3] as *mut ITimerSpec,
+        ),
+        SYSCALL_TIMER_DELETE => sys_timer_delete(args[0]),
         SYSCALL_CLOCK_SETTIME => sys_clock_settime(args[0], args[1] as *const TimeSpec),
         SYSCALL_CLOCK_GETTIME => sys_clock_gettime(args[0], args[1] as *mut TimeSpec),
+        SYSCALL_CLOCK_GETRES => sys_clock_getres(args[0], args[1] as *mut TimeSpec),
         SYSCALL_CLOCK_NANOSLEEP => sys_clock_nanosleep(
             args[0],
             args[1],
@@ -455,11 +481,15 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         SYSCALL_GETGROUPS => sys_getgroups(args[0], args[1] as *mut u32),
         SYSCALL_SETGROUPS => sys_setgroups(args[0], args[1] as *const u32),
         SYSCALL_UNAME => sys_uname(args[0] as *mut UtsName),
+        SYSCALL_SETHOSTNAME => sys_sethostname(args[0] as *const u8, args[1]),
+        SYSCALL_SETDOMAINNAME => sys_setdomainname(args[0] as *const u8, args[1]),
+        SYSCALL_GETRUSAGE => sys_getrusage(args[0] as isize, args[1] as *mut RUsage),
         SYSCALL_UMASK => sys_umask(args[0]),
         SYSCALL_GETTIMEOFDAY => sys_gettimeofday(args[0] as *mut TimeVal, args[1] as *mut TimeZone),
         SYSCALL_SETTIMEOFDAY => {
             sys_settimeofday(args[0] as *const TimeVal, args[1] as *const TimeZone)
         }
+        SYSCALL_ADJTIMEX => sys_adjtimex(args[0] as *mut Timex),
         SYSCALL_GETPID => sys_getpid(),
         SYSCALL_GETPPID => sys_getppid(),
         SYSCALL_GETUID => sys_getuid(),
@@ -572,6 +602,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
             args[3] as *mut RLimit,
         ),
         SYSCALL_FANOTIFY_INIT => sys_fanotify_init(args[0], args[1]),
+        SYSCALL_CLOCK_ADJTIME => sys_clock_adjtime(args[0], args[1] as *mut Timex),
         SYSCALL_SENDMMSG => sys_sendmmsg(args[0], args[1], args[2], args[3]),
         SYSCALL_RENAMEAT2 => sys_renameat2(
             args[0] as isize,

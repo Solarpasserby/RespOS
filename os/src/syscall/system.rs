@@ -4,9 +4,29 @@ use super::{Errno, SysResult};
 use crate::arch::sbi;
 use crate::config::{MEMORY_END, MEMORY_START, PAGE_SIZE};
 use crate::fs::ext4;
-use crate::mm::{copy_to_user, free_frame_count};
+use crate::mm::{copy_from_user, copy_to_user, free_frame_count};
+use crate::mutex::SpinLock;
 use crate::task::{TASK_MANAGER, current_task};
 use crate::timer::get_time_ms;
+use lazy_static::lazy_static;
+
+lazy_static! {
+    static ref UTS_STATE: SpinLock<UtsState> = SpinLock::new(UtsState::default());
+}
+
+struct UtsState {
+    nodename: [u8; 65],
+    domainname: [u8; 65],
+}
+
+impl Default for UtsState {
+    fn default() -> Self {
+        Self {
+            nodename: UtsName::from_str("LAPTOP"),
+            domainname: UtsName::from_str("localdomain"),
+        }
+    }
+}
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -58,14 +78,15 @@ impl UtsName {
         let machine = "riscv64";
         #[cfg(target_arch = "loongarch64")]
         let machine = "loongarch64";
+        let state = UTS_STATE.lock();
 
         Self {
             sysname: Self::from_str("Linux"),
-            nodename: Self::from_str("LAPTOP"),
+            nodename: state.nodename,
             release: Self::from_str("6.10.0-dev"), // 为运行 glibc 程序所设
             version: Self::from_str("Resp0S 0.1.0"),
             machine: Self::from_str(machine),
-            domainname: Self::from_str("localdomain"),
+            domainname: state.domainname,
         }
     }
 
@@ -124,6 +145,39 @@ pub fn sys_uname(buf: *mut UtsName) -> SysResult<usize> {
     let utsname = UtsName::with_personality(persona);
     copy_to_user(buf, &utsname as *const UtsName, 1)?;
     Ok(0)
+}
+
+fn set_uts_field(name: *const u8, len: usize, is_domainname: bool) -> SysResult<usize> {
+    const MAX_UTS_FIELD_LEN: usize = 64;
+    if len > MAX_UTS_FIELD_LEN {
+        return Err(Errno::EINVAL);
+    }
+
+    let task = current_task().expect("[kernel] current task is None.");
+    if task.euid() != 0 {
+        return Err(Errno::EPERM);
+    }
+
+    let mut field = [0u8; 65];
+    if len != 0 {
+        copy_from_user(field.as_mut_ptr(), name, len)?;
+    }
+
+    let mut state = UTS_STATE.lock();
+    if is_domainname {
+        state.domainname = field;
+    } else {
+        state.nodename = field;
+    }
+    Ok(0)
+}
+
+pub fn sys_sethostname(name: *const u8, len: usize) -> SysResult<usize> {
+    set_uts_field(name, len, false)
+}
+
+pub fn sys_setdomainname(name: *const u8, len: usize) -> SysResult<usize> {
+    set_uts_field(name, len, true)
 }
 
 /// 系统调用 sys-personality。
