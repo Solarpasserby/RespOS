@@ -85,6 +85,32 @@ pub const SEEK_CUR: usize = 1;
 pub const SEEK_END: usize = 2;
 pub const AT_FDCWD: isize = -100;
 
+pub const AF_INET: usize = 2;
+pub const SOCK_STREAM: usize = 1;
+pub const SOCK_DGRAM: usize = 2;
+pub const IPPROTO_TCP: usize = 6;
+pub const IPPROTO_UDP: usize = 17;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SockAddrIn {
+    pub sin_family: u16,
+    pub sin_port: u16,
+    pub sin_addr: [u8; 4],
+    pub sin_zero: [u8; 8],
+}
+
+impl SockAddrIn {
+    pub const fn loopback(port: u16) -> Self {
+        Self {
+            sin_family: AF_INET as u16,
+            sin_port: port.to_be(),
+            sin_addr: [127, 0, 0, 1],
+            sin_zero: [0; 8],
+        }
+    }
+}
+
 pub const SIGDEF: i32 = 0; // 无信号，默认处理
 pub const SIGHUP: i32 = 1; // 挂起（终端断开）
 pub const SIGINT: i32 = 2; // Ctrl+C 中断
@@ -212,6 +238,65 @@ pub fn waitpid(pid: usize, exit_code: &mut i32) -> isize {
             exit_pid => return exit_pid,
         }
     }
+}
+
+pub fn socket(domain: usize, socket_type: usize, protocol: usize) -> isize {
+    sys_socket(domain, socket_type, protocol)
+}
+
+pub fn bind(fd: usize, addr: &SockAddrIn) -> isize {
+    sys_bind(
+        fd,
+        addr as *const SockAddrIn as usize,
+        core::mem::size_of::<SockAddrIn>(),
+    )
+}
+
+pub fn listen(fd: usize, backlog: usize) -> isize {
+    sys_listen(fd, backlog)
+}
+
+pub fn accept(fd: usize, addr: &mut SockAddrIn, addrlen: &mut u32) -> isize {
+    sys_accept(
+        fd,
+        addr as *mut SockAddrIn as usize,
+        addrlen as *mut u32 as usize,
+    )
+}
+
+pub fn connect(fd: usize, addr: &SockAddrIn) -> isize {
+    sys_connect(
+        fd,
+        addr as *const SockAddrIn as usize,
+        core::mem::size_of::<SockAddrIn>(),
+    )
+}
+
+pub fn sendto(fd: usize, buf: &[u8], flags: usize, addr: Option<&SockAddrIn>) -> isize {
+    let (addr_ptr, addrlen) = match addr {
+        Some(addr) => (
+            addr as *const SockAddrIn as usize,
+            core::mem::size_of::<SockAddrIn>(),
+        ),
+        None => (0, 0),
+    };
+    sys_sendto(fd, buf.as_ptr(), buf.len(), flags, addr_ptr, addrlen)
+}
+
+pub fn recvfrom(
+    fd: usize,
+    buf: &mut [u8],
+    flags: usize,
+    addr: Option<(&mut SockAddrIn, &mut u32)>,
+) -> isize {
+    let (addr_ptr, addrlen_ptr) = match addr {
+        Some((addr, addrlen)) => (
+            addr as *mut SockAddrIn as usize,
+            addrlen as *mut u32 as usize,
+        ),
+        None => (0, 0),
+    };
+    sys_recvfrom(fd, buf.as_mut_ptr(), buf.len(), flags, addr_ptr, addrlen_ptr)
 }
 
 pub fn kill(pid: usize, signum: i32) -> isize {

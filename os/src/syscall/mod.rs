@@ -118,9 +118,14 @@ const SYSCALL_LISTEN: usize = 201;
 const SYSCALL_ACCEPT: usize = 202;
 const SYSCALL_CONNECT: usize = 203;
 const SYSCALL_GETSOCKNAME: usize = 204;
+const SYSCALL_GETPEERNAME: usize = 205;
 const SYSCALL_SENDTO: usize = 206;
 const SYSCALL_RECVFROM: usize = 207;
 const SYSCALL_SETSOCKOPT: usize = 208;
+const SYSCALL_GETSOCKOPT: usize = 209;
+const SYSCALL_SHUTDOWN: usize = 210;
+const SYSCALL_SENDMSG: usize = 211;
+const SYSCALL_RECVMSG: usize = 212;
 const SYSCALL_BRK: usize = 214;
 const SYSCALL_MUNMAP: usize = 215;
 const SYSCALL_CLONE: usize = 220;
@@ -130,11 +135,14 @@ const SYSCALL_MPROTECT: usize = 226;
 const SYSCALL_MSYNC: usize = 227;
 const SYSCALL_MADVISE: usize = 233;
 const SYSCALL_PERF_EVENT_OPEN: usize = 241;
+const SYSCALL_ACCEPT4: usize = 242;
+const SYSCALL_RECVMMSG: usize = 243;
 const SYSCALL_PREADV2: usize = 286;
 const SYSCALL_PWRITEV2: usize = 287;
 const SYSCALL_WAIT4: usize = 260;
 const SYSCALL_PRLIMIT64: usize = 261;
 const SYSCALL_FANOTIFY_INIT: usize = 262;
+const SYSCALL_SENDMMSG: usize = 269;
 const SYSCALL_RENAMEAT2: usize = 276;
 const SYSCALL_GETRANDOM: usize = 278;
 const SYSCALL_MEMFD_CREATE: usize = 279;
@@ -394,6 +402,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         SYSCALL_ACCEPT => sys_accept(args[0], args[1], args[2]),
         SYSCALL_CONNECT => sys_connect(args[0], args[1], args[2]),
         SYSCALL_GETSOCKNAME => sys_getsockname(args[0], args[1], args[2]),
+        SYSCALL_GETPEERNAME => sys_getpeername(args[0], args[1], args[2]),
         SYSCALL_SENDTO => sys_sendto(
             args[0],
             args[1] as *const u8,
@@ -411,9 +420,15 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
             args[5],
         ),
         SYSCALL_SETSOCKOPT => sys_setsockopt(args[0], args[1], args[2], args[3], args[4]),
+        SYSCALL_GETSOCKOPT => sys_getsockopt(args[0], args[1], args[2], args[3], args[4]),
+        SYSCALL_SHUTDOWN => sys_shutdown(args[0], args[1]),
+        SYSCALL_SENDMSG => sys_sendmsg(args[0], args[1], args[2]),
+        SYSCALL_RECVMSG => sys_recvmsg(args[0], args[1], args[2]),
         SYSCALL_BRK => sys_brk(args[0]),
         SYSCALL_MUNMAP => sys_munmap(args[0], args[1]),
         SYSCALL_CLONE => sys_clone(args[0], args[1], args[2], args[3], args[4]),
+        SYSCALL_ACCEPT4 => sys_accept4(args[0], args[1], args[2], args[3]),
+        SYSCALL_RECVMMSG => sys_recvmmsg(args[0], args[1], args[2], args[3], args[4]),
         SYSCALL_EXECVE => sys_execve(
             args[0] as *const u8,
             args[1] as *const usize,
@@ -471,6 +486,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
             args[3] as *mut RLimit,
         ),
         SYSCALL_FANOTIFY_INIT => sys_fanotify_init(args[0], args[1]),
+        SYSCALL_SENDMMSG => sys_sendmmsg(args[0], args[1], args[2], args[3]),
         SYSCALL_RENAMEAT2 => sys_renameat2(
             args[0] as isize,
             args[1] as *const u8,

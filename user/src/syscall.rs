@@ -34,6 +34,13 @@ const SYSCALL_REBOOT: usize = 142;
 const SYSCALL_GETTIMEOFDAY: usize = 169;
 const SYSCALL_GETPID: usize = 172;
 const SYSCALL_GETPPID: usize = 173;
+const SYSCALL_SOCKET: usize = 198;
+const SYSCALL_BIND: usize = 200;
+const SYSCALL_LISTEN: usize = 201;
+const SYSCALL_ACCEPT: usize = 202;
+const SYSCALL_CONNECT: usize = 203;
+const SYSCALL_SENDTO: usize = 206;
+const SYSCALL_RECVFROM: usize = 207;
 const SYSCALL_BRK: usize = 214;
 const SYSCALL_MUNMAP: usize = 215;
 const SYSCALL_CLONE: usize = 220;
@@ -374,6 +381,48 @@ pub fn sys_getpid() -> isize {
 
 pub fn sys_getppid() -> isize {
     syscall(SYSCALL_GETPPID, [0, 0, 0, 0, 0, 0])
+}
+
+pub fn sys_socket(domain: usize, socket_type: usize, protocol: usize) -> isize {
+    syscall(SYSCALL_SOCKET, [domain, socket_type, protocol, 0, 0, 0])
+}
+
+pub fn sys_bind(fd: usize, addr: usize, addrlen: usize) -> isize {
+    syscall(SYSCALL_BIND, [fd, addr, addrlen, 0, 0, 0])
+}
+
+pub fn sys_listen(fd: usize, backlog: usize) -> isize {
+    syscall(SYSCALL_LISTEN, [fd, backlog, 0, 0, 0, 0])
+}
+
+pub fn sys_accept(fd: usize, addr: usize, addrlen: usize) -> isize {
+    syscall(SYSCALL_ACCEPT, [fd, addr, addrlen, 0, 0, 0])
+}
+
+pub fn sys_connect(fd: usize, addr: usize, addrlen: usize) -> isize {
+    syscall(SYSCALL_CONNECT, [fd, addr, addrlen, 0, 0, 0])
+}
+
+pub fn sys_sendto(
+    fd: usize,
+    buf: *const u8,
+    len: usize,
+    flags: usize,
+    addr: usize,
+    addrlen: usize,
+) -> isize {
+    syscall(SYSCALL_SENDTO, [fd, buf as usize, len, flags, addr, addrlen])
+}
+
+pub fn sys_recvfrom(
+    fd: usize,
+    buf: *mut u8,
+    len: usize,
+    flags: usize,
+    addr: usize,
+    addrlen: usize,
+) -> isize {
+    syscall(SYSCALL_RECVFROM, [fd, buf as usize, len, flags, addr, addrlen])
 }
 
 pub fn sys_brk(addr: usize) -> isize {

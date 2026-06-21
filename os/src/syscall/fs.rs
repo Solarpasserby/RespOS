@@ -16,6 +16,7 @@ use crate::mm::{
     VPNRange, VirtAddr, check_user_readable, check_user_writable, copy_cstr_from_user,
     copy_from_user, copy_to_user,
 };
+use crate::net::socket::Socket;
 use crate::signal::sig_struct::{Sig, SigSet};
 use crate::signal::{SiField, SigInfo};
 use crate::task::{
@@ -1471,6 +1472,9 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SysResult<usize> {
             flags.remove(status_flags);
             flags |= OpenFlags::from(arg) & status_flags;
             entry.set_flags(flags);
+            if let Some(socket) = entry.file.as_any().downcast_ref::<Socket>() {
+                socket.set_nonblocking(flags.contains(OpenFlags::O_NONBLOCK));
+            }
             task.set_fd(fd, entry)?;
             Ok(0)
         }
