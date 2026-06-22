@@ -4,7 +4,7 @@ use super::{Errno, SysResult};
 use crate::config::PAGE_SIZE;
 use crate::fs::dev::{LoopControlInode, LoopInode};
 use crate::fs::mount::{do_mount, do_umount2};
-use crate::fs::vfs::InodeType;
+use crate::fs::vfs::{InodeOp, InodeType};
 use crate::fs::{
     AT_EMPTY_PATH, AT_FDCWD, AT_NO_AUTOMOUNT, AT_SYMLINK_NOFOLLOW, FdEntry, File, FileOp, KStat,
     OpenFlags, Pipe, Stat, Statfs64, check_dir_search_permission, filename_create, filename_link,
@@ -24,6 +24,7 @@ use crate::task::{
     yield_current_task,
 };
 use crate::timer::{TimeSpec, get_time_ms, get_timeout_us};
+use alloc::{string::String, sync::Arc, vec::Vec};
 
 const UTIME_NOW: isize = 1_073_741_823;
 const UTIME_OMIT: isize = 1_073_741_822;
@@ -33,11 +34,242 @@ const W_OK: usize = 2;
 const R_OK: usize = 4;
 const AT_EACCESS: usize = 0x200;
 const AT_STATX_SYNC_TYPE: usize = 0x6000;
+const XATTR_CREATE: usize = 0x1;
+const XATTR_REPLACE: usize = 0x2;
+const XATTR_NAME_MAX: usize = 255;
+const XATTR_SIZE_MAX: usize = 65_536;
 
 // 使用 mm 实现的 `copy_cstr_from_user`, `copy_from_user`, `copy_to_user` 来访问用户空间的数据
 
 // TODO: write 和 read 借助堆上分配的空间中转数据，有额外开销，须优化
 const IO_CHUNK_SIZE: usize = PAGE_SIZE * 16;
+
+struct XattrTarget {
+    inode: Option<Arc<dyn InodeOp>>,
+    ty: InodeType,
+}
+
+fn xattr_target_from_path(path: &crate::fs::Path) -> SysResult<XattrTarget> {
+    let inode = path.dentry.get_inode();
+    let stat = inode.stat(&path.abs_path())?;
+    Ok(XattrTarget {
+        inode: Some(inode),
+        ty: stat.ty,
+    })
+}
+
+fn xattr_target_from_fd(fd: usize) -> SysResult<XattrTarget> {
+    let task = current_task().expect("[kernel] current task is None.");
+    let file = task.get_fd_entry(fd)?.get_file();
+    if let Some(file) = file.as_any().downcast_ref::<File>() {
+        return xattr_target_from_path(&file.path());
+    }
+    Ok(XattrTarget {
+        inode: None,
+        ty: InodeType::Socket,
+    })
+}
+
+fn xattr_target_from_user_path(
+    path: *const u8,
+    follow_final_symlink: bool,
+) -> SysResult<XattrTarget> {
+    let path = copy_cstr_from_user(path)?;
+    let resolved = if follow_final_symlink {
+        filename_lookup(AT_FDCWD, path.as_str(), 0)?
+    } else {
+        filename_lookup_no_follow_final_symlink(AT_FDCWD, path.as_str())?
+    };
+    xattr_target_from_path(&resolved)
+}
+
+fn copy_xattr_name(name: *const u8) -> SysResult<String> {
+    let name = copy_cstr_from_user(name)?;
+    if name.is_empty() || name.len() > XATTR_NAME_MAX {
+        return Err(Errno::ERANGE);
+    }
+    Ok(name)
+}
+
+fn user_namespace_restricted(name: &str, ty: InodeType) -> bool {
+    name.starts_with("user.") && !matches!(ty, InodeType::Regular | InodeType::Directory)
+}
+
+fn copy_xattr_value(value: *const u8, size: usize) -> SysResult<Vec<u8>> {
+    if size > XATTR_SIZE_MAX {
+        return Err(Errno::E2BIG);
+    }
+    let mut data = alloc::vec![0u8; size];
+    if size > 0 {
+        copy_from_user(data.as_mut_ptr(), value, size)?;
+    }
+    Ok(data)
+}
+
+fn set_xattr(target: XattrTarget, name: String, value: Vec<u8>, flags: usize) -> SysResult<usize> {
+    if flags & !(XATTR_CREATE | XATTR_REPLACE) != 0
+        || flags & (XATTR_CREATE | XATTR_REPLACE) == (XATTR_CREATE | XATTR_REPLACE)
+    {
+        return Err(Errno::EINVAL);
+    }
+    if user_namespace_restricted(&name, target.ty) {
+        return Err(Errno::EPERM);
+    }
+    target
+        .inode
+        .ok_or(Errno::EPERM)?
+        .set_xattr(name, value, flags)?;
+    Ok(0)
+}
+
+fn get_xattr(target: XattrTarget, name: String, value: *mut u8, size: usize) -> SysResult<usize> {
+    if user_namespace_restricted(&name, target.ty) {
+        return Err(Errno::ENODATA);
+    }
+    let data = target.inode.ok_or(Errno::ENODATA)?.get_xattr(&name)?;
+    if size == 0 {
+        return Ok(data.len());
+    }
+    if size < data.len() {
+        return Err(Errno::ERANGE);
+    }
+    copy_to_user(value, data.as_ptr(), data.len())?;
+    Ok(data.len())
+}
+
+fn list_xattr(target: XattrTarget, list: *mut u8, size: usize) -> SysResult<usize> {
+    let mut names = target
+        .inode
+        .map(|inode| inode.list_xattr())
+        .transpose()?
+        .unwrap_or_default();
+    names.sort();
+
+    let total = names.iter().try_fold(0usize, |sum, name| {
+        sum.checked_add(name.len() + 1).ok_or(Errno::ERANGE)
+    })?;
+    if size == 0 {
+        return Ok(total);
+    }
+    if size < total {
+        return Err(Errno::ERANGE);
+    }
+
+    let mut offset = 0usize;
+    for name in names {
+        copy_to_user(unsafe { list.add(offset) }, name.as_ptr(), name.len())?;
+        offset += name.len();
+        let nul = 0u8;
+        copy_to_user(unsafe { list.add(offset) }, &nul as *const u8, 1)?;
+        offset += 1;
+    }
+    Ok(total)
+}
+
+fn remove_xattr(target: XattrTarget, name: String) -> SysResult<usize> {
+    target.inode.ok_or(Errno::ENODATA)?.remove_xattr(&name)?;
+    Ok(0)
+}
+
+pub fn sys_setxattr(
+    path: *const u8,
+    name: *const u8,
+    value: *const u8,
+    size: usize,
+    flags: usize,
+) -> SysResult<usize> {
+    let target = xattr_target_from_user_path(path, true)?;
+    let name = copy_xattr_name(name)?;
+    let value = copy_xattr_value(value, size)?;
+    set_xattr(target, name, value, flags)
+}
+
+pub fn sys_lsetxattr(
+    path: *const u8,
+    name: *const u8,
+    value: *const u8,
+    size: usize,
+    flags: usize,
+) -> SysResult<usize> {
+    let target = xattr_target_from_user_path(path, false)?;
+    let name = copy_xattr_name(name)?;
+    let value = copy_xattr_value(value, size)?;
+    set_xattr(target, name, value, flags)
+}
+
+pub fn sys_fsetxattr(
+    fd: usize,
+    name: *const u8,
+    value: *const u8,
+    size: usize,
+    flags: usize,
+) -> SysResult<usize> {
+    let target = xattr_target_from_fd(fd)?;
+    let name = copy_xattr_name(name)?;
+    let value = copy_xattr_value(value, size)?;
+    set_xattr(target, name, value, flags)
+}
+
+pub fn sys_getxattr(
+    path: *const u8,
+    name: *const u8,
+    value: *mut u8,
+    size: usize,
+) -> SysResult<usize> {
+    let target = xattr_target_from_user_path(path, true)?;
+    let name = copy_xattr_name(name)?;
+    get_xattr(target, name, value, size)
+}
+
+pub fn sys_lgetxattr(
+    path: *const u8,
+    name: *const u8,
+    value: *mut u8,
+    size: usize,
+) -> SysResult<usize> {
+    let target = xattr_target_from_user_path(path, false)?;
+    let name = copy_xattr_name(name)?;
+    get_xattr(target, name, value, size)
+}
+
+pub fn sys_fgetxattr(fd: usize, name: *const u8, value: *mut u8, size: usize) -> SysResult<usize> {
+    let target = xattr_target_from_fd(fd)?;
+    let name = copy_xattr_name(name)?;
+    get_xattr(target, name, value, size)
+}
+
+pub fn sys_listxattr(path: *const u8, list: *mut u8, size: usize) -> SysResult<usize> {
+    let target = xattr_target_from_user_path(path, true)?;
+    list_xattr(target, list, size)
+}
+
+pub fn sys_llistxattr(path: *const u8, list: *mut u8, size: usize) -> SysResult<usize> {
+    let target = xattr_target_from_user_path(path, false)?;
+    list_xattr(target, list, size)
+}
+
+pub fn sys_flistxattr(fd: usize, list: *mut u8, size: usize) -> SysResult<usize> {
+    let target = xattr_target_from_fd(fd)?;
+    list_xattr(target, list, size)
+}
+
+pub fn sys_removexattr(path: *const u8, name: *const u8) -> SysResult<usize> {
+    let target = xattr_target_from_user_path(path, true)?;
+    let name = copy_xattr_name(name)?;
+    remove_xattr(target, name)
+}
+
+pub fn sys_lremovexattr(path: *const u8, name: *const u8) -> SysResult<usize> {
+    let target = xattr_target_from_user_path(path, false)?;
+    let name = copy_xattr_name(name)?;
+    remove_xattr(target, name)
+}
+
+pub fn sys_fremovexattr(fd: usize, name: *const u8) -> SysResult<usize> {
+    let target = xattr_target_from_fd(fd)?;
+    let name = copy_xattr_name(name)?;
+    remove_xattr(target, name)
+}
 
 /// 系统调用 sys-read
 pub fn sys_read(fd: usize, buf: *mut u8, len: usize) -> SysResult<usize> {

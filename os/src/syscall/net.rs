@@ -454,8 +454,11 @@ pub fn sys_socketpair(
 }
 
 pub fn sys_bind(socketfd: usize, socketaddr: usize, socketlen: usize) -> SysResult<usize> {
-    let addr = read_sockaddr(socketaddr, socketlen)?;
     with_socket(socketfd, |sock| {
+        if sock.domain == SocketDomain::AF_UNIX {
+            return Ok(0);
+        }
+        let addr = read_sockaddr(socketaddr, socketlen)?;
         sock.bind(addr)?;
         Ok(0)
     })

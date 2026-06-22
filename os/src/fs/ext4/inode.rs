@@ -37,6 +37,7 @@ pub struct Ext4Inode {
     nlink_override: Mutex<Option<u32>>,
     /// 共享页缓存，挂载在 inode 上，同一 inode 的所有 File 共享
     page_cache: Arc<PageCache>,
+    xattrs: Mutex<HashMap<String, Vec<u8>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -59,6 +60,7 @@ impl Ext4Inode {
             owner_override: Mutex::new(None),
             nlink_override: Mutex::new(None),
             page_cache: PageCache::new(0),
+            xattrs: Mutex::new(HashMap::new()),
         }
     }
 
@@ -640,6 +642,42 @@ impl InodeOp for Ext4Inode {
         Ok(())
     }
 
+    fn set_xattr(&self, name: String, value: Vec<u8>, flags: usize) -> SysResult {
+        const XATTR_CREATE: usize = 0x1;
+        const XATTR_REPLACE: usize = 0x2;
+
+        let mut xattrs = self.xattrs.lock();
+        let exists = xattrs.contains_key(&name);
+        if flags & XATTR_CREATE != 0 && exists {
+            return Err(Errno::EEXIST);
+        }
+        if flags & XATTR_REPLACE != 0 && !exists {
+            return Err(Errno::ENODATA);
+        }
+        xattrs.insert(name, value);
+        Ok(())
+    }
+
+    fn get_xattr(&self, name: &str) -> Result<Vec<u8>, Errno> {
+        self.xattrs.lock().get(name).cloned().ok_or(Errno::ENODATA)
+    }
+
+    fn list_xattr(&self) -> Result<Vec<String>, Errno> {
+        Ok(self.xattrs.lock().keys().cloned().collect())
+    }
+
+    fn remove_xattr(&self, name: &str) -> SysResult {
+        if self.xattrs.lock().remove(name).is_some() {
+            Ok(())
+        } else {
+            Err(Errno::ENODATA)
+        }
+    }
+
+    fn clear_xattrs(&self) {
+        self.xattrs.lock().clear();
+    }
+
     /// 查找与 name 匹配的子索引节点，约定 name 为常规文件名
     fn lookup(&self, parent_path: &str, name: &str) -> SysResult<Arc<dyn InodeOp>> {
         self.check_type(InodeType::Directory)?;
@@ -785,6 +823,7 @@ impl InodeOp for Ext4Inode {
         Self::file_symlink(target, &path)?;
         // 创建后重新 lookup，复用现有 inode cache/type 修正逻辑。
         let inode = self.lookup(parent_path, name)?;
+        inode.clear_xattrs();
         if let Some(inode) = inode.as_any().downcast_ref::<Ext4Inode>() {
             inode.init_inode_times();
         }

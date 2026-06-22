@@ -38,6 +38,19 @@ pub trait InodeOp: Any + Send + Sync {
     fn set_owner(&self, _path: &str, _uid: u32, _gid: u32) -> SysResult {
         Err(Errno::EINVAL)
     }
+    fn set_xattr(&self, _name: String, _value: Vec<u8>, _flags: usize) -> SysResult {
+        Err(Errno::EPERM)
+    }
+    fn get_xattr(&self, _name: &str) -> Result<Vec<u8>, Errno> {
+        Err(Errno::ENODATA)
+    }
+    fn list_xattr(&self) -> Result<Vec<String>, Errno> {
+        Ok(Vec::new())
+    }
+    fn remove_xattr(&self, _name: &str) -> SysResult {
+        Err(Errno::ENODATA)
+    }
+    fn clear_xattrs(&self) {}
 
     fn lookup(&self, parent_path: &str, name: &str) -> SysResult<Arc<dyn InodeOp>>;
     fn readdir(&self, path: &str) -> SysResult<Vec<LinuxDirent64>>;

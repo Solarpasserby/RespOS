@@ -73,6 +73,8 @@ pub enum Errno {
     ENOTEMPTY = 39,
     /// 符号链接层数过多，通常表示符号链接循环。
     ELOOP = 40,
+    /// 扩展属性不存在。
+    ENODATA = 61,
     /// 需要目标地址（socket 未指定 peer 地址）。
     EDESTADDRREQ = 89,
     /// 消息过长（UDP 数据报超过 MTU）。
@@ -163,6 +165,7 @@ impl Errno {
             Errno::ENOSYS => "Function not implemented",
             Errno::ENOTEMPTY => "Directory not empty",
             Errno::ELOOP => "Too many levels of symbolic links",
+            Errno::ENODATA => "No data available",
             Errno::EDESTADDRREQ => "Destination address required",
             Errno::EMSGSIZE => "Message too long",
             Errno::ENOPROTOOPT => "Protocol not available",

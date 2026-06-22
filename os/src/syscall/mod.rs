@@ -2,6 +2,18 @@
 
 //! ### 系统调用模块
 
+const SYSCALL_SETXATTR: usize = 5;
+const SYSCALL_LSETXATTR: usize = 6;
+const SYSCALL_FSETXATTR: usize = 7;
+const SYSCALL_GETXATTR: usize = 8;
+const SYSCALL_LGETXATTR: usize = 9;
+const SYSCALL_FGETXATTR: usize = 10;
+const SYSCALL_LISTXATTR: usize = 11;
+const SYSCALL_LLISTXATTR: usize = 12;
+const SYSCALL_FLISTXATTR: usize = 13;
+const SYSCALL_REMOVEXATTR: usize = 14;
+const SYSCALL_LREMOVEXATTR: usize = 15;
+const SYSCALL_FREMOVEXATTR: usize = 16;
 const SYSCALL_GETCWD: usize = 17;
 const SYSCALL_DUP: usize = 23;
 const SYSCALL_DUP3: usize = 24;
@@ -195,6 +207,48 @@ fn merge_offset_arg(low: usize, high: usize) -> isize {
 
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
     match syscall_id {
+        SYSCALL_SETXATTR => sys_setxattr(
+            args[0] as *const u8,
+            args[1] as *const u8,
+            args[2] as *const u8,
+            args[3],
+            args[4],
+        ),
+        SYSCALL_LSETXATTR => sys_lsetxattr(
+            args[0] as *const u8,
+            args[1] as *const u8,
+            args[2] as *const u8,
+            args[3],
+            args[4],
+        ),
+        SYSCALL_FSETXATTR => sys_fsetxattr(
+            args[0],
+            args[1] as *const u8,
+            args[2] as *const u8,
+            args[3],
+            args[4],
+        ),
+        SYSCALL_GETXATTR => sys_getxattr(
+            args[0] as *const u8,
+            args[1] as *const u8,
+            args[2] as *mut u8,
+            args[3],
+        ),
+        SYSCALL_LGETXATTR => sys_lgetxattr(
+            args[0] as *const u8,
+            args[1] as *const u8,
+            args[2] as *mut u8,
+            args[3],
+        ),
+        SYSCALL_FGETXATTR => {
+            sys_fgetxattr(args[0], args[1] as *const u8, args[2] as *mut u8, args[3])
+        }
+        SYSCALL_LISTXATTR => sys_listxattr(args[0] as *const u8, args[1] as *mut u8, args[2]),
+        SYSCALL_LLISTXATTR => sys_llistxattr(args[0] as *const u8, args[1] as *mut u8, args[2]),
+        SYSCALL_FLISTXATTR => sys_flistxattr(args[0], args[1] as *mut u8, args[2]),
+        SYSCALL_REMOVEXATTR => sys_removexattr(args[0] as *const u8, args[1] as *const u8),
+        SYSCALL_LREMOVEXATTR => sys_lremovexattr(args[0] as *const u8, args[1] as *const u8),
+        SYSCALL_FREMOVEXATTR => sys_fremovexattr(args[0], args[1] as *const u8),
         SYSCALL_GETCWD => sys_getcwd(args[0] as *mut u8, args[1]),
         SYSCALL_DUP => sys_dup(args[0]),
         SYSCALL_DUP3 => sys_dup3(args[0], args[1], args[2]),
