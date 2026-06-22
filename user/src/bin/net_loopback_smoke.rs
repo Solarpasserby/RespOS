@@ -6,8 +6,8 @@ extern crate user_lib;
 
 use core::mem::size_of;
 use user_lib::{
-    accept, bind, close, connect, exit, fork, listen, read, recvfrom, sendto, socket, wait, write,
-    SockAddrIn, AF_INET, IPPROTO_TCP, IPPROTO_UDP, SOCK_DGRAM, SOCK_STREAM,
+    AF_INET, IPPROTO_TCP, IPPROTO_UDP, SOCK_DGRAM, SOCK_STREAM, SockAddrIn, accept, bind, close,
+    connect, exit, fork, listen, read, recvfrom, sendto, socket, wait, write,
 };
 
 const UDP_PORT: u16 = 41000;

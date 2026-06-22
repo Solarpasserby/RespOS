@@ -7,6 +7,7 @@
 
 mod loop_device;
 mod null;
+mod random;
 mod rtc;
 mod shm;
 mod zero;
@@ -21,8 +22,12 @@ const MISC_DIR_INO: u64 = 5;
 const RTC_INO: u64 = 6;
 const LOOP_CONTROL_INO: u64 = 7;
 const LOOP0_INO: u64 = 8;
+const RANDOM_INO: u64 = 9;
+const URANDOM_INO: u64 = 10;
 const NULL_RDEV: u64 = (1 << 8) | 3;
 const ZERO_RDEV: u64 = (1 << 8) | 5;
+const RANDOM_RDEV: u64 = (1 << 8) | 8;
+const URANDOM_RDEV: u64 = (1 << 8) | 9;
 const RTC_RDEV: u64 = (254 << 8) | 0;
 const LOOP_CONTROL_RDEV: u64 = (10 << 8) | 237;
 const LOOP0_RDEV: u64 = 7 << 8;
@@ -35,6 +40,7 @@ use alloc::vec::Vec;
 use core::any::Any;
 pub use loop_device::{LoopControlInode, LoopInode};
 use null::NullInode;
+use random::RandomInode;
 use rtc::RtcInode;
 use shm::shm_dir;
 use zero::ZeroInode;
@@ -68,6 +74,8 @@ impl InodeOp for DevDirInode {
         match name {
             "null" => Ok(Arc::new(NullInode)),
             "zero" => Ok(Arc::new(ZeroInode)),
+            "random" => Ok(Arc::new(RandomInode::random())),
+            "urandom" => Ok(Arc::new(RandomInode::urandom())),
             "shm" => Ok(shm_dir()),
             "misc" => Ok(Arc::new(MiscDirInode)),
             "loop-control" => Ok(Arc::new(LoopControlInode)),
@@ -82,15 +90,17 @@ impl InodeOp for DevDirInode {
             dir_entry(2, 2, b"..\0"),
             entry(NULL_INO, InodeType::CharDevice, 3, b"null\0"),
             entry(ZERO_INO, InodeType::CharDevice, 4, b"zero\0"),
-            entry(SHM_DIR_INO, InodeType::Directory, 5, b"shm\0"),
-            entry(MISC_DIR_INO, InodeType::Directory, 6, b"misc\0"),
+            entry(RANDOM_INO, InodeType::CharDevice, 5, b"random\0"),
+            entry(URANDOM_INO, InodeType::CharDevice, 6, b"urandom\0"),
+            entry(SHM_DIR_INO, InodeType::Directory, 7, b"shm\0"),
+            entry(MISC_DIR_INO, InodeType::Directory, 8, b"misc\0"),
             entry(
                 LOOP_CONTROL_INO,
                 InodeType::CharDevice,
-                7,
+                9,
                 b"loop-control\0",
             ),
-            entry(LOOP0_INO, InodeType::BlockDevice, 8, b"loop0\0"),
+            entry(LOOP0_INO, InodeType::BlockDevice, 10, b"loop0\0"),
         ])
     }
 
@@ -194,7 +204,7 @@ impl SuperBlockOp for DevSuperBlock {
             f_blocks: 0,
             f_bfree: 0,
             f_bavail: 0,
-            f_files: 4,
+            f_files: 10,
             f_ffree: 0,
             f_namelen: 255,
             f_frsize: crate::config::PAGE_SIZE as i64,

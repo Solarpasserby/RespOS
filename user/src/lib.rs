@@ -296,7 +296,14 @@ pub fn recvfrom(
         ),
         None => (0, 0),
     };
-    sys_recvfrom(fd, buf.as_mut_ptr(), buf.len(), flags, addr_ptr, addrlen_ptr)
+    sys_recvfrom(
+        fd,
+        buf.as_mut_ptr(),
+        buf.len(),
+        flags,
+        addr_ptr,
+        addrlen_ptr,
+    )
 }
 
 pub fn kill(pid: usize, signum: i32) -> isize {

@@ -8,7 +8,7 @@ use smoltcp::{
 use crate::mutex::SpinLock;
 use crate::syscall::{Errno, SysResult};
 
-use super::{socket_set, SocketSetWrapper};
+use super::{SocketSetWrapper, socket_set};
 
 const LISTEN_QUEUE_SIZE: usize = 512;
 
@@ -51,12 +51,19 @@ impl ListenTable {
         self.table[port as usize].lock().is_none()
     }
 
-    pub fn listen(&self, listen_endpoint: IpListenEndpoint, listen_handle: SocketHandle) -> SysResult {
+    pub fn listen(
+        &self,
+        listen_endpoint: IpListenEndpoint,
+        listen_handle: SocketHandle,
+    ) -> SysResult {
         let port = listen_endpoint.port;
         debug_assert!(port != 0);
         let mut guard = self.table[port as usize].lock();
         if guard.is_none() {
-            *guard = Some(Box::new(ListenTableEntry::new(listen_endpoint, listen_handle)));
+            *guard = Some(Box::new(ListenTableEntry::new(
+                listen_endpoint,
+                listen_handle,
+            )));
             Ok(())
         } else {
             Err(Errno::EADDRINUSE)
@@ -88,12 +95,17 @@ impl ListenTable {
         self.promote_listener(port);
         let mut guard = self.table[port as usize].lock();
         let entry = guard.as_mut().ok_or(Errno::ECONNREFUSED)?;
-        let handle = entry.accept_queue.pop_front().ok_or(Errno::EAGAIN)?;
-        if is_closed(handle) {
-            Err(Errno::ECONNRESET)
-        } else {
-            Ok((handle, get_addr_tuple(handle)))
+        while let Some(handle) = entry.accept_queue.pop_front() {
+            if is_closed(handle) {
+                socket_set().lock().remove(handle);
+                continue;
+            }
+            if let Some(addr_tuple) = get_addr_tuple(handle) {
+                return Ok((handle, addr_tuple));
+            }
+            socket_set().lock().remove(handle);
         }
+        Err(Errno::EAGAIN)
     }
 
     fn promote_listener(&self, port: u16) {
@@ -145,18 +157,13 @@ fn is_connected(handle: SocketHandle) -> bool {
 fn is_closed(handle: SocketHandle) -> bool {
     super::socket_set()
         .lock()
-        .with_socket::<_, tcp::Socket, _>(handle, |socket| {
-            matches!(socket.state(), State::Closed)
-        })
+        .with_socket::<_, tcp::Socket, _>(handle, |socket| matches!(socket.state(), State::Closed))
 }
 
-fn get_addr_tuple(handle: SocketHandle) -> (IpEndpoint, IpEndpoint) {
+fn get_addr_tuple(handle: SocketHandle) -> Option<(IpEndpoint, IpEndpoint)> {
     super::socket_set()
         .lock()
         .with_socket::<_, tcp::Socket, _>(handle, |socket| {
-            (
-                socket.local_endpoint().unwrap(),
-                socket.remote_endpoint().unwrap(),
-            )
+            Some((socket.local_endpoint()?, socket.remote_endpoint()?))
         })
 }

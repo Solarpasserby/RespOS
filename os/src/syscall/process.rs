@@ -253,6 +253,20 @@ pub fn sys_getpgid(pid: usize) -> SysResult<usize> {
     Ok(target.pgid())
 }
 
+/// 系统调用 sys-setsid
+///
+/// 当前内核还没有完整建模 session/controlling terminal；这里保留 Linux 的关键可见语义：
+/// 进程组 leader 不能 setsid，成功后调用者成为新的进程组 leader，并返回新 session id。
+pub fn sys_setsid() -> SysResult<usize> {
+    let current = current_task().expect("[kernel] current task is None.");
+    let pid = current.tgid();
+    if current.pgid() == pid {
+        return Err(Errno::EPERM);
+    }
+    current.set_pgid(pid);
+    Ok(pid)
+}
+
 pub fn sys_prlimit64(
     pid: usize,
     resource: usize,

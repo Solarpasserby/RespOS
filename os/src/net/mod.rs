@@ -28,16 +28,10 @@ use lazy_static::lazy_static;
 use smoltcp::{
     iface::{Config, Interface, SocketHandle, SocketSet},
     phy::Medium,
-    socket::{
-        tcp::SocketBuffer,
-        udp::PacketBuffer,
-        AnySocket,
-    },
+    socket::{AnySocket, tcp::SocketBuffer, udp::PacketBuffer},
     storage::PacketMetadata,
     time::Instant as SmolInstant,
-    wire::{
-        HardwareAddress, IpAddress, IpCidr,
-    },
+    wire::{HardwareAddress, IpAddress, IpCidr},
 };
 
 use crate::arch::timer::get_time_ms;
@@ -52,8 +46,8 @@ pub mod tcp;
 pub mod udp;
 
 pub use addr::{
-    from_ipendpoint_to_socketaddr, from_sockaddr_to_ipendpoint, is_unspecified,
     LOOP_BACK_ENDPOINT, LOOP_BACK_IP, UNSPECIFIED_ENDPOINT, UNSPECIFIED_IP,
+    from_ipendpoint_to_socketaddr, from_sockaddr_to_ipendpoint, is_unspecified,
 };
 pub use listen::ListenTable;
 pub use loopback::LoopbackDev;
@@ -181,23 +175,33 @@ impl<'a> SocketSetWrapper<'a> {
         iface.poll(timestamp, &mut *dev, &mut sockets);
     }
 
-    /// 检查指定地址:端口是否已被占用（用于 bind 前的冲突检测）。
-    pub fn bind_check(&self, addr: IpAddress, port: u16) -> Result<usize, Errno> {
+    /// 检查指定 TCP 地址:端口是否已被占用（用于 bind/connect 前的冲突检测）。
+    pub fn tcp_bind_check(&self, addr: IpAddress, port: u16) -> Result<usize, Errno> {
         use smoltcp::socket::Socket;
         let mut sockets = self.0.lock();
         for item in sockets.iter_mut() {
-            match item.1 {
-                Socket::Tcp(socket) => {
-                    if socket.local_endpoint().is_some_and(|endpoint| endpoint.addr == addr && endpoint.port == port) {
-                        return Err(Errno::EADDRINUSE);
-                    }
+            if let Socket::Tcp(socket) = item.1 {
+                if socket
+                    .local_endpoint()
+                    .is_some_and(|endpoint| endpoint.addr == addr && endpoint.port == port)
+                {
+                    return Err(Errno::EADDRINUSE);
                 }
-                Socket::Udp(socket) => {
-                    if socket.endpoint().addr == Some(addr) && socket.endpoint().port == port {
-                        return Err(Errno::EADDRINUSE);
-                    }
+            }
+        }
+        Ok(0)
+    }
+
+    /// 检查指定 UDP 地址:端口是否已被占用（用于 bind 前的冲突检测）。
+    pub fn udp_bind_check(&self, addr: IpAddress, port: u16) -> Result<usize, Errno> {
+        use smoltcp::socket::Socket;
+        let mut sockets = self.0.lock();
+        for item in sockets.iter_mut() {
+            if let Socket::Udp(socket) = item.1 {
+                if socket.endpoint().addr == Some(addr) && socket.endpoint().port == port {
+                    return Err(Errno::EADDRINUSE);
                 }
-            };
+            }
         }
         Ok(0)
     }

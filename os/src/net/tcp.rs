@@ -14,7 +14,7 @@
 use core::{
     cell::UnsafeCell,
     net::SocketAddr,
-    sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
+    sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
 };
 use smoltcp::{
     iface::SocketHandle,
@@ -24,16 +24,12 @@ use smoltcp::{
 use spin::Mutex;
 
 use crate::{
-    net::addr::{
-        from_sockaddr_to_ipendpoint, is_unspecified, UNSPECIFIED_ENDPOINT,
-    },
+    net::addr::{LOOP_BACK_IP, UNSPECIFIED_ENDPOINT, from_sockaddr_to_ipendpoint, is_unspecified},
     syscall::{Errno, SysResult},
     task::yield_current_task,
 };
 
-use super::{
-    poll_interfaces, socket_set, SocketSetWrapper, LISTEN_TABLE,
-};
+use super::{LISTEN_TABLE, SocketSetWrapper, poll_interfaces, socket_set};
 
 /// 描述 socket 的当前可读/可写状态。
 pub struct PollState {
@@ -147,7 +143,9 @@ impl TcpSocket {
         };
         debug_assert!(port != 0);
         let addr = if is_unspecified(local_addr.addr) {
-            Some(smoltcp::wire::IpAddress::Ipv4(Ipv4Address::new(127, 0, 0, 1)))
+            Some(smoltcp::wire::IpAddress::Ipv4(Ipv4Address::new(
+                127, 0, 0, 1,
+            )))
         } else {
             Some(local_addr.addr)
         };
@@ -193,7 +191,10 @@ impl TcpSocket {
         if !readable && !writeable {
             readable = true;
         }
-        PollState { readable, writeable }
+        PollState {
+            readable,
+            writeable,
+        }
     }
 
     /// 检查监听 socket 是否有已完成握手的连接。
@@ -310,11 +311,8 @@ impl TcpSocket {
     /// 3. `block_on` 等待 smoltcp 状态变为 Established
     pub fn connect(&self, remote_addr: SocketAddr) -> Result<(), Errno> {
         self.update_state(STATE_CLOSED, STATE_CONNECTING, || {
-            let handle = unsafe { self.handle.get().read() }.unwrap_or_else(|| {
-                socket_set()
-                    .lock()
-                    .add(SocketSetWrapper::new_tcp_socket())
-            });
+            let handle = unsafe { self.handle.get().read() }
+                .unwrap_or_else(|| socket_set().lock().add(SocketSetWrapper::new_tcp_socket()));
             unsafe {
                 self.handle.get().write(Some(handle));
             }
@@ -377,7 +375,7 @@ impl TcpSocket {
             }
             if !self.is_reuse_addr() {
                 let l = from_sockaddr_to_ipendpoint(local_addr);
-                socket_set().lock().bind_check(l.addr, l.port)?;
+                socket_set().lock().tcp_bind_check(l.addr, l.port)?;
             }
             unsafe {
                 self.local_addr
@@ -431,13 +429,11 @@ impl TcpSocket {
         let local_port = unsafe { self.local_addr.get().read().port };
 
         self.block_on(|| match LISTEN_TABLE.lock().accept(local_port) {
-            Ok((handle, (local_endpoint, remote_endpoint))) => {
-                Ok(TcpSocket::new_connected(
-                    handle,
-                    local_endpoint,
-                    remote_endpoint,
-                ))
-            }
+            Ok((handle, (local_endpoint, remote_endpoint))) => Ok(TcpSocket::new_connected(
+                handle,
+                local_endpoint,
+                remote_endpoint,
+            )),
             Err(e) => {
                 if e == Errno::ECONNRESET || e == Errno::ECONNREFUSED {
                     self.shutdown();
@@ -508,10 +504,10 @@ impl TcpSocket {
                             RecvError::InvalidState => Errno::ENOTCONN,
                         })?;
                         Ok(len)
-                    } else if !socket.is_active() {
-                        Err(Errno::ECONNREFUSED)
                     } else if !socket.may_recv() {
                         Ok(0)
+                    } else if !socket.is_active() {
+                        Err(Errno::ECONNREFUSED)
                     } else {
                         Err(Errno::EAGAIN)
                     }
@@ -567,9 +563,7 @@ impl TcpSocket {
     pub fn set_nagle_enabled(&self, enable: bool) {
         let handle = unsafe {
             self.handle.get().read().unwrap_or_else(|| {
-                let handle = socket_set()
-                    .lock()
-                    .add(SocketSetWrapper::new_tcp_socket());
+                let handle = socket_set().lock().add(SocketSetWrapper::new_tcp_socket());
                 self.handle.get().write(Some(handle));
                 handle
             })
@@ -585,9 +579,7 @@ impl TcpSocket {
     pub fn set_keep_alive(&self) {
         let handle = unsafe {
             self.handle.get().read().unwrap_or_else(|| {
-                let handle = socket_set()
-                    .lock()
-                    .add(SocketSetWrapper::new_tcp_socket());
+                let handle = socket_set().lock().add(SocketSetWrapper::new_tcp_socket());
                 self.handle.get().write(Some(handle));
                 handle
             })
@@ -631,9 +623,7 @@ impl TcpSocket {
     pub fn set_hop_limit(&self, limit: u8) -> SysResult {
         let handle = unsafe {
             self.handle.get().read().unwrap_or_else(|| {
-                let handle = socket_set()
-                    .lock()
-                    .add(SocketSetWrapper::new_tcp_socket());
+                let handle = socket_set().lock().add(SocketSetWrapper::new_tcp_socket());
                 self.handle.get().write(Some(handle));
                 handle
             })
@@ -662,7 +652,12 @@ fn get_ephemeral_port() -> u16 {
         } else {
             *curr += 1;
         }
-        if LISTEN_TABLE.lock().can_listen(port) {
+        if LISTEN_TABLE.lock().can_listen(port)
+            && socket_set()
+                .lock()
+                .tcp_bind_check(LOOP_BACK_IP, port)
+                .is_ok()
+        {
             return port;
         }
         tries += 1;

@@ -197,11 +197,18 @@ impl File {
     pub fn truncate(&self, size: usize) -> SysResult<usize> {
         let inner = self.inner.lock();
         let path = inner.path.abs_path();
-        self.inode.truncate(&path, size)?;
+        match self.inode.truncate(&path, size) {
+            Ok(_) => {}
+            Err(Errno::ENOENT) if inner.page_cache.is_some() => {}
+            Err(err) => return Err(err),
+        }
         if let Some(ref pc) = inner.page_cache {
             pc.resize(size);
             if inner.write_back {
-                pc.sync(&self.inode, &path)?;
+                match pc.sync(&self.inode, &path) {
+                    Ok(_) | Err(Errno::ENOENT) => {}
+                    Err(err) => return Err(err),
+                }
             }
         }
         if inner.offset > size {
@@ -333,7 +340,10 @@ impl FileOp for File {
         if let Some(ref pc) = inner.page_cache {
             if inner.write_back {
                 let path = inner.path.abs_path();
-                pc.sync(&self.inode, &path)?;
+                match pc.sync(&self.inode, &path) {
+                    Ok(_) | Err(Errno::ENOENT) => {}
+                    Err(err) => return Err(err),
+                }
             }
         }
         Ok(0)

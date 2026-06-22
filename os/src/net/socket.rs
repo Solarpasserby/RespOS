@@ -4,22 +4,23 @@
 //! 从而可以通过标准文件描述符接口（read/write/poll）操作。
 //! 内部根据 `SocketKind` 分派到 `TcpSocket` 或 `UdpSocket`。
 
-use core::{net::SocketAddr, sync::atomic::{AtomicBool, AtomicU64, Ordering}};
 use alloc::{collections::VecDeque, sync::Arc};
+use core::{
+    net::SocketAddr,
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+};
 use spin::Mutex;
 
 use crate::{
-    fs::{FileOp, OpenFlags, KStat},
     fs::vfs::InodeType,
+    fs::{FileOp, KStat, OpenFlags},
     mutex::SpinLock,
     syscall::{Errno, SysResult},
     task::yield_current_task,
 };
 
 use super::{
-    addr::{
-        from_ipendpoint_to_socketaddr, UNSPECIFIED_ENDPOINT,
-    },
+    addr::{UNSPECIFIED_ENDPOINT, from_ipendpoint_to_socketaddr},
     poll_interfaces,
     tcp::TcpSocket,
     udp::UdpSocket,
@@ -201,7 +202,10 @@ impl Socket {
     }
 
     pub fn new_unix_pair(socket_type: SocketKind) -> Result<(Self, Self), Errno> {
-        if !matches!(socket_type, SocketKind::SOCK_STREAM | SocketKind::SOCK_DGRAM) {
+        if !matches!(
+            socket_type,
+            SocketKind::SOCK_STREAM | SocketKind::SOCK_DGRAM
+        ) {
             return Err(Errno::EINVAL);
         }
         let (left, right) = UnixSocket::pair();
@@ -438,14 +442,26 @@ impl Socket {
         match &self.inner {
             SocketInner::Tcp(tcp) => {
                 let state = tcp.poll(isread);
-                if isread { state.readable } else { state.writeable }
+                if isread {
+                    state.readable
+                } else {
+                    state.writeable
+                }
             }
             SocketInner::Udp(udp) => {
                 let state = udp.poll();
-                if isread { state.readable } else { state.writeable }
+                if isread {
+                    state.readable
+                } else {
+                    state.writeable
+                }
             }
             SocketInner::Unix(unix) => {
-                if isread { unix.read_ready() } else { unix.write_ready() }
+                if isread {
+                    unix.read_ready()
+                } else {
+                    unix.write_ready()
+                }
             }
         }
     }
@@ -526,7 +542,7 @@ impl FileOp for Socket {
     }
 
     fn fsync(&self) -> SysResult<usize> {
-        Err(Errno::EINVAL)
+        Ok(0)
     }
 }
 

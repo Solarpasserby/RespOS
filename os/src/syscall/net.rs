@@ -4,7 +4,7 @@ use core::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use crate::{
     fs::{FdEntry, FileOp},
     mm::{check_user_writable, copy_from_user, copy_to_user},
-    net::socket::{self, Socket, SocketDomain, SocketKind, SOCK_CLOEXEC, SOCK_NONBLOCK},
+    net::socket::{self, SOCK_CLOEXEC, SOCK_NONBLOCK, Socket, SocketDomain, SocketKind},
     task::current_task,
 };
 
@@ -31,7 +31,10 @@ const IPPROTO_IP: usize = 0;
 const IPPROTO_TCP: usize = 6;
 const IPPROTO_UDP: usize = 17;
 const IP_TTL: usize = 2;
+const IP_RECVERR: usize = 11;
 const TCP_NODELAY: usize = 1;
+const TCP_MAXSEG: usize = 2;
+const TCP_DEFAULT_MAXSEG: i32 = 1448;
 const MSG_OOB: usize = 0x1;
 const MSG_ERRQUEUE: usize = 0x2000;
 
@@ -157,7 +160,11 @@ fn write_sockaddr(addr: usize, addrlen_ptr: usize, sockaddr: SocketAddr) -> SysR
     let write_len = core::cmp::min(user_len as usize, core::mem::size_of::<SockAddrIn>());
     if write_len > 0 {
         check_user_writable(addr as *mut u8, write_len)?;
-        copy_to_user(addr as *mut u8, &raw as *const SockAddrIn as *const u8, write_len)?;
+        copy_to_user(
+            addr as *mut u8,
+            &raw as *const SockAddrIn as *const u8,
+            write_len,
+        )?;
     }
     copy_to_user(addrlen_ptr as *mut u32, &actual_len as *const u32, 1)?;
     Ok(())
@@ -172,7 +179,11 @@ fn write_sockaddr_value(addr: usize, addrlen: usize, sockaddr: SocketAddr) -> Sy
     let write_len = core::cmp::min(addrlen, actual_len);
     if write_len > 0 {
         check_user_writable(addr as *mut u8, write_len)?;
-        copy_to_user(addr as *mut u8, &raw as *const SockAddrIn as *const u8, write_len)?;
+        copy_to_user(
+            addr as *mut u8,
+            &raw as *const SockAddrIn as *const u8,
+            write_len,
+        )?;
     }
     Ok(actual_len as u32)
 }
@@ -276,7 +287,11 @@ fn collect_iov_bytes(iovs: &[MsgIov]) -> SysResult<Vec<u8>> {
         }
         let old_len = buf.len();
         buf.resize(old_len + item.len, 0);
-        copy_from_user(buf[old_len..].as_mut_ptr(), item.base as *const u8, item.len)?;
+        copy_from_user(
+            buf[old_len..].as_mut_ptr(),
+            item.base as *const u8,
+            item.len,
+        )?;
     }
     Ok(buf)
 }
@@ -360,7 +375,11 @@ fn write_sockopt<T: Copy>(optval: usize, optlen: usize, value: &T) -> SysResult 
     Ok(())
 }
 
-fn parse_socket(domain: usize, socket_type: usize, protocol: usize) -> SysResult<(SocketDomain, SocketKind)> {
+fn parse_socket(
+    domain: usize,
+    socket_type: usize,
+    protocol: usize,
+) -> SysResult<(SocketDomain, SocketKind)> {
     let domain = socket::parse_domain(domain)?;
     let kind = socket::parse_kind(socket_type)?;
     match (&domain, kind, protocol) {
@@ -658,64 +677,66 @@ pub fn sys_setsockopt(
     optval: usize,
     optlen: usize,
 ) -> SysResult<usize> {
-    with_socket(fd, |sock| {
-        match (level, optname) {
-            (SOL_SOCKET, SO_REUSEADDR) => {
-                sock.set_reuse_addr(read_i32(optval, optlen)? != 0);
-                Ok(0)
-            }
-            (SOL_SOCKET, SO_OOBINLINE | SO_DONTROUTE | SO_BROADCAST | SO_KEEPALIVE) => {
-                let _ = read_i32(optval, optlen)?;
-                Ok(0)
-            }
-            (SOL_SOCKET, SO_SNDBUF) => {
-                let size = read_i32(optval, optlen)?;
-                if size < 0 {
-                    return Err(Errno::EINVAL);
-                }
-                sock.set_send_buf_size(size as u64);
-                Ok(0)
-            }
-            (SOL_SOCKET, SO_SNDBUFFORCE) => {
-                let size = read_u32(optval, optlen)?;
-                sock.set_send_buf_size(core::cmp::min(size, i32::MAX as u32) as u64);
-                Ok(0)
-            }
-            (SOL_SOCKET, SO_RCVBUF) => {
-                let size = read_i32(optval, optlen)?;
-                if size < 0 {
-                    return Err(Errno::EINVAL);
-                }
-                sock.set_recv_buf_size(size as u64);
-                Ok(0)
-            }
-            (SOL_SOCKET, SO_RCVBUFFORCE) => {
-                let size = read_u32(optval, optlen)?;
-                sock.set_recv_buf_size(core::cmp::min(size, i32::MAX as u32) as u64);
-                Ok(0)
-            }
-            (SOL_SOCKET, SO_RCVTIMEO) => {
-                sock.set_recv_timeout(read_timespec(optval, optlen)?);
-                Ok(0)
-            }
-            (SOL_SOCKET, SO_SNDTIMEO) => {
-                sock.set_send_timeout(read_timespec(optval, optlen)?);
-                Ok(0)
-            }
-            (IPPROTO_TCP, TCP_NODELAY) => {
-                sock.set_tcp_nodelay(read_i32(optval, optlen)? != 0)?;
-                Ok(0)
-            }
-            (IPPROTO_IP, IP_TTL) => {
-                let ttl = read_i32(optval, optlen)?;
-                if !(1..=255).contains(&ttl) {
-                    return Err(Errno::EINVAL);
-                }
-                sock.set_hop_limit(ttl as u8)?;
-                Ok(0)
-            }
-            _ => Err(Errno::ENOPROTOOPT),
+    with_socket(fd, |sock| match (level, optname) {
+        (SOL_SOCKET, SO_REUSEADDR) => {
+            sock.set_reuse_addr(read_i32(optval, optlen)? != 0);
+            Ok(0)
         }
+        (SOL_SOCKET, SO_OOBINLINE | SO_DONTROUTE | SO_BROADCAST | SO_KEEPALIVE) => {
+            let _ = read_i32(optval, optlen)?;
+            Ok(0)
+        }
+        (SOL_SOCKET, SO_SNDBUF) => {
+            let size = read_i32(optval, optlen)?;
+            if size < 0 {
+                return Err(Errno::EINVAL);
+            }
+            sock.set_send_buf_size(size as u64);
+            Ok(0)
+        }
+        (SOL_SOCKET, SO_SNDBUFFORCE) => {
+            let size = read_u32(optval, optlen)?;
+            sock.set_send_buf_size(core::cmp::min(size, i32::MAX as u32) as u64);
+            Ok(0)
+        }
+        (SOL_SOCKET, SO_RCVBUF) => {
+            let size = read_i32(optval, optlen)?;
+            if size < 0 {
+                return Err(Errno::EINVAL);
+            }
+            sock.set_recv_buf_size(size as u64);
+            Ok(0)
+        }
+        (SOL_SOCKET, SO_RCVBUFFORCE) => {
+            let size = read_u32(optval, optlen)?;
+            sock.set_recv_buf_size(core::cmp::min(size, i32::MAX as u32) as u64);
+            Ok(0)
+        }
+        (SOL_SOCKET, SO_RCVTIMEO) => {
+            sock.set_recv_timeout(read_timespec(optval, optlen)?);
+            Ok(0)
+        }
+        (SOL_SOCKET, SO_SNDTIMEO) => {
+            sock.set_send_timeout(read_timespec(optval, optlen)?);
+            Ok(0)
+        }
+        (IPPROTO_TCP, TCP_NODELAY) => {
+            sock.set_tcp_nodelay(read_i32(optval, optlen)? != 0)?;
+            Ok(0)
+        }
+        (IPPROTO_IP, IP_TTL) => {
+            let ttl = read_i32(optval, optlen)?;
+            if !(1..=255).contains(&ttl) {
+                return Err(Errno::EINVAL);
+            }
+            sock.set_hop_limit(ttl as u8)?;
+            Ok(0)
+        }
+        (IPPROTO_IP, IP_RECVERR) => {
+            let _ = read_i32(optval, optlen)?;
+            Ok(0)
+        }
+        _ => Err(Errno::ENOPROTOOPT),
     })
 }
 
@@ -751,6 +772,7 @@ pub fn sys_getsockopt(
                 let value = if sock.tcp_nodelay()? { 1i32 } else { 0i32 };
                 write_sockopt(optval, optlen, &value)
             }
+            (IPPROTO_TCP, TCP_MAXSEG) => write_sockopt(optval, optlen, &TCP_DEFAULT_MAXSEG),
             (SOL_SOCKET, _) | (IPPROTO_IP, _) | (IPPROTO_TCP, _) => Err(Errno::ENOPROTOOPT),
             _ => Err(Errno::EOPNOTSUPP),
         }?;

@@ -23,6 +23,8 @@ const LUA_SCRIPT: &str = "lua_testcode.sh\0";
 const LMBENCH_SCRIPT: &str = "lmbench_testcode.sh\0";
 const LTP_SCRIPT: &str = "ltp_testcode.sh\0";
 const IOZONE_SCRIPT: &str = "iozone_testcode.sh\0";
+const NETPERF_SCRIPT: &str = "netperf_testcode.sh\0";
+const IPERF_SCRIPT: &str = "iperf_testcode.sh\0";
 
 const RV_MUSL_LOADER: &str = "/lib/ld-musl-riscv64.so.1\0";
 const RV_MUSL_SF_LOADER: &str = "/lib/ld-musl-riscv64-sf.so.1\0";
@@ -514,6 +516,40 @@ fn _run_lmbench_glibc() {
     cleanup_benchmark_state();
 }
 
+fn _run_netperf_musl() {
+    prepare_benchmark_dirs();
+    prepare_musl_loader_links();
+    prepare_bin_shell(BUSYBOX_PATH);
+    let envp: &[*const u8] = &[
+        "LD_LIBRARY_PATH=/musl/lib:/musl\0".as_ptr(),
+        core::ptr::null(),
+    ];
+    run_shell_script_with_env("/musl/\0", BUSYBOX_PATH, NETPERF_SCRIPT, envp);
+}
+
+fn _run_netperf_glibc() {
+    prepare_benchmark_dirs();
+    prepare_glibc_loader_links();
+    prepare_bin_shell(GLIBC_BUSYBOX_PATH);
+    let envp: &[*const u8] = &[
+        "LD_LIBRARY_PATH=/glibc/lib:/glibc\0".as_ptr(),
+        core::ptr::null(),
+    ];
+    run_shell_script_with_env("/glibc/\0", GLIBC_BUSYBOX_PATH, NETPERF_SCRIPT, envp);
+}
+
+fn _run_iperf_musl() {
+    prepare_benchmark_dirs();
+    prepare_bin_shell(BUSYBOX_PATH);
+    run_shell_script("/musl/\0", BUSYBOX_PATH, IPERF_SCRIPT);
+}
+
+fn _run_iperf_glibc() {
+    prepare_benchmark_dirs();
+    prepare_bin_shell(GLIBC_BUSYBOX_PATH);
+    run_shell_script("/glibc/\0", GLIBC_BUSYBOX_PATH, IPERF_SCRIPT);
+}
+
 // ==== LTP 测例 ==== //
 
 const LTP_SKIP: &[&str] = &[
@@ -707,8 +743,12 @@ fn main() -> i32 {
     // _run_libctest_musl();
     // _run_lua_musl();
     // _run_lua_glibc();
+    // _run_iperf_musl();
+    // _run_iperf_glibc();
     // _run_iozone_glibc();
     // _run_iozone_musl();
+    _run_netperf_musl();
+    _run_netperf_glibc();
     // _run_lmbench_musl();
     // _run_lmbench_glibc();
     _run_ltp_musl();
@@ -731,12 +771,16 @@ fn main() -> i32 {
     // _run_libctest_musl();
     // _run_lua_musl();
     // _run_lua_glibc();
+    // _run_iperf_musl();
+    // _run_iperf_glibc();
     // _run_iozone_glibc();
     // _run_iozone_musl();
+    _run_netperf_musl();
+    _run_netperf_glibc();
     // _run_lmbench_musl();
     // _run_lmbench_glibc();
-    _run_ltp_musl();
-    _run_ltp_glibc();
+    // _run_ltp_musl();
+    // _run_ltp_glibc();
     println!("[testrunner] all selected tests finished, powering off");
     poweroff();
     0

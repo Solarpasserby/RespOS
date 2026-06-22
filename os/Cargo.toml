@@ -17,7 +17,7 @@ bitflags = "1.2.1"
 xmas-elf = "0.7.0"
 virtio-drivers = { version = "0.11.0", features = ["alloc"] }
 spin = "0.9.8"
-smoltcp = { version = "0.11", default-features = false, features = ["alloc", "log", "medium-ethernet", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-udp"] }
+smoltcp = { path = "../vendor/smoltcp", default-features = false, features = ["alloc", "log", "medium-ethernet", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-udp"] }
 hashbrown = "0.16.1"
 lwext4_rust = { path = "../vendor/lwext4_rust", default-features = false }
 

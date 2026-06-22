@@ -6,7 +6,9 @@
 extern crate alloc;
 
 use alloc::{collections::VecDeque, vec, vec::Vec};
-use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken as SmoltcpRx, TxToken as SmoltcpTx};
+use smoltcp::phy::{
+    Device, DeviceCapabilities, Medium, RxToken as SmoltcpRx, TxToken as SmoltcpTx,
+};
 use smoltcp::time::Instant;
 use smoltcp::wire::{IpProtocol, Ipv4Packet, TcpPacket};
 

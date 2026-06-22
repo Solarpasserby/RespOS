@@ -3,12 +3,12 @@
 //! UDP 是无连接协议，没有 TCP 那样的状态机。直接通过 smoltcp 的
 //! `udp::Socket` 进行数据报的收发。阻塞语义同样使用 `block_on` 模式。
 
+use alloc::vec;
 use core::{
     cell::UnsafeCell,
     net::SocketAddr,
     sync::atomic::{AtomicBool, Ordering},
 };
-use alloc::vec;
 use smoltcp::{
     iface::SocketHandle,
     socket::udp,
@@ -18,15 +18,14 @@ use spin::{Mutex, RwLock};
 
 use crate::{
     net::addr::{
-        from_ipendpoint_to_socketaddr, from_sockaddr_to_ipendpoint, is_unspecified,
-        LOOP_BACK_IP,
+        LOOP_BACK_IP, from_ipendpoint_to_socketaddr, from_sockaddr_to_ipendpoint, is_unspecified,
     },
     syscall::{Errno, SysResult},
     task::yield_current_task,
 };
 
-use super::{poll_interfaces, socket_set, SocketSetWrapper};
 use super::tcp::PollState;
+use super::{SocketSetWrapper, poll_interfaces, socket_set};
 
 /// UDP 套接字。
 ///
@@ -64,14 +63,18 @@ impl UdpSocket {
 
     pub fn local_addr(&self) -> Result<SocketAddr, Errno> {
         match self.local_addr.try_read() {
-            Some(addr) => addr.map(from_ipendpoint_to_socketaddr).ok_or(Errno::ENOTCONN),
+            Some(addr) => addr
+                .map(from_ipendpoint_to_socketaddr)
+                .ok_or(Errno::ENOTCONN),
             None => Err(Errno::ENOTCONN),
         }
     }
 
     pub fn remote_addr(&self) -> Result<SocketAddr, Errno> {
         match self.remote_addr.try_read() {
-            Some(addr) => addr.map(from_ipendpoint_to_socketaddr).ok_or(Errno::ENOTCONN),
+            Some(addr) => addr
+                .map(from_ipendpoint_to_socketaddr)
+                .ok_or(Errno::ENOTCONN),
             None => Err(Errno::ENOTCONN),
         }
     }
@@ -126,7 +129,7 @@ impl UdpSocket {
         if !self.is_reuse_addr() {
             socket_set()
                 .lock()
-                .bind_check(local_endpoint.addr, local_endpoint.port)?;
+                .udp_bind_check(local_endpoint.addr, local_endpoint.port)?;
         }
         let handle = unsafe { self.handle.get().read().unwrap() };
         socket_set()
@@ -171,13 +174,24 @@ impl UdpSocket {
                 get_ephemeral_port(),
             )))?;
         }
-        *self_remote_addr = Some(from_sockaddr_to_ipendpoint(remote_addr));
+        let remote_endpoint = from_sockaddr_to_ipendpoint(remote_addr);
+        let handle = unsafe { self.handle.get().read().unwrap() };
+        socket_set()
+            .lock()
+            .with_socket_mut::<_, udp::Socket, _>(handle, |socket| {
+                socket.connect(remote_endpoint);
+            });
+        *self_remote_addr = Some(remote_endpoint);
         Ok(())
     }
 
     /// 向 connect 时设置的远程地址发送数据。
     pub fn send(&self, buf: &[u8]) -> Result<usize, Errno> {
-        let remote_endpoint = *self.remote_addr.read().as_ref().ok_or(Errno::EDESTADDRREQ)?;
+        let remote_endpoint = *self
+            .remote_addr
+            .read()
+            .as_ref()
+            .ok_or(Errno::EDESTADDRREQ)?;
         self.send_impl(buf, remote_endpoint)
     }
 
@@ -185,9 +199,9 @@ impl UdpSocket {
     pub fn recv(&self, buf: &mut [u8]) -> Result<usize, Errno> {
         let remote_endpoint = *self.remote_addr.read().as_ref().ok_or(Errno::ENOTCONN)?;
         self.recv_impl(|socket| {
-            let (len, meta) = socket.recv_slice(buf).map_err(|e| match e {
+            let (_, meta) = socket.peek_slice(&mut []).map_err(|e| match e {
                 udp::RecvError::Exhausted => Errno::EAGAIN,
-                udp::RecvError::Truncated => Errno::EMSGSIZE,
+                udp::RecvError::Truncated => Errno::EAGAIN,
             })?;
             if !is_unspecified(remote_endpoint.addr) && remote_endpoint.addr != meta.endpoint.addr {
                 return Err(Errno::EAGAIN);
@@ -195,6 +209,10 @@ impl UdpSocket {
             if remote_endpoint.port != 0 && remote_endpoint.port != meta.endpoint.port {
                 return Err(Errno::EAGAIN);
             }
+            let (len, _) = socket.recv_slice(buf).map_err(|e| match e {
+                udp::RecvError::Exhausted => Errno::EAGAIN,
+                udp::RecvError::Truncated => Errno::EMSGSIZE,
+            })?;
             Ok(len)
         })
     }
@@ -312,13 +330,24 @@ pub fn get_ephemeral_port() -> u16 {
     const PORT_END: u16 = 0xffff;
     static CURR: Mutex<u16> = Mutex::new(PORT_START);
     let mut curr = CURR.lock();
-    let port = *curr;
-    if *curr == PORT_END {
-        *curr = PORT_START;
-    } else {
-        *curr += 1;
+    let mut tries = 0;
+    while tries <= PORT_END - PORT_START {
+        let port = *curr;
+        if *curr == PORT_END {
+            *curr = PORT_START;
+        } else {
+            *curr += 1;
+        }
+        if socket_set()
+            .lock()
+            .udp_bind_check(LOOP_BACK_IP, port)
+            .is_ok()
+        {
+            return port;
+        }
+        tries += 1;
     }
-    port
+    panic!("no available UDP port");
 }
 
 impl Drop for UdpSocket {
