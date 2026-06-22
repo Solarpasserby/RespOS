@@ -184,6 +184,9 @@ impl FileOp for NamedFifoEnd {
     fn get_stat(&self) -> SysResult<KStat> {
         self.inner.get_stat()
     }
+    fn fsync(&self) -> SysResult<usize> {
+        Err(Errno::EINVAL)
+    }
 }
 
 impl Drop for NamedFifoEnd {
@@ -412,6 +415,9 @@ impl FileOp for Pipe {
             .with_dev(PIPE_DEV)
             .with_ino(PIPE_INO)
             .with_mode(0o666))
+    }
+    fn fsync(&self) -> SysResult<usize> {
+        Err(Errno::EINVAL)
     }
 }
 

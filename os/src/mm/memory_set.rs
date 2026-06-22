@@ -70,6 +70,33 @@ pub struct MemorySet {
 }
 
 impl MemorySet {
+    #[cfg(target_arch = "loongarch64")]
+    fn initial_mmap_start() -> usize {
+        MMAP_MIN_ADDR
+    }
+
+    #[cfg(target_arch = "riscv64")]
+    fn initial_mmap_start() -> usize {
+        MMAP_MIN_ADDR
+    }
+
+    #[cfg(target_arch = "loongarch64")]
+    fn record_auto_mmap(&mut self, _start: usize, end: usize, map_perm: MapPermission) {
+        let prot_bits = MapPermission::READ | MapPermission::WRITE | MapPermission::EXECUTE;
+        self.mmap_start = if map_perm.intersection(prot_bits).is_empty() {
+            end.checked_add(PAGE_SIZE)
+                .filter(|next| *next <= MMAP_MAX_ADDR)
+                .unwrap_or(end)
+        } else {
+            end
+        };
+    }
+
+    #[cfg(target_arch = "riscv64")]
+    fn record_auto_mmap(&mut self, _start: usize, end: usize, _map_perm: MapPermission) {
+        self.mmap_start = end;
+    }
+
     /// 将一段空的逻辑段加入地址空间，在内部完成映射关系的建立
     fn push_empty_map_area(
         &mut self,
@@ -295,7 +322,7 @@ impl MemorySet {
             locked,
         ));
         if addr.is_none() {
-            self.mmap_start = end;
+            self.record_auto_mmap(start, end, map_perm);
         }
         Ok(start)
     }
@@ -328,7 +355,7 @@ impl MemorySet {
         area.locked = locked;
         self.push_empty_map_area(area, None, 0);
         if addr.is_none() {
-            self.mmap_start = end;
+            self.record_auto_mmap(start, end, map_perm);
         }
         Ok(start)
     }
@@ -370,7 +397,7 @@ impl MemorySet {
             0,
         );
         if addr.is_none() {
-            self.mmap_start = end;
+            self.record_auto_mmap(start, end, map_perm);
         }
         Ok(start)
     }
@@ -406,7 +433,7 @@ impl MemorySet {
         area.locked = locked;
         self.push_empty_map_area(area, None, 0);
         if addr.is_none() {
-            self.mmap_start = end;
+            self.record_auto_mmap(start, end, map_perm);
         }
         Ok(start)
     }
@@ -438,7 +465,7 @@ impl MemorySet {
         }
         self.areas.push(area);
         if addr.is_none() {
-            self.mmap_start = end;
+            self.record_auto_mmap(start, end, map_perm);
         }
         Ok(start)
     }
@@ -474,31 +501,71 @@ impl MemorySet {
         Ok(())
     }
 
-    // TOFIX: mmap 在分配内存时，如果分配跨过 2 MB 页表区间，则会导致第一个落进去的线程 TLS/启动栈会变成零
-    // 目前对 mmap 起点的控制和处理属于为了通过测例的妥协之举
     #[cfg(target_arch = "loongarch64")]
     fn choose_mmap_start(&self, addr: Option<usize>, map_len: usize) -> SysResult<usize> {
+        const PMD_SIZE: usize = PAGE_SIZE * 512;
+
+        fn align_for_loongarch(start: usize, map_len: usize) -> SysResult<usize> {
+            let end = start.checked_add(map_len).ok_or(Errno::ENOMEM)?;
+            if map_len < PMD_SIZE && start / PMD_SIZE != (end - 1) / PMD_SIZE {
+                Ok((start + PMD_SIZE - 1) & !(PMD_SIZE - 1))
+            } else {
+                Ok(start)
+            }
+        }
+
         match addr {
             Some(start) => Ok(start),
             None => {
-                let mut start = self.mmap_start;
-                {
-                    const PMD_SIZE: usize = PAGE_SIZE * 512;
+                let mut start = align_for_loongarch(self.mmap_start, map_len)?;
+                loop {
                     let end = start.checked_add(map_len).ok_or(Errno::ENOMEM)?;
-                    if map_len < PMD_SIZE && start / PMD_SIZE != (end - 1) / PMD_SIZE {
-                        start = (start + PMD_SIZE - 1) & !(PMD_SIZE - 1);
+                    if end > MMAP_MAX_ADDR {
+                        return Err(Errno::ENOMEM);
                     }
+                    let vpn_range =
+                        VPNRange::new(VirtAddr::from(start).floor(), VirtAddr::from(end).ceil());
+                    if let Some(area) = self
+                        .areas
+                        .iter()
+                        .find(|area| area.vpn_range.intersect_with(&vpn_range))
+                    {
+                        start = usize::from(VirtAddr::from(area.vpn_range.get_end()))
+                            .checked_add(PAGE_SIZE)
+                            .ok_or(Errno::ENOMEM)?;
+                        start = align_for_loongarch(start, map_len)?;
+                        continue;
+                    }
+                    return Ok(start);
                 }
-                Ok(start)
             }
         }
     }
 
     #[cfg(target_arch = "riscv64")]
-    fn choose_mmap_start(&self, addr: Option<usize>, _map_len: usize) -> SysResult<usize> {
+    fn choose_mmap_start(&self, addr: Option<usize>, map_len: usize) -> SysResult<usize> {
         match addr {
             Some(start) => Ok(start),
-            None => Ok(self.mmap_start),
+            None => {
+                let mut start = self.mmap_start;
+                loop {
+                    let end = start.checked_add(map_len).ok_or(Errno::ENOMEM)?;
+                    if end > MMAP_MAX_ADDR {
+                        return Err(Errno::ENOMEM);
+                    }
+                    let vpn_range =
+                        VPNRange::new(VirtAddr::from(start).floor(), VirtAddr::from(end).ceil());
+                    if let Some(area) = self
+                        .areas
+                        .iter()
+                        .find(|area| area.vpn_range.intersect_with(&vpn_range))
+                    {
+                        start = usize::from(VirtAddr::from(area.vpn_range.get_end()));
+                        continue;
+                    }
+                    return Ok(start);
+                }
+            }
         }
     }
 
@@ -510,6 +577,11 @@ impl MemorySet {
         }
         let vpn_range = VPNRange::new(VirtAddr::from(addr).floor(), VirtAddr::from(end).ceil());
         self.remove_area_with_overlap_range(vpn_range)?;
+        #[cfg(target_arch = "loongarch64")]
+        if self.mmap_start == end || self.mmap_start == end.saturating_add(PAGE_SIZE) {
+            self.mmap_start = addr;
+        }
+        #[cfg(target_arch = "riscv64")]
         if self.mmap_start == end {
             self.mmap_start = addr;
         }
@@ -813,7 +885,7 @@ impl MemorySet {
         Self {
             brk: 0,
             heap_bottom: 0,
-            mmap_start: MMAP_MIN_ADDR,
+            mmap_start: Self::initial_mmap_start(),
             page_table: PageTable::new(),
             areas: Vec::new(),
         }
@@ -823,7 +895,7 @@ impl MemorySet {
         Self {
             brk: 0,
             heap_bottom: 0,
-            mmap_start: MMAP_MIN_ADDR,
+            mmap_start: Self::initial_mmap_start(),
             page_table: PageTable::from_kernel(),
             areas: Vec::new(),
         }

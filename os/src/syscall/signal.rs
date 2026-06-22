@@ -8,6 +8,47 @@ use crate::task::{TASK_MANAGER, current_task, yield_current_task};
 use crate::timer::{TimeSpec, get_timeout_ms};
 use alloc::vec::Vec;
 
+#[cfg(target_arch = "loongarch64")]
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct UserSigAction {
+    handler: usize,
+    flags: usize,
+    mask: SigSet,
+}
+
+#[cfg(not(target_arch = "loongarch64"))]
+type UserSigAction = SigAction;
+
+#[cfg(target_arch = "loongarch64")]
+fn sigaction_from_user(action: UserSigAction) -> SigAction {
+    SigAction {
+        sa_handler: action.handler,
+        flags: crate::signal::sig_handler::SigActionFlag::from_bits_truncate(action.flags as u32),
+        restorer: 0,
+        mask: action.mask,
+    }
+}
+
+#[cfg(not(target_arch = "loongarch64"))]
+fn sigaction_from_user(action: UserSigAction) -> SigAction {
+    action
+}
+
+#[cfg(target_arch = "loongarch64")]
+fn sigaction_to_user(action: SigAction) -> UserSigAction {
+    UserSigAction {
+        handler: action.sa_handler,
+        flags: action.flags.bits() as usize,
+        mask: action.mask,
+    }
+}
+
+#[cfg(not(target_arch = "loongarch64"))]
+fn sigaction_to_user(action: SigAction) -> UserSigAction {
+    action
+}
+
 #[cfg(target_arch = "riscv64")]
 fn restore_sig_context(
     trap_cx: &mut crate::arch::trap::TrapContext,
@@ -248,20 +289,22 @@ pub fn sys_sigaction(signum: i32, act: *const u8, oldact: *mut u8) -> SysResult<
         return Err(Errno::EINVAL);
     }
 
-    let act_ptr = act as *const SigAction;
-    let oldact_ptr = oldact as *mut SigAction;
+    let act_ptr = act as *const UserSigAction;
+    let oldact_ptr = oldact as *mut UserSigAction;
     let task = current_task().expect("[kernel] current task is None.");
 
     // 写回旧动作
     if !oldact.is_null() {
         let old_action = task.op_sig_handler(|handler| handler.get(sig));
-        copy_to_user(oldact_ptr, &old_action as *const SigAction, 1)?;
+        let old_user_action = sigaction_to_user(old_action);
+        copy_to_user(oldact_ptr, &old_user_action as *const UserSigAction, 1)?;
     }
 
     // 读入新动作
     if !act.is_null() {
-        let mut new_action: SigAction = unsafe { core::mem::zeroed() }; // 初始化，不用default是因为字段 SigActionFlag 和 SigSet 的 bitflags 版本（1.2.1）不自动实现 Default
-        copy_from_user(&mut new_action as *mut SigAction, act_ptr, 1)?;
+        let mut new_user_action: UserSigAction = unsafe { core::mem::zeroed() };
+        copy_from_user(&mut new_user_action as *mut UserSigAction, act_ptr, 1)?;
+        let mut new_action = sigaction_from_user(new_user_action);
         new_action.mask.remove_signal(Sig::SIGKILL);
         new_action.mask.remove_signal(Sig::SIGSTOP);
         task.op_sig_handler_mut(|handler| handler.update(sig, new_action));

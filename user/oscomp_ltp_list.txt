@@ -1,6 +1,6 @@
 # oscomp LTP test list - Phase 1: identity — process & system info (37 tests)
 #confstr01
-#getcontext01
+getcontext01
 #getdomainname01
 #getegid01
 #getegid01_16
@@ -9,10 +9,10 @@
 #geteuid01
 #getgid01
 #getgid03
-#gethostbyname_r01
-#gethostid01
+gethostbyname_r01
+gethostid01
 #gethostname01
-#gethostname02
+gethostname02
 #getpagesize01
 #getpgid01
 #getpgid02
@@ -56,7 +56,7 @@
 #clock_getres01
 #clock_gettime01
 #clock_gettime02
-clock_gettime04
+#clock_gettime04
 #clock_nanosleep02
 #clock_settime02
 #getitimer01
@@ -66,16 +66,16 @@ clock_gettime04
 #nanosleep04
 #setitimer01
 #setitimer02
-timer_delete01
-timer_delete02
-timer_getoverrun01
-timer_settime01
-timer_settime02
+#timer_delete01
+#timer_delete02
+#timer_getoverrun01
+#timer_settime01
+#timer_settime02
 timerfd01
-timerfd02
-timerfd_create01
-timerfd_gettime01
-timerfd_settime01
+#timerfd02
+#timerfd_create01
+#timerfd_gettime01
+#timerfd_settime01
 
 # oscomp LTP test list - Phase 4: early_process — exit, abort, fork (15 tests)
 #exit01
@@ -129,8 +129,8 @@ timerfd_settime01
 #fcntl03_64
 #fcntl04
 #fcntl04_64
-#fcntl05
-#fcntl05_64
+fcntl05
+fcntl05_64
 #fcntl08
 #fcntl08_64
 #fcntl12
@@ -205,7 +205,7 @@ timerfd_settime01
 #openat01
 #openat02
 #openat02_child
-#openat03
+##openat03
 #openat04
 #openat201
 #openat202

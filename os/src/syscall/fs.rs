@@ -16,6 +16,7 @@ use crate::mm::{
     VPNRange, VirtAddr, check_user_readable, check_user_writable, copy_cstr_from_user,
     copy_from_user, copy_to_user,
 };
+use crate::mutex::SpinLock;
 use crate::net::socket::Socket;
 use crate::signal::sig_struct::{Sig, SigSet};
 use crate::signal::{SiField, SigInfo};
@@ -24,7 +25,8 @@ use crate::task::{
     yield_current_task,
 };
 use crate::timer::{TimeSpec, get_time_ms, get_timeout_us};
-use alloc::{string::String, sync::Arc, vec::Vec};
+use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
+use lazy_static::lazy_static;
 
 const UTIME_NOW: isize = 1_073_741_823;
 const UTIME_OMIT: isize = 1_073_741_822;
@@ -38,6 +40,57 @@ const XATTR_CREATE: usize = 0x1;
 const XATTR_REPLACE: usize = 0x2;
 const XATTR_NAME_MAX: usize = 255;
 const XATTR_SIZE_MAX: usize = 65_536;
+const CLOSE_RANGE_UNSHARE: usize = 1 << 1;
+const CLOSE_RANGE_CLOEXEC: usize = 1 << 2;
+
+const LOCK_SH: usize = 1;
+const LOCK_EX: usize = 2;
+const LOCK_NB: usize = 4;
+const LOCK_UN: usize = 8;
+
+const F_RDLCK: i16 = 0;
+const F_WRLCK: i16 = 1;
+const F_UNLCK: i16 = 2;
+const SEEK_SET: i16 = 0;
+const SEEK_CUR: i16 = 1;
+const SEEK_END: i16 = 2;
+
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct LinuxFlock {
+    pub l_type: i16,
+    pub l_whence: i16,
+    pub l_start: i64,
+    pub l_len: i64,
+    pub l_pid: i32,
+}
+
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum FlockKind {
+    Shared,
+    Exclusive,
+}
+
+#[derive(Copy, Clone)]
+struct FlockEntry {
+    owner: usize,
+    kind: FlockKind,
+}
+
+#[derive(Copy, Clone)]
+struct PosixLockEntry {
+    owner_pid: usize,
+    start: u64,
+    end: Option<u64>,
+    kind: FlockKind,
+}
+
+lazy_static! {
+    static ref FLOCKS: SpinLock<BTreeMap<(u64, u64), alloc::vec::Vec<FlockEntry>>> =
+        SpinLock::new(BTreeMap::new());
+    static ref POSIX_LOCKS: SpinLock<BTreeMap<(u64, u64), alloc::vec::Vec<PosixLockEntry>>> =
+        SpinLock::new(BTreeMap::new());
+}
 
 // 使用 mm 实现的 `copy_cstr_from_user`, `copy_from_user`, `copy_to_user` 来访问用户空间的数据
 
@@ -271,6 +324,48 @@ pub fn sys_fremovexattr(fd: usize, name: *const u8) -> SysResult<usize> {
     remove_xattr(target, name)
 }
 
+fn raise_sigxfsz() {
+    if let Some(task) = current_task() {
+        let siginfo = SigInfo::new(Sig::SIGXFSZ.raw(), SigInfo::KERNEL, SiField::None);
+        task.receive_siginfo(siginfo, false);
+    }
+}
+
+fn limit_regular_file_write(
+    file: &Arc<dyn FileOp>,
+    flags: OpenFlags,
+    offset_override: Option<usize>,
+    requested: usize,
+) -> SysResult<usize> {
+    let stat = file.get_stat()?;
+    if stat.ty != InodeType::Regular {
+        return Ok(requested);
+    }
+
+    let task = current_task().expect("[kernel] current task is None.");
+    let limit = task.fsize_limit().0;
+    if limit == usize::MAX {
+        return Ok(requested);
+    }
+
+    let offset = if let Some(offset) = offset_override {
+        offset
+    } else if flags.contains(OpenFlags::O_APPEND) {
+        stat.size
+    } else {
+        file.get_offset()
+    };
+    if offset >= limit && offset >= stat.size {
+        raise_sigxfsz();
+        return Err(Errno::EFBIG);
+    }
+
+    if offset.saturating_add(requested) <= limit || offset.saturating_add(requested) <= stat.size {
+        return Ok(requested);
+    }
+    Ok(limit.saturating_sub(offset))
+}
+
 /// 系统调用 sys-read
 pub fn sys_read(fd: usize, buf: *mut u8, len: usize) -> SysResult<usize> {
     if len == 0 {
@@ -382,7 +477,20 @@ pub fn sys_pwrite64(fd: usize, buf: *mut u8, len: usize, offset: isize) -> SysRe
     let mut total = 0usize;
     let mut ret = Ok(0usize);
     while total < len {
-        let chunk_len = (len - total).min(kbuf.len());
+        let requested = (len - total).min(kbuf.len());
+        let chunk_len = match limit_regular_file_write(
+            &file,
+            OpenFlags::empty(),
+            Some(offset as usize + total),
+            requested,
+        ) {
+            Ok(0) => break,
+            Ok(chunk_len) => chunk_len,
+            Err(err) => {
+                ret = Err(err);
+                break;
+            }
+        };
         if let Err(err) = copy_from_user(kbuf.as_mut_ptr(), unsafe { buf.add(total) }, chunk_len) {
             ret = Err(err);
             break;
@@ -585,7 +693,14 @@ pub fn sys_write(fd: usize, buf: *mut u8, len: usize) -> SysResult<usize> {
             }
             break;
         }
-        let chunk_len = (len - total).min(kbuf.len());
+        let requested = (len - total).min(kbuf.len());
+        let chunk_len = match limit_regular_file_write(&file, fd_entry.get_flags(), None, requested)
+        {
+            Ok(0) => break,
+            Ok(chunk_len) => chunk_len,
+            Err(err) if total == 0 => return Err(err),
+            Err(_) => break,
+        };
         copy_from_user(kbuf.as_mut_ptr(), unsafe { buf.add(total) }, chunk_len)?;
         let written = match file.write(&kbuf[..chunk_len]) {
             Ok(written) => written,
@@ -1083,10 +1198,310 @@ pub fn sys_openat2(
     sys_openat(dirfd, path, khow.flags as usize, khow.mode as usize)
 }
 
+fn flock_owner(file: &alloc::sync::Arc<dyn FileOp>) -> usize {
+    alloc::sync::Arc::as_ptr(file) as *const () as usize
+}
+
+fn flock_key(file: &alloc::sync::Arc<dyn FileOp>) -> SysResult<(u64, u64)> {
+    let stat = file.get_stat()?;
+    if stat.ino == 0 {
+        Ok((stat.dev, flock_owner(file) as u64))
+    } else {
+        Ok((stat.dev, stat.ino))
+    }
+}
+
+fn lock_range(start: u64, len: i64) -> SysResult<(u64, Option<u64>)> {
+    if len == 0 {
+        return Ok((start, None));
+    }
+    if len > 0 {
+        let end = start
+            .checked_add(len as u64)
+            .and_then(|end| end.checked_sub(1))
+            .ok_or(Errno::EINVAL)?;
+        return Ok((start, Some(end)));
+    }
+    let back = (-len) as u64;
+    if back > start {
+        return Err(Errno::EINVAL);
+    }
+    Ok((start - back, start.checked_sub(1)))
+}
+
+fn normalize_flock(file: &alloc::sync::Arc<dyn FileOp>, lock: LinuxFlock) -> SysResult<LinuxFlock> {
+    if !matches!(lock.l_whence, SEEK_SET | SEEK_CUR | SEEK_END)
+        || !matches!(lock.l_type, F_RDLCK | F_WRLCK | F_UNLCK)
+    {
+        return Err(Errno::EINVAL);
+    }
+
+    let base = match lock.l_whence {
+        SEEK_SET => 0i128,
+        SEEK_CUR => file.get_offset() as i128,
+        SEEK_END => file.get_stat()?.size as i128,
+        _ => return Err(Errno::EINVAL),
+    };
+    let start = base + lock.l_start as i128;
+    if start < 0 || start > u64::MAX as i128 {
+        return Err(Errno::EINVAL);
+    }
+    let start = start as u64;
+    let (range_start, range_end) = lock_range(start, lock.l_len)?;
+    let range_len = range_end
+        .map(|end| end.saturating_sub(range_start).saturating_add(1) as i64)
+        .unwrap_or(0);
+    Ok(LinuxFlock {
+        l_whence: SEEK_SET,
+        l_start: range_start as i64,
+        l_len: range_len,
+        ..lock
+    })
+}
+
+fn ranges_overlap(a_start: u64, a_end: Option<u64>, b_start: u64, b_end: Option<u64>) -> bool {
+    let a_end = a_end.unwrap_or(u64::MAX);
+    let b_end = b_end.unwrap_or(u64::MAX);
+    a_start <= b_end && b_start <= a_end
+}
+
+fn posix_lock_conflict(
+    entries: &[PosixLockEntry],
+    owner_pid: usize,
+    requested: &LinuxFlock,
+) -> SysResult<Option<PosixLockEntry>> {
+    let start = requested.l_start as u64;
+    let (_, end) = lock_range(start, requested.l_len)?;
+    let kind = match requested.l_type {
+        F_RDLCK => FlockKind::Shared,
+        F_WRLCK => FlockKind::Exclusive,
+        F_UNLCK => return Ok(None),
+        _ => return Err(Errno::EINVAL),
+    };
+    Ok(entries.iter().copied().find(|entry| {
+        entry.owner_pid != owner_pid
+            && ranges_overlap(entry.start, entry.end, start, end)
+            && (entry.kind == FlockKind::Exclusive || kind == FlockKind::Exclusive)
+    }))
+}
+
+fn set_posix_lock(file: &alloc::sync::Arc<dyn FileOp>, lock: LinuxFlock) -> SysResult {
+    let key = flock_key(file)?;
+    let owner_pid = current_task()
+        .expect("[kernel] current task is None.")
+        .tgid();
+    let start = lock.l_start as u64;
+    let (_, end) = lock_range(start, lock.l_len)?;
+    let mut locks = POSIX_LOCKS.lock();
+    let entries = locks.entry(key).or_default();
+
+    entries.retain(|entry| {
+        entry.owner_pid != owner_pid || !ranges_overlap(entry.start, entry.end, start, end)
+    });
+    if lock.l_type == F_UNLCK {
+        if entries.is_empty() {
+            locks.remove(&key);
+        }
+        return Ok(());
+    }
+    if posix_lock_conflict(entries, owner_pid, &lock)?.is_some() {
+        return Err(Errno::EAGAIN);
+    }
+    let kind = if lock.l_type == F_RDLCK {
+        FlockKind::Shared
+    } else {
+        FlockKind::Exclusive
+    };
+    entries.push(PosixLockEntry {
+        owner_pid,
+        start,
+        end,
+        kind,
+    });
+    Ok(())
+}
+
+fn get_posix_lock(file: &alloc::sync::Arc<dyn FileOp>, lock: LinuxFlock) -> SysResult<LinuxFlock> {
+    let key = flock_key(file)?;
+    let owner_pid = current_task()
+        .expect("[kernel] current task is None.")
+        .tgid();
+    let locks = POSIX_LOCKS.lock();
+    let Some(entries) = locks.get(&key) else {
+        return Ok(LinuxFlock {
+            l_type: F_UNLCK,
+            ..lock
+        });
+    };
+    if let Some(conflict) = posix_lock_conflict(entries, owner_pid, &lock)? {
+        Ok(LinuxFlock {
+            l_type: if conflict.kind == FlockKind::Shared {
+                F_RDLCK
+            } else {
+                F_WRLCK
+            },
+            l_whence: SEEK_SET,
+            l_start: conflict.start as i64,
+            l_len: conflict
+                .end
+                .map(|end| end.saturating_sub(conflict.start).saturating_add(1) as i64)
+                .unwrap_or(0),
+            l_pid: conflict.owner_pid as i32,
+        })
+    } else {
+        Ok(LinuxFlock {
+            l_type: F_UNLCK,
+            ..lock
+        })
+    }
+}
+
+fn release_flock_for_file(file: &alloc::sync::Arc<dyn FileOp>) {
+    let Ok(key) = flock_key(file) else {
+        return;
+    };
+    let owner = flock_owner(file);
+    let mut locks = FLOCKS.lock();
+    if let Some(entries) = locks.get_mut(&key) {
+        entries.retain(|entry| entry.owner != owner);
+        if entries.is_empty() {
+            locks.remove(&key);
+        }
+    }
+}
+
+fn release_flock_for_file_if_last_fd(fd: usize, file: &alloc::sync::Arc<dyn FileOp>) {
+    let Some(task) = current_task() else {
+        release_flock_for_file(file);
+        return;
+    };
+    let owner = flock_owner(file);
+    let has_other_fd = task.open_fds().into_iter().any(|other_fd| {
+        other_fd != fd
+            && task
+                .get_fd_entry(other_fd)
+                .map(|entry| flock_owner(&entry.file) == owner)
+                .unwrap_or(false)
+    });
+    if !has_other_fd {
+        release_flock_for_file(file);
+    }
+}
+
+fn release_posix_locks_for_file(file: &alloc::sync::Arc<dyn FileOp>) {
+    let Ok(key) = flock_key(file) else {
+        return;
+    };
+    let Some(task) = current_task() else {
+        return;
+    };
+    let owner_pid = task.tgid();
+    let mut locks = POSIX_LOCKS.lock();
+    if let Some(entries) = locks.get_mut(&key) {
+        entries.retain(|entry| entry.owner_pid != owner_pid);
+        if entries.is_empty() {
+            locks.remove(&key);
+        }
+    }
+}
+
+fn flock_conflicts(entries: &[FlockEntry], owner: usize, kind: FlockKind) -> bool {
+    entries.iter().any(|entry| {
+        entry.owner != owner && (entry.kind == FlockKind::Exclusive || kind == FlockKind::Exclusive)
+    })
+}
+
+fn set_flock(file: &alloc::sync::Arc<dyn FileOp>, kind: FlockKind) -> SysResult {
+    let key = flock_key(file)?;
+    let owner = flock_owner(file);
+    let mut locks = FLOCKS.lock();
+    let entries = locks.entry(key).or_default();
+    if flock_conflicts(entries, owner, kind) {
+        return Err(Errno::EAGAIN);
+    }
+    entries.retain(|entry| entry.owner != owner);
+    entries.push(FlockEntry { owner, kind });
+    Ok(())
+}
+
+pub fn sys_flock(fd: usize, operation: usize) -> SysResult<usize> {
+    let op = operation & !LOCK_NB;
+    if operation & !(LOCK_SH | LOCK_EX | LOCK_NB | LOCK_UN) != 0
+        || !matches!(op, LOCK_SH | LOCK_EX | LOCK_UN)
+    {
+        return Err(Errno::EINVAL);
+    }
+
+    let task = current_task().expect("[kernel] current task is None.");
+    let fd_entry = task.get_fd_entry(fd)?;
+    match op {
+        LOCK_UN => release_flock_for_file(&fd_entry.file),
+        LOCK_SH | LOCK_EX => {
+            let kind = if op == LOCK_SH {
+                FlockKind::Shared
+            } else {
+                FlockKind::Exclusive
+            };
+            loop {
+                match set_flock(&fd_entry.file, kind) {
+                    Ok(()) => break,
+                    Err(Errno::EAGAIN) if operation & LOCK_NB == 0 => {
+                        task.set_interruptible(true);
+                        if task.check_signal_interrupt() || task.is_interrupted() {
+                            task.clear_interrupted();
+                            task.set_interruptible(false);
+                            return Err(Errno::EINTR);
+                        }
+                        yield_current_task();
+                        task.set_interruptible(false);
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+        }
+        _ => return Err(Errno::EINVAL),
+    }
+    Ok(0)
+}
+
 /// 系统调用 sys-close
 pub fn sys_close(fd: usize) -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
+    if let Ok(fd_entry) = task.get_fd_entry(fd) {
+        release_flock_for_file_if_last_fd(fd, &fd_entry.file);
+        release_posix_locks_for_file(&fd_entry.file);
+    }
     task.close(fd)?;
+    Ok(0)
+}
+
+pub fn sys_close_range(first: usize, last: usize, flags: usize) -> SysResult<usize> {
+    const ALLOWED_FLAGS: usize = CLOSE_RANGE_UNSHARE | CLOSE_RANGE_CLOEXEC;
+    if first > last || flags & !ALLOWED_FLAGS != 0 {
+        return Err(Errno::EINVAL);
+    }
+
+    let task = current_task().expect("[kernel] current task is None.");
+    if flags & CLOSE_RANGE_UNSHARE != 0 {
+        task.unshare_fd_table();
+    }
+    let open_fds = task.open_fds();
+    for fd in open_fds {
+        if fd < first || fd > last {
+            continue;
+        }
+        if flags & CLOSE_RANGE_CLOEXEC != 0 {
+            let mut entry = task.get_fd_entry(fd)?;
+            entry.set_flags(entry.get_flags() | OpenFlags::O_CLOEXEC);
+            let _ = task.set_fd(fd, entry)?;
+        } else {
+            if let Ok(fd_entry) = task.get_fd_entry(fd) {
+                release_flock_for_file_if_last_fd(fd, &fd_entry.file);
+                release_posix_locks_for_file(&fd_entry.file);
+            }
+            let _ = task.close(fd);
+        }
+    }
     Ok(0)
 }
 
@@ -1655,6 +2070,38 @@ pub fn sys_lseek(fd: usize, offset: isize, whence: usize) -> SysResult<usize> {
     file.seek(new_offset as isize)
 }
 
+pub fn sys_sync_file_range(
+    fd: isize,
+    offset: isize,
+    nbytes: isize,
+    flags: usize,
+) -> SysResult<usize> {
+    const SYNC_FILE_RANGE_WAIT_BEFORE: usize = 1;
+    const SYNC_FILE_RANGE_WRITE: usize = 2;
+    const SYNC_FILE_RANGE_WAIT_AFTER: usize = 4;
+    const SYNC_FILE_RANGE_VALID_FLAGS: usize =
+        SYNC_FILE_RANGE_WAIT_BEFORE | SYNC_FILE_RANGE_WRITE | SYNC_FILE_RANGE_WAIT_AFTER;
+
+    if fd < 0 {
+        return Err(Errno::EBADF);
+    }
+    if flags & !SYNC_FILE_RANGE_VALID_FLAGS != 0 || offset < 0 || nbytes < 0 {
+        return Err(Errno::EINVAL);
+    }
+
+    let task = current_task().expect("[kernel] current task is None.");
+    let file = task.get_fd_entry(fd as usize)?.file;
+    file.can_seek()?;
+    if flags == 0 || nbytes == 0 {
+        return Ok(0);
+    }
+    if flags & SYNC_FILE_RANGE_WRITE != 0 {
+        file.fsync()
+    } else {
+        Ok(0)
+    }
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
 struct WinSize {
@@ -1873,7 +2320,41 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SysResult<usize> {
             let pipe = pipe_ref(&fd_entry.file).ok_or(Errno::EBADF)?;
             pipe.set_capacity(arg)
         }
-        F_GETLK | F_SETLK | F_SETLKW => Ok(0),
+        F_GETLK => {
+            let flock = arg as *mut LinuxFlock;
+            let mut lock = LinuxFlock::default();
+            copy_from_user(&mut lock as *mut LinuxFlock, flock as *const LinuxFlock, 1)?;
+            let lock = normalize_flock(&fd_entry.file, lock)?;
+            let lock = get_posix_lock(&fd_entry.file, lock)?;
+            copy_to_user(flock, &lock as *const LinuxFlock, 1)?;
+            Ok(0)
+        }
+        F_SETLK | F_SETLKW => {
+            let mut lock = LinuxFlock::default();
+            copy_from_user(&mut lock as *mut LinuxFlock, arg as *const LinuxFlock, 1)?;
+            let lock = normalize_flock(&fd_entry.file, lock)?;
+            if cmd == F_SETLK {
+                set_posix_lock(&fd_entry.file, lock)?;
+            } else {
+                loop {
+                    match set_posix_lock(&fd_entry.file, lock) {
+                        Ok(()) => break,
+                        Err(Errno::EAGAIN) => {
+                            task.set_interruptible(true);
+                            if task.check_signal_interrupt() || task.is_interrupted() {
+                                task.clear_interrupted();
+                                task.set_interruptible(false);
+                                return Err(Errno::EINTR);
+                            }
+                            yield_current_task();
+                            task.set_interruptible(false);
+                        }
+                        Err(err) => return Err(err),
+                    }
+                }
+            }
+            Ok(0)
+        }
         _ => Err(Errno::EINVAL),
     }
 }
@@ -2037,6 +2518,23 @@ pub fn sys_chdir(path: *const u8) -> SysResult<usize> {
     }
     check_dir_search_permission(&resolved.dentry)?;
     task.set_cwd(resolved);
+    Ok(0)
+}
+
+pub fn sys_fchdir(fd: usize) -> SysResult<usize> {
+    let task = current_task().expect("[kernel] current task is None.");
+    let fd_entry = task.get_fd_entry(fd)?;
+    let file = fd_entry
+        .file
+        .as_any()
+        .downcast_ref::<File>()
+        .ok_or(Errno::ENOTDIR)?;
+    if file.inode().node_type() != InodeType::Directory {
+        return Err(Errno::ENOTDIR);
+    }
+    let path = file.path();
+    check_dir_search_permission(&path.dentry)?;
+    task.set_cwd(path);
     Ok(0)
 }
 

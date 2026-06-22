@@ -371,6 +371,7 @@ pub fn sys_prlimit64(
     old_limit: *mut RLimit,
 ) -> SysResult<usize> {
     const RLIMIT_NOFILE: usize = 7;
+    const RLIMIT_FSIZE: usize = 1;
     const RLIMIT_STACK: usize = 3;
     const RLIM_INFINITY: usize = usize::MAX;
 
@@ -382,6 +383,10 @@ pub fn sys_prlimit64(
     let old = match resource {
         RLIMIT_NOFILE => {
             let (cur, max) = task.nofile_limit();
+            RLimit { cur, max }
+        }
+        RLIMIT_FSIZE => {
+            let (cur, max) = task.fsize_limit();
             RLimit { cur, max }
         }
         RLIMIT_STACK => RLimit {
@@ -397,8 +402,10 @@ pub fn sys_prlimit64(
     if !new_limit.is_null() {
         let mut limit = RLimit { cur: 0, max: 0 };
         copy_from_user(&mut limit as *mut RLimit, new_limit, 1)?;
-        if resource == RLIMIT_NOFILE {
-            task.set_nofile_limit(limit.cur, limit.max)?;
+        match resource {
+            RLIMIT_NOFILE => task.set_nofile_limit(limit.cur, limit.max)?,
+            RLIMIT_FSIZE => task.set_fsize_limit(limit.cur, limit.max)?,
+            _ => {}
         }
     }
 

@@ -562,7 +562,7 @@ impl FileOp for Socket {
     }
 
     fn fsync(&self) -> SysResult<usize> {
-        Ok(0)
+        Err(Errno::EINVAL)
     }
 }
 

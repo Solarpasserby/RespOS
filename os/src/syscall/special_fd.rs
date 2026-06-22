@@ -1,12 +1,19 @@
+use super::time::{ITimerSpec, clock_time_ms};
 use super::{Errno, SysResult};
 use crate::fs::vfs::InodeType;
-use crate::fs::{FdEntry, OpenFlags, SpecialFd};
-use crate::mm::{check_user_readable, copy_cstr_from_user};
-use crate::task::{TASK_MANAGER, current_task};
+use crate::fs::{FdEntry, FileOp, KStat, OpenFlags, SpecialFd};
+use crate::mm::{check_user_readable, copy_cstr_from_user, copy_from_user, copy_to_user};
+use crate::mutex::SpinLock;
+use crate::task::{TASK_MANAGER, current_task, yield_current_task};
+use crate::timer::TimeSpec;
 use alloc::sync::Arc;
+use core::any::Any;
 
 const O_NONBLOCK: usize = OpenFlags::O_NONBLOCK.bits() as usize;
 const O_CLOEXEC: usize = OpenFlags::O_CLOEXEC.bits() as usize;
+const TFD_TIMER_ABSTIME: usize = 1;
+const TFD_TIMER_CANCEL_ON_SET: usize = 1 << 1;
+const TFD_SETTIME_FLAGS: usize = TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET;
 
 const MFD_CLOEXEC: usize = 0x0001;
 const MFD_ALLOW_SEALING: usize = 0x0002;
@@ -44,6 +51,166 @@ fn flags_from_o_flags(flags: usize, allowed: usize) -> SysResult<OpenFlags> {
     Ok(fd_flags(flags & O_NONBLOCK != 0, flags & O_CLOEXEC != 0))
 }
 
+#[derive(Clone, Copy, Default)]
+struct TimerFdState {
+    interval_ms: usize,
+    deadline_ms: usize,
+    consumed: u64,
+}
+
+pub struct TimerFd {
+    clockid: usize,
+    flags: OpenFlags,
+    state: SpinLock<TimerFdState>,
+}
+
+impl TimerFd {
+    fn new(clockid: usize, flags: OpenFlags) -> Self {
+        Self {
+            clockid,
+            flags,
+            state: SpinLock::new(TimerFdState::default()),
+        }
+    }
+
+    fn expirations_locked(state: &TimerFdState, now_ms: usize) -> u64 {
+        if state.deadline_ms == 0 || now_ms < state.deadline_ms {
+            return 0;
+        }
+        if state.interval_ms == 0 {
+            return 1;
+        }
+        1 + ((now_ms - state.deadline_ms) / state.interval_ms) as u64
+    }
+
+    fn pending(&self) -> u64 {
+        let state = self.state.lock();
+        Self::expirations_locked(&state, clock_time_ms(self.clockid).unwrap_or(0))
+            .saturating_sub(state.consumed)
+    }
+
+    fn current_spec(&self) -> ITimerSpec {
+        let now_ms = clock_time_ms(self.clockid).unwrap_or(0);
+        let state = self.state.lock();
+        let remaining_ms = if state.deadline_ms == 0 {
+            0
+        } else if now_ms < state.deadline_ms {
+            state.deadline_ms - now_ms
+        } else if state.interval_ms == 0 {
+            0
+        } else {
+            let elapsed = now_ms - state.deadline_ms;
+            let rem = state.interval_ms - (elapsed % state.interval_ms);
+            if rem == state.interval_ms { 0 } else { rem }
+        };
+        ITimerSpec {
+            interval: ms_to_timespec(state.interval_ms),
+            value: ms_to_timespec(remaining_ms),
+        }
+    }
+}
+
+impl FileOp for TimerFd {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn read<'a>(&'a self, buf: &'a mut [u8]) -> SysResult<usize> {
+        if buf.len() < core::mem::size_of::<u64>() {
+            return Err(Errno::EINVAL);
+        }
+        let task = current_task().expect("[kernel] current task is None.");
+        loop {
+            let mut state = self.state.lock();
+            let expired = Self::expirations_locked(&state, clock_time_ms(self.clockid)?);
+            let pending = expired.saturating_sub(state.consumed);
+            if pending != 0 {
+                state.consumed = expired;
+                buf[..8].copy_from_slice(&pending.to_ne_bytes());
+                return Ok(8);
+            }
+            drop(state);
+            task.set_interruptible(true);
+            if task.check_signal_interrupt() || task.is_interrupted() {
+                task.clear_interrupted();
+                task.set_interruptible(false);
+                return Err(Errno::EINTR);
+            }
+            yield_current_task();
+            task.set_interruptible(false);
+        }
+    }
+
+    fn write<'a>(&'a self, _buf: &'a [u8]) -> SysResult<usize> {
+        Err(Errno::EINVAL)
+    }
+
+    fn can_seek(&self) -> SysResult {
+        Err(Errno::ESPIPE)
+    }
+
+    fn seek(&self, _offset: isize) -> SysResult<usize> {
+        Err(Errno::ESPIPE)
+    }
+
+    fn get_offset(&self) -> usize {
+        0
+    }
+
+    fn get_flags(&self) -> OpenFlags {
+        self.flags
+    }
+
+    fn get_stat(&self) -> SysResult<KStat> {
+        Ok(KStat::minimal(0, InodeType::Unknown))
+    }
+
+    fn readable(&self) -> bool {
+        true
+    }
+
+    fn writable(&self) -> bool {
+        false
+    }
+
+    fn read_ready(&self) -> bool {
+        self.pending() > 0
+    }
+}
+
+fn is_timerfd_clock(clockid: usize) -> bool {
+    const CLOCK_REALTIME: usize = 0;
+    const CLOCK_MONOTONIC: usize = 1;
+    const CLOCK_BOOTTIME: usize = 7;
+    const CLOCK_REALTIME_ALARM: usize = 8;
+    const CLOCK_BOOTTIME_ALARM: usize = 9;
+
+    matches!(
+        clockid,
+        CLOCK_REALTIME
+            | CLOCK_MONOTONIC
+            | CLOCK_BOOTTIME
+            | CLOCK_REALTIME_ALARM
+            | CLOCK_BOOTTIME_ALARM
+    )
+}
+
+fn ms_to_timespec(ms: usize) -> TimeSpec {
+    TimeSpec {
+        sec: (ms / 1000) as isize,
+        nsec: ((ms % 1000) * 1_000_000) as isize,
+    }
+}
+
+fn timerfd_ref(fd: usize) -> SysResult<Arc<dyn FileOp>> {
+    let task = current_task().expect("[kernel] current task is None.");
+    let entry = task.get_fd_entry(fd)?;
+    if entry.file.as_any().downcast_ref::<TimerFd>().is_none() {
+        return Err(Errno::EINVAL);
+    }
+    Ok(entry.file)
+}
+
 pub fn sys_eventfd2(_initval: usize, flags: usize) -> SysResult<usize> {
     let flags = flags_from_o_flags(flags, O_NONBLOCK | O_CLOEXEC)?;
     alloc_special_fd(flags)
@@ -75,9 +242,65 @@ pub fn sys_signalfd4(
     alloc_special_fd(flags)
 }
 
-pub fn sys_timerfd_create(_clockid: usize, flags: usize) -> SysResult<usize> {
+pub fn sys_timerfd_create(clockid: usize, flags: usize) -> SysResult<usize> {
+    if !is_timerfd_clock(clockid) {
+        return Err(Errno::EINVAL);
+    }
     let flags = flags_from_o_flags(flags, O_NONBLOCK | O_CLOEXEC)?;
-    alloc_special_fd(flags)
+    let task = current_task().expect("[kernel] current task is None.");
+    task.alloc_fd(FdEntry::new(Arc::new(TimerFd::new(clockid, flags)), flags))
+}
+
+pub fn sys_timerfd_gettime(fd: usize, curr_value: *mut ITimerSpec) -> SysResult<usize> {
+    let file = timerfd_ref(fd)?;
+    let timerfd = file.as_any().downcast_ref::<TimerFd>().unwrap();
+    let current = timerfd.current_spec();
+    copy_to_user(curr_value, &current as *const ITimerSpec, 1)?;
+    Ok(0)
+}
+
+pub fn sys_timerfd_settime(
+    fd: usize,
+    flags: usize,
+    new_value: *const ITimerSpec,
+    old_value: *mut ITimerSpec,
+) -> SysResult<usize> {
+    let file = timerfd_ref(fd)?;
+    if flags & !TFD_SETTIME_FLAGS != 0 {
+        return Err(Errno::EINVAL);
+    }
+    let timerfd = file.as_any().downcast_ref::<TimerFd>().unwrap();
+    let old = timerfd.current_spec();
+    let mut new_timer = ITimerSpec::default();
+    copy_from_user(&mut new_timer as *mut ITimerSpec, new_value, 1)?;
+    if !new_timer.value.is_valid_duration() || !new_timer.interval.is_valid_duration() {
+        return Err(Errno::EINVAL);
+    }
+    if !old_value.is_null() {
+        copy_to_user(old_value, &old as *const ITimerSpec, 1)?;
+    }
+
+    let value_ms = new_timer.value.checked_duration_ms().ok_or(Errno::EINVAL)?;
+    let interval_ms = new_timer
+        .interval
+        .checked_duration_ms()
+        .ok_or(Errno::EINVAL)?;
+    let now_ms = clock_time_ms(timerfd.clockid)?;
+    let deadline_ms = if value_ms == 0 {
+        0
+    } else if flags & TFD_TIMER_ABSTIME != 0 {
+        value_ms
+    } else {
+        now_ms.saturating_add(value_ms)
+    };
+
+    let mut state = timerfd.state.lock();
+    *state = TimerFdState {
+        interval_ms,
+        deadline_ms,
+        consumed: 0,
+    };
+    Ok(0)
 }
 
 pub fn sys_pidfd_open(pid: usize, flags: usize) -> SysResult<usize> {

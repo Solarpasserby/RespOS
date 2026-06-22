@@ -499,8 +499,17 @@ pub fn sys_accept4(socketfd: usize, addr: usize, addrlen: usize, flags: usize) -
 }
 
 pub fn sys_connect(socketfd: usize, addr: usize, addrlen: usize) -> SysResult<usize> {
-    let remote = read_sockaddr(addr, addrlen)?;
     with_socket(socketfd, |sock| {
+        if sock.domain == SocketDomain::AF_UNIX {
+            if addr == 0 {
+                return Err(Errno::EFAULT);
+            }
+            if addrlen < core::mem::size_of::<u16>() {
+                return Err(Errno::EINVAL);
+            }
+            return Err(Errno::ENOENT);
+        }
+        let remote = read_sockaddr(addr, addrlen)?;
         sock.connect(remote)?;
         Ok(0)
     })

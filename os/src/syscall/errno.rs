@@ -51,6 +51,8 @@ pub enum Errno {
     EMFILE = 24,
     /// 不是终端设备，常用于不支持终端相关 ioctl 的文件。
     ENOTTY = 25,
+    /// 文件过大。
+    EFBIG = 27,
     /// 设备或文件系统空间不足。
     ENOSPC = 28,
     /// 非法 seek，例如对 pipe、socket 等不可 seek 对象执行 lseek。
@@ -154,6 +156,7 @@ impl Errno {
             Errno::ENFILE => "Too many open files in system",
             Errno::EMFILE => "Too many open files",
             Errno::ENOTTY => "Not a typewriter", // 历史遗留术语，指代 TTY 设备，现在指代终端
+            Errno::EFBIG => "File too large",
             Errno::ENOSPC => "No space left on device",
             Errno::ESPIPE => "Illegal seek",
             Errno::ERANGE => "Result out of range",

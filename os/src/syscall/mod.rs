@@ -23,6 +23,7 @@ const SYSCALL_EVENTFD2: usize = 19;
 const SYSCALL_EPOLL_CREATE1: usize = 20;
 const SYSCALL_INOTIFY_INIT1: usize = 26;
 const SYSCALL_MKNODAT: usize = 33;
+const SYSCALL_FLOCK: usize = 32;
 const SYSCALL_MKDIRAT: usize = 34;
 const SYSCALL_UNLINKAT: usize = 35;
 const SYSCALL_SYMLINKAT: usize = 36;
@@ -35,6 +36,7 @@ const SYSCALL_FTRUNCATE: usize = 46;
 const SYSCALL_FALLOCATE: usize = 47;
 const SYSCALL_FACCESSAT: usize = 48;
 const SYSCALL_CHDIR: usize = 49;
+const SYSCALL_FCHDIR: usize = 50;
 const SYSCALL_FCHMOD: usize = 52;
 const SYSCALL_FCHMODAT: usize = 53;
 const SYSCALL_FCHOWNAT: usize = 54;
@@ -63,7 +65,10 @@ const SYSCALL_FSTATAT: usize = 79;
 const SYSCALL_FSTAT: usize = 80;
 const SYSCALL_FSYNC: usize = 82;
 const SYSCALL_FDATASYNC: usize = 83;
+const SYSCALL_SYNC_FILE_RANGE: usize = 84;
 const SYSCALL_TIMERFD_CREATE: usize = 85;
+const SYSCALL_TIMERFD_SETTIME: usize = 86;
+const SYSCALL_TIMERFD_GETTIME: usize = 87;
 const SYSCALL_UTIMENSAT: usize = 88;
 const SYSCALL_CAPGET: usize = 90;
 const SYSCALL_CAPSET: usize = 91;
@@ -186,6 +191,7 @@ const SYSCALL_OPEN_TREE: usize = 428;
 const SYSCALL_FSOPEN: usize = 430;
 const SYSCALL_FSPICK: usize = 433;
 const SYSCALL_PIDFD_OPEN: usize = 434;
+const SYSCALL_CLOSE_RANGE: usize = 436;
 const SYSCALL_OPENAT2: usize = 437;
 const SYSCALL_FACCESSAT2: usize = 439;
 const SYSCALL_MEMFD_SECRET: usize = 447;
@@ -275,6 +281,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         SYSCALL_INOTIFY_INIT1 => sys_inotify_init1(args[0]),
         SYSCALL_FCNTL => sys_fcntl(args[0], args[1], args[2]),
         SYSCALL_IOCTL => sys_ioctl(args[0], args[1], args[2]),
+        SYSCALL_FLOCK => sys_flock(args[0], args[1]),
         SYSCALL_MKDIRAT => sys_mkdirat(args[0] as isize, args[1] as *const u8, args[2]),
         SYSCALL_UNLINKAT => sys_unlinkat(args[0] as isize, args[1] as *const u8, args[2]),
         SYSCALL_SYMLINKAT => {
@@ -303,6 +310,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
             sys_faccessat(args[0] as isize, args[1] as *const u8, args[2], args[3])
         }
         SYSCALL_CHDIR => sys_chdir(args[0] as *const u8),
+        SYSCALL_FCHDIR => sys_fchdir(args[0]),
         SYSCALL_MKNODAT => sys_mknodat(args[0] as isize, args[1] as *const u8, args[2], args[3]),
         SYSCALL_FCHMOD => sys_fchmod(args[0], args[1]),
         SYSCALL_FCHMODAT => sys_fchmodat(args[0] as isize, args[1] as *const u8, args[2]),
@@ -370,7 +378,20 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         SYSCALL_FSTAT => sys_fstat(args[0], args[1] as *mut Stat),
         SYSCALL_FSYNC => sys_fsync(args[0]),
         SYSCALL_FDATASYNC => sys_fdatasync(args[0]),
+        SYSCALL_SYNC_FILE_RANGE => sys_sync_file_range(
+            args[0] as isize,
+            args[1] as isize,
+            args[2] as isize,
+            args[3],
+        ),
         SYSCALL_TIMERFD_CREATE => sys_timerfd_create(args[0], args[1]),
+        SYSCALL_TIMERFD_SETTIME => sys_timerfd_settime(
+            args[0],
+            args[1],
+            args[2] as *const ITimerSpec,
+            args[3] as *mut ITimerSpec,
+        ),
+        SYSCALL_TIMERFD_GETTIME => sys_timerfd_gettime(args[0], args[1] as *mut ITimerSpec),
         SYSCALL_FSTATFS => sys_fstatfs(args[0], args[1] as *mut crate::fs::Statfs64),
         SYSCALL_UTIMENSAT => sys_utimensat(
             args[0] as isize,
@@ -620,6 +641,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         SYSCALL_FSOPEN => sys_fsopen(args[0] as *const u8, args[1]),
         SYSCALL_FSPICK => sys_fspick(args[0] as isize, args[1] as *const u8, args[2]),
         SYSCALL_PIDFD_OPEN => sys_pidfd_open(args[0], args[1]),
+        SYSCALL_CLOSE_RANGE => sys_close_range(args[0], args[1], args[2]),
         SYSCALL_STATX => sys_statx(
             args[0] as isize,
             args[1] as *const u8,

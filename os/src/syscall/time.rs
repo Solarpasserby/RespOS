@@ -114,6 +114,7 @@ impl Timex {
 lazy_static! {
     static ref TIMEX_STATE: SpinLock<Timex> = SpinLock::new(Timex::initial());
     static ref POSIX_TIMERS: SpinLock<BTreeMap<usize, PosixTimer>> = SpinLock::new(BTreeMap::new());
+    static ref REALTIME_OFFSET_US: SpinLock<isize> = SpinLock::new(0);
 }
 
 static NEXT_POSIX_TIMER_ID: AtomicUsize = AtomicUsize::new(1);
@@ -138,7 +139,7 @@ pub fn sys_times(buf: *mut Tms) -> SysResult<usize> {
 
 pub fn sys_gettimeofday(tv: *mut TimeVal, tz: *mut TimeZone) -> SysResult<usize> {
     if !tv.is_null() {
-        let us = get_time_us();
+        let us = realtime_us();
         let time_val = TimeVal {
             sec: us / 1_000_000,
             usec: us % 1_000_000,
@@ -180,8 +181,42 @@ pub fn sys_clock_settime(clock_id: usize, tp: *const TimeSpec) -> SysResult<usiz
     if !time_spec.is_valid_duration() {
         return Err(Errno::EINVAL);
     }
+    let task = current_task().expect("no current task");
+    if task.euid() != 0 {
+        return Err(Errno::EPERM);
+    }
 
-    Err(Errno::EPERM)
+    let target_us = time_spec.checked_duration_us().ok_or(Errno::EINVAL)? as isize;
+    let now_us = get_time_us() as isize;
+    *REALTIME_OFFSET_US.lock() = target_us.saturating_sub(now_us);
+    Ok(0)
+}
+
+fn realtime_us() -> usize {
+    (get_time_us() as isize)
+        .saturating_add(*REALTIME_OFFSET_US.lock())
+        .max(0) as usize
+}
+
+fn timespec_from_us(us: usize) -> TimeSpec {
+    TimeSpec {
+        sec: (us / 1_000_000) as isize,
+        nsec: ((us % 1_000_000) * 1000) as isize,
+    }
+}
+
+pub fn clock_time_ms(clock_id: usize) -> SysResult<usize> {
+    const CLOCK_REALTIME: usize = 0;
+    const CLOCK_MONOTONIC: usize = 1;
+    const CLOCK_BOOTTIME: usize = 7;
+    const CLOCK_REALTIME_ALARM: usize = 8;
+    const CLOCK_BOOTTIME_ALARM: usize = 9;
+
+    match clock_id {
+        CLOCK_REALTIME | CLOCK_REALTIME_ALARM => Ok(realtime_us() / 1000),
+        CLOCK_MONOTONIC | CLOCK_BOOTTIME | CLOCK_BOOTTIME_ALARM => Ok(get_time_ms()),
+        _ => Err(Errno::EINVAL),
+    }
 }
 
 pub fn sys_clock_gettime(clock_id: usize, tp: *mut TimeSpec) -> SysResult<usize> {
@@ -193,25 +228,31 @@ pub fn sys_clock_gettime(clock_id: usize, tp: *mut TimeSpec) -> SysResult<usize>
     const CLOCK_REALTIME_COARSE: usize = 5;
     const CLOCK_MONOTONIC_COARSE: usize = 6;
     const CLOCK_BOOTTIME: usize = 7;
+    const CLOCK_REALTIME_ALARM: usize = 8;
+    const CLOCK_BOOTTIME_ALARM: usize = 9;
     const CLOCK_TAI: usize = 11;
 
     // TODO[ABI-COMPAT]: 目前调度器还没有统计进程/线程 CPU 时间，
     // 所以 CPU 时间时钟暂时用墙上时钟近似。
     match clock_id {
-        CLOCK_REALTIME
-        | CLOCK_MONOTONIC
+        CLOCK_MONOTONIC
         | CLOCK_PROCESS_CPUTIME_ID
         | CLOCK_THREAD_CPUTIME_ID
         | CLOCK_MONOTONIC_RAW
-        | CLOCK_REALTIME_COARSE
         | CLOCK_MONOTONIC_COARSE
         | CLOCK_BOOTTIME
+        | CLOCK_BOOTTIME_ALARM
         | CLOCK_TAI => {
             let ms = get_time_ms();
             let time_spec = TimeSpec {
                 sec: (ms / 1000) as isize,
                 nsec: ((ms % 1000) * 1_000_000) as isize,
             };
+            copy_to_user(tp, &time_spec as *const TimeSpec, 1)?;
+            Ok(0)
+        }
+        CLOCK_REALTIME | CLOCK_REALTIME_COARSE | CLOCK_REALTIME_ALARM => {
+            let time_spec = timespec_from_us(realtime_us());
             copy_to_user(tp, &time_spec as *const TimeSpec, 1)?;
             Ok(0)
         }

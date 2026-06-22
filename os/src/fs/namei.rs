@@ -303,7 +303,7 @@ fn created_mode(parent: &Arc<Dentry>, requested_mode: usize, ty: InodeType) -> S
     let parent_stat = parent.get_inode().stat(parent.abs_path.as_str())?;
     let mut mode = (requested_mode & 0o7777) as u32;
     mode &= !(task.umask() as u32);
-    if ty == InodeType::Regular && parent_stat.mode & 0o2000 != 0 {
+    if ty == InodeType::Regular && parent_stat.mode & 0o2000 != 0 && task.euid() != 0 {
         mode &= !0o2000;
     }
     Ok(mode)
@@ -352,7 +352,8 @@ pub fn open_last_lookups(nd: &mut Nameidata, flags: usize, mode: usize) -> SysRe
         match lookup_dentry(nd) {
             // 成功
             Ok(dentry) => {
-                let inode = dentry.get_inode();
+                let mut dentry = dentry;
+                let mut inode = dentry.get_inode();
                 if flags.contains(OpenFlags::O_TMPFILE) {
                     if inode.node_type() != InodeType::Directory {
                         return Err(Errno::ENOTDIR);
@@ -371,6 +372,29 @@ pub fn open_last_lookups(nd: &mut Nameidata, flags: usize, mode: usize) -> SysRe
                 if flags.contains(OpenFlags::O_NOFOLLOW) && inode.node_type() == InodeType::SymLink
                 {
                     return Err(Errno::ELOOP);
+                }
+                if flags.contains(OpenFlags::O_CREATE) && inode.node_type() == InodeType::SymLink {
+                    let symlink_base = Path::new(nd.mnt.clone(), nd.dentry.clone());
+                    let target = inode.read_link(&dentry.abs_path)?;
+                    match resolve_path_from(symlink_base.clone(), &target, true, true, 1) {
+                        Ok(target_path) => {
+                            dentry = target_path.dentry.clone();
+                            inode = dentry.get_inode();
+                        }
+                        Err(Errno::ENOENT) => {
+                            return path_open_from_base(
+                                symlink_base,
+                                &target,
+                                flags.bits() as usize,
+                                mode,
+                            );
+                        }
+                        Err(err) => return Err(err),
+                    }
+                }
+                if flags.contains(OpenFlags::O_CREATE) && inode.node_type() == InodeType::Directory
+                {
+                    return Err(Errno::EISDIR);
                 }
                 // 期望打开目录，但实际文件类型不是目录，返回错误
                 if flags.contains(OpenFlags::O_DIRECTORY)
@@ -447,7 +471,18 @@ pub fn path_open(dirfd: isize, path: &str, flags: usize, mode: usize) -> SysResu
     }
 
     // O_CREAT 路径沿用 parent-walk 流程；最终 symlink 的 O_NOFOLLOW 语义在 open_last_lookups 处理。
-    let mut nd = Nameidata::new_at(dirfd, path)?;
+    let base = base_path_from_dirfd(dirfd, path)?;
+    path_open_from_base(base, path, flags, mode)
+}
+
+fn path_open_from_base(
+    base: Arc<Path>,
+    path: &str,
+    flags: usize,
+    mode: usize,
+) -> SysResult<Arc<File>> {
+    validate_path_components(path)?;
+    let mut nd = Nameidata::new_from_path(path, base);
     link_path_walk(&mut nd)?;
     open_last_lookups(&mut nd, flags, mode)
 }

@@ -87,6 +87,8 @@ pub struct TaskControlBlock {
     fd_table: SpinLock<Arc<FdTable>>,
     cwd: Arc<SpinLock<Arc<Path>>>,
     exe_path: Arc<SpinLock<String>>,
+    fsize_cur: AtomicUsize,
+    fsize_max: AtomicUsize,
 
     //信号
     sig_pending: SpinLock<SigPending>, // 本线程的信号队列 + 掩码（独享）
@@ -162,6 +164,8 @@ impl TaskControlBlock {
             fd_table: SpinLock::new(FdTable::new()),
             cwd: Arc::new(SpinLock::new(Path::zero_init())),
             exe_path: Arc::new(SpinLock::new(String::new())),
+            fsize_cur: AtomicUsize::new(usize::MAX),
+            fsize_max: AtomicUsize::new(usize::MAX),
 
             //信号
             sig_pending: SpinLock::new(SigPending::new()),
@@ -247,6 +251,8 @@ impl TaskControlBlock {
             fd_table: SpinLock::new(FdTable::new()),
             cwd: Arc::new(SpinLock::new(init_root_fs())),
             exe_path: Arc::new(SpinLock::new(String::new())),
+            fsize_cur: AtomicUsize::new(usize::MAX),
+            fsize_max: AtomicUsize::new(usize::MAX),
 
             //信号
             sig_pending: SpinLock::new(SigPending::new()),
@@ -409,6 +415,8 @@ impl TaskControlBlock {
             fd_table: SpinLock::new(fd_table),
             cwd,
             exe_path,
+            fsize_cur: AtomicUsize::new(self.fsize_limit().0),
+            fsize_max: AtomicUsize::new(self.fsize_limit().1),
 
             // 信号
             sig_pending,
@@ -1125,6 +1133,11 @@ impl TaskControlBlock {
     pub fn close(&self, fd: usize) -> SysResult {
         self.fd_table.lock().close(fd)
     }
+    pub fn unshare_fd_table(&self) {
+        let current = self.fd_table.lock().clone();
+        let new_table = FdTable::from_existed_user(&current);
+        *self.fd_table.lock() = new_table;
+    }
     pub fn get_fd_entry(&self, fd: usize) -> SysResult<FdEntry> {
         self.fd_table.lock().get_fd_entry(fd)
     }
@@ -1136,6 +1149,20 @@ impl TaskControlBlock {
     }
     pub fn set_nofile_limit(&self, cur: usize, max: usize) -> SysResult {
         self.fd_table.lock().set_nofile_limit(cur, max)
+    }
+    pub fn fsize_limit(&self) -> (usize, usize) {
+        (
+            self.fsize_cur.load(Ordering::Relaxed),
+            self.fsize_max.load(Ordering::Relaxed),
+        )
+    }
+    pub fn set_fsize_limit(&self, cur: usize, max: usize) -> SysResult {
+        if cur > max {
+            return Err(Errno::EINVAL);
+        }
+        self.fsize_cur.store(cur, Ordering::Relaxed);
+        self.fsize_max.store(max, Ordering::Relaxed);
+        Ok(())
     }
 }
 
