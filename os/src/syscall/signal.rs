@@ -1,10 +1,12 @@
 use super::{Errno, SysResult};
 use crate::mm::{copy_from_user, copy_to_user};
 use crate::signal::sig_handler::SigAction;
+use crate::signal::sig_stack::{SS_DISABLE, SignalStack};
 use crate::signal::sig_struct::{FrameFlags, Sig, SigFrame, SigRTFrame, SigSet};
-use crate::signal::{SiField, SigInfo};
+use crate::signal::{LinuxSigInfo, SiField, SigInfo};
 use crate::task::{TASK_MANAGER, current_task, yield_current_task};
 use crate::timer::{TimeSpec, get_timeout_ms};
+use alloc::vec::Vec;
 
 #[cfg(target_arch = "riscv64")]
 fn restore_sig_context(
@@ -26,36 +28,83 @@ fn restore_sig_context(
 }
 
 pub fn sys_kill(pid: usize, signum: i32) -> SysResult<usize> {
-    // TODO[ABI-COMPAT]: 还没有实现负 pid 和进程组信号发送语义。
     let sig = Sig::from(signum);
     if signum != 0 && !sig.is_valid() {
         return Err(Errno::EINVAL);
     }
-    if let Some(task) = TASK_MANAGER.get(pid) {
-        if signum == 0 {
-            return Ok(0);
+
+    let current = current_task().expect("[kernel] current task is None.");
+    let pid = pid as isize;
+    let mut targets = Vec::new();
+    if pid > 0 {
+        if let Some(task) = TASK_MANAGER.get(pid as usize) {
+            targets.push(task);
+        }
+    } else {
+        let pgid = if pid == 0 {
+            current.pgid()
+        } else if pid == -1 {
+            usize::MAX
+        } else {
+            (-pid) as usize
+        };
+        TASK_MANAGER.for_each(|task| {
+            if task.tid() == task.tgid()
+                && (pgid == usize::MAX || task.pgid() == pgid)
+                && !(pid == -1 && task.tgid() == current.tgid())
+            {
+                targets.push(task.clone());
+            }
+        });
+    }
+
+    if targets.is_empty() {
+        return Err(Errno::ESRCH);
+    }
+    if signum == 0 {
+        return Ok(0);
+    }
+
+    let mut delivered = false;
+    let mut denied = false;
+    for task in targets {
+        if current.euid() != 0
+            && current.euid() != task.uid()
+            && current.euid() != task.suid()
+            && current.uid() != task.uid()
+            && current.uid() != task.suid()
+        {
+            denied = true;
+            continue;
         }
         let siginfo = SigInfo::new(
             sig.raw(),
             SigInfo::USER,
             SiField::Kill {
-                tid: current_task().unwrap().tgid(), // 获取发送者的进程号
+                tid: current.tgid(),
             },
         );
-        // 主线程 → 进程级信号（整个线程组）；普通线程 → 线程级信号
         task.receive_siginfo(siginfo, !task.is_process_leader());
         if sig == Sig::SIGCONT && task.is_stopped() {
             task.set_wait_event(SigInfo::CLD_CONTINUED, sig.raw());
             task.notify_parent_sigchld(SigInfo::CLD_CONTINUED);
             crate::task::wakeup_stopped_task(task);
         }
+        delivered = true;
+    }
+    if delivered {
         Ok(0)
+    } else if denied {
+        Err(Errno::EPERM)
     } else {
         Err(Errno::ESRCH)
     }
 }
 
 pub fn sys_tkill(tid: usize, signum: i32) -> SysResult<usize> {
+    if (tid as isize) <= 0 {
+        return Err(Errno::EINVAL);
+    }
     let sig = Sig::from(signum);
     if signum != 0 && !sig.is_valid() {
         return Err(Errno::EINVAL);
@@ -79,6 +128,9 @@ pub fn sys_tkill(tid: usize, signum: i32) -> SysResult<usize> {
 }
 
 pub fn sys_tgkill(tgid: usize, tid: usize, signum: i32) -> SysResult<usize> {
+    if (tgid as isize) <= 0 || (tid as isize) <= 0 {
+        return Err(Errno::EINVAL);
+    }
     if let Some(task) = TASK_MANAGER.get(tid) {
         if tgid != 0 && task.tgid() != tgid {
             return Err(Errno::ESRCH);
@@ -86,10 +138,105 @@ pub fn sys_tgkill(tgid: usize, tid: usize, signum: i32) -> SysResult<usize> {
         if signum == 0 {
             return Ok(0);
         }
+        if signum > Sig::SIGLEGACYMAX.raw()
+            && task.op_sig_pending(|pending| pending.mask.contain_signal(Sig::from(signum)))
+        {
+            return Err(Errno::EAGAIN);
+        }
     } else {
         return Err(Errno::ESRCH);
     }
     sys_tkill(tid, signum)
+}
+
+pub fn sys_sigaltstack(
+    new_stack: *const SignalStack,
+    old_stack: *mut SignalStack,
+) -> SysResult<usize> {
+    const SS_ONSTACK: i32 = 2;
+    const MINSIGSTKSZ: usize = 2048;
+
+    let task = current_task().expect("[kernel] current task is None.");
+    if !old_stack.is_null() {
+        let old = task.raw_sigstack();
+        copy_to_user(old_stack, &old as *const SignalStack, 1)?;
+    }
+    if !new_stack.is_null() {
+        let mut stack = SignalStack::default();
+        copy_from_user(&mut stack as *mut SignalStack, new_stack, 1)?;
+        if stack.ss_flags & !(SS_DISABLE as i32) != 0 {
+            return Err(Errno::EINVAL);
+        }
+        if stack.ss_flags & SS_ONSTACK != 0 {
+            return Err(Errno::EINVAL);
+        }
+        if stack.ss_flags & (SS_DISABLE as i32) == 0 && stack.ss_size < MINSIGSTKSZ {
+            return Err(Errno::ENOMEM);
+        }
+        task.set_sigstack(stack);
+    }
+    Ok(0)
+}
+
+pub fn sys_rt_sigpending(set: *mut SigSet, sigsetsize: usize) -> SysResult<usize> {
+    if sigsetsize != core::mem::size_of::<SigSet>() {
+        return Err(Errno::EINVAL);
+    }
+    let task = current_task().expect("[kernel] current task is None.");
+    let pending = task.op_sig_pending(|pending| pending.pending);
+    copy_to_user(set, &pending as *const SigSet, 1)?;
+    Ok(0)
+}
+
+pub fn sys_rt_sigsuspend(mask: *const SigSet, sigsetsize: usize) -> SysResult<usize> {
+    if sigsetsize != core::mem::size_of::<SigSet>() {
+        return Err(Errno::EINVAL);
+    }
+
+    let mut new_mask = SigSet::empty();
+    copy_from_user(&mut new_mask as *mut SigSet, mask, 1)?;
+    new_mask.remove_signal(Sig::SIGKILL);
+    new_mask.remove_signal(Sig::SIGSTOP);
+
+    let task = current_task().expect("[kernel] current task is None.");
+    let old_mask = task.op_sig_pending(|pending| pending.mask);
+    task.set_sigsuspend_saved_mask(Some(old_mask));
+    task.op_sig_pending_mut(|pending| pending.mask = new_mask);
+
+    loop {
+        task.set_interruptible(true);
+        if task.check_signal_interrupt() || task.is_interrupted() {
+            task.clear_interrupted();
+            break;
+        }
+        task.check_real_timer();
+        yield_current_task();
+        if task.check_signal_interrupt() || task.is_interrupted() {
+            task.clear_interrupted();
+            break;
+        }
+    }
+
+    task.set_interruptible(false);
+    Err(Errno::EINTR)
+}
+
+pub fn sys_rt_sigqueueinfo(
+    tgid: usize,
+    signum: i32,
+    uinfo: *const LinuxSigInfo,
+) -> SysResult<usize> {
+    let sig = Sig::from(signum);
+    if signum != 0 && !sig.is_valid() {
+        return Err(Errno::EINVAL);
+    }
+    let task = TASK_MANAGER.get(tgid).ok_or(Errno::ESRCH)?;
+    let mut linux_info = LinuxSigInfo::default();
+    copy_from_user(&mut linux_info as *mut LinuxSigInfo, uinfo, 1)?;
+    let mut siginfo = SigInfo::from(linux_info);
+    siginfo.signo = signum;
+    task.receive_siginfo(siginfo, !task.is_process_leader());
+    Ok(0)
 }
 
 pub fn sys_sigaction(signum: i32, act: *const u8, oldact: *mut u8) -> SysResult<usize> {

@@ -21,6 +21,7 @@ impl SigInfo {
 pub enum SiField {
     None,
     Kill { tid: usize }, //这里填的是发送者身份，不一定是线程号
+    Queue { pid: i32, uid: i32, value: i32 },
 }
 
 // SiField 补全方法
@@ -44,6 +45,14 @@ impl SiField {
 
                 // uid（先占位）
                 arr[2] = 0;
+            }
+
+            SiField::Queue { pid, uid, value } => {
+                // For Linux siginfo_t, _rt.si_pid/_rt.si_uid/_rt.si_sigval
+                // start at these padding slots after signo/errno/code.
+                arr[1] = *pid;
+                arr[2] = *uid;
+                arr[3] = *value;
             }
         }
 
@@ -79,6 +88,16 @@ impl From<SigInfo> for LinuxSigInfo {
 
 impl From<LinuxSigInfo> for SigInfo {
     fn from(lsi: LinuxSigInfo) -> Self {
+        let fields = if lsi.si_code == SigInfo::QUEUE {
+            SiField::Queue {
+                pid: lsi._pad[1],
+                uid: lsi._pad[2],
+                value: lsi._pad[3],
+            }
+        } else {
+            SiField::from_array(lsi._pad)
+        };
+
         SigInfo {
             // 信号编号
             signo: lsi.si_signo,
@@ -87,7 +106,7 @@ impl From<LinuxSigInfo> for SigInfo {
             code: lsi.si_code,
 
             // 恢复附加字段
-            fields: SiField::from_array(lsi._pad),
+            fields,
         }
     }
 }

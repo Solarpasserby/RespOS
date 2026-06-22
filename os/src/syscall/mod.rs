@@ -87,9 +87,13 @@ const SYSCALL_SCHED_YIELD: usize = 124;
 const SYSCALL_KILL: usize = 129;
 const SYSCALL_TKILL: usize = 130;
 const SYSCALL_TGKILL: usize = 131;
+const SYSCALL_SIGALTSTACK: usize = 132;
+const SYSCALL_RT_SIGSUSPEND: usize = 133;
 const SYSCALL_SIGACTION: usize = 134;
 const SYSCALL_SIGPROCMASK: usize = 135;
+const SYSCALL_RT_SIGPENDING: usize = 136;
 const SYSCALL_RT_SIGTIMEDWAIT: usize = 137;
+const SYSCALL_RT_SIGQUEUEINFO: usize = 138;
 pub const SYSCALL_SIGRETURN: usize = 139;
 const SYSCALL_SETPRIORITY: usize = 140;
 const SYSCALL_REBOOT: usize = 142;
@@ -189,6 +193,7 @@ mod time;
 use crate::fs::Stat;
 use crate::signal::LinuxSigInfo;
 use crate::signal::SigSet;
+use crate::signal::sig_stack::SignalStack;
 use crate::timer::TimeSpec;
 pub use errno::*;
 use fs::*;
@@ -409,11 +414,19 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         SYSCALL_KILL => sys_kill(args[0], args[1] as i32),
         SYSCALL_TKILL => sys_tkill(args[0], args[1] as i32),
         SYSCALL_TGKILL => sys_tgkill(args[0], args[1], args[2] as i32),
+        SYSCALL_SIGALTSTACK => {
+            sys_sigaltstack(args[0] as *const SignalStack, args[1] as *mut SignalStack)
+        }
+        SYSCALL_RT_SIGSUSPEND => sys_rt_sigsuspend(args[0] as *const SigSet, args[1]),
         SYSCALL_SIGACTION => {
             sys_sigaction(args[0] as i32, args[1] as *const u8, args[2] as *mut u8)
         }
         SYSCALL_SIGPROCMASK => sys_sigprocmask(args[0], args[1], args[2], args[3]),
+        SYSCALL_RT_SIGPENDING => sys_rt_sigpending(args[0] as *mut SigSet, args[1]),
         SYSCALL_RT_SIGTIMEDWAIT => sys_rt_sigtimedwait(args[0], args[1], args[2], args[3]),
+        SYSCALL_RT_SIGQUEUEINFO => {
+            sys_rt_sigqueueinfo(args[0], args[1] as i32, args[2] as *const LinuxSigInfo)
+        }
         SYSCALL_SIGRETURN => sys_sigreturn(),
         SYSCALL_SETPRIORITY => sys_setpriority(args[0], args[1], args[2] as isize),
         SYSCALL_REBOOT => sys_reboot(),

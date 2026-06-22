@@ -15,7 +15,7 @@ use crate::signal::sig_handler::{ActionType, SigHandler};
 use crate::signal::sig_info::SigInfo;
 use crate::signal::sig_stack::{SS_DISABLE, SignalStack};
 use crate::signal::sig_struct::SigPending;
-use crate::signal::{SiField, Sig};
+use crate::signal::{SiField, Sig, SigSet};
 use crate::syscall::{Errno, SysResult};
 use crate::timer::{get_accounting_ms, get_timeout_ms};
 use crate::trap::TrapContext;
@@ -60,6 +60,7 @@ pub struct TaskControlBlock {
     tid: RwLock<TidHandle>,
     tgid: AtomicUsize,
     pgid: AtomicUsize,
+    sid: AtomicUsize,
     uid: AtomicUsize,
     euid: AtomicUsize,
     suid: AtomicUsize,
@@ -92,6 +93,7 @@ pub struct TaskControlBlock {
     sig_stack: SpinLock<SignalStack>,  // 本线程的备用信号栈（独享）
     sig_handler: Arc<SpinLock<SigHandler>>, // 线程组共享的 handler 注册表（共享）
     sig_context_addr: AtomicUsize,     // 用户栈上 SigContext 的地址
+    sigsuspend_saved_mask: SpinLock<Option<SigSet>>,
 
     // 线程同步
     tid_address: SpinLock<TidAddress>,
@@ -103,6 +105,7 @@ pub struct TaskControlBlock {
     alarm_deadline_ms: AtomicUsize,
     alarm_interval_ms: AtomicUsize,
     personality: AtomicUsize,
+    did_exec: AtomicBool,
     start_time_ms: AtomicUsize,
     child_utime_ticks: AtomicUsize,
     child_stime_ticks: AtomicUsize,
@@ -128,6 +131,7 @@ impl TaskControlBlock {
             tid: RwLock::new(TidHandle(0)),
             tgid: AtomicUsize::new(0),
             pgid: AtomicUsize::new(0),
+            sid: AtomicUsize::new(0),
             uid: AtomicUsize::new(0),
             euid: AtomicUsize::new(0),
             suid: AtomicUsize::new(0),
@@ -160,6 +164,7 @@ impl TaskControlBlock {
             sig_stack: SpinLock::new(SignalStack::default()),
             sig_handler: Arc::new(SpinLock::new(SigHandler::new())),
             sig_context_addr: AtomicUsize::new(0),
+            sigsuspend_saved_mask: SpinLock::new(None),
 
             // 线程同步
             tid_address: SpinLock::new(TidAddress::new()),
@@ -170,6 +175,7 @@ impl TaskControlBlock {
             alarm_deadline_ms: AtomicUsize::new(0),
             alarm_interval_ms: AtomicUsize::new(0),
             personality: AtomicUsize::new(0),
+            did_exec: AtomicBool::new(false),
             start_time_ms: AtomicUsize::new(get_accounting_ms()),
             child_utime_ticks: AtomicUsize::new(0),
             child_stime_ticks: AtomicUsize::new(0),
@@ -207,6 +213,7 @@ impl TaskControlBlock {
             tid: RwLock::new(tid),
             tgid: AtomicUsize::new(tgid),
             pgid: AtomicUsize::new(tgid),
+            sid: AtomicUsize::new(tgid),
             uid: AtomicUsize::new(0),
             euid: AtomicUsize::new(0),
             suid: AtomicUsize::new(0),
@@ -238,6 +245,7 @@ impl TaskControlBlock {
             sig_stack: SpinLock::new(SignalStack::default()),
             sig_handler: Arc::new(SpinLock::new(SigHandler::new())),
             sig_context_addr: AtomicUsize::new(0),
+            sigsuspend_saved_mask: SpinLock::new(None),
 
             // 线程同步
             tid_address: SpinLock::new(TidAddress::new()),
@@ -248,6 +256,7 @@ impl TaskControlBlock {
             alarm_deadline_ms: AtomicUsize::new(0),
             alarm_interval_ms: AtomicUsize::new(0),
             personality: AtomicUsize::new(0),
+            did_exec: AtomicBool::new(false),
             start_time_ms: AtomicUsize::new(get_accounting_ms()),
             child_utime_ticks: AtomicUsize::new(0),
             child_stime_ticks: AtomicUsize::new(0),
@@ -297,11 +306,12 @@ impl TaskControlBlock {
             .unwrap_or_else(|| self.clone());
 
         // 创建线程或是进程
-        let (tgid, pgid, thread_group, parent, children, cwd, exe_path) = if is_thread {
+        let (tgid, pgid, sid, thread_group, parent, children, cwd, exe_path) = if is_thread {
             // 创建线程，属于同一线程组
             (
                 self.tgid(),
                 self.pgid(),
+                self.sid(),
                 self.thread_group.clone(),
                 self.parent.clone(),
                 self.children.clone(),
@@ -313,6 +323,7 @@ impl TaskControlBlock {
             (
                 tid.0,
                 self.pgid(),
+                self.sid(),
                 Arc::new(SpinLock::new(ThreadGroup::new())),
                 Arc::new(SpinLock::new(Some(Arc::downgrade(&process_leader)))),
                 Arc::new(SpinLock::new(BTreeMap::new())),
@@ -360,6 +371,7 @@ impl TaskControlBlock {
             tid: RwLock::new(tid),
             tgid: AtomicUsize::new(tgid),
             pgid: AtomicUsize::new(pgid),
+            sid: AtomicUsize::new(sid),
             uid: AtomicUsize::new(self.uid()),
             euid: AtomicUsize::new(self.euid()),
             suid: AtomicUsize::new(self.suid()),
@@ -391,6 +403,7 @@ impl TaskControlBlock {
             sig_stack,
             sig_handler,
             sig_context_addr: AtomicUsize::new(0),
+            sigsuspend_saved_mask: SpinLock::new(None),
 
             // 线程同步
             tid_address: SpinLock::new(TidAddress::new()),
@@ -401,6 +414,7 @@ impl TaskControlBlock {
             alarm_deadline_ms: AtomicUsize::new(0),
             alarm_interval_ms: AtomicUsize::new(0),
             personality: AtomicUsize::new(self.personality()),
+            did_exec: AtomicBool::new(false),
             start_time_ms: AtomicUsize::new(get_accounting_ms()),
             child_utime_ticks: AtomicUsize::new(0),
             child_stime_ticks: AtomicUsize::new(0),
@@ -438,9 +452,6 @@ impl TaskControlBlock {
             return Err(Errno::EINVAL);
         }
 
-        // 记录可执行文件路径，供 /proc/self/exe 使用
-        self.set_exe_path(exe_path);
-
         let (memory_set, _token, mut user_sp, entry_point, aux_vec) =
             MemorySet::from_elf_data(elf_data);
 
@@ -474,6 +485,11 @@ impl TaskControlBlock {
             linux_abi,
         );
 
+        // 记录可执行文件路径，供 /proc/self/exe 使用。到这里 exec 已经完成了
+        // 新地址空间和用户栈的关键构造，父进程不应再能修改它的 pgid。
+        self.set_exe_path(exe_path);
+        self.did_exec.store(true, Ordering::Relaxed);
+
         /* ===== 修改线程组 ===== */
         self.close_other_threads_for_exec();
 
@@ -501,6 +517,9 @@ impl TaskControlBlock {
     }
     pub fn pgid(&self) -> usize {
         self.pgid.load(Ordering::Relaxed)
+    }
+    pub fn sid(&self) -> usize {
+        self.sid.load(Ordering::Relaxed)
     }
     pub fn uid(&self) -> usize {
         self.uid.load(Ordering::Relaxed)
@@ -610,12 +629,18 @@ impl TaskControlBlock {
     pub fn is_process_leader(&self) -> bool {
         self.tid() == self.tgid()
     }
+    pub fn did_exec(&self) -> bool {
+        self.did_exec.load(Ordering::Relaxed)
+    }
     /* ======= 设置内部数据 ====== */
     pub fn set_tgid(&self, tgid: usize) {
         self.tgid.swap(tgid, Ordering::Relaxed);
     }
     pub fn set_pgid(&self, pgid: usize) {
         self.pgid.store(pgid, Ordering::Relaxed);
+    }
+    pub fn set_sid(&self, sid: usize) {
+        self.sid.store(sid, Ordering::Relaxed);
     }
     pub fn set_uid_triplet(&self, uid: usize, euid: usize, suid: usize) {
         self.uid.store(uid, Ordering::Relaxed);
@@ -789,6 +814,22 @@ impl TaskControlBlock {
         } else {
             Some(stack)
         }
+    }
+
+    pub fn raw_sigstack(&self) -> SignalStack {
+        *self.sig_stack.lock()
+    }
+
+    pub fn set_sigstack(&self, stack: SignalStack) {
+        *self.sig_stack.lock() = stack;
+    }
+
+    pub fn set_sigsuspend_saved_mask(&self, mask: Option<SigSet>) {
+        *self.sigsuspend_saved_mask.lock() = mask;
+    }
+
+    pub fn take_sigsuspend_saved_mask(&self) -> Option<SigSet> {
+        self.sigsuspend_saved_mask.lock().take()
     }
 
     // 信号入口：给线程发送信号

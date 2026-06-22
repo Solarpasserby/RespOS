@@ -39,7 +39,9 @@ pub fn handle_signal() {
     let task = current_task().unwrap();
 
     while let Some((sig, siginfo)) = task.op_sig_pending_mut(|p| p.fetch_signal()) {
-        let old_mask = task.op_sig_pending(|p| p.mask);
+        let old_mask = task
+            .take_sigsuspend_saved_mask()
+            .unwrap_or_else(|| task.op_sig_pending(|p| p.mask));
         let action = task.op_sig_handler(|h| h.get(sig));
 
         if !action.is_user() {

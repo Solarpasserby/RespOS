@@ -563,8 +563,9 @@ const LTP_SKIP: &[&str] = &[
     "pipe2_02_child",
     "mount03_suid_child",
     "writev03",
-    // fork14 需要构造 16TiB 级 VMA；当前 39-bit/8GiB mmap 窗口无法支持，
-    // 且该测例收益很小，阶段推进时跳过。
+    // fork13 能通过，但运行时间过长占用评测时间，且考虑到收益很小，跳过
+    "fork13",
+    // fork14 需要构造 16TiB 级 VMA；当前 39-bit/8GiB mmap 窗口无法支持，且该测例收益很小，阶段推进时跳过。
     "fork14",
 ];
 

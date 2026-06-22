@@ -11,8 +11,8 @@ use crate::mm::{
 };
 use crate::signal::{LinuxSigInfo, SigInfo};
 use crate::task::{
-    CloneFlags, TASK_MANAGER, WaitOption, add_task, blocking_and_run_next, current_task, do_futex,
-    exit_and_run_next, exit_group_and_run_next, yield_current_task,
+    CloneFlags, TASK_MANAGER, TaskControlBlock, WaitOption, add_task, blocking_and_run_next,
+    current_task, do_futex, exit_and_run_next, exit_group_and_run_next, yield_current_task,
 };
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -39,6 +39,27 @@ fn shebang_busybox_path(script_path: &str) -> &'static str {
     } else {
         "/musl/busybox"
     }
+}
+
+fn process_leader(task: &Arc<TaskControlBlock>) -> Arc<TaskControlBlock> {
+    task.op_thread_group(|tg| tg.iter().find(|task| task.tid() == task.tgid()))
+        .unwrap_or_else(|| task.clone())
+}
+
+fn set_process_pgid(task: &Arc<TaskControlBlock>, pgid: usize) {
+    task.op_thread_group(|tg| {
+        for member in tg.iter() {
+            member.set_pgid(pgid);
+        }
+    });
+}
+
+fn set_process_sid(task: &Arc<TaskControlBlock>, sid: usize) {
+    task.op_thread_group(|tg| {
+        for member in tg.iter() {
+            member.set_sid(sid);
+        }
+    });
 }
 
 // 判断执行文件是否为 shell 脚本，若为 shell 脚本，则更改执行环境和参数
@@ -227,28 +248,68 @@ pub fn sys_gettid() -> SysResult<usize> {
 
 /// 系统调用 sys-setpgid
 ///
-/// 当前内核尚未建模 session/controlling terminal，只维护进程组号本身。
-/// 这足以覆盖 libc/LTP harness 常见的 setpgid(0, 0) 初始化路径。
+/// 当前内核尚未建模 controlling terminal，但维护 sid/pgid 的基本关系。
 ///
-/// TODO[ABI-COMPAT]: 补齐跨 session、已 exec 子进程、非子进程等 EPERM/EACCES 规则。
+/// TODO[ABI-COMPAT]: 补齐 job-control 相关的 tty 前后台进程组规则。
 pub fn sys_setpgid(pid: usize, pgid: usize) -> SysResult<usize> {
-    let current = current_task().expect("[kernel] current task is None.");
+    let current_thread = current_task().expect("[kernel] current task is None.");
+    let current = process_leader(&current_thread);
+    if (pgid as isize) < 0 {
+        return Err(Errno::EINVAL);
+    }
+    if (pid as isize) < 0 {
+        return Err(Errno::ESRCH);
+    }
+
     let target = if pid == 0 {
-        current
+        current.clone()
     } else {
-        TASK_MANAGER.get(pid).ok_or(Errno::ESRCH)?
+        process_leader(&TASK_MANAGER.get(pid).ok_or(Errno::ESRCH)?)
     };
+    if !target.is_process_leader() {
+        return Err(Errno::ESRCH);
+    }
+
+    let target_is_current = target.tgid() == current.tgid();
+    if !target_is_current {
+        let is_child = current.op_children_mut(|children| children.contains_key(&target.tgid()));
+        if !is_child {
+            return Err(Errno::ESRCH);
+        }
+        if target.did_exec() {
+            return Err(Errno::EACCES);
+        }
+    }
+    if target.sid() != current.sid() {
+        return Err(Errno::EPERM);
+    }
+    if target.sid() == target.tgid() {
+        return Err(Errno::EPERM);
+    }
+
     let new_pgid = if pgid == 0 { target.tgid() } else { pgid };
-    target.set_pgid(new_pgid);
+    if new_pgid != target.tgid() {
+        let mut group_exists_in_session = false;
+        TASK_MANAGER.for_each(|task| {
+            if task.is_process_leader() && task.sid() == current.sid() && task.pgid() == new_pgid {
+                group_exists_in_session = true;
+            }
+        });
+        if !group_exists_in_session {
+            return Err(Errno::EPERM);
+        }
+    }
+
+    set_process_pgid(&target, new_pgid);
     Ok(0)
 }
 
 pub fn sys_getpgid(pid: usize) -> SysResult<usize> {
-    let current = current_task().expect("[kernel] current task is None.");
+    let current_thread = current_task().expect("[kernel] current task is None.");
     let target = if pid == 0 {
-        current
+        process_leader(&current_thread)
     } else {
-        TASK_MANAGER.get(pid).ok_or(Errno::ESRCH)?
+        process_leader(&TASK_MANAGER.get(pid).ok_or(Errno::ESRCH)?)
     };
     Ok(target.pgid())
 }
@@ -258,12 +319,14 @@ pub fn sys_getpgid(pid: usize) -> SysResult<usize> {
 /// 当前内核还没有完整建模 session/controlling terminal；这里保留 Linux 的关键可见语义：
 /// 进程组 leader 不能 setsid，成功后调用者成为新的进程组 leader，并返回新 session id。
 pub fn sys_setsid() -> SysResult<usize> {
-    let current = current_task().expect("[kernel] current task is None.");
+    let current_thread = current_task().expect("[kernel] current task is None.");
+    let current = process_leader(&current_thread);
     let pid = current.tgid();
     if current.pgid() == pid {
         return Err(Errno::EPERM);
     }
-    current.set_pgid(pid);
+    set_process_sid(&current, pid);
+    set_process_pgid(&current, pid);
     Ok(pid)
 }
 
