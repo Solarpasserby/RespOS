@@ -202,6 +202,16 @@ fn ms_to_timespec(ms: usize) -> TimeSpec {
     }
 }
 
+fn absolute_timespec_ms(ts: TimeSpec) -> SysResult<usize> {
+    if !ts.is_valid_duration() {
+        return Err(Errno::EINVAL);
+    }
+    (ts.sec as usize)
+        .checked_mul(1000)
+        .and_then(|ms| ms.checked_add((ts.nsec as usize) / 1_000_000))
+        .ok_or(Errno::EINVAL)
+}
+
 fn timerfd_ref(fd: usize) -> SysResult<Arc<dyn FileOp>> {
     let task = current_task().expect("[kernel] current task is None.");
     let entry = task.get_fd_entry(fd)?;
@@ -280,7 +290,11 @@ pub fn sys_timerfd_settime(
         copy_to_user(old_value, &old as *const ITimerSpec, 1)?;
     }
 
-    let value_ms = new_timer.value.checked_duration_ms().ok_or(Errno::EINVAL)?;
+    let value_ms = if flags & TFD_TIMER_ABSTIME != 0 {
+        absolute_timespec_ms(new_timer.value)?
+    } else {
+        new_timer.value.checked_duration_ms().ok_or(Errno::EINVAL)?
+    };
     let interval_ms = new_timer
         .interval
         .checked_duration_ms()

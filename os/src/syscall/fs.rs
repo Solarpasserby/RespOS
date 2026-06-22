@@ -7,8 +7,8 @@ use crate::fs::mount::{do_mount, do_umount2};
 use crate::fs::vfs::{InodeOp, InodeType};
 use crate::fs::{
     AT_EMPTY_PATH, AT_FDCWD, AT_NO_AUTOMOUNT, AT_SYMLINK_NOFOLLOW, FdEntry, File, FileOp, KStat,
-    OpenFlags, Pipe, Stat, Statfs64, check_dir_search_permission, filename_create, filename_link,
-    filename_link_tmpfile, filename_lookup, filename_lookup_no_follow_final_symlink,
+    OpenFlags, Path, Pipe, Stat, Statfs64, check_dir_search_permission, filename_create,
+    filename_link, filename_link_tmpfile, filename_lookup, filename_lookup_no_follow_final_symlink,
     filename_rename, filename_symlink, filename_unlink, init_fdset, make_pipe, open_named_fifo,
     path_open,
 };
@@ -40,6 +40,7 @@ const XATTR_CREATE: usize = 0x1;
 const XATTR_REPLACE: usize = 0x2;
 const XATTR_NAME_MAX: usize = 255;
 const XATTR_SIZE_MAX: usize = 65_536;
+const CHOWN_ID_UNCHANGED: usize = u32::MAX as usize;
 const CLOSE_RANGE_UNSHARE: usize = 1 << 1;
 const CLOSE_RANGE_CLOEXEC: usize = 1 << 2;
 
@@ -1321,7 +1322,11 @@ fn set_posix_lock(file: &alloc::sync::Arc<dyn FileOp>, lock: LinuxFlock) -> SysR
     Ok(())
 }
 
-fn get_posix_lock(file: &alloc::sync::Arc<dyn FileOp>, lock: LinuxFlock) -> SysResult<LinuxFlock> {
+fn get_posix_lock(
+    file: &alloc::sync::Arc<dyn FileOp>,
+    normalized: LinuxFlock,
+    original: LinuxFlock,
+) -> SysResult<LinuxFlock> {
     let key = flock_key(file)?;
     let owner_pid = current_task()
         .expect("[kernel] current task is None.")
@@ -1330,10 +1335,10 @@ fn get_posix_lock(file: &alloc::sync::Arc<dyn FileOp>, lock: LinuxFlock) -> SysR
     let Some(entries) = locks.get(&key) else {
         return Ok(LinuxFlock {
             l_type: F_UNLCK,
-            ..lock
+            ..original
         });
     };
-    if let Some(conflict) = posix_lock_conflict(entries, owner_pid, &lock)? {
+    if let Some(conflict) = posix_lock_conflict(entries, owner_pid, &normalized)? {
         Ok(LinuxFlock {
             l_type: if conflict.kind == FlockKind::Shared {
                 F_RDLCK
@@ -1351,7 +1356,7 @@ fn get_posix_lock(file: &alloc::sync::Arc<dyn FileOp>, lock: LinuxFlock) -> SysR
     } else {
         Ok(LinuxFlock {
             l_type: F_UNLCK,
-            ..lock
+            ..original
         })
     }
 }
@@ -1716,7 +1721,36 @@ fn set_fd_mode(fd: isize, mode: u32) -> SysResult {
     let file = task.get_fd_entry(fd as usize)?.file;
     let file = file.as_any().downcast_ref::<File>().ok_or(Errno::EINVAL)?;
     let path = file.path();
-    file.inode().set_mode(&path.abs_path(), mode)
+    set_inode_mode(&path.dentry.get_inode(), &path.abs_path(), mode)
+}
+
+fn file_path_from_fd(fd: isize) -> SysResult<Arc<Path>> {
+    if fd < 0 {
+        return Err(Errno::EBADF);
+    }
+    let task = current_task().expect("[kernel] current task is None.");
+    let file = task.get_fd_entry(fd as usize)?.file;
+    let file = file.as_any().downcast_ref::<File>().ok_or(Errno::EINVAL)?;
+    Ok(file.path())
+}
+
+fn chmod_effective_mode(stat: &KStat, requested: u32) -> SysResult<u32> {
+    let task = current_task().expect("[kernel] current task is None.");
+    if task.fsuid() != 0 && task.fsuid() as u32 != stat.uid {
+        return Err(Errno::EPERM);
+    }
+
+    let mut mode = requested & 0o7777;
+    if mode & 0o2000 != 0 && task.fsuid() != 0 && task.fsgid() as u32 != stat.gid {
+        mode &= !0o2000;
+    }
+    Ok(mode)
+}
+
+fn set_inode_mode(inode: &Arc<dyn InodeOp>, abs_path: &str, mode: u32) -> SysResult {
+    let stat = inode.stat(abs_path)?;
+    let mode = chmod_effective_mode(&stat, mode)?;
+    inode.set_mode(abs_path, mode)
 }
 
 /// 系统调用 sys-fchmod
@@ -1731,13 +1765,83 @@ pub fn sys_fchmod(fd: usize, mode: usize) -> SysResult<usize> {
     Ok(0)
 }
 
+fn resolve_chown_id(id: usize, current: u32) -> SysResult<u32> {
+    if id == usize::MAX || id == CHOWN_ID_UNCHANGED {
+        return Ok(current);
+    }
+    u32::try_from(id).map_err(|_| Errno::EINVAL)
+}
+
+fn chown_id_is_unchanged(id: usize) -> bool {
+    id == usize::MAX || id == CHOWN_ID_UNCHANGED
+}
+
+fn check_chown_permission(stat: &KStat, owner: usize, group: usize) -> SysResult {
+    let task = current_task().expect("[kernel] current task is None.");
+    if task.fsuid() == 0 {
+        return Ok(());
+    }
+
+    if !chown_id_is_unchanged(owner) {
+        return Err(Errno::EPERM);
+    }
+    if task.fsuid() as u32 != stat.uid {
+        return Err(Errno::EPERM);
+    }
+    if !chown_id_is_unchanged(group) && group != task.fsgid() {
+        return Err(Errno::EPERM);
+    }
+    Ok(())
+}
+
+fn chown_cleared_mode(stat: &KStat, owner: usize, group: usize) -> Option<u32> {
+    if chown_id_is_unchanged(owner) && chown_id_is_unchanged(group) {
+        return None;
+    }
+    if stat.ty != InodeType::Regular {
+        return None;
+    }
+
+    let mut mode = stat.mode & 0o7777;
+    mode &= !0o4000;
+    if mode & 0o010 != 0 {
+        mode &= !0o2000;
+    }
+    if mode == stat.mode & 0o7777 {
+        None
+    } else {
+        Some(mode)
+    }
+}
+
+fn do_chown_inode(
+    inode: &Arc<dyn InodeOp>,
+    abs_path: &str,
+    owner: usize,
+    group: usize,
+) -> SysResult {
+    let stat = inode.stat(abs_path)?;
+    check_chown_permission(&stat, owner, group)?;
+    let uid = resolve_chown_id(owner, stat.uid)?;
+    let gid = resolve_chown_id(group, stat.gid)?;
+    inode.set_owner(abs_path, uid, gid)?;
+    if let Some(mode) = chown_cleared_mode(&stat, owner, group) {
+        inode.set_mode(abs_path, mode)?;
+    }
+    Ok(())
+}
+
+pub fn sys_fchown(fd: usize, owner: usize, group: usize) -> SysResult<usize> {
+    let path = file_path_from_fd(fd as isize)?;
+    do_chown_inode(&path.dentry.get_inode(), &path.abs_path(), owner, group)?;
+    Ok(0)
+}
+
 /// 系统调用 sys-fchmodat
 ///
-/// 按 dirfd + path 定位文件并修改权限位。当前内核还没有 uid/gid/capability
-/// 权限模型，因此只做路径解析、flags 合法性检查和后端 mode 写入。
+/// 按 dirfd + path 定位文件并修改权限位。
 ///
-/// TODO[ABI-COMPAT]: 尚未实现所有者、CAP_FOWNER、S_ISGID 清理等 Linux
-/// 权限规则；目前主要用于满足 libc/LTP 对 chmod 路径的基础需求。
+/// TODO[ABI-COMPAT]: 尚未实现 CAP_FOWNER、ACL、不可变文件等完整 Linux 权限模型。
 pub fn sys_fchmodat(dirfd: isize, path: *const u8, mode: usize) -> SysResult<usize> {
     do_fchmodat(dirfd, path, mode, 0)
 }
@@ -1759,7 +1863,7 @@ fn do_fchmodat(dirfd: isize, path: *const u8, mode: usize, flags: usize) -> SysR
         if dirfd == AT_FDCWD {
             let task = current_task().expect("[kernel] current task is None.");
             let cwd = task.cwd();
-            cwd.dentry.get_inode().set_mode(&cwd.abs_path(), mode)?;
+            set_inode_mode(&cwd.dentry.get_inode(), &cwd.abs_path(), mode)?;
         } else {
             set_fd_mode(dirfd, mode)?;
         }
@@ -1770,7 +1874,7 @@ fn do_fchmodat(dirfd: isize, path: *const u8, mode: usize, flags: usize) -> SysR
             filename_lookup(dirfd, path.as_str(), 0)?
         };
         let abs_path = resolved.abs_path();
-        resolved.dentry.get_inode().set_mode(&abs_path, mode)?;
+        set_inode_mode(&resolved.dentry.get_inode(), &abs_path, mode)?;
     }
 
     Ok(0)
@@ -1809,21 +1913,8 @@ pub fn sys_fchownat(
         filename_lookup(dirfd, path.as_str(), 0)?
     };
 
-    let stat = resolved.dentry.get_inode().stat(&resolved.abs_path())?;
-    let uid = if owner == usize::MAX {
-        stat.uid
-    } else {
-        owner as u32
-    };
-    let gid = if group == usize::MAX {
-        stat.gid
-    } else {
-        group as u32
-    };
-    resolved
-        .dentry
-        .get_inode()
-        .set_owner(&resolved.abs_path(), uid, gid)?;
+    let abs_path = resolved.abs_path();
+    do_chown_inode(&resolved.dentry.get_inode(), &abs_path, owner, group)?;
     Ok(0)
 }
 
@@ -1947,13 +2038,10 @@ pub fn sys_fallocate(fd: usize, mode: usize, offset: isize, len: isize) -> SysRe
 /// flags 目前只接受 AT_EACCESS、AT_SYMLINK_NOFOLLOW 和 AT_EMPTY_PATH，
 /// 其中 AT_SYMLINK_NOFOLLOW 会让最后一级符号链接停在链接本身。
 ///
-/// 当前内核还没有完整的 uid/gid 权限模型，这里先检查路径是否存在，
-/// 并用 inode mode 的基础权限位满足 busybox/coreutils 的可执行性探测。
+/// 当前内核还没有完整的 capability/ACL 权限模型，这里按 real/effective id
+/// 和 inode mode 的基础权限位执行 Linux access/faccessat 语义。
 ///
-/// TODO[ABI-COMPAT]: Linux access/faccessat 默认使用 real uid/gid，
-/// faccessat2 + AT_EACCESS 才使用 effective uid/gid；当前暂未区分。
-/// TODO[ABI-COMPAT]: 尚未实现 root/capability/ACL 等权限放宽规则。
-/// TODO[ABI-COMPAT]: 尚未检查路径中每一级目录的 search/execute 权限。
+/// TODO[ABI-COMPAT]: 尚未实现 capability、ACL 等权限放宽规则。
 /// TODO[ABI-COMPAT]: W_OK 对只读挂载、不可变文件等特殊状态的语义尚未实现。
 pub fn sys_faccessat(dirfd: isize, path: *const u8, mode: usize, flags: usize) -> SysResult<usize> {
     const FACCESSAT_ALLOWED_FLAGS: usize = AT_EACCESS | AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH;
@@ -1995,14 +2083,7 @@ pub fn sys_faccessat(dirfd: isize, path: *const u8, mode: usize, flags: usize) -
         return Ok(0);
     }
 
-    let perm = access_perm_bits(kstat.ty, kstat.mode);
-    if mode & R_OK != 0 && perm & 0o444 == 0 {
-        return Err(Errno::EACCES);
-    }
-    if mode & W_OK != 0 && perm & 0o222 == 0 {
-        return Err(Errno::EACCES);
-    }
-    if mode & X_OK != 0 && perm & 0o111 == 0 {
+    if !access_mode_allowed(&kstat, mode, flags & AT_EACCESS != 0) {
         return Err(Errno::EACCES);
     }
     Ok(0)
@@ -2023,6 +2104,47 @@ fn access_perm_bits(ty: InodeType, mode: u32) -> u32 {
     }
 }
 
+fn access_mode_allowed(stat: &KStat, mode: usize, use_effective_ids: bool) -> bool {
+    let task = current_task().expect("[kernel] current task is None.");
+    let uid = if use_effective_ids {
+        task.euid()
+    } else {
+        task.uid()
+    } as u32;
+    let gid = if use_effective_ids {
+        task.egid()
+    } else {
+        task.gid()
+    } as u32;
+    let perm = access_perm_bits(stat.ty, stat.mode);
+
+    if uid == 0 {
+        if mode & X_OK != 0 && stat.ty != InodeType::Directory && perm & 0o111 == 0 {
+            return false;
+        }
+        return true;
+    }
+
+    let granted = if uid == stat.uid {
+        (perm >> 6) & 0o7
+    } else if gid == stat.gid {
+        (perm >> 3) & 0o7
+    } else {
+        perm & 0o7
+    };
+    let mut requested = 0u32;
+    if mode & R_OK != 0 {
+        requested |= 0o4;
+    }
+    if mode & W_OK != 0 {
+        requested |= 0o2;
+    }
+    if mode & X_OK != 0 {
+        requested |= 0o1;
+    }
+    granted & requested == requested
+}
+
 /// 系统调用 sys-statfs
 pub fn sys_statfs(path: *const u8, buf: *mut Statfs64) -> SysResult<usize> {
     let path = copy_cstr_from_user(path)?;
@@ -2032,12 +2154,29 @@ pub fn sys_statfs(path: *const u8, buf: *mut Statfs64) -> SysResult<usize> {
     Ok(0)
 }
 
+fn statfs_for_fileop(file: &Arc<dyn FileOp>) -> SysResult<Statfs64> {
+    if let Some(file) = file.as_any().downcast_ref::<File>() {
+        return file.path().mnt.fs.statfs();
+    }
+
+    let stat = file.get_stat()?;
+    match stat.ty {
+        InodeType::Fifo => Ok(Statfs64 {
+            f_type: 0x5049_5045,
+            f_bsize: PAGE_SIZE as i64,
+            f_namelen: 255,
+            f_frsize: PAGE_SIZE as i64,
+            ..Default::default()
+        }),
+        _ => Err(Errno::EINVAL),
+    }
+}
+
 /// 系统调用 sys-fstatfs
 pub fn sys_fstatfs(fd: usize, buf: *mut Statfs64) -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
     let file = task.get_fd_entry(fd)?.file;
-    let file = file.as_any().downcast_ref::<File>().ok_or(Errno::EINVAL)?;
-    let statfs = file.path().mnt.fs.statfs()?;
+    let statfs = statfs_for_fileop(&file)?;
     copy_to_user(buf, &statfs as *const Statfs64, 1)?;
     Ok(0)
 }
@@ -2322,10 +2461,14 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SysResult<usize> {
         }
         F_GETLK => {
             let flock = arg as *mut LinuxFlock;
-            let mut lock = LinuxFlock::default();
-            copy_from_user(&mut lock as *mut LinuxFlock, flock as *const LinuxFlock, 1)?;
-            let lock = normalize_flock(&fd_entry.file, lock)?;
-            let lock = get_posix_lock(&fd_entry.file, lock)?;
+            let mut original = LinuxFlock::default();
+            copy_from_user(
+                &mut original as *mut LinuxFlock,
+                flock as *const LinuxFlock,
+                1,
+            )?;
+            let normalized = normalize_flock(&fd_entry.file, original)?;
+            let lock = get_posix_lock(&fd_entry.file, normalized, original)?;
             copy_to_user(flock, &lock as *const LinuxFlock, 1)?;
             Ok(0)
         }

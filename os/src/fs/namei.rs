@@ -663,6 +663,9 @@ fn resolve_path_from(
         // 如果 child 是相对 symlink，后续解析必须以“链接所在目录”为起点。
         // 因此先保存当前目录 path，再去 lookup child。
         let symlink_base = Path::new(nd.mnt.clone(), nd.dentry.clone());
+        if nd.dentry.get_inode().node_type() == InodeType::Directory {
+            check_dir_search_permission(&nd.dentry)?;
+        }
         // 中间路径必须穿过 mount；最后一级是否穿过 mount 由调用者决定。
         let child = lookup_dentry_maybe_follow_mount(&mut nd, !is_last || follow_final_mount)?;
         let child_path = Path::new(nd.mnt.clone(), child.clone());
@@ -999,6 +1002,9 @@ pub fn link_path_walk(nd: &mut Nameidata) -> SysResult {
                 follow_dotdot(nd);
             } else {
                 let symlink_base = Path::new(nd.mnt.clone(), nd.dentry.clone());
+                if nd.dentry.get_inode().node_type() == InodeType::Directory {
+                    check_dir_search_permission(&nd.dentry)?;
+                }
                 let child_dentry = lookup_dentry(nd)?;
                 let child_path = Path::new(nd.mnt.clone(), child_dentry.clone());
                 let inode = child_dentry.get_inode();

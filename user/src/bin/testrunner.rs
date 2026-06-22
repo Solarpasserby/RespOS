@@ -119,6 +119,20 @@ fn ensure_executable_file(path: &str, content: &[u8]) {
     let _ = close(fd as usize);
 }
 
+#[cfg(target_arch = "riscv64")]
+const LTP_PATHCONF_PRELOAD_SO: &[u8] =
+    include_bytes!("../../assets/ltp_pathconf_preload_riscv64.so");
+
+#[cfg(target_arch = "loongarch64")]
+const LTP_PATHCONF_PRELOAD_SO: &[u8] =
+    include_bytes!("../../assets/ltp_pathconf_preload_loongarch64.so");
+
+const LTP_PATHCONF_PRELOAD_PATH: &str = "/tmp/ltp_pathconf_preload.so\0";
+
+fn prepare_ltp_pathconf_preload() {
+    ensure_executable_file(LTP_PATHCONF_PRELOAD_PATH, LTP_PATHCONF_PRELOAD_SO);
+}
+
 fn ensure_noop_mkfs(path: &str) {
     ensure_executable_file(path, b"#!/bin/sh\nexit 0\n");
 }
@@ -146,13 +160,7 @@ uucp:x:10:uucp\n\
 nogroup:x:65534:nobody\n\
 nobody:x:65534:nobody\n",
     );
-    let mut hosts = String::from("127.0.0.1 localhost ");
-    for _ in 0..991 {
-        hosts.push('0');
-    }
-    hosts.push('\n');
-    hosts.push('\0');
-    ensure_text_file("/etc/hosts\0", &hosts.as_bytes()[..hosts.len() - 1]);
+    ensure_text_file("/etc/hosts\0", b"127.0.0.1 localhost\n");
     ensure_text_file("/etc/resolv.conf\0", b"");
     ensure_text_file(
         "/etc/nsswitch.conf\0",
@@ -622,6 +630,7 @@ fn run_ltp_selected(
     path_env: &str,
     ld_library_path_env: &str,
     ltp_root_env: &str,
+    ld_preload_env: Option<&str>,
 ) {
     if chdir(workdir) < 0 {
         println!("[testrunner] cannot enter {}", strip_nul(workdir));
@@ -661,23 +670,43 @@ fn run_ltp_selected(
             ld_library_path_env_buf.push('\0');
             let mut ltp_root_env_buf = String::from(ltp_root_env);
             ltp_root_env_buf.push('\0');
+            let mut ld_preload_env_buf = String::new();
+            if let Some(ld_preload_env) = ld_preload_env {
+                ld_preload_env_buf.push_str(ld_preload_env);
+                ld_preload_env_buf.push('\0');
+            }
 
             println!("RUN LTP CASE {}", name_str);
 
             let pid = fork();
             if pid == 0 {
                 let argv: &[*const u8] = &[argv0.as_ptr(), core::ptr::null()];
-                let envp: &[*const u8] = &[
-                    path_env_buf.as_ptr(),
-                    ld_library_path_env_buf.as_ptr(),
-                    ltp_root_env_buf.as_ptr(),
-                    "TMPDIR=/tmp\0".as_ptr(),
-                    // LTP 会据此跳过 systemd-detect-virt 探测；
-                    // 官方 benchmark 镜像中没有这个程序。
-                    "LTP_VIRT_OVERRIDE=\0".as_ptr(),
-                    core::ptr::null(),
-                ];
-                let ret = execve(&path, argv, envp);
+                let ret = if ld_preload_env_buf.is_empty() {
+                    let envp: &[*const u8] = &[
+                        path_env_buf.as_ptr(),
+                        ld_library_path_env_buf.as_ptr(),
+                        ltp_root_env_buf.as_ptr(),
+                        "TMPDIR=/tmp\0".as_ptr(),
+                        // LTP 会据此跳过 systemd-detect-virt 探测；
+                        // 官方 benchmark 镜像中没有这个程序。
+                        "LTP_VIRT_OVERRIDE=\0".as_ptr(),
+                        core::ptr::null(),
+                    ];
+                    execve(&path, argv, envp)
+                } else {
+                    let envp: &[*const u8] = &[
+                        path_env_buf.as_ptr(),
+                        ld_library_path_env_buf.as_ptr(),
+                        ltp_root_env_buf.as_ptr(),
+                        ld_preload_env_buf.as_ptr(),
+                        "TMPDIR=/tmp\0".as_ptr(),
+                        // LTP 会据此跳过 systemd-detect-virt 探测；
+                        // 官方 benchmark 镜像中没有这个程序。
+                        "LTP_VIRT_OVERRIDE=\0".as_ptr(),
+                        core::ptr::null(),
+                    ];
+                    execve(&path, argv, envp)
+                };
                 println!("[testrunner] exec {} failed: {}", name_str, ret);
                 exit(-1);
             }
@@ -722,6 +751,7 @@ fn _run_ltp_musl() {
     prepare_musl_loader_links();
     prepare_ltp_common_files();
     prepare_bin_shell(BUSYBOX_PATH);
+    prepare_ltp_pathconf_preload();
     run_ltp_selected(
         "/musl/\0",
         "ltp-musl",
@@ -729,6 +759,7 @@ fn _run_ltp_musl() {
         "PATH=/musl/ltp/testcases/bin:/musl:/bin",
         "LD_LIBRARY_PATH=/musl/lib:/musl",
         "LTPROOT=/musl/ltp",
+        Some("LD_PRELOAD=/tmp/ltp_pathconf_preload.so"),
     );
 }
 
@@ -743,6 +774,7 @@ fn _run_ltp_glibc() {
         "PATH=/glibc/ltp/testcases/bin:/glibc:/bin",
         "LD_LIBRARY_PATH=/glibc/lib:/glibc",
         "LTPROOT=/glibc/ltp",
+        None,
     );
 }
 

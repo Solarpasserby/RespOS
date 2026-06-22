@@ -759,7 +759,7 @@ static int ext4_path_check(const char *path, bool *is_goal)
 {
 	int i;
 
-	for (i = 0; i < EXT4_DIRECTORY_FILENAME_LEN; ++i) {
+	for (i = 0; i <= EXT4_DIRECTORY_FILENAME_LEN; ++i) {
 
 		if (path[i] == '/') {
 			*is_goal = false;

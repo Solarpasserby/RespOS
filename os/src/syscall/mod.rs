@@ -40,6 +40,7 @@ const SYSCALL_FCHDIR: usize = 50;
 const SYSCALL_FCHMOD: usize = 52;
 const SYSCALL_FCHMODAT: usize = 53;
 const SYSCALL_FCHOWNAT: usize = 54;
+const SYSCALL_FCHOWN: usize = 55;
 const SYSCALL_OPENAT: usize = 56;
 const SYSCALL_CLOSE: usize = 57;
 const SYSCALL_PIPE2: usize = 59;
@@ -321,6 +322,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
             args[3],
             args[4],
         ),
+        SYSCALL_FCHOWN => sys_fchown(args[0], args[1], args[2]),
         SYSCALL_OPENAT => sys_openat(args[0] as isize, args[1] as *const u8, args[2], args[3]),
         SYSCALL_CLOSE => sys_close(args[0]),
         SYSCALL_PIPE2 => sys_pipe2(args[0] as *mut [i32; 2], args[1]),
