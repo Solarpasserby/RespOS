@@ -176,6 +176,161 @@ pub fn sys_pwrite64(fd: usize, buf: *mut u8, len: usize, offset: isize) -> SysRe
     }
 }
 
+fn copy_file_data(
+    input: &alloc::sync::Arc<dyn FileOp>,
+    output: &alloc::sync::Arc<dyn FileOp>,
+    count: usize,
+) -> SysResult<usize> {
+    let mut kbuf = alloc::vec![0u8; count.min(IO_CHUNK_SIZE)];
+    let mut total = 0usize;
+    while total < count {
+        if !output.write_ready() {
+            return if total > 0 {
+                Ok(total)
+            } else {
+                Err(Errno::EAGAIN)
+            };
+        }
+        let chunk_len = (count - total).min(kbuf.len());
+        let read_len = match input.read(&mut kbuf[..chunk_len]) {
+            Ok(0) => break,
+            Ok(read_len) => read_len,
+            Err(err) => return if total > 0 { Ok(total) } else { Err(err) },
+        };
+        let mut written_total = 0usize;
+        while written_total < read_len {
+            if !output.write_ready() {
+                return if total > 0 {
+                    Ok(total)
+                } else {
+                    Err(Errno::EAGAIN)
+                };
+            }
+            let written = match output.write(&kbuf[written_total..read_len]) {
+                Ok(0) => break,
+                Ok(written) => written,
+                Err(err) => return if total > 0 { Ok(total) } else { Err(err) },
+            };
+            written_total += written;
+        }
+        total += written_total;
+        if written_total < read_len || read_len < chunk_len {
+            break;
+        }
+    }
+    Ok(total)
+}
+
+pub fn sys_sendfile(
+    out_fd: usize,
+    in_fd: usize,
+    offset: *mut i64,
+    count: usize,
+) -> SysResult<usize> {
+    let task = current_task().expect("[kernel] current task is None.");
+    let in_entry = task.get_fd_entry(in_fd)?;
+    let out_entry = task.get_fd_entry(out_fd)?;
+    let input = in_entry.file.clone();
+    let output = out_entry.file.clone();
+
+    if !input.readable() || !output.writable() {
+        return Err(Errno::EBADF);
+    }
+    if count == 0 {
+        return Ok(0);
+    }
+
+    let explicit_offset = read_user_offset(offset)?;
+    let old_in_offset = input.get_offset();
+    if let Some(offset) = explicit_offset {
+        input.can_seek()?;
+        input.seek(offset as isize)?;
+    }
+
+    let ret = copy_file_data(&input, &output, count);
+    let new_in_offset = input.get_offset();
+
+    if explicit_offset.is_some() {
+        let _ = input.seek(old_in_offset as isize);
+        if ret.is_ok() {
+            write_user_offset(offset, new_in_offset)?;
+        }
+    }
+
+    ret
+}
+
+pub fn sys_copy_file_range(
+    fd_in: usize,
+    off_in: *mut i64,
+    fd_out: usize,
+    off_out: *mut i64,
+    len: usize,
+    flags: usize,
+) -> SysResult<usize> {
+    if flags != 0 {
+        return Err(Errno::EINVAL);
+    }
+    if len == 0 {
+        return Ok(0);
+    }
+
+    let task = current_task().expect("[kernel] current task is None.");
+    let in_entry = task.get_fd_entry(fd_in)?;
+    let out_entry = task.get_fd_entry(fd_out)?;
+    let input = in_entry.file.clone();
+    let output = out_entry.file.clone();
+
+    if !input.readable() || !output.writable() {
+        return Err(Errno::EBADF);
+    }
+    input.can_seek()?;
+    output.can_seek()?;
+
+    let explicit_in = read_user_offset(off_in)?;
+    let explicit_out = read_user_offset(off_out)?;
+    let old_in_offset = input.get_offset();
+    let old_out_offset = output.get_offset();
+    if let Some(offset) = explicit_in {
+        input.seek(offset as isize)?;
+    }
+    if let Some(offset) = explicit_out {
+        output.seek(offset as isize)?;
+    }
+
+    let ret = copy_file_data(&input, &output, len);
+    let new_in_offset = input.get_offset();
+    let new_out_offset = output.get_offset();
+
+    if explicit_in.is_some() {
+        let _ = input.seek(old_in_offset as isize);
+        if ret.is_ok() {
+            write_user_offset(off_in, new_in_offset)?;
+        }
+    }
+    if explicit_out.is_some() {
+        let _ = output.seek(old_out_offset as isize);
+        if ret.is_ok() {
+            write_user_offset(off_out, new_out_offset)?;
+        }
+    }
+
+    ret
+}
+
+pub fn sys_fadvise64(fd: usize, offset: isize, len: isize, advice: usize) -> SysResult<usize> {
+    if offset < 0 || len < 0 {
+        return Err(Errno::EINVAL);
+    }
+    if advice > 5 {
+        return Err(Errno::EINVAL);
+    }
+    let task = current_task().expect("[kernel] current task is None.");
+    let file = task.get_fd_entry(fd)?.file;
+    file.can_seek()?;
+    Ok(0)
+}
+
 /// 系统调用 sys-write
 pub fn sys_write(fd: usize, buf: *mut u8, len: usize) -> SysResult<usize> {
     if len == 0 {
@@ -2200,13 +2355,11 @@ pub fn sys_preadv(
     iovcnt: usize,
     offset: isize,
 ) -> SysResult<usize> {
-    const IOV_MAX: usize = 1024;
-    if offset < 0 || iovcnt > IOV_MAX {
+    if offset < 0 {
         return Err(Errno::EINVAL);
     }
-    if iovcnt == 0 {
-        return Ok(0);
-    }
+    let items = read_iovecs(iov_ptr, iovcnt)?;
+    check_iovec_buffers(&items, IovecBufferPerm::Write)?;
 
     let task = current_task().expect("[kernel] current task is None.");
     let file = task.get_fd_entry(fd)?.file;
@@ -2219,16 +2372,7 @@ pub fn sys_preadv(
     file.seek(offset)?; // 定位到写入起点
 
     let mut total: usize = 0;
-    for idx in 0..iovcnt {
-        let mut item = IoVec {
-            base: core::ptr::null_mut(),
-            len: 0,
-        };
-        let iov_ret = unsafe { copy_from_user(&mut item as *mut IoVec, iov_ptr.add(idx), 1) };
-        if let Err(err) = iov_ret {
-            let _ = file.seek(old_offset as isize);
-            return if total > 0 { Ok(total) } else { Err(err) };
-        }
+    for item in items {
         if item.len == 0 {
             continue;
         }
@@ -2274,10 +2418,10 @@ pub fn sys_pwritev(
 
     let task = current_task().expect("[kernel] current task is None.");
     let file = task.get_fd_entry(fd)?.file;
+    file.can_seek()?;
     if !file.writable() {
         return Err(Errno::EBADF);
     }
-    file.can_seek()?;
 
     let old_offset = file.get_offset(); // 保存原偏移
     file.seek(offset)?; // 定位到写入起点

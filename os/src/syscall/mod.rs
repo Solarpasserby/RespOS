@@ -39,6 +39,7 @@ const SYSCALL_PREAD64: usize = 67;
 const SYSCALL_PWRITE64: usize = 68;
 const SYSCALL_PREADV: usize = 69;
 const SYSCALL_PWRITEV: usize = 70;
+const SYSCALL_SENDFILE: usize = 71;
 const SYSCALL_PSELECT6: usize = 72;
 const SYSCALL_PPOLL: usize = 73;
 const SYSCALL_SIGNALFD4: usize = 74;
@@ -132,12 +133,14 @@ const SYSCALL_MUNMAP: usize = 215;
 const SYSCALL_CLONE: usize = 220;
 const SYSCALL_EXECVE: usize = 221;
 const SYSCALL_MMAP: usize = 222;
+const SYSCALL_FADVISE64: usize = 223;
 const SYSCALL_MPROTECT: usize = 226;
 const SYSCALL_MSYNC: usize = 227;
 const SYSCALL_MADVISE: usize = 233;
 const SYSCALL_PERF_EVENT_OPEN: usize = 241;
 const SYSCALL_ACCEPT4: usize = 242;
 const SYSCALL_RECVMMSG: usize = 243;
+const SYSCALL_COPY_FILE_RANGE: usize = 285;
 const SYSCALL_PREADV2: usize = 286;
 const SYSCALL_PWRITEV2: usize = 287;
 const SYSCALL_WAIT4: usize = 260;
@@ -185,6 +188,10 @@ use signal::*;
 use special_fd::*;
 use system::*;
 use time::*;
+
+fn merge_offset_arg(low: usize, high: usize) -> isize {
+    (((high as u64) << 32) | ((low as u64) & 0xffff_ffff)) as i64 as isize
+}
 
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
     match syscall_id {
@@ -245,6 +252,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         SYSCALL_WRITEV => sys_writev(args[0], args[1] as *const IoVec, args[2]),
         SYSCALL_PREADV => sys_preadv(args[0], args[1] as *const IoVec, args[2], args[3] as isize),
         SYSCALL_PWRITEV => sys_pwritev(args[0], args[1] as *const IoVec, args[2], args[3] as isize),
+        SYSCALL_SENDFILE => sys_sendfile(args[0], args[1], args[2] as *mut i64, args[3]),
         SYSCALL_PREAD64 => sys_pread64(args[0], args[1] as *mut u8, args[2], args[3] as isize),
         SYSCALL_PWRITE64 => sys_pwrite64(args[0], args[1] as *mut u8, args[2], args[3] as isize),
         SYSCALL_PSELECT6 => sys_pselect6(
@@ -431,6 +439,14 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         SYSCALL_CLONE => sys_clone(args[0], args[1], args[2], args[3], args[4]),
         SYSCALL_ACCEPT4 => sys_accept4(args[0], args[1], args[2], args[3]),
         SYSCALL_RECVMMSG => sys_recvmmsg(args[0], args[1], args[2], args[3], args[4]),
+        SYSCALL_COPY_FILE_RANGE => sys_copy_file_range(
+            args[0],
+            args[1] as *mut i64,
+            args[2],
+            args[3] as *mut i64,
+            args[4],
+            args[5],
+        ),
         SYSCALL_EXECVE => sys_execve(
             args[0] as *const u8,
             args[1] as *const usize,
@@ -451,6 +467,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
             args[4] as isize,
             args[5],
         ),
+        SYSCALL_FADVISE64 => sys_fadvise64(args[0], args[1] as isize, args[2] as isize, args[3]),
         SYSCALL_MPROTECT => sys_mprotect(args[0], args[1], args[2] as u32),
         SYSCALL_MSYNC => sys_msync(args[0], args[1], args[2] as i32),
         SYSCALL_PERF_EVENT_OPEN => sys_perf_event_open(
@@ -464,15 +481,15 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
             args[0],
             args[1] as *const IoVec,
             args[2],
-            args[3] as isize,
-            args[4] as i32,
+            merge_offset_arg(args[3], args[4]),
+            args[5] as i32,
         ),
         SYSCALL_PWRITEV2 => sys_pwritev2(
             args[0],
             args[1] as *const IoVec,
             args[2],
-            args[3] as isize,
-            args[4] as i32,
+            merge_offset_arg(args[3], args[4]),
+            args[5] as i32,
         ),
         SYSCALL_MADVISE => sys_madvise(args[0], args[1], args[2] as i32),
         SYSCALL_WAIT4 => sys_wait4(

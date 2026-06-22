@@ -26,6 +26,8 @@ use super::{
     udp::UdpSocket,
 };
 
+const UNIX_SOCKET_BUFFER_LIMIT: usize = 64 * 1024;
+
 // ——— 类型枚举 ———
 
 /// 套接字地址族。
@@ -125,8 +127,20 @@ impl UnixSocket {
             return Ok(0);
         }
         let peer_rx = self.peer_rx.lock().clone().ok_or(Errno::ENOTCONN)?;
-        peer_rx.lock().extend(buf.iter().copied());
-        Ok(buf.len())
+        loop {
+            let mut rx = peer_rx.lock();
+            let available = UNIX_SOCKET_BUFFER_LIMIT.saturating_sub(rx.len());
+            if available > 0 {
+                let write_len = available.min(buf.len());
+                rx.extend(buf[..write_len].iter().copied());
+                return Ok(write_len);
+            }
+            drop(rx);
+            if self.is_nonblocking() {
+                return Err(Errno::EAGAIN);
+            }
+            yield_current_task();
+        }
     }
 
     fn read_ready(&self) -> bool {
@@ -134,7 +148,10 @@ impl UnixSocket {
     }
 
     fn write_ready(&self) -> bool {
-        self.peer_rx.lock().is_some()
+        self.peer_rx
+            .lock()
+            .as_ref()
+            .is_some_and(|rx| rx.lock().len() < UNIX_SOCKET_BUFFER_LIMIT)
     }
 }
 
