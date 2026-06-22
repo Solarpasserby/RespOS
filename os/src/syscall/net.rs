@@ -780,9 +780,9 @@ pub fn sys_getsockopt(
     })
 }
 
-pub fn sys_shutdown(fd: usize, _how: usize) -> SysResult<usize> {
+pub fn sys_shutdown(fd: usize, how: usize) -> SysResult<usize> {
     with_socket(fd, |sock| {
-        sock.shutdown()?;
+        sock.shutdown(how)?;
         Ok(0)
     })
 }

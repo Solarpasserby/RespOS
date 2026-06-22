@@ -21,7 +21,7 @@ use crate::{
         LOOP_BACK_IP, from_ipendpoint_to_socketaddr, from_sockaddr_to_ipendpoint, is_unspecified,
     },
     syscall::{Errno, SysResult},
-    task::yield_current_task,
+    task::{current_task, yield_current_task},
 };
 
 use super::tcp::PollState;
@@ -307,19 +307,33 @@ impl UdpSocket {
         if self.is_nonblocking() {
             f()
         } else {
-            loop {
+            let task = current_task().ok_or(Errno::ESRCH)?;
+            task.set_interruptible(true);
+            let result = loop {
                 poll_interfaces();
+                task.check_real_timer();
+                if task.check_signal_interrupt() || task.is_interrupted() {
+                    task.clear_interrupted();
+                    break Err(Errno::EINTR);
+                }
                 match f() {
-                    Ok(res) => return Ok(res),
+                    Ok(res) => break Ok(res),
                     Err(e) => {
                         if e == Errno::EAGAIN {
                             yield_current_task();
+                            task.check_real_timer();
+                            if task.check_signal_interrupt() || task.is_interrupted() {
+                                task.clear_interrupted();
+                                break Err(Errno::EINTR);
+                            }
                         } else {
-                            return Err(e);
+                            break Err(e);
                         }
                     }
                 }
-            }
+            };
+            task.set_interruptible(false);
+            result
         }
     }
 }

@@ -26,7 +26,7 @@ use spin::Mutex;
 use crate::{
     net::addr::{LOOP_BACK_IP, UNSPECIFIED_ENDPOINT, from_sockaddr_to_ipendpoint, is_unspecified},
     syscall::{Errno, SysResult},
-    task::yield_current_task,
+    task::{current_task, yield_current_task},
 };
 
 use super::{LISTEN_TABLE, SocketSetWrapper, poll_interfaces, socket_set};
@@ -54,6 +54,9 @@ pub struct TcpSocket {
     nonblock: AtomicBool,
     /// 是否允许端口复用（SO_REUSEADDR）。
     reuse_addr: AtomicBool,
+    /// 用户态 shutdown(SHUT_RD/SHUT_WR) 的半关闭状态。
+    recv_shutdown: AtomicBool,
+    send_shutdown: AtomicBool,
     /// TCP keepalive 参数。
     tcp_keepidle: AtomicU64,
     tcp_keepintvl: AtomicU64,
@@ -66,6 +69,10 @@ const STATE_BUSY: u8 = 1;
 const STATE_CONNECTED: u8 = 2;
 const STATE_CONNECTING: u8 = 3;
 const STATE_LISTENING: u8 = 4;
+
+const SHUT_RD: usize = 0;
+const SHUT_WR: usize = 1;
+const SHUT_RDWR: usize = 2;
 
 // SAFETY: TcpSocket 的字段访问受 `update_state` / `block_on` 控制，
 // 在单核协作式调度下不存在真正的并发问题。
@@ -87,6 +94,11 @@ impl TcpSocket {
 
     pub fn is_connected(&self) -> bool {
         self.get_state() == STATE_CONNECTED
+    }
+
+    fn reset_shutdown_flags(&self) {
+        self.recv_shutdown.store(false, Ordering::Release);
+        self.send_shutdown.store(false, Ordering::Release);
     }
 
     fn is_connecting(&self) -> bool {
@@ -159,6 +171,7 @@ impl TcpSocket {
             .with_socket::<_, tcp::Socket, _>(handle, |socket| match socket.state() {
                 State::SynSent => false,
                 State::Established => {
+                    self.reset_shutdown_flags();
                     self.set_state(STATE_CONNECTED);
                     true
                 }
@@ -188,6 +201,8 @@ impl TcpSocket {
                 readable = !socket.may_recv() || socket.can_recv();
                 writeable = !socket.may_send() || socket.can_send();
             });
+        readable |= self.recv_shutdown.load(Ordering::Acquire);
+        writeable |= self.send_shutdown.load(Ordering::Acquire);
         if !readable && !writeable {
             readable = true;
         }
@@ -215,19 +230,33 @@ impl TcpSocket {
         if self.is_nonblocking() {
             f()
         } else {
-            loop {
+            let task = current_task().ok_or(Errno::ESRCH)?;
+            task.set_interruptible(true);
+            let result = loop {
                 poll_interfaces();
+                task.check_real_timer();
+                if task.check_signal_interrupt() || task.is_interrupted() {
+                    task.clear_interrupted();
+                    break Err(Errno::EINTR);
+                }
                 match f() {
-                    Ok(res) => return Ok(res),
+                    Ok(res) => break Ok(res),
                     Err(res) => {
                         if res == Errno::EAGAIN {
                             yield_current_task();
+                            task.check_real_timer();
+                            if task.check_signal_interrupt() || task.is_interrupted() {
+                                task.clear_interrupted();
+                                break Err(Errno::EINTR);
+                            }
                         } else {
-                            return Err(res);
+                            break Err(res);
                         }
                     }
                 }
-            }
+            };
+            task.set_interruptible(false);
+            result
         }
     }
 }
@@ -243,6 +272,8 @@ impl TcpSocket {
             remote_addr: UnsafeCell::new(UNSPECIFIED_ENDPOINT),
             nonblock: AtomicBool::new(false),
             reuse_addr: AtomicBool::new(false),
+            recv_shutdown: AtomicBool::new(false),
+            send_shutdown: AtomicBool::new(false),
             tcp_keepidle: AtomicU64::new(0),
             tcp_keepintvl: AtomicU64::new(0),
             tcp_keepcnt: AtomicU64::new(0),
@@ -262,6 +293,8 @@ impl TcpSocket {
             remote_addr: UnsafeCell::new(remote_endpoint),
             nonblock: AtomicBool::new(false),
             reuse_addr: AtomicBool::new(false),
+            recv_shutdown: AtomicBool::new(false),
+            send_shutdown: AtomicBool::new(false),
             tcp_keepidle: AtomicU64::new(0),
             tcp_keepintvl: AtomicU64::new(0),
             tcp_keepcnt: AtomicU64::new(0),
@@ -316,6 +349,7 @@ impl TcpSocket {
             unsafe {
                 self.handle.get().write(Some(handle));
             }
+            self.reset_shutdown_flags();
             let bound_endpoint = self.bound_endpoint();
             let remote_ipendpoint = from_sockaddr_to_ipendpoint(remote_addr);
 
@@ -436,15 +470,61 @@ impl TcpSocket {
             )),
             Err(e) => {
                 if e == Errno::ECONNRESET || e == Errno::ECONNREFUSED {
-                    self.shutdown();
+                    self.close_all();
                 }
                 Err(e)
             }
         })
     }
 
-    /// 关闭连接或停止监听。
-    pub fn shutdown(&self) {
+    /// 处理用户态 shutdown(2)。smoltcp 的 close() 正好对应关闭 TCP 发送半边。
+    pub fn shutdown(&self, how: usize) -> SysResult {
+        if how > SHUT_RDWR {
+            return Err(Errno::EINVAL);
+        }
+        if self.is_connecting() {
+            return Err(Errno::ENOTCONN);
+        }
+        if self.is_listening() {
+            return Err(Errno::ENOTCONN);
+        }
+        if !self.is_connected() {
+            return Err(Errno::ENOTCONN);
+        }
+
+        match how {
+            SHUT_RD => {
+                self.recv_shutdown.store(true, Ordering::Release);
+            }
+            SHUT_WR => {
+                self.shutdown_write();
+            }
+            SHUT_RDWR => {
+                self.recv_shutdown.store(true, Ordering::Release);
+                self.shutdown_write();
+            }
+            _ => unreachable!(),
+        }
+        Ok(())
+    }
+
+    fn shutdown_write(&self) {
+        if self.send_shutdown.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let Some(handle) = (unsafe { self.handle.get().read() }) else {
+            return;
+        };
+        socket_set()
+            .lock()
+            .with_socket_mut::<_, tcp::Socket, _>(handle, |socket| {
+                socket.close();
+            });
+        socket_set().lock().poll_interfaces();
+    }
+
+    /// 释放连接或停止监听，用于 Drop 和内部错误恢复。
+    pub fn close_all(&self) {
         // 已连接 socket：关闭 smoltcp socket，清除绑定地址
         let _ = self.update_state(STATE_CONNECTED, STATE_CLOSED, || {
             let handle = unsafe { self.handle.get().read().unwrap() };
@@ -456,6 +536,8 @@ impl TcpSocket {
             unsafe {
                 self.local_addr.get().write(UNSPECIFIED_ENDPOINT);
             }
+            self.recv_shutdown.store(true, Ordering::Release);
+            self.send_shutdown.store(true, Ordering::Release);
             socket_set().lock().poll_interfaces();
             Ok(())
         });
@@ -466,6 +548,8 @@ impl TcpSocket {
             unsafe {
                 self.local_addr.get().write(UNSPECIFIED_ENDPOINT);
             }
+            self.recv_shutdown.store(true, Ordering::Release);
+            self.send_shutdown.store(true, Ordering::Release);
             LISTEN_TABLE.lock().unlisten(local_port);
             socket_set().lock().poll_interfaces();
             Ok(())
@@ -492,6 +576,8 @@ impl TcpSocket {
             return Err(Errno::EAGAIN);
         } else if !self.is_connected() {
             return Err(Errno::ENOTCONN);
+        } else if self.recv_shutdown.load(Ordering::Acquire) {
+            return Ok(0);
         }
         let handle = unsafe { self.handle.get().read().unwrap() };
         self.block_on(|| {
@@ -521,6 +607,8 @@ impl TcpSocket {
             return Err(Errno::EAGAIN);
         } else if !self.is_connected() {
             return Err(Errno::ENOTCONN);
+        } else if self.send_shutdown.load(Ordering::Acquire) {
+            return Err(Errno::EPIPE);
         }
         let handle = unsafe { self.handle.get().read().unwrap() };
         self.block_on(|| {
@@ -667,7 +755,7 @@ fn get_ephemeral_port() -> u16 {
 
 impl Drop for TcpSocket {
     fn drop(&mut self) {
-        self.shutdown();
+        self.close_all();
         if let Some(handle) = unsafe { self.handle.get().read() } {
             socket_set().lock().remove(handle);
         }

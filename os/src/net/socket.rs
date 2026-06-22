@@ -397,11 +397,14 @@ impl Socket {
         }
     }
 
-    /// 关闭套接字。
-    pub fn shutdown(&self) -> SysResult {
+    /// 关闭套接字的一端或两端。
+    pub fn shutdown(&self, how: usize) -> SysResult {
+        if how > 2 {
+            return Err(Errno::EINVAL);
+        }
         match &self.inner {
             SocketInner::Tcp(tcp) => {
-                tcp.close();
+                tcp.shutdown(how)?;
             }
             SocketInner::Udp(udp) => {
                 udp.shutdown();

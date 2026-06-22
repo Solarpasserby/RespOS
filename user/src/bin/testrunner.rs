@@ -747,8 +747,8 @@ fn main() -> i32 {
     // _run_iperf_glibc();
     // _run_iozone_glibc();
     // _run_iozone_musl();
-    _run_netperf_musl();
-    _run_netperf_glibc();
+    // _run_netperf_musl();
+    // _run_netperf_glibc();
     // _run_lmbench_musl();
     // _run_lmbench_glibc();
     _run_ltp_musl();
@@ -775,12 +775,12 @@ fn main() -> i32 {
     // _run_iperf_glibc();
     // _run_iozone_glibc();
     // _run_iozone_musl();
-    _run_netperf_musl();
-    _run_netperf_glibc();
+    // _run_netperf_musl();
+    // _run_netperf_glibc();
     // _run_lmbench_musl();
     // _run_lmbench_glibc();
-    // _run_ltp_musl();
-    // _run_ltp_glibc();
+    _run_ltp_musl();
+    _run_ltp_glibc();
     println!("[testrunner] all selected tests finished, powering off");
     poweroff();
     0
