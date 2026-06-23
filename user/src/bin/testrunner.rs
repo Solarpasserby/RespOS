@@ -9,7 +9,7 @@ extern crate alloc;
 use alloc::string::String;
 use user_lib::{
     O_CREATE, O_RDONLY, O_TRUNC, O_WRONLY, chdir, close, exec, execve, exit, fork, mkdir, open,
-    poweroff, read, symlink, unlink, waitpid, write,
+    poweroff, read, symlink, time_get, unlink, waitpid, write,
 };
 
 const BUSYBOX_PATH: &str = "/musl/busybox\0";
@@ -609,6 +609,22 @@ fn ltp_script_exit_code(status: i32) -> i32 {
     }
 }
 
+fn ltp_elapsed_ms(start_ms: isize) -> isize {
+    let end_ms = time_get();
+    if start_ms < 0 || end_ms < start_ms {
+        -1
+    } else {
+        end_ms - start_ms
+    }
+}
+
+fn print_ltp_case_time(group_name: &str, name: &str, ret: i32, elapsed_ms: isize) {
+    println!(
+        "LTP CASE TIME {} {} {} {}",
+        group_name, name, ret, elapsed_ms
+    );
+}
+
 fn run_ltp_selected(
     workdir: &str,
     group_name: &str,
@@ -658,6 +674,7 @@ fn run_ltp_selected(
 
             println!("RUN LTP CASE {}", name_str);
 
+            let start_ms = time_get();
             let pid = fork();
             if pid == 0 {
                 let argv: &[*const u8] = &[argv0.as_ptr(), core::ptr::null()];
@@ -677,19 +694,24 @@ fn run_ltp_selected(
             }
 
             if pid < 0 {
+                let elapsed_ms = ltp_elapsed_ms(start_ms);
                 println!("FAIL LTP CASE {} : 1", name_str);
+                print_ltp_case_time(group_name, name_str, 1, elapsed_ms);
                 fail += 1;
                 continue;
             }
 
             let mut ec: i32 = 0;
             let waited = waitpid(pid as usize, &mut ec);
+            let elapsed_ms = ltp_elapsed_ms(start_ms);
             if waited < 0 {
                 println!("FAIL LTP CASE {} : 1", name_str);
+                print_ltp_case_time(group_name, name_str, 1, elapsed_ms);
                 fail += 1;
             } else {
                 let ret = ltp_script_exit_code(ec);
                 println!("FAIL LTP CASE {} : {}", name_str, ret);
+                print_ltp_case_time(group_name, name_str, ret, elapsed_ms);
                 if ret == 0 {
                     pass += 1;
                 } else if ret == 32 {
