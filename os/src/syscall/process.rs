@@ -748,47 +748,69 @@ pub fn sys_wait4(
                 return Err(Errno::ECHILD);
             }
 
-            Ok(children
-                .iter()
-                .find(|(child_tid, child)| {
-                    (pid == -1
-                        || target_pid == Some(**child_tid)
-                        || target_pgid == Some(child.pgid()))
-                        && child.is_exited()
-                })
-                .map(|(child_tid, child)| (*child_tid, child.wait_status())))
+            Ok(children.iter().find_map(|(child_tid, child)| {
+                let matches_pid = pid == -1
+                    || target_pid == Some(*child_tid)
+                    || target_pgid == Some(child.pgid());
+                if !matches_pid {
+                    return None;
+                }
+
+                if options.intersects(WaitOption::WUNTRACED | WaitOption::WCONTINUED) {
+                    if let Some((code, status)) = child.peek_wait_event() {
+                        if (code == SigInfo::CLD_STOPPED && options.contains(WaitOption::WUNTRACED))
+                            || (code == SigInfo::CLD_CONTINUED
+                                && options.contains(WaitOption::WCONTINUED))
+                        {
+                            return Some((*child_tid, wait4_event_status(code, status), false));
+                        }
+                    }
+                }
+
+                child
+                    .is_exited()
+                    .then(|| (*child_tid, child.wait_status(), true))
+            }))
         })?;
 
-        if let Some((child_tid, wait_status)) = wait_result {
+        if let Some((child_tid, wait_status, exited)) = wait_result {
             if !exit_code_ptr.is_null() {
                 copy_to_user(exit_code_ptr, &wait_status as *const i32, 1)?;
             }
 
-            let (child_utime, child_stime) = task.op_children_mut(|children| {
-                let child = children.get(&child_tid).unwrap();
-                let ticks = child.elapsed_ticks();
-                (ticks, ticks)
-            });
-            task.add_child_ticks(child_utime, child_stime);
+            if exited {
+                let (child_utime, child_stime) = task.op_children_mut(|children| {
+                    let child = children.get(&child_tid).unwrap();
+                    let ticks = child.elapsed_ticks();
+                    (ticks, ticks)
+                });
+                task.add_child_ticks(child_utime, child_stime);
 
-            if !rusage.is_null() {
-                let usage = RUsage {
-                    ru_utime: TimeVal {
-                        sec: child_utime / CLK_TCK,
-                        usec: (child_utime % CLK_TCK) * (1_000_000 / CLK_TCK),
-                    },
-                    ru_stime: TimeVal {
-                        sec: child_stime / CLK_TCK,
-                        usec: (child_stime % CLK_TCK) * (1_000_000 / CLK_TCK),
-                    },
-                    ..RUsage::default()
-                };
-                copy_to_user(rusage, &usage as *const RUsage, 1)?;
+                if !rusage.is_null() {
+                    let usage = RUsage {
+                        ru_utime: TimeVal {
+                            sec: child_utime / CLK_TCK,
+                            usec: (child_utime % CLK_TCK) * (1_000_000 / CLK_TCK),
+                        },
+                        ru_stime: TimeVal {
+                            sec: child_stime / CLK_TCK,
+                            usec: (child_stime % CLK_TCK) * (1_000_000 / CLK_TCK),
+                        },
+                        ..RUsage::default()
+                    };
+                    copy_to_user(rusage, &usage as *const RUsage, 1)?;
+                }
+
+                task.op_children_mut(|children| {
+                    children.remove(&child_tid).unwrap();
+                });
+            } else {
+                task.op_children_mut(|children| {
+                    if let Some(child) = children.get(&child_tid) {
+                        child.take_wait_event();
+                    }
+                });
             }
-
-            task.op_children_mut(|children| {
-                children.remove(&child_tid).unwrap();
-            });
 
             return Ok(child_tid);
         }
@@ -822,6 +844,14 @@ fn waitid_child_info(pid: usize, status: i32) -> LinuxSigInfo {
             SigInfo::CLD_KILLED
         };
         LinuxSigInfo::new_child(pid, status & 0x7f, code)
+    }
+}
+
+fn wait4_event_status(code: i32, status: i32) -> i32 {
+    match code {
+        SigInfo::CLD_STOPPED => (status << 8) | 0x7f,
+        SigInfo::CLD_CONTINUED => 0xffff,
+        _ => status,
     }
 }
 
