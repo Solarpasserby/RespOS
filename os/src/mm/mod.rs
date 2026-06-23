@@ -22,6 +22,7 @@ use frame_allocator::init_frame_allocator;
 pub use frame_allocator::{FrameTracker, frame_alloc};
 use heap_allocator::init_heap;
 pub use memory_set::{KERNEL_SPACE, MapPermission, MemorySet};
+pub(crate) use memory_set::{MmapBacking, mmap_file_backing};
 
 pub fn free_frame_count() -> usize {
     frame_allocator::FRAME_ALLOCATOR.lock().free_frames()
@@ -50,41 +51,19 @@ pub fn copy_cstr_from_user(ptr: *const u8) -> SysResult<String> {
         return Err(Errno::EFAULT);
     }
 
-    let start_vpn = VirtAddr::from(ptr as usize).floor();
-
-    let vpn_range = current_task()
-        .expect("[kernel] current task is None.")
-        .op_memory_set_read(|memory_set| {
-            // TODO[ABI-COMPAT]: 当前 C 字符串读取只允许字符串落在起始逻辑段内；
-            // 后续需要支持跨相邻合法逻辑段的用户字符串。
-            memory_set.check_valid_user_vpn(start_vpn, MapPermission::READ)
-        })?;
-
-    let area_end = usize::from(VirtAddr::from(vpn_range.get_end()));
-    let max_end = (ptr as usize)
-        .checked_add(USER_CSTR_MAX_LEN)
-        .ok_or(Errno::EFAULT)?
-        .min(area_end);
-
-    let mut cur = ptr as usize;
     let mut ret = String::new();
 
-    while cur < max_end {
-        let mut byte = [0u8; 1];
-        copy_user_bytes_to_kernel(cur, &mut byte)?;
-        let ch = byte[0];
+    for offset in 0..USER_CSTR_MAX_LEN {
+        let cur = (ptr as usize).checked_add(offset).ok_or(Errno::EFAULT)?;
+        let mut ch = 0u8;
+        copy_from_user(&mut ch as *mut u8, cur as *const u8, 1)?;
         if ch == 0 {
             return Ok(ret);
         }
         ret.push(ch as char);
-        cur += 1;
     }
 
-    if cur == (ptr as usize).saturating_add(USER_CSTR_MAX_LEN) {
-        Err(Errno::ENAMETOOLONG)
-    } else {
-        Err(Errno::EFAULT)
-    }
+    Err(Errno::ENAMETOOLONG)
 }
 
 pub fn extract_cstrings_from_user(mut ptr: *const usize) -> SysResult<Vec<String>> {
@@ -232,10 +211,8 @@ pub fn check_user_writable<T>(dst: *mut T, len: usize) -> SysResult {
 
 /// 检验数据段是否合法；检验数据段是否符合访问权限
 ///
-/// 当前检验不支持跨逻辑段的数据
+/// 允许跨过多个相邻且权限满足的用户逻辑段。
 fn check_user_buffer(start: usize, byte_len: usize, perm: MapPermission) -> SysResult {
-    // TODO[ABI-COMPAT]: 当前要求整个用户 buffer 完整落在同一个逻辑段内；
-    // 后续需要按页/按逻辑段逐段检查，允许跨相邻且权限满足的逻辑段。
     if byte_len == 0 {
         return Ok(());
     }
@@ -248,7 +225,7 @@ fn check_user_buffer(start: usize, byte_len: usize, perm: MapPermission) -> SysR
     current_task()
         .expect("[kernel] current task is None.")
         .op_memory_set_write(|memory_set| {
-            memory_set.check_valid_user_vpn_range(vpn_range.clone(), perm)?;
+            memory_set.check_user_access_range(vpn_range.clone(), perm)?;
             memory_set.ensure_user_page_access(vpn_range, perm)
         })?;
     Ok(())

@@ -32,11 +32,13 @@ const SYSCALL_UMOUNT2: usize = 39;
 const SYSCALL_MOUNT: usize = 40;
 const SYSCALL_STATFS: usize = 43;
 const SYSCALL_FSTATFS: usize = 44;
+const SYSCALL_TRUNCATE: usize = 45;
 const SYSCALL_FTRUNCATE: usize = 46;
 const SYSCALL_FALLOCATE: usize = 47;
 const SYSCALL_FACCESSAT: usize = 48;
 const SYSCALL_CHDIR: usize = 49;
 const SYSCALL_FCHDIR: usize = 50;
+const SYSCALL_CHROOT: usize = 51;
 const SYSCALL_FCHMOD: usize = 52;
 const SYSCALL_FCHMODAT: usize = 53;
 const SYSCALL_FCHOWNAT: usize = 54;
@@ -226,6 +228,13 @@ use time::*;
 
 pub use time::check_posix_timers;
 
+pub fn check_all_task_timers() {
+    crate::task::TASK_MANAGER.for_each(|task| {
+        task.check_real_timer();
+        check_posix_timers(task);
+    });
+}
+
 fn merge_offset_arg(low: usize, high: usize) -> isize {
     (((high as u64) << 32) | ((low as u64) & 0xffff_ffff)) as i64 as isize
 }
@@ -305,6 +314,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         ),
         SYSCALL_STATFS => sys_statfs(args[0] as *const u8, args[1] as *mut crate::fs::Statfs64),
         SYSCALL_FTRUNCATE => sys_ftruncate(args[0], args[1] as isize),
+        SYSCALL_TRUNCATE => sys_truncate(args[0] as *const u8, args[1] as isize),
         SYSCALL_FALLOCATE => sys_fallocate(args[0], args[1], args[2] as isize, args[3] as isize),
         SYSCALL_FACCESSAT => sys_faccessat(args[0] as isize, args[1] as *const u8, args[2], 0),
         SYSCALL_FACCESSAT2 => {
@@ -312,6 +322,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         }
         SYSCALL_CHDIR => sys_chdir(args[0] as *const u8),
         SYSCALL_FCHDIR => sys_fchdir(args[0]),
+        SYSCALL_CHROOT => sys_chroot(args[0] as *const u8),
         SYSCALL_MKNODAT => sys_mknodat(args[0] as isize, args[1] as *const u8, args[2], args[3]),
         SYSCALL_FCHMOD => sys_fchmod(args[0], args[1]),
         SYSCALL_FCHMODAT => sys_fchmodat(args[0] as isize, args[1] as *const u8, args[2]),

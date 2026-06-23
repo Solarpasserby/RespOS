@@ -1993,6 +1993,7 @@ pub fn sys_ftruncate(fd: usize, length: isize) -> SysResult<usize> {
     if length < 0 {
         return Err(Errno::EINVAL);
     }
+    check_truncate_fsize_limit(length as usize)?;
     let task = current_task().expect("[kernel] current task is None.");
     let file = task.get_fd_entry(fd)?.file;
     if !file.writable() {
@@ -2002,11 +2003,38 @@ pub fn sys_ftruncate(fd: usize, length: isize) -> SysResult<usize> {
     file.truncate(length as usize)
 }
 
+fn check_truncate_fsize_limit(length: usize) -> SysResult {
+    let task = current_task().expect("[kernel] current task is None.");
+    let limit = task.fsize_limit().0;
+    if limit != usize::MAX && length > limit {
+        raise_sigxfsz();
+        return Err(Errno::EFBIG);
+    }
+    Ok(())
+}
+
+pub fn sys_truncate(path: *const u8, length: isize) -> SysResult<usize> {
+    if length < 0 {
+        return Err(Errno::EINVAL);
+    }
+    let path = copy_cstr_from_user(path)?;
+    check_truncate_fsize_limit(length as usize)?;
+    let file = path_open(
+        AT_FDCWD,
+        path.as_str(),
+        OpenFlags::O_WRONLY.bits() as usize,
+        0,
+    )?;
+    file.truncate(length as usize)
+}
+
 pub fn sys_fallocate(fd: usize, mode: usize, offset: isize, len: isize) -> SysResult<usize> {
+    const FALLOC_FL_KEEP_SIZE: usize = 0x01;
+
     if offset < 0 || len <= 0 {
         return Err(Errno::EINVAL);
     }
-    if mode != 0 {
+    if mode & !FALLOC_FL_KEEP_SIZE != 0 {
         return Err(Errno::EOPNOTSUPP);
     }
 
@@ -2019,7 +2047,7 @@ pub fn sys_fallocate(fd: usize, mode: usize, offset: isize, len: isize) -> SysRe
         return Err(Errno::EBADF);
     }
     let file = file.as_any().downcast_ref::<File>().ok_or(Errno::EINVAL)?;
-    if file.get_stat()?.size < end {
+    if mode & FALLOC_FL_KEEP_SIZE == 0 && file.get_stat()?.size < end {
         file.truncate(end)?;
     }
     Ok(0)
@@ -2664,6 +2692,21 @@ pub fn sys_chdir(path: *const u8) -> SysResult<usize> {
     Ok(0)
 }
 
+pub fn sys_chroot(path: *const u8) -> SysResult<usize> {
+    let task = current_task().expect("[kernel] current task is None.");
+    if task.euid() != 0 {
+        return Err(Errno::EPERM);
+    }
+    let path = copy_cstr_from_user(path)?;
+    let resolved = filename_lookup(AT_FDCWD, path.as_str(), 0)?;
+    if resolved.dentry.get_inode().node_type() != InodeType::Directory {
+        return Err(Errno::ENOTDIR);
+    }
+    check_dir_search_permission(&resolved.dentry)?;
+    task.set_root(resolved);
+    Ok(0)
+}
+
 pub fn sys_fchdir(fd: usize) -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
     let fd_entry = task.get_fd_entry(fd)?;
@@ -2681,10 +2724,28 @@ pub fn sys_fchdir(fd: usize) -> SysResult<usize> {
     Ok(0)
 }
 
+fn cwd_relative_to_root(task: &crate::task::TaskControlBlock) -> SysResult<alloc::string::String> {
+    let cwd = task.cwd();
+    let root = task.root();
+    let cwd_path = cwd.global_abs_path();
+    let root_path = root.global_abs_path();
+    if cwd_path == root_path {
+        return Ok("/".into());
+    }
+    if root_path == "/" {
+        return Ok(cwd_path);
+    }
+    cwd_path
+        .strip_prefix(root_path.as_str())
+        .filter(|rest| rest.starts_with('/'))
+        .map(alloc::string::String::from)
+        .ok_or(Errno::ENOENT)
+}
+
 /// 系统调用 sys-getcwd
 pub fn sys_getcwd(buf: *mut u8, len: usize) -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
-    let cwd = task.cwd().global_abs_path();
+    let cwd = cwd_relative_to_root(&task)?;
     if cwd.len() >= len {
         return Err(Errno::ERANGE);
     }
@@ -2814,6 +2875,9 @@ pub fn sys_readlinkat(
     buf: *mut u8,
     bufsize: usize,
 ) -> SysResult<usize> {
+    if bufsize == 0 {
+        return Err(Errno::EINVAL);
+    }
     let path_str = copy_cstr_from_user(path)?;
     // readlinkat 读取的是最后一级 symlink inode 的 payload，不能先跟随到目标文件。
     let target_path = filename_lookup_no_follow_final_symlink(dirfd, &path_str)?;

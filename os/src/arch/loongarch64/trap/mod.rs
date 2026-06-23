@@ -119,6 +119,7 @@ pub fn trap_handler(cx: &mut TrapContext) {
         estat::Trap::Interrupt(estat::Interrupt::Timer) => {
             clear_timer_interrupt();
             set_next_ti_trigger();
+            check_all_task_timers();
             yield_current_task();
         }
         estat::Trap::Exception(estat::Exception::Syscall) => {
@@ -157,10 +158,7 @@ pub fn trap_handler(cx: &mut TrapContext) {
             );
         }
     }
-    if let Some(task) = current_task() {
-        task.check_real_timer();
-        check_posix_timers(&task);
-    }
+    check_all_task_timers();
     handle_signals();
 }
 

@@ -579,7 +579,7 @@ const LTP_SKIP: &[&str] = &[
 ];
 
 #[cfg(target_arch = "loongarch64")]
-const LTP_ARCH_MUSL_SKIP: &[&str] = &["mknod06", "rename11"];
+const LTP_ARCH_MUSL_SKIP: &[&str] = &[];
 
 #[cfg(not(target_arch = "loongarch64"))]
 const LTP_ARCH_MUSL_SKIP: &[&str] = &[];
@@ -616,6 +616,13 @@ fn ltp_elapsed_ms(start_ms: isize) -> isize {
     } else {
         end_ms - start_ms
     }
+}
+
+fn print_ltp_case_time(group_name: &str, name: &str, ret: i32, elapsed_ms: isize) {
+    println!(
+        "LTP CASE TIME {} {} {} {}",
+        group_name, name, ret, elapsed_ms
+    );
 }
 
 fn run_ltp_selected(
@@ -689,10 +696,7 @@ fn run_ltp_selected(
             if pid < 0 {
                 let elapsed_ms = ltp_elapsed_ms(start_ms);
                 println!("FAIL LTP CASE {} : 1", name_str);
-                println!(
-                    "LTP CASE TIME {} {} 1 {}",
-                    group_name, name_str, elapsed_ms
-                );
+                print_ltp_case_time(group_name, name_str, 1, elapsed_ms);
                 fail += 1;
                 continue;
             }
@@ -702,18 +706,12 @@ fn run_ltp_selected(
             let elapsed_ms = ltp_elapsed_ms(start_ms);
             if waited < 0 {
                 println!("FAIL LTP CASE {} : 1", name_str);
-                println!(
-                    "LTP CASE TIME {} {} 1 {}",
-                    group_name, name_str, elapsed_ms
-                );
+                print_ltp_case_time(group_name, name_str, 1, elapsed_ms);
                 fail += 1;
             } else {
                 let ret = ltp_script_exit_code(ec);
                 println!("FAIL LTP CASE {} : {}", name_str, ret);
-                println!(
-                    "LTP CASE TIME {} {} {} {}",
-                    group_name, name_str, ret, elapsed_ms
-                );
+                print_ltp_case_time(group_name, name_str, ret, elapsed_ms);
                 if ret == 0 {
                     pass += 1;
                 } else if ret == 32 {

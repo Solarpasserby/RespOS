@@ -14,6 +14,7 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
+use spin::Mutex;
 
 pub const AT_FDCWD: isize = -100;
 pub const AT_NO_AUTOMOUNT: usize = 0x800;
@@ -22,6 +23,13 @@ pub const AT_SYMLINK_NOFOLLOW: usize = 0x100;
 
 const MAX_SYMLINK_FOLLOWS: usize = 40;
 const NAME_MAX: usize = 255;
+static NAMEI_MUTATION_LOCK: Mutex<()> = Mutex::new(());
+
+fn task_root_path() -> Arc<Path> {
+    current_task()
+        .map(|task| task.root())
+        .unwrap_or_else(root_path)
+}
 
 /// 路径名解析状态量
 pub struct Nameidata {
@@ -51,7 +59,7 @@ impl Nameidata {
             .collect();
 
         let base = if file_name.starts_with("/") {
-            root_path()
+            task_root_path()
         } else {
             base
         };
@@ -136,9 +144,18 @@ fn lookup_dentry_maybe_follow_mount(
 }
 
 fn follow_dotdot(nd: &mut Nameidata) {
+    let root = task_root_path();
+    if Arc::ptr_eq(&nd.mnt, &root.mnt) && Arc::ptr_eq(&nd.dentry, &root.dentry) {
+        return;
+    }
     if Arc::ptr_eq(&nd.dentry, &nd.mnt.root) {
         if let Some(mount) = get_mount_by_vfsmount(&nd.mnt) {
             if let Some(parent) = mount.parent.as_ref().and_then(|parent| parent.upgrade()) {
+                if Arc::ptr_eq(&parent.vfs_mount, &root.mnt)
+                    && Arc::ptr_eq(&mount.mountpoint, &root.dentry)
+                {
+                    return;
+                }
                 nd.mnt = parent.vfs_mount.clone();
                 nd.dentry = mount.mountpoint.get_parent_or_self();
                 return;
@@ -214,6 +231,11 @@ fn check_dir_write_permission(dentry: &Arc<Dentry>) -> SysResult {
     } else {
         Err(Errno::EACCES)
     }
+}
+
+fn check_dir_write_and_search_permission(dentry: &Arc<Dentry>) -> SysResult {
+    check_dir_search_permission(dentry)?;
+    check_dir_write_permission(dentry)
 }
 
 fn check_sticky_rename_permission(parent: &Arc<Dentry>, target: &Arc<Dentry>) -> SysResult {
@@ -303,6 +325,9 @@ fn created_mode(parent: &Arc<Dentry>, requested_mode: usize, ty: InodeType) -> S
     let parent_stat = parent.get_inode().stat(parent.abs_path.as_str())?;
     let mut mode = (requested_mode & 0o7777) as u32;
     mode &= !(task.umask() as u32);
+    if ty == InodeType::Directory && parent_stat.mode & 0o2000 != 0 {
+        mode |= 0o2000;
+    }
     if ty == InodeType::Regular && parent_stat.mode & 0o2000 != 0 && task.euid() != 0 {
         mode &= !0o2000;
     }
@@ -407,12 +432,21 @@ pub fn open_last_lookups(nd: &mut Nameidata, flags: usize, mode: usize) -> SysRe
                 dentry
             }
             Err(Errno::ENOENT) if flags.contains(OpenFlags::O_CREATE) => {
+                let mutation_guard = NAMEI_MUTATION_LOCK.lock();
+                match lookup_dentry(nd) {
+                    Ok(_) => {
+                        drop(mutation_guard);
+                        return open_last_lookups(nd, flags.bits() as usize, mode);
+                    }
+                    Err(Errno::ENOENT) => {}
+                    Err(err) => return Err(err),
+                }
                 // 期望打开目录，但目标不存在
                 if flags.contains(OpenFlags::O_DIRECTORY) {
                     return Err(Errno::ENOTDIR);
                 }
                 check_mount_writable(&nd.mnt)?;
-                check_dir_write_permission(&nd.dentry)?;
+                check_dir_write_and_search_permission(&nd.dentry)?;
                 let current_dir_inode = nd.dentry.get_inode();
                 let inode = current_dir_inode.create(
                     &nd.dentry.abs_path,
@@ -492,6 +526,8 @@ pub fn filename_create(dirfd: isize, path: &str, ty: InodeType, mode: usize) -> 
     if path.is_empty() {
         return Err(Errno::ENOENT);
     }
+
+    let _mutation_guard = NAMEI_MUTATION_LOCK.lock();
     let mut nd = Nameidata::new_at(dirfd, path)?;
     link_path_walk(&mut nd)?;
 
@@ -505,7 +541,7 @@ pub fn filename_create(dirfd: isize, path: &str, ty: InodeType, mode: usize) -> 
         return Err(Errno::EEXIST);
     }
     check_mount_writable(&nd.mnt)?;
-    check_dir_write_permission(&nd.dentry)?;
+    check_dir_write_and_search_permission(&nd.dentry)?;
 
     // TODO: 引入负目录项需进行修改，这里先做简单实现
     match lookup_dentry(&mut nd) {
@@ -533,6 +569,7 @@ pub fn filename_symlink(dirfd: isize, target: &str, newpath: &str) -> SysResult 
         return Err(Errno::ENOENT);
     }
 
+    let _mutation_guard = NAMEI_MUTATION_LOCK.lock();
     // symlinkat 的 linkpath 需要按“父目录 + 新名字”解析：
     // 中间路径仍正常解析，最后一级必须不存在。
     let mut nd = Nameidata::new_at(dirfd, newpath)?;
@@ -549,7 +586,7 @@ pub fn filename_symlink(dirfd: isize, target: &str, newpath: &str) -> SysResult 
         return Err(Errno::EEXIST);
     }
     check_mount_writable(&nd.mnt)?;
-    check_dir_write_permission(&nd.dentry)?;
+    check_dir_write_and_search_permission(&nd.dentry)?;
 
     match lookup_dentry(&mut nd) {
         Ok(_) => Err(Errno::EEXIST),
@@ -596,7 +633,7 @@ fn resolve_path(
         Err(Errno::ENOENT) => {
             if let Some(alias) = glibc_default_lib_alias(path) {
                 resolve_path_from(
-                    root_path(),
+                    task_root_path(),
                     &alias,
                     follow_final_symlink,
                     follow_final_mount,
@@ -677,8 +714,8 @@ fn resolve_path_from(
             // target 替换当前 symlink，其余未解析 segment 继续拼到 target 后面。
             let next_path = join_symlink_target(&target, &nd.path_segments[nd.depth + 1..]);
             let next_base = if target.starts_with('/') {
-                // 绝对 symlink 目标从全局 root 开始解析。
-                root_path()
+                // 绝对 symlink 目标从当前进程 root 开始解析。
+                task_root_path()
             } else {
                 // 相对 symlink 目标从 symlink 所在目录开始解析。
                 symlink_base
@@ -727,6 +764,7 @@ pub fn filename_unlink(dirfd: isize, path: &str, remove_dir: bool) -> SysResult 
         return Err(Errno::ENOENT);
     }
 
+    let _mutation_guard = NAMEI_MUTATION_LOCK.lock();
     let mut nd = Nameidata::new_at(dirfd, path)?;
     link_path_walk(&mut nd)?;
 
@@ -749,7 +787,7 @@ pub fn filename_unlink(dirfd: isize, path: &str, remove_dir: bool) -> SysResult 
         };
     }
     check_mount_writable(&nd.mnt)?;
-    check_dir_write_permission(&nd.dentry)?;
+    check_dir_write_and_search_permission(&nd.dentry)?;
 
     let target = lookup_dentry(&mut nd)?;
     let target_ty = target.get_inode().node_type();
@@ -761,6 +799,7 @@ pub fn filename_unlink(dirfd: isize, path: &str, remove_dir: bool) -> SysResult 
     }
 
     let parent = target.get_parent().ok_or(Errno::EBUSY)?;
+    check_sticky_rename_permission(&parent, &target)?;
     let name = dentry_name(&target)?;
     parent.get_inode().unlink(&target)?;
     parent.remove_child(name.as_str());
@@ -772,6 +811,8 @@ pub fn filename_link_tmpfile(file: &File, newdirfd: isize, newpath: &str) -> Sys
     if newpath.is_empty() {
         return Err(Errno::ENOENT);
     }
+
+    let _mutation_guard = NAMEI_MUTATION_LOCK.lock();
     let meta = file.tmpfile_meta().ok_or(Errno::EINVAL)?;
 
     let mut nd = Nameidata::new_at(newdirfd, newpath)?;
@@ -786,7 +827,7 @@ pub fn filename_link_tmpfile(file: &File, newdirfd: isize, newpath: &str) -> Sys
         return Err(Errno::EEXIST);
     }
     check_mount_writable(&nd.mnt)?;
-    check_dir_write_permission(&nd.dentry)?;
+    check_dir_write_and_search_permission(&nd.dentry)?;
 
     match lookup_dentry(&mut nd) {
         Ok(_) => Err(Errno::EEXIST),
@@ -831,6 +872,7 @@ pub fn filename_link(olddirfd: isize, oldpath: &str, newdirfd: isize, newpath: &
         return Err(Errno::ENOENT);
     }
 
+    let _mutation_guard = NAMEI_MUTATION_LOCK.lock();
     let old_path = filename_lookup(olddirfd, oldpath, 0)?;
 
     let mut nd = Nameidata::new_at(newdirfd, newpath)?;
@@ -846,7 +888,7 @@ pub fn filename_link(olddirfd: isize, oldpath: &str, newdirfd: isize, newpath: &
         return Err(Errno::EEXIST);
     }
     check_mount_writable(&nd.mnt)?;
-    check_dir_write_permission(&nd.dentry)?;
+    check_dir_write_and_search_permission(&nd.dentry)?;
 
     if old_path.dentry.get_inode().node_type() == InodeType::Directory {
         return Err(Errno::EPERM);
@@ -892,13 +934,14 @@ pub fn filename_rename(
         return Err(Errno::ENOENT);
     }
 
+    let _mutation_guard = NAMEI_MUTATION_LOCK.lock();
     let old = filename_lookup(olddirfd, oldpath, 0)?;
     let old_parent = old
         .dentry
         .get_parent()
         .unwrap_or_else(|| old.dentry.clone());
     check_mount_writable(&old.mnt)?;
-    check_dir_write_permission(&old_parent)?;
+    check_dir_write_and_search_permission(&old_parent)?;
     check_sticky_rename_permission(&old_parent, &old.dentry)?;
 
     let mut nd = Nameidata::new_at(newdirfd, newpath)?;
@@ -913,7 +956,7 @@ pub fn filename_rename(
         return Err(Errno::EBUSY);
     }
     check_mount_writable(&nd.mnt)?;
-    check_dir_write_permission(&nd.dentry)?;
+    check_dir_write_and_search_permission(&nd.dentry)?;
 
     let new_abs = child_abs_path(&nd.dentry, name.as_str());
     if new_abs == old.abs_path() {
@@ -947,6 +990,7 @@ pub fn filename_rename(
         if old_stat.dev == existing_stat.dev && old_stat.ino == existing_stat.ino {
             return Ok(());
         }
+        check_sticky_rename_permission(&nd.dentry, &existing)?;
 
         if existing_ty != InodeType::Directory {
             nd.dentry.get_inode().unlink(&existing)?;
@@ -1015,7 +1059,7 @@ pub fn link_path_walk(nd: &mut Nameidata) -> SysResult {
                     let target = inode.read_link(&child_path.abs_path())?;
                     let next_path = join_symlink_target(&target, &nd.path_segments[nd.depth + 1..]);
                     let next_base = if target.starts_with('/') {
-                        root_path()
+                        task_root_path()
                     } else {
                         symlink_base
                     };
