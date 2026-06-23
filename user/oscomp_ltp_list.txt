@@ -42,12 +42,12 @@ utsname01
 utsname04
 
 # oscomp LTP test list - Phase 2: time_basic — gettimeofday, time, times (6 tests)
-#gettimeofday01
-#gettimeofday02
-#settimeofday02
-#time01
-#times01
-#times03
+gettimeofday01
+gettimeofday02
+settimeofday02
+time01
+times01
+times03
 
 # oscomp LTP test list - Phase 3: clock_timer — clocks, timers, alarms (30 tests)
 # 测例 clock_gettime04，la musl没有解决
@@ -85,21 +85,21 @@ timerfd_settime01
 # oscomp LTP test list - Phase 4: early_process — exit, abort, fork (15 tests)
 # 测例 fork13 可以通过但占用时间长收益低，目前在 testrunner 中标记跳过
 # 测例 fork14 实现复杂，且该测例收益很小，目前在 testrunner 中标记跳过
-#exit01
-#exit02
-#exit_group01
-#fork01
-#fork03
-#fork04
-#fork05
-#fork07
-#fork08
-#fork09
-#fork10
-#fork13
-#fork14
-#fork_procs
-#pause01
+exit01
+exit02
+exit_group01
+fork01
+fork03
+fork04
+fork05
+fork07
+fork08
+fork09
+fork10
+fork13
+fork14
+fork_procs
+pause01
 
 # oscomp LTP test list - Phase 5: fd — file descriptors (53 tests)
 # 测例 creat09，暂未解决
@@ -158,38 +158,38 @@ flock04
 flock06
 
 # oscomp LTP test list - Phase 6: pipe — pipes, FIFOs, splice (32 tests)
-#pipe01
-#pipe02
-#pipe03
-#pipe04
-#pipe05
-#pipe06
-#pipe07
-#pipe08
-#pipe09
-#pipe10
-#pipe11
-#pipe12
-#pipe13
-#pipe14
-#pipe15
-#pipe2_01
-#pipe2_02
-#pipe2_02_child
-#pipe2_04
-#splice01
-#splice02
-#splice03
-#splice04
-#splice05
-#splice06
-#splice07
-#tee01
-#tee02
-#vmsplice01
-#vmsplice02
-#vmsplice03
-#vmsplice04
+pipe01
+pipe02
+pipe03
+pipe04
+pipe05
+pipe06
+pipe07
+pipe08
+pipe09
+pipe10
+pipe11
+pipe12
+pipe13
+pipe14
+pipe15
+pipe2_01
+pipe2_02
+pipe2_02_child
+pipe2_04
+splice01
+splice02
+splice03
+splice04
+splice05
+splice06
+splice07
+tee01
+tee02
+vmsplice01
+vmsplice02
+vmsplice03
+vmsplice04
 
 # oscomp LTP test list - Phase 7: io_basic — open, read, write, lseek (45 tests)
 # 测例 openat03，暂未解决
@@ -241,58 +241,58 @@ writev06
 writev07
 
 # oscomp LTP test list - Phase 8: io_advanced — readv, writev, sendfile (52 tests)
-#copy_file_range01
-#copy_file_range03
-#posix_fadvise01
-#posix_fadvise01_64
-#posix_fadvise02
-#posix_fadvise02_64
-#posix_fadvise03
-#posix_fadvise03_64
-#posix_fadvise04
-#posix_fadvise04_64
-#pread01
-#pread01_64
-#pread02
-#pread02_64
-#preadv01
-#preadv01_64
-#preadv02
-#preadv02_64
-#preadv201
-#preadv201_64
-#preadv202
-#preadv202_64
-#pwrite01
-#pwrite01_64
-#pwrite02
-#pwrite02_64
-#pwrite03
-#pwrite03_64
-#pwrite04
-#pwrite04_64
-#pwritev01
-#pwritev01_64
-#pwritev02
-#pwritev02_64
-#pwritev201
-#pwritev201_64
-#pwritev202
-#pwritev202_64
-#sendfile02
-#sendfile02_64
-#sendfile03
-#sendfile03_64
-#sendfile04
-#sendfile04_64
-#sendfile05
-#sendfile05_64
-#sendfile06
-#sendfile06_64
-#sendfile07
-#sendfile07_64
-#sendfile08
-#sendfile08_64
+copy_file_range01
+copy_file_range03
+posix_fadvise01
+posix_fadvise01_64
+posix_fadvise02
+posix_fadvise02_64
+posix_fadvise03
+posix_fadvise03_64
+posix_fadvise04
+posix_fadvise04_64
+pread01
+pread01_64
+pread02
+pread02_64
+preadv01
+preadv01_64
+preadv02
+preadv02_64
+preadv201
+preadv201_64
+preadv202
+preadv202_64
+pwrite01
+pwrite01_64
+pwrite02
+pwrite02_64
+pwrite03
+pwrite03_64
+pwrite04
+pwrite04_64
+pwritev01
+pwritev01_64
+pwritev02
+pwritev02_64
+pwritev201
+pwritev201_64
+pwritev202
+pwritev202_64
+sendfile02
+sendfile02_64
+sendfile03
+sendfile03_64
+sendfile04
+sendfile04_64
+sendfile05
+sendfile05_64
+sendfile06
+sendfile06_64
+sendfile07
+sendfile07_64
+sendfile08
+sendfile08_64
 
 # oscomp LTP test list - Phase 9: fs_stat_perm — stat, chmod, chown (58 tests)
 access01
@@ -355,28 +355,28 @@ statx03
 umask01
 
 # oscomp LTP test list - Phase 10: fs_xattr — extended attributes (22 tests)
-#fgetxattr01
-#fgetxattr02
-#fgetxattr03
-#flistxattr01
-#flistxattr02
-#flistxattr03
-#fremovexattr01
-#fremovexattr02
-#fsetxattr01
-#getxattr01
-#getxattr02
-#lgetxattr01
-#lgetxattr02
-#listxattr01
-#listxattr02
-#listxattr03
-#llistxattr01
-#llistxattr02
-#llistxattr03
-#lremovexattr01
-#setxattr01
-#setxattr02
+fgetxattr01
+fgetxattr02
+fgetxattr03
+flistxattr01
+flistxattr02
+flistxattr03
+fremovexattr01
+fremovexattr02
+fsetxattr01
+getxattr01
+getxattr02
+lgetxattr01
+lgetxattr02
+listxattr01
+listxattr02
+listxattr03
+llistxattr01
+llistxattr02
+llistxattr03
+lremovexattr01
+setxattr01
+setxattr02
 
 # oscomp LTP test list - Phase 11: fs_file_dir — truncate, dirs, links, rename (70 tests)
 #chdir01
@@ -452,26 +452,26 @@ umask01
 
 # oscomp LTP test list - Phase 12: signal — signal handling (20 tests)
 # 测例 rt_sigqueueinfo01 sigwait01 报错奇怪收益低跳过完整通过
-#kill03
-#kill05
-#kill06
-#kill11
-#rt_sigqueueinfo01
-#sigaltstack02
-#sighold02
-#signal01
-#signal02
-#signal03
-#signal04
-#signal05
-#sigpending02
-#sigsuspend01
-#sigwait01
-#tgkill01
-#tgkill02
-#tgkill03
-#tkill01
-#tkill02
+kill03
+kill05
+kill06
+kill11
+rt_sigqueueinfo01
+sigaltstack02
+sighold02
+signal01
+signal02
+signal03
+signal04
+signal05
+sigpending02
+sigsuspend01
+sigwait01
+tgkill01
+tgkill02
+tgkill03
+tkill01
+tkill02
 
 # oscomp LTP test list - Phase 13: exec — execute programs (18 tests)
 #execl01
