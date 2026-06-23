@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="430" viewBox="0 0 920 430">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#475467"/>
+    </marker>
+    <style>
+      .proc { fill:#eff6ff; stroke:#2563eb; stroke-width:1.5; rx:6; }
+      .obj { fill:#f8fafc; stroke:#667085; stroke-width:1.4; rx:6; }
+      .pipe { fill:#fff7ed; stroke:#ea580c; stroke-width:1.5; rx:6; }
+      .shm { fill:#ecfdf3; stroke:#16a34a; stroke-width:1.5; rx:6; }
+      .futex { fill:#f5f3ff; stroke:#7c3aed; stroke-width:1.5; rx:6; }
+      .text { font-family: "DejaVu Sans Mono", "Microsoft YaHei", sans-serif; font-size:15px; fill:#344054; }
+      .title { font-family: "DejaVu Sans Mono", "Microsoft YaHei", sans-serif; font-size:17px; font-weight:700; fill:#101828; }
+      .note { font-family: "DejaVu Sans Mono", "Microsoft YaHei", sans-serif; font-size:13px; fill:#667085; }
+      .line { stroke:#475467; stroke-width:1.8; fill:none; marker-end:url(#arrow); }
+      .dash { stroke:#667085; stroke-width:1.5; stroke-dasharray:6 5; fill:none; marker-end:url(#arrow); }
+    </style>
+  </defs>
+
+  <rect x="55" y="55" width="170" height="80" class="proc"/>
+  <text x="140" y="88" text-anchor="middle" class="title">Process A</text>
+  <text x="140" y="113" text-anchor="middle" class="text">FdTable + MemorySet</text>
+
+  <rect x="695" y="55" width="170" height="80" class="proc"/>
+  <text x="780" y="88" text-anchor="middle" class="title">Process B</text>
+  <text x="780" y="113" text-anchor="middle" class="text">FdTable + MemorySet</text>
+
+  <rect x="300" y="45" width="320" height="105" class="pipe"/>
+  <text x="460" y="78" text-anchor="middle" class="title">PipeRingBuffer</text>
+  <text x="460" y="103" text-anchor="middle" class="text">VecDeque bytes + capacity</text>
+  <text x="460" y="128" text-anchor="middle" class="text">read_waiters / write_waiters</text>
+
+  <rect x="300" y="185" width="320" height="95" class="shm"/>
+  <text x="460" y="218" text-anchor="middle" class="title">System V Shared Memory</text>
+  <text x="460" y="243" text-anchor="middle" class="text">SHM_TABLE: shmid -> frames</text>
+  <text x="460" y="266" text-anchor="middle" class="text">mmap SharedFrames into tasks</text>
+
+  <rect x="300" y="315" width="320" height="75" class="futex"/>
+  <text x="460" y="346" text-anchor="middle" class="title">Futex Queues</text>
+  <text x="460" y="371" text-anchor="middle" class="text">hash(uaddr) -> waiters by tid</text>
+
+  <path d="M225 83 H300" class="line"/>
+  <path d="M620 83 H695" class="line"/>
+  <path d="M695 112 C650 145 620 170 575 185" class="dash"/>
+  <path d="M225 112 C270 145 300 170 345 185" class="dash"/>
+  <path d="M225 95 C255 250 295 320 300 350" class="dash"/>
+  <path d="M695 95 C665 250 625 320 620 350" class="dash"/>
+
+  <text x="250" y="64" text-anchor="middle" class="note">fd read end</text>
+  <text x="670" y="64" text-anchor="middle" class="note">fd write end</text>
+  <text x="265" y="187" text-anchor="end" class="note">shmat</text>
+  <text x="655" y="187" class="note">shmat</text>
+  <text x="245" y="348" text-anchor="end" class="note">wait</text>
+  <text x="675" y="348" class="note">wake</text>
+
+  <text x="460" y="415" text-anchor="middle" class="note">管道通过 fd 传递字节流；共享内存通过同一批页帧共享数据；futex 只在用户地址上建立等待/唤醒关系。</text>
+</svg>

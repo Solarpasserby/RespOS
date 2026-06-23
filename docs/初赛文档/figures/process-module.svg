@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="430" viewBox="0 0 900 430">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L9,3 L0,6 Z" fill="#475467"/>
+    </marker>
+    <style>
+      .title { font: 700 28px sans-serif; fill: #202124; }
+      .label { font: 700 24px sans-serif; fill: #202124; }
+      .small { font: 500 20px monospace; fill: #344054; }
+      .hint { font: 500 18px sans-serif; fill: #667085; }
+      .sys { fill: #fff7ed; stroke: #c2410c; stroke-width: 1.7; rx: 10; }
+      .task { fill: #eff6ff; stroke: #2563eb; stroke-width: 2; rx: 12; }
+      .dep { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.4; rx: 10; }
+      .dep-green { fill: #f0fdf4; stroke: #15803d; stroke-width: 1.5; rx: 10; }
+      .dep-yellow { fill: #fffbeb; stroke: #d97706; stroke-width: 1.5; rx: 10; }
+      .arrow { stroke: #475467; stroke-width: 2.1; fill: none; marker-end: url(#arrow); }
+      .dash { stroke: #667085; stroke-width: 1.8; fill: none; stroke-dasharray: 7 5; marker-end: url(#arrow); }
+    </style>
+  </defs>
+
+  <rect x="80" y="26" width="740" height="72" class="sys"/>
+  <text x="450" y="56" text-anchor="middle" class="label">系统调用入口</text>
+  <text x="450" y="82" text-anchor="middle" class="small">clone / fork / execve / wait4 / exit / futex / getpid / gettid</text>
+
+  <line x1="450" y1="98" x2="450" y2="140" class="arrow"/>
+  <text x="470" y="126" class="hint">创建、替换、阻塞、退出</text>
+
+  <rect x="250" y="140" width="400" height="116" class="task"/>
+  <text x="450" y="174" text-anchor="middle" class="title">任务管理核心</text>
+  <text x="450" y="204" text-anchor="middle" class="small">TaskControlBlock / ThreadGroup</text>
+  <text x="450" y="230" text-anchor="middle" class="small">Scheduler / Processor / TaskManager</text>
+
+  <rect x="52" y="305" width="230" height="76" class="dep-green"/>
+  <text x="167" y="334" text-anchor="middle" class="label">内存管理</text>
+  <text x="167" y="360" text-anchor="middle" class="small">地址空间 / 用户栈 / 内核栈</text>
+
+  <rect x="335" y="305" width="230" height="76" class="dep"/>
+  <text x="450" y="334" text-anchor="middle" class="label">文件系统</text>
+  <text x="450" y="360" text-anchor="middle" class="small">fd 表 / cwd / root / exec 文件</text>
+
+  <rect x="618" y="305" width="230" height="76" class="dep-yellow"/>
+  <text x="733" y="334" text-anchor="middle" class="label">信号与同步</text>
+  <text x="733" y="360" text-anchor="middle" class="small">pending / handler / futex / wait</text>
+
+  <path d="M330 256 C250 278 205 286 167 305" class="dash"/>
+  <path d="M450 256 L450 305" class="dash"/>
+  <path d="M570 256 C650 278 695 286 733 305" class="dash"/>
+
+  <text x="220" y="292" class="hint">地址空间与栈资源</text>
+  <text x="472" y="292" class="hint">execve / fd 继承</text>
+  <text x="642" y="292" class="hint">阻塞唤醒与退出通知</text>
+</svg>

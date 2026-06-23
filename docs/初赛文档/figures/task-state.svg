@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="360" viewBox="0 0 900 360">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L9,3 L0,6 Z" fill="#475467"/>
+    </marker>
+    <style>
+      .state { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.6; rx: 12; }
+      .ready { fill: #ecfdf3; stroke: #16a34a; }
+      .run { fill: #eff6ff; stroke: #2563eb; }
+      .block { fill: #fffbeb; stroke: #d97706; }
+      .stop { fill: #f8fafc; stroke: #64748b; }
+      .exit { fill: #fef2f2; stroke: #dc2626; }
+      .label { font: 700 25px sans-serif; fill: #202124; }
+      .small { font: 500 18px sans-serif; fill: #475467; }
+      .arrow { stroke: #475467; stroke-width: 2.1; fill: none; marker-end: url(#arrow); }
+      .dash { stroke: #667085; stroke-width: 1.8; fill: none; stroke-dasharray: 7 5; marker-end: url(#arrow); }
+    </style>
+  </defs>
+
+  <rect x="58" y="126" width="148" height="78" class="state ready"/>
+  <text x="132" y="157" text-anchor="middle" class="label">Ready</text>
+  <text x="132" y="184" text-anchor="middle" class="small">就绪队列</text>
+
+  <rect x="376" y="126" width="148" height="78" class="state run"/>
+  <text x="450" y="157" text-anchor="middle" class="label">Running</text>
+  <text x="450" y="184" text-anchor="middle" class="small">当前 CPU 执行</text>
+
+  <rect x="694" y="126" width="148" height="78" class="state block"/>
+  <text x="768" y="157" text-anchor="middle" class="label">Blocked</text>
+  <text x="768" y="184" text-anchor="middle" class="small">等待事件</text>
+
+  <rect x="376" y="20" width="148" height="70" class="state stop"/>
+  <text x="450" y="49" text-anchor="middle" class="label">Stopped</text>
+  <text x="450" y="73" text-anchor="middle" class="small">停止信号暂停</text>
+
+  <rect x="376" y="268" width="148" height="70" class="state exit"/>
+  <text x="450" y="297" text-anchor="middle" class="label">Exited</text>
+  <text x="450" y="321" text-anchor="middle" class="small">等待父进程回收</text>
+
+  <path d="M206 158 L376 158" class="arrow"/>
+  <text x="291" y="145" text-anchor="middle" class="small">fetch_task</text>
+
+  <path d="M376 188 C314 238 232 238 160 204" class="arrow"/>
+  <text x="273" y="246" text-anchor="middle" class="small">yield / preempt</text>
+
+  <path d="M524 158 L694 158" class="arrow"/>
+  <text x="609" y="145" text-anchor="middle" class="small">wait / futex / I/O</text>
+
+  <path d="M694 188 C625 245 270 245 184 204" class="arrow"/>
+  <text x="548" y="254" text-anchor="middle" class="small">wakeup_task</text>
+
+  <path d="M450 126 L450 90" class="dash"/>
+  <text x="492" y="111" class="small">SIGSTOP</text>
+
+  <path d="M524 55 C650 58 723 93 756 126" class="dash"/>
+  <text x="654" y="48" text-anchor="middle" class="small">SIGCONT 后回到可调度路径</text>
+
+  <path d="M450 204 L450 268" class="arrow"/>
+  <text x="470" y="241" class="small">exit / fatal signal</text>
+</svg>
