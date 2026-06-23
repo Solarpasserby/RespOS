@@ -59,6 +59,7 @@ const PROC_SYS_NET_IPV4_CONF_LO_INO: u64 = 30;
 const PROC_SYS_NET_IPV4_CONF_DEFAULT_INO: u64 = 31;
 const PROC_SYS_NET_IPV4_CONF_LO_TAG_INO: u64 = 32;
 const PROC_SYS_NET_IPV4_CONF_DEFAULT_TAG_INO: u64 = 33;
+const PROC_SYS_KERNEL_SCHED_RR_TIMESLICE_MS_INO: u64 = 34;
 const PROC_PID_DIR_INO_BASE: u64 = 0x10000;
 const PROC_PID_STAT_INO_BASE: u64 = 0x20000;
 const PROC_DEV: u64 = 0x100;
@@ -73,6 +74,7 @@ const CONFIG_GZ_CONTENT: &[u8] = &[
     0xc8, 0xcb, 0x2f, 0x51, 0x28, 0x4e, 0x2d, 0xe1, 0x02, 0x00, 0xc8, 0x7f, 0x8e, 0x19, 0x1e, 0x00,
     0x00, 0x00,
 ];
+const SCHED_RR_TIMESLICE_MS_CONTENT: &str = "100\n";
 
 lazy_static! {
     static ref PID_MAX_VALUE: Mutex<String> = Mutex::new(String::from(PID_MAX_CONTENT));
@@ -696,6 +698,10 @@ impl InodeOp for ProcSysKernelInode {
                 shmall_value,
                 set_shmall_value,
             ))),
+            "sched_rr_timeslice_ms" => Ok(Arc::new(ProcReadOnlyInode::new(
+                PROC_SYS_KERNEL_SCHED_RR_TIMESLICE_MS_INO,
+                SCHED_RR_TIMESLICE_MS_CONTENT,
+            ))),
             _ => Err(Errno::ENOENT),
         }
     }
@@ -745,6 +751,12 @@ impl InodeOp for ProcSysKernelInode {
                 InodeType::Regular,
                 9,
                 b"shmall\0",
+            ),
+            entry(
+                PROC_SYS_KERNEL_SCHED_RR_TIMESLICE_MS_INO,
+                InodeType::Regular,
+                10,
+                b"sched_rr_timeslice_ms\0",
             ),
         ])
     }

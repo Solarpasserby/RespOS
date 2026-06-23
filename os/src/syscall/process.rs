@@ -2,7 +2,7 @@
 
 use super::time::TimeVal;
 use super::{Errno, SysResult};
-use crate::config::{CLK_TCK, USER_STACK_SIZE};
+use crate::config::CLK_TCK;
 use crate::fs::vfs::InodeType;
 use crate::fs::{AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW, File, FileOp, OpenFlags, path_open};
 use crate::loader::get_app_data_by_name;
@@ -15,6 +15,7 @@ use crate::task::{
     CloneFlags, TASK_MANAGER, TaskControlBlock, WaitOption, add_task, blocking_and_run_next,
     current_task, do_futex, exit_and_run_next, exit_group_and_run_next, yield_current_task,
 };
+use crate::timer::TimeSpec;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -27,6 +28,10 @@ fn is_elf(data: &[u8]) -> bool {
 }
 
 fn builtin_for_fs_exec(path: &str, args: &[String]) -> Option<&'static str> {
+    if path == "/bin/true" {
+        return Some("true");
+    }
+
     let is_cp_path = matches!(path, "/musl/cp" | "/glibc/cp" | "/bin/cp");
     if is_cp_path && args.len() == 3 && args[1].contains("/ltp/testcases/bin/") && args[2] == "." {
         return Some("cp");
@@ -127,6 +132,19 @@ pub struct RLimit {
 
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
+pub struct SchedAttr {
+    pub size: u32,
+    pub sched_policy: u32,
+    pub sched_flags: u64,
+    pub sched_nice: i32,
+    pub sched_priority: u32,
+    pub sched_runtime: u64,
+    pub sched_deadline: u64,
+    pub sched_period: u64,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
 pub struct CapUserHeader {
     pub version: u32,
     pub pid: i32,
@@ -216,20 +234,272 @@ pub fn sys_sched_yield() -> SysResult<usize> {
     Ok(0)
 }
 
-pub fn sys_sched_getaffinity(pid: usize, cpusetsize: usize, mask: *mut u8) -> SysResult<usize> {
-    if pid != 0 && TASK_MANAGER.get(pid).is_none() {
-        return Err(Errno::ESRCH);
+const ONLINE_CPU_MASK: usize = 0b11;
+const SCHED_OTHER: usize = 0;
+const SCHED_FIFO: usize = 1;
+const SCHED_RR: usize = 2;
+const SCHED_BATCH: usize = 3;
+const SCHED_IDLE: usize = 5;
+const SCHED_DEADLINE: usize = 6;
+const SCHED_RESET_ON_FORK: usize = 0x4000_0000;
+const MIN_RT_PRIO: i32 = 1;
+const MAX_RT_PRIO: i32 = 99;
+const RLIMIT_RTPRIO: usize = 14;
+const CAP_SYS_NICE: usize = 23;
+const CAP_SETPCAP: usize = 8;
+const CAP_LOW_MASK: usize = u32::MAX as usize;
+
+fn sched_task(pid: isize) -> SysResult<Arc<TaskControlBlock>> {
+    if pid < 0 {
+        return Err(Errno::EINVAL);
+    }
+    if pid == 0 {
+        current_task().ok_or(Errno::ESRCH)
+    } else {
+        TASK_MANAGER.get(pid as usize).ok_or(Errno::ESRCH)
+    }
+}
+
+fn is_regular_sched_policy(policy: usize) -> bool {
+    matches!(policy, SCHED_OTHER | SCHED_BATCH | SCHED_IDLE)
+}
+
+fn is_rt_sched_policy(policy: usize) -> bool {
+    matches!(policy, SCHED_FIFO | SCHED_RR)
+}
+
+fn normalize_sched_policy(policy: usize) -> SysResult<(usize, bool)> {
+    let base = policy & !SCHED_RESET_ON_FORK;
+    if policy & !(SCHED_RESET_ON_FORK | 0xff) != 0 {
+        return Err(Errno::EINVAL);
+    }
+    Ok((base, policy & SCHED_RESET_ON_FORK != 0))
+}
+
+fn check_sched_param(policy: usize, priority: i32) -> SysResult<()> {
+    if is_rt_sched_policy(policy) {
+        if !(MIN_RT_PRIO..=MAX_RT_PRIO).contains(&priority) {
+            return Err(Errno::EINVAL);
+        }
+    } else if is_regular_sched_policy(policy) {
+        if priority != 0 {
+            return Err(Errno::EINVAL);
+        }
+    } else {
+        return Err(Errno::EINVAL);
+    }
+    Ok(())
+}
+
+fn check_sched_permission(
+    target: &Arc<TaskControlBlock>,
+    policy: usize,
+    priority: i32,
+) -> SysResult<()> {
+    let current = current_task().expect("[kernel] current task is None.");
+    if current.has_cap(CAP_SYS_NICE) {
+        return Ok(());
+    }
+    if current.euid() != target.uid() && current.euid() != target.euid() {
+        return Err(Errno::EPERM);
+    }
+    if is_rt_sched_policy(policy) {
+        let rtprio_limit = current
+            .rlimit(RLIMIT_RTPRIO)
+            .map(|limit| limit.0)
+            .unwrap_or(0);
+        if priority as usize > rtprio_limit {
+            return Err(Errno::EPERM);
+        }
+    }
+    Ok(())
+}
+
+fn read_sched_priority(param: *const i32) -> SysResult<i32> {
+    if param.is_null() {
+        return Err(Errno::EINVAL);
+    }
+    let mut priority = 0i32;
+    copy_from_user(&mut priority as *mut i32, param, 1)?;
+    Ok(priority)
+}
+
+pub fn sys_sched_setaffinity(pid: isize, cpusetsize: usize, mask: *const u8) -> SysResult<usize> {
+    let task = sched_task(pid)?;
+    let current = current_task().expect("[kernel] current task is None.");
+    if !current.has_cap(CAP_SYS_NICE)
+        && current.euid() != task.uid()
+        && current.euid() != task.euid()
+    {
+        return Err(Errno::EPERM);
     }
     if cpusetsize == 0 {
         return Err(Errno::EINVAL);
     }
-
     let mut kbuf = alloc::vec![0u8; cpusetsize];
-    // Report two online CPUs. This satisfies libc/LTP affinity probing even
-    // when the current QEMU command line runs the kernel on one hart.
-    kbuf[0] = if cpusetsize > 0 { 0b11 } else { 0 };
+    copy_from_user(kbuf.as_mut_ptr(), mask, cpusetsize)?;
+    let mut requested = 0usize;
+    for (idx, byte) in kbuf.iter().take(core::mem::size_of::<usize>()).enumerate() {
+        requested |= (*byte as usize) << (idx * 8);
+    }
+    let effective = requested & ONLINE_CPU_MASK;
+    if effective == 0 {
+        return Err(Errno::EINVAL);
+    }
+    task.set_cpu_affinity_mask(effective);
+    Ok(0)
+}
+
+pub fn sys_sched_getaffinity(pid: isize, cpusetsize: usize, mask: *mut u8) -> SysResult<usize> {
+    let task = sched_task(pid)?;
+    if cpusetsize == 0 {
+        return Err(Errno::EINVAL);
+    }
+    let mut kbuf = alloc::vec![0u8; cpusetsize];
+    let affinity = task.cpu_affinity_mask() & ONLINE_CPU_MASK;
+    for idx in 0..core::mem::size_of::<usize>().min(cpusetsize) {
+        kbuf[idx] = ((affinity >> (idx * 8)) & 0xff) as u8;
+    }
     copy_to_user(mask, kbuf.as_ptr(), cpusetsize)?;
     Ok(cpusetsize)
+}
+
+pub fn sys_sched_setscheduler(pid: isize, policy: usize, param: *const i32) -> SysResult<usize> {
+    let target = sched_task(pid)?;
+    let (policy, reset_on_fork) = normalize_sched_policy(policy)?;
+    let priority = read_sched_priority(param)?;
+    check_sched_param(policy, priority)?;
+    check_sched_permission(&target, policy, priority)?;
+    target.set_sched_with_reset_on_fork(policy, priority, reset_on_fork);
+    Ok(0)
+}
+
+pub fn sys_sched_getscheduler(pid: isize) -> SysResult<usize> {
+    Ok(sched_task(pid)?.sched_policy())
+}
+
+pub fn sys_sched_setparam(pid: isize, param: *const i32) -> SysResult<usize> {
+    let target = sched_task(pid)?;
+    let priority = read_sched_priority(param)?;
+    let policy = target.sched_policy();
+    check_sched_param(policy, priority)?;
+    check_sched_permission(&target, policy, priority)?;
+    target.set_sched(policy, priority);
+    Ok(0)
+}
+
+pub fn sys_sched_getparam(pid: isize, param: *mut i32) -> SysResult<usize> {
+    if param.is_null() {
+        return Err(Errno::EINVAL);
+    }
+    let target = sched_task(pid)?;
+    let priority = target.sched_priority();
+    copy_to_user(param, &priority as *const i32, 1)?;
+    Ok(0)
+}
+
+pub fn sys_sched_get_priority_max(policy: isize) -> SysResult<usize> {
+    let (policy, _) = normalize_sched_policy(policy as usize)?;
+    match policy {
+        SCHED_FIFO | SCHED_RR => Ok(MAX_RT_PRIO as usize),
+        SCHED_OTHER | SCHED_BATCH | SCHED_IDLE | SCHED_DEADLINE => Ok(0),
+        _ => Err(Errno::EINVAL),
+    }
+}
+
+pub fn sys_sched_get_priority_min(policy: isize) -> SysResult<usize> {
+    let (policy, _) = normalize_sched_policy(policy as usize)?;
+    match policy {
+        SCHED_FIFO | SCHED_RR => Ok(MIN_RT_PRIO as usize),
+        SCHED_OTHER | SCHED_BATCH | SCHED_IDLE | SCHED_DEADLINE => Ok(0),
+        _ => Err(Errno::EINVAL),
+    }
+}
+
+pub fn sys_sched_rr_get_interval(pid: isize, interval: *mut TimeSpec) -> SysResult<usize> {
+    if interval.is_null() {
+        return Err(Errno::EINVAL);
+    }
+    let target = sched_task(pid)?;
+    let time_slice = if target.sched_policy() == SCHED_RR {
+        TimeSpec {
+            sec: 0,
+            nsec: 100_000_000,
+        }
+    } else {
+        TimeSpec { sec: 0, nsec: 0 }
+    };
+    copy_to_user(interval, &time_slice as *const TimeSpec, 1)?;
+    Ok(0)
+}
+
+pub fn sys_sched_setattr(pid: isize, attr: *const SchedAttr, flags: u32) -> SysResult<usize> {
+    if attr.is_null() || flags != 0 {
+        return Err(Errno::EINVAL);
+    }
+    let target = sched_task(pid)?;
+    let mut sched_attr = SchedAttr::default();
+    copy_from_user(&mut sched_attr as *mut SchedAttr, attr, 1)?;
+    let attr_size = sched_attr.size as usize;
+    if attr_size < core::mem::size_of::<SchedAttr>() {
+        return Err(Errno::EINVAL);
+    }
+    if sched_attr.sched_flags & !(SCHED_RESET_ON_FORK as u64) != 0 {
+        return Err(Errno::EINVAL);
+    }
+
+    let (policy, policy_reset_on_fork) = normalize_sched_policy(sched_attr.sched_policy as usize)?;
+    let reset_on_fork =
+        policy_reset_on_fork || sched_attr.sched_flags & SCHED_RESET_ON_FORK as u64 != 0;
+    if policy == SCHED_DEADLINE {
+        return Err(Errno::EINVAL);
+    }
+    let priority = if is_rt_sched_policy(policy) {
+        sched_attr.sched_priority as i32
+    } else {
+        if !(-20..=19).contains(&sched_attr.sched_nice) {
+            return Err(Errno::EINVAL);
+        }
+        if sched_attr.sched_priority != 0 {
+            return Err(Errno::EINVAL);
+        }
+        0
+    };
+    check_sched_param(policy, priority)?;
+    check_sched_permission(&target, policy, priority)?;
+    target.set_sched_with_reset_on_fork(policy, priority, reset_on_fork);
+    if is_regular_sched_policy(policy) {
+        target.set_nice(sched_attr.sched_nice);
+    }
+    Ok(0)
+}
+
+pub fn sys_sched_getattr(
+    pid: isize,
+    attr: *mut SchedAttr,
+    size: u32,
+    flags: u32,
+) -> SysResult<usize> {
+    if attr.is_null() || flags != 0 || (size as usize) < core::mem::size_of::<SchedAttr>() {
+        return Err(Errno::EINVAL);
+    }
+    let target = sched_task(pid)?;
+    let sched_attr = SchedAttr {
+        size: core::mem::size_of::<SchedAttr>() as u32,
+        sched_policy: target.sched_policy() as u32,
+        sched_flags: 0,
+        sched_nice: target.nice(),
+        sched_priority: if is_rt_sched_policy(target.sched_policy()) {
+            target.sched_priority() as u32
+        } else {
+            0
+        },
+        sched_runtime: 0,
+        sched_deadline: 0,
+        sched_period: 0,
+    };
+    copy_to_user(attr, &sched_attr as *const SchedAttr, 1)?;
+    Ok(0)
 }
 
 fn check_cap_header(header: CapUserHeader) -> SysResult<CapUserHeader> {
@@ -253,13 +523,32 @@ fn check_cap_header(header: CapUserHeader) -> SysResult<CapUserHeader> {
     Ok(header)
 }
 
+fn cap_task(header: CapUserHeader) -> SysResult<Arc<TaskControlBlock>> {
+    if header.pid == 0 {
+        current_task().ok_or(Errno::ESRCH)
+    } else {
+        TASK_MANAGER.get(header.pid as usize).ok_or(Errno::ESRCH)
+    }
+}
+
 pub fn sys_capget(hdrp: *mut CapUserHeader, datap: *mut CapUserData) -> SysResult<usize> {
     let mut header = CapUserHeader::default();
     copy_from_user(&mut header as *mut CapUserHeader, hdrp, 1)?;
-    let _ = check_cap_header(header)?;
+    let header = check_cap_header(header)?;
+    let task = cap_task(header)?;
 
     if !datap.is_null() {
-        let data = [CapUserData::default(); 2];
+        let effective = task.cap_effective();
+        let permitted = task.cap_permitted();
+        let inheritable = task.cap_inheritable();
+        let data = [
+            CapUserData {
+                effective: (effective & CAP_LOW_MASK) as u32,
+                permitted: (permitted & CAP_LOW_MASK) as u32,
+                inheritable: (inheritable & CAP_LOW_MASK) as u32,
+            },
+            CapUserData::default(),
+        ];
         copy_to_user(datap, data.as_ptr(), data.len())?;
     }
     Ok(0)
@@ -268,10 +557,34 @@ pub fn sys_capget(hdrp: *mut CapUserHeader, datap: *mut CapUserData) -> SysResul
 pub fn sys_capset(hdrp: *const CapUserHeader, datap: *const CapUserData) -> SysResult<usize> {
     let mut header = CapUserHeader::default();
     copy_from_user(&mut header as *mut CapUserHeader, hdrp, 1)?;
-    let _ = check_cap_header(header)?;
+    let header = check_cap_header(header)?;
+    let task = cap_task(header)?;
+    let current = current_task().expect("[kernel] current task is None.");
+    if task.tid() != current.tid() {
+        return Err(Errno::EPERM);
+    }
 
     let mut data = [CapUserData::default(); 2];
     copy_from_user(data.as_mut_ptr(), datap, data.len())?;
+    if data[1].effective != 0 || data[1].permitted != 0 || data[1].inheritable != 0 {
+        return Err(Errno::EPERM);
+    }
+
+    let effective = data[0].effective as usize;
+    let permitted = data[0].permitted as usize;
+    let inheritable = data[0].inheritable as usize;
+    let old_permitted = task.cap_permitted();
+    if effective & !permitted != 0 {
+        return Err(Errno::EPERM);
+    }
+    if permitted & !old_permitted != 0 {
+        return Err(Errno::EPERM);
+    }
+    if !current.has_cap(CAP_SETPCAP) && inheritable & !old_permitted != 0 {
+        return Err(Errno::EPERM);
+    }
+
+    task.set_capabilities(effective, permitted, inheritable);
     Ok(0)
 }
 
@@ -371,49 +684,33 @@ pub fn sys_prlimit64(
     new_limit: *const RLimit,
     old_limit: *mut RLimit,
 ) -> SysResult<usize> {
-    const RLIMIT_NOFILE: usize = 7;
-    const RLIMIT_FSIZE: usize = 1;
-    const RLIMIT_STACK: usize = 3;
-    const RLIMIT_MEMLOCK: usize = 8;
-    const RLIM_INFINITY: usize = usize::MAX;
-
-    let task = current_task().expect("[kernel] current task is None.");
-    if pid != 0 && pid != task.tid() {
+    let current = current_task().expect("[kernel] current task is None.");
+    let task = if pid == 0 {
+        current.clone()
+    } else {
+        let task = TASK_MANAGER.get(pid).ok_or(Errno::ESRCH)?;
+        process_leader(&task)
+    };
+    if resource >= RLIMIT_COUNT {
+        return Err(Errno::EINVAL);
+    }
+    if pid != 0 && task.tgid() != pid {
         return Err(Errno::ESRCH);
     }
 
-    let old = match resource {
-        RLIMIT_NOFILE => {
-            let (cur, max) = task.nofile_limit();
-            RLimit { cur, max }
-        }
-        RLIMIT_FSIZE => {
-            let (cur, max) = task.fsize_limit();
-            RLimit { cur, max }
-        }
-        RLIMIT_STACK => RLimit {
-            cur: USER_STACK_SIZE,
-            max: RLIM_INFINITY,
-        },
-        RLIMIT_MEMLOCK => {
-            let (cur, max) = task.memlock_limit();
-            RLimit { cur, max }
-        }
-        _ => RLimit {
-            cur: RLIM_INFINITY,
-            max: RLIM_INFINITY,
-        },
-    };
+    let (cur, max) = task.rlimit(resource).ok_or(Errno::EINVAL)?;
+    let old = RLimit { cur, max };
 
     if !new_limit.is_null() {
         let mut limit = RLimit { cur: 0, max: 0 };
         copy_from_user(&mut limit as *mut RLimit, new_limit, 1)?;
-        match resource {
-            RLIMIT_NOFILE => task.set_nofile_limit(limit.cur, limit.max)?,
-            RLIMIT_FSIZE => task.set_fsize_limit(limit.cur, limit.max)?,
-            RLIMIT_MEMLOCK => task.set_memlock_limit(limit.cur, limit.max)?,
-            _ => {}
+        if limit.cur > limit.max {
+            return Err(Errno::EINVAL);
         }
+        if limit.max > old.max && current.euid() != 0 {
+            return Err(Errno::EPERM);
+        }
+        task.set_rlimit(resource, limit.cur, limit.max)?;
     }
 
     if !old_limit.is_null() {
@@ -421,6 +718,16 @@ pub fn sys_prlimit64(
     }
 
     Ok(0)
+}
+
+const RLIMIT_COUNT: usize = 16;
+
+pub fn sys_getrlimit(resource: usize, old_limit: *mut RLimit) -> SysResult<usize> {
+    sys_prlimit64(0, resource, core::ptr::null(), old_limit)
+}
+
+pub fn sys_setrlimit(resource: usize, new_limit: *const RLimit) -> SysResult<usize> {
+    sys_prlimit64(0, resource, new_limit, core::ptr::null_mut())
 }
 
 pub fn sys_getrandom(buf: *mut u8, buflen: usize, flags: usize) -> SysResult<usize> {
@@ -955,11 +1262,102 @@ pub fn sys_waitid(
     }
 }
 
+const PRIO_PROCESS: usize = 0;
+const PRIO_PGRP: usize = 1;
+const PRIO_USER: usize = 2;
+
+fn priority_targets(which: usize, who: usize) -> SysResult<Vec<Arc<TaskControlBlock>>> {
+    let current_thread = current_task().expect("[kernel] current task is None.");
+    let current = process_leader(&current_thread);
+    let target_id = match which {
+        PRIO_PROCESS => {
+            if who == 0 {
+                current.tgid()
+            } else {
+                who
+            }
+        }
+        PRIO_PGRP => {
+            if who == 0 {
+                current.pgid()
+            } else {
+                who
+            }
+        }
+        PRIO_USER => {
+            if who == 0 {
+                current.uid()
+            } else {
+                who
+            }
+        }
+        _ => return Err(Errno::EINVAL),
+    };
+
+    let mut targets = Vec::new();
+    TASK_MANAGER.for_each(|task| {
+        if !task.is_process_leader() {
+            return;
+        }
+        let matches = match which {
+            PRIO_PROCESS => task.tgid() == target_id,
+            PRIO_PGRP => task.pgid() == target_id,
+            PRIO_USER => task.uid() == target_id,
+            _ => false,
+        };
+        if matches {
+            targets.push(task.clone());
+        }
+    });
+
+    if targets.is_empty() {
+        Err(Errno::ESRCH)
+    } else {
+        Ok(targets)
+    }
+}
+
 /// 系统调用 sys-setpriority
-/// TODO[UNIMPLEMENTED]: 需要补完 setpriority 逻辑。
 pub fn sys_setpriority(which: usize, who: usize, prio: isize) -> SysResult<usize> {
-    let _ = (which, who, prio);
-    Err(Errno::ENOSYS)
+    let current = process_leader(&current_task().expect("[kernel] current task is None."));
+    let nice = (prio as i32).clamp(-20, 19);
+    let targets = priority_targets(which, who)?;
+
+    let mut denied_other_user = false;
+    for target in &targets {
+        if current.euid() == 0 {
+            continue;
+        }
+        let same_user = current.euid() == target.uid() || current.euid() == target.euid();
+        if same_user && nice < target.nice() {
+            return Err(Errno::EACCES);
+        }
+        if !same_user {
+            denied_other_user = true;
+        }
+    }
+    if denied_other_user {
+        return Err(Errno::EPERM);
+    }
+
+    for target in targets {
+        target.op_thread_group(|tg| {
+            for member in tg.iter() {
+                member.set_nice(nice);
+            }
+        });
+    }
+    Ok(0)
+}
+
+pub fn sys_getpriority(which: usize, who: usize) -> SysResult<usize> {
+    let targets = priority_targets(which, who)?;
+    let nice = targets
+        .iter()
+        .map(|task| task.nice())
+        .min()
+        .ok_or(Errno::ESRCH)?;
+    Ok((20 - nice) as usize)
 }
 
 /// 系统调用 sys-getpid
