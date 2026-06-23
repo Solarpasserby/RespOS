@@ -17,6 +17,18 @@ lazy_static! {
         SpinNoIrqLock::new(Vec::new());
 }
 
+const SCHED_FIFO: usize = 1;
+const SCHED_RR: usize = 2;
+const SCHED_IDLE: usize = 5;
+
+fn sched_rank(task: &TaskControlBlock) -> (usize, i32) {
+    match task.sched_policy() {
+        SCHED_FIFO | SCHED_RR => (3, task.sched_priority()),
+        SCHED_IDLE => (1, 20 - task.nice()),
+        _ => (2, 20 - task.nice()),
+    }
+}
+
 fn defer_drop_task(task: Arc<TaskControlBlock>) {
     DEAD_TASKS.lock().push(task);
 }
@@ -268,7 +280,16 @@ impl Scheduler {
 
     /// 取出调度器就绪队列队首任务。
     pub fn fetch(&mut self) -> Option<Arc<TaskControlBlock>> {
-        self.ready_queue.pop_front()
+        let mut best_idx = None;
+        let mut best_rank = (0usize, i32::MIN);
+        for (idx, task) in self.ready_queue.iter().enumerate() {
+            let rank = sched_rank(task);
+            if best_idx.is_none() || rank > best_rank {
+                best_idx = Some(idx);
+                best_rank = rank;
+            }
+        }
+        best_idx.map(|idx| self.ready_queue.remove(idx).unwrap())
     }
 
     /// 是否没有可运行任务。

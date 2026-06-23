@@ -50,63 +50,198 @@ impl TidAddress {
     }
 }
 
-struct ResourceLimits {
-    fsize_cur: AtomicUsize,
-    fsize_max: AtomicUsize,
-    memlock_cur: AtomicUsize,
-    memlock_max: AtomicUsize,
+const RLIMIT_COUNT: usize = 16;
+const RLIMIT_FSIZE: usize = 1;
+const RLIMIT_STACK: usize = 3;
+const RLIMIT_MEMLOCK: usize = 8;
+const DEFAULT_CPU_AFFINITY_MASK: usize = 0b11;
+const SCHED_OTHER: usize = 0;
+const SCHED_FIFO: usize = 1;
+const SCHED_RR: usize = 2;
+const ROOT_CAP_MASK: usize = u32::MAX as usize;
+
+pub const RLIMIT_NOFILE: usize = 7;
+
+#[derive(Copy, Clone)]
+struct LimitPair {
+    cur: usize,
+    max: usize,
 }
 
-impl ResourceLimits {
+struct ResourceLimits {
+    limits: SpinLock<[LimitPair; RLIMIT_COUNT]>,
+}
+
+struct SchedState {
+    nice: AtomicI32,
+    policy: AtomicUsize,
+    priority: AtomicI32,
+    cpu_affinity_mask: AtomicUsize,
+    reset_on_fork: AtomicBool,
+}
+
+impl SchedState {
     fn new() -> Self {
         Self {
-            fsize_cur: AtomicUsize::new(usize::MAX),
-            fsize_max: AtomicUsize::new(usize::MAX),
-            memlock_cur: AtomicUsize::new(usize::MAX),
-            memlock_max: AtomicUsize::new(usize::MAX),
+            nice: AtomicI32::new(0),
+            policy: AtomicUsize::new(SCHED_OTHER),
+            priority: AtomicI32::new(0),
+            cpu_affinity_mask: AtomicUsize::new(DEFAULT_CPU_AFFINITY_MASK),
+            reset_on_fork: AtomicBool::new(false),
         }
     }
 
     fn from_parent(parent: &Self) -> Self {
-        let (cur, max) = parent.fsize_limit();
-        let (memlock_cur, memlock_max) = parent.memlock_limit();
+        let mut nice = parent.nice();
+        let mut policy = parent.policy();
+        let mut priority = parent.priority();
+        if parent.reset_on_fork() {
+            if matches!(policy, SCHED_FIFO | SCHED_RR) {
+                policy = SCHED_OTHER;
+                priority = 0;
+            }
+            nice = nice.max(0);
+        }
+
         Self {
-            fsize_cur: AtomicUsize::new(cur),
-            fsize_max: AtomicUsize::new(max),
-            memlock_cur: AtomicUsize::new(memlock_cur),
-            memlock_max: AtomicUsize::new(memlock_max),
+            nice: AtomicI32::new(nice),
+            policy: AtomicUsize::new(policy),
+            priority: AtomicI32::new(priority),
+            cpu_affinity_mask: AtomicUsize::new(parent.cpu_affinity_mask()),
+            reset_on_fork: AtomicBool::new(false),
+        }
+    }
+
+    fn nice(&self) -> i32 {
+        self.nice.load(Ordering::Relaxed)
+    }
+
+    fn policy(&self) -> usize {
+        self.policy.load(Ordering::Relaxed)
+    }
+
+    fn priority(&self) -> i32 {
+        self.priority.load(Ordering::Relaxed)
+    }
+
+    fn cpu_affinity_mask(&self) -> usize {
+        self.cpu_affinity_mask.load(Ordering::Relaxed)
+    }
+
+    fn reset_on_fork(&self) -> bool {
+        self.reset_on_fork.load(Ordering::Relaxed)
+    }
+
+    fn set_nice(&self, nice: i32) {
+        self.nice.store(nice.clamp(-20, 19), Ordering::Relaxed);
+    }
+
+    fn set_sched(&self, policy: usize, priority: i32, reset_on_fork: bool) {
+        self.policy.store(policy, Ordering::Relaxed);
+        self.priority.store(priority, Ordering::Relaxed);
+        self.reset_on_fork.store(reset_on_fork, Ordering::Relaxed);
+    }
+
+    fn set_cpu_affinity_mask(&self, mask: usize) {
+        self.cpu_affinity_mask.store(mask, Ordering::Relaxed);
+    }
+}
+
+struct CapState {
+    effective: AtomicUsize,
+    permitted: AtomicUsize,
+    inheritable: AtomicUsize,
+}
+
+impl CapState {
+    fn root() -> Self {
+        Self {
+            effective: AtomicUsize::new(ROOT_CAP_MASK),
+            permitted: AtomicUsize::new(ROOT_CAP_MASK),
+            inheritable: AtomicUsize::new(0),
+        }
+    }
+
+    fn from_parent(parent: &Self) -> Self {
+        Self {
+            effective: AtomicUsize::new(parent.effective()),
+            permitted: AtomicUsize::new(parent.permitted()),
+            inheritable: AtomicUsize::new(parent.inheritable()),
+        }
+    }
+
+    fn effective(&self) -> usize {
+        self.effective.load(Ordering::Relaxed)
+    }
+
+    fn permitted(&self) -> usize {
+        self.permitted.load(Ordering::Relaxed)
+    }
+
+    fn inheritable(&self) -> usize {
+        self.inheritable.load(Ordering::Relaxed)
+    }
+
+    fn has_cap(&self, cap: usize) -> bool {
+        cap < usize::BITS as usize && (self.effective() & (1usize << cap)) != 0
+    }
+
+    fn set(&self, effective: usize, permitted: usize, inheritable: usize) {
+        self.effective.store(effective, Ordering::Relaxed);
+        self.permitted.store(permitted, Ordering::Relaxed);
+        self.inheritable.store(inheritable, Ordering::Relaxed);
+    }
+
+    fn set_effective(&self, effective: usize) {
+        self.effective.store(effective, Ordering::Relaxed);
+    }
+
+    fn set_permitted(&self, permitted: usize) {
+        self.permitted.store(permitted, Ordering::Relaxed);
+    }
+}
+
+impl ResourceLimits {
+    fn new() -> Self {
+        let mut limits = [LimitPair {
+            cur: usize::MAX,
+            max: usize::MAX,
+        }; RLIMIT_COUNT];
+        limits[RLIMIT_STACK] = LimitPair {
+            cur: crate::config::USER_STACK_SIZE,
+            max: usize::MAX,
+        };
+        Self {
+            limits: SpinLock::new(limits),
+        }
+    }
+
+    fn from_parent(parent: &Self) -> Self {
+        Self {
+            limits: SpinLock::new(*parent.limits.lock()),
         }
     }
 
     fn fsize_limit(&self) -> (usize, usize) {
-        (
-            self.fsize_cur.load(Ordering::Relaxed),
-            self.fsize_max.load(Ordering::Relaxed),
-        )
+        self.rlimit(RLIMIT_FSIZE).unwrap()
     }
 
     fn set_fsize_limit(&self, cur: usize, max: usize) -> SysResult {
+        self.set_rlimit(RLIMIT_FSIZE, cur, max)
+    }
+
+    fn rlimit(&self, resource: usize) -> Option<(usize, usize)> {
+        let limits = self.limits.lock();
+        limits.get(resource).map(|limit| (limit.cur, limit.max))
+    }
+
+    fn set_rlimit(&self, resource: usize, cur: usize, max: usize) -> SysResult {
         if cur > max {
             return Err(Errno::EINVAL);
         }
-        self.fsize_cur.store(cur, Ordering::Relaxed);
-        self.fsize_max.store(max, Ordering::Relaxed);
-        Ok(())
-    }
-
-    fn memlock_limit(&self) -> (usize, usize) {
-        (
-            self.memlock_cur.load(Ordering::Relaxed),
-            self.memlock_max.load(Ordering::Relaxed),
-        )
-    }
-
-    fn set_memlock_limit(&self, cur: usize, max: usize) -> SysResult {
-        if cur > max {
-            return Err(Errno::EINVAL);
-        }
-        self.memlock_cur.store(cur, Ordering::Relaxed);
-        self.memlock_max.store(max, Ordering::Relaxed);
+        let mut limits = self.limits.lock();
+        let limit = limits.get_mut(resource).ok_or(Errno::EINVAL)?;
+        *limit = LimitPair { cur, max };
         Ok(())
     }
 }
@@ -225,6 +360,8 @@ pub struct TaskControlBlock {
     fsgid: AtomicUsize,
     supplementary_groups: SpinLock<Vec<usize>>,
     umask: AtomicUsize,
+    sched: SchedState,
+    caps: CapState,
     thread_group: Arc<SpinLock<ThreadGroup>>,
     task_status: SpinLock<TaskStatus>,
     parent: Arc<SpinLock<Option<Weak<TaskControlBlock>>>>,
@@ -297,6 +434,8 @@ impl TaskControlBlock {
             fsgid: AtomicUsize::new(0),
             supplementary_groups: SpinLock::new(Vec::new()),
             umask: AtomicUsize::new(0o022),
+            sched: SchedState::new(),
+            caps: CapState::root(),
             thread_group: Arc::new(SpinLock::new(ThreadGroup::new())),
             task_status: SpinLock::new(TaskStatus::Ready),
             parent: Arc::new(SpinLock::new(None)),
@@ -382,6 +521,8 @@ impl TaskControlBlock {
             fsgid: AtomicUsize::new(0),
             supplementary_groups: SpinLock::new(Vec::new()),
             umask: AtomicUsize::new(0o022),
+            sched: SchedState::new(),
+            caps: CapState::root(),
             thread_group: Arc::new(SpinLock::new(ThreadGroup::new())),
             task_status: SpinLock::new(TaskStatus::Ready),
             parent: Arc::new(SpinLock::new(None)),
@@ -577,6 +718,8 @@ impl TaskControlBlock {
             fsgid: AtomicUsize::new(self.fsgid()),
             supplementary_groups: SpinLock::new(self.supplementary_groups()),
             umask: AtomicUsize::new(self.umask()),
+            sched: SchedState::from_parent(&self.sched),
+            caps: CapState::from_parent(&self.caps),
             thread_group,
             task_status: SpinLock::new(TaskStatus::Ready),
             parent,
@@ -752,6 +895,30 @@ impl TaskControlBlock {
     pub fn in_group(&self, gid: usize) -> bool {
         self.fsgid() == gid || self.supplementary_groups.lock().contains(&gid)
     }
+    pub fn nice(&self) -> i32 {
+        self.sched.nice()
+    }
+    pub fn sched_policy(&self) -> usize {
+        self.sched.policy()
+    }
+    pub fn sched_priority(&self) -> i32 {
+        self.sched.priority()
+    }
+    pub fn cpu_affinity_mask(&self) -> usize {
+        self.sched.cpu_affinity_mask()
+    }
+    pub fn cap_effective(&self) -> usize {
+        self.caps.effective()
+    }
+    pub fn cap_permitted(&self) -> usize {
+        self.caps.permitted()
+    }
+    pub fn cap_inheritable(&self) -> usize {
+        self.caps.inheritable()
+    }
+    pub fn has_cap(&self, cap: usize) -> bool {
+        self.caps.has_cap(cap)
+    }
     pub fn umask(&self) -> usize {
         self.umask.load(Ordering::Relaxed)
     }
@@ -856,10 +1023,19 @@ impl TaskControlBlock {
         self.sid.store(sid, Ordering::Relaxed);
     }
     pub fn set_uid_triplet(&self, uid: usize, euid: usize, suid: usize) {
+        let old_euid = self.euid();
         self.uid.store(uid, Ordering::Relaxed);
         self.euid.store(euid, Ordering::Relaxed);
         self.suid.store(suid, Ordering::Relaxed);
         self.fsuid.store(euid, Ordering::Relaxed);
+        if euid == 0 {
+            self.caps.set_effective(self.caps.permitted());
+        } else if old_euid == 0 {
+            self.caps.set_effective(0);
+            if uid != 0 && suid != 0 {
+                self.caps.set_permitted(0);
+            }
+        }
     }
     pub fn set_gid_triplet(&self, gid: usize, egid: usize, sgid: usize) {
         self.gid.store(gid, Ordering::Relaxed);
@@ -875,6 +1051,22 @@ impl TaskControlBlock {
     }
     pub fn set_supplementary_groups(&self, groups: Vec<usize>) {
         *self.supplementary_groups.lock() = groups;
+    }
+    pub fn set_nice(&self, nice: i32) {
+        self.sched.set_nice(nice);
+    }
+    pub fn set_sched(&self, policy: usize, priority: i32) {
+        self.sched
+            .set_sched(policy, priority, self.sched.reset_on_fork());
+    }
+    pub fn set_sched_with_reset_on_fork(&self, policy: usize, priority: i32, reset_on_fork: bool) {
+        self.sched.set_sched(policy, priority, reset_on_fork);
+    }
+    pub fn set_cpu_affinity_mask(&self, mask: usize) {
+        self.sched.set_cpu_affinity_mask(mask);
+    }
+    pub fn set_capabilities(&self, effective: usize, permitted: usize, inheritable: usize) {
+        self.caps.set(effective, permitted, inheritable);
     }
     pub fn set_umask(&self, mask: usize) -> usize {
         self.umask.swap(mask & 0o777, Ordering::Relaxed)
@@ -1336,10 +1528,24 @@ impl TaskControlBlock {
         self.limits.set_fsize_limit(cur, max)
     }
     pub fn memlock_limit(&self) -> (usize, usize) {
-        self.limits.memlock_limit()
+        self.limits.rlimit(RLIMIT_MEMLOCK).unwrap()
     }
     pub fn set_memlock_limit(&self, cur: usize, max: usize) -> SysResult {
-        self.limits.set_memlock_limit(cur, max)
+        self.limits.set_rlimit(RLIMIT_MEMLOCK, cur, max)
+    }
+    pub fn rlimit(&self, resource: usize) -> Option<(usize, usize)> {
+        if resource == RLIMIT_NOFILE {
+            Some(self.nofile_limit())
+        } else {
+            self.limits.rlimit(resource)
+        }
+    }
+    pub fn set_rlimit(&self, resource: usize, cur: usize, max: usize) -> SysResult {
+        if resource == RLIMIT_NOFILE {
+            self.set_nofile_limit(cur, max)
+        } else {
+            self.limits.set_rlimit(resource, cur, max)
+        }
     }
 }
 

@@ -564,44 +564,54 @@
 #setuid04
 
 # oscomp LTP test list - Phase 16: resource_sched — priority, rlimit, sched (38 tests)
-#getpriority02
-#getrlimit01
-#getrlimit02
-#getrlimit03
-#mallinfo01
-#mallinfo02
-#mallopt01
-#nice01
-#nice02
-#nice03
-#nice04
-#sched_get_priority_max01
-#sched_get_priority_max02
-#sched_get_priority_min01
-#sched_get_priority_min02
-#sched_getaffinity01
-#sched_getparam01
-#sched_getparam03
-#sched_getscheduler01
-#sched_getscheduler02
-#sched_rr_get_interval01
-#sched_rr_get_interval02
-#sched_rr_get_interval03
-#sched_setaffinity01
-#sched_setparam01
-#sched_setparam02
-#sched_setparam03
-#sched_setparam04
-#sched_setparam05
-#sched_setscheduler01
-#sched_setscheduler03
-#sched_setscheduler04
-#sched_yield01
-#setpriority01
-#setpriority02
-#setrlimit02
-#setrlimit04
-#setrlimit05
+# compare 剩余差异说明：
+# - mallinfo01 / mallinfo02 / mallopt01：musl 组返回 TCONF，提示 libc 不实现非 POSIX mallinfo/mallopt；
+#   glibc 组已通过，属于用户态 libc 能力差异，不是内核 syscall 语义缺失。
+# - LA musl 多个 sched_* 用例少 pass：libc variant 在 tst_sched.h 中直接报
+#   “sched_* not supported” TCONF，syscall variant 已通过；这是 LA musl wrapper/测例二进制口径问题。
+# - sched_setscheduler04：LA musl 的检查阶段固定调用 libc sched_getscheduler/sched_getparam，
+#   没有进入内核 syscall；RV/LA glibc 已通过，reset-on-fork 内核语义已验证。
+# - setpriority01：PRIO_USER 分支因测试环境不能执行 useradd 创建 ltp_setpriority01 用户而 TCONF；
+#   PRIO_PROCESS 和 PRIO_PGRP 分支已通过。
+# - nice04：旧 compare 中 RV musl 曾显示 failed，但最新日志已 TPASS；重新生成 compare 后应消失。
+getpriority02
+getrlimit01
+getrlimit02
+getrlimit03
+mallinfo01
+mallinfo02
+mallopt01
+nice01
+nice02
+nice03
+nice04
+sched_get_priority_max01
+sched_get_priority_max02
+sched_get_priority_min01
+sched_get_priority_min02
+sched_getaffinity01
+sched_getparam01
+sched_getparam03
+sched_getscheduler01
+sched_getscheduler02
+sched_rr_get_interval01
+sched_rr_get_interval02
+sched_rr_get_interval03
+sched_setaffinity01
+sched_setparam01
+sched_setparam02
+sched_setparam03
+sched_setparam04
+sched_setparam05
+sched_setscheduler01
+sched_setscheduler03
+sched_setscheduler04
+sched_yield01
+setpriority01
+setpriority02
+setrlimit02
+setrlimit04
+setrlimit05
 
 # oscomp LTP test list - Phase 17: mmap_clone_ipc — mmap, clone, futex, SysV IPC (79 tests)
 #brk01

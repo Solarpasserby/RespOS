@@ -96,8 +96,16 @@ const SYSCALL_CLOCK_GETTIME: usize = 113;
 const SYSCALL_CLOCK_GETRES: usize = 114;
 const SYSCALL_CLOCK_NANOSLEEP: usize = 115;
 const SYSCALL_SYSLOG: usize = 116;
+const SYSCALL_SCHED_SETPARAM: usize = 118;
+const SYSCALL_SCHED_SETSCHEDULER: usize = 119;
+const SYSCALL_SCHED_GETSCHEDULER: usize = 120;
+const SYSCALL_SCHED_GETPARAM: usize = 121;
+const SYSCALL_SCHED_SETAFFINITY: usize = 122;
 const SYSCALL_SCHED_GETAFFINITY: usize = 123;
 const SYSCALL_SCHED_YIELD: usize = 124;
+const SYSCALL_SCHED_GET_PRIORITY_MAX: usize = 125;
+const SYSCALL_SCHED_GET_PRIORITY_MIN: usize = 126;
+const SYSCALL_SCHED_RR_GET_INTERVAL: usize = 127;
 const SYSCALL_KILL: usize = 129;
 const SYSCALL_TKILL: usize = 130;
 const SYSCALL_TGKILL: usize = 131;
@@ -110,6 +118,7 @@ const SYSCALL_RT_SIGTIMEDWAIT: usize = 137;
 const SYSCALL_RT_SIGQUEUEINFO: usize = 138;
 pub const SYSCALL_SIGRETURN: usize = 139;
 const SYSCALL_SETPRIORITY: usize = 140;
+const SYSCALL_GETPRIORITY: usize = 141;
 const SYSCALL_REBOOT: usize = 142;
 const SYSCALL_SETREGID: usize = 143;
 const SYSCALL_SETGID: usize = 144;
@@ -130,6 +139,8 @@ const SYSCALL_SETGROUPS: usize = 159;
 const SYSCALL_UNAME: usize = 160;
 const SYSCALL_SETHOSTNAME: usize = 161;
 const SYSCALL_SETDOMAINNAME: usize = 162;
+const SYSCALL_GETRLIMIT: usize = 163;
+const SYSCALL_SETRLIMIT: usize = 164;
 const SYSCALL_GETRUSAGE: usize = 165;
 const SYSCALL_UMASK: usize = 166;
 const SYSCALL_GETTIMEOFDAY: usize = 169;
@@ -185,6 +196,8 @@ const SYSCALL_PRLIMIT64: usize = 261;
 const SYSCALL_FANOTIFY_INIT: usize = 262;
 const SYSCALL_CLOCK_ADJTIME: usize = 266;
 const SYSCALL_SENDMMSG: usize = 269;
+const SYSCALL_SCHED_SETATTR: usize = 274;
+const SYSCALL_SCHED_GETATTR: usize = 275;
 const SYSCALL_RENAMEAT2: usize = 276;
 const SYSCALL_GETRANDOM: usize = 278;
 const SYSCALL_MEMFD_CREATE: usize = 279;
@@ -473,8 +486,24 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
             args[3] as *mut TimeSpec,
         ),
         SYSCALL_SYSLOG => sys_syslog(args[0], args[1] as *mut u8, args[2] as isize),
-        SYSCALL_SCHED_GETAFFINITY => sys_sched_getaffinity(args[0], args[1], args[2] as *mut u8),
+        SYSCALL_SCHED_SETPARAM => sys_sched_setparam(args[0] as isize, args[1] as *const i32),
+        SYSCALL_SCHED_SETSCHEDULER => {
+            sys_sched_setscheduler(args[0] as isize, args[1], args[2] as *const i32)
+        }
+        SYSCALL_SCHED_GETSCHEDULER => sys_sched_getscheduler(args[0] as isize),
+        SYSCALL_SCHED_GETPARAM => sys_sched_getparam(args[0] as isize, args[1] as *mut i32),
+        SYSCALL_SCHED_SETAFFINITY => {
+            sys_sched_setaffinity(args[0] as isize, args[1], args[2] as *const u8)
+        }
+        SYSCALL_SCHED_GETAFFINITY => {
+            sys_sched_getaffinity(args[0] as isize, args[1], args[2] as *mut u8)
+        }
         SYSCALL_SCHED_YIELD => sys_sched_yield(),
+        SYSCALL_SCHED_GET_PRIORITY_MAX => sys_sched_get_priority_max(args[0] as isize),
+        SYSCALL_SCHED_GET_PRIORITY_MIN => sys_sched_get_priority_min(args[0] as isize),
+        SYSCALL_SCHED_RR_GET_INTERVAL => {
+            sys_sched_rr_get_interval(args[0] as isize, args[1] as *mut TimeSpec)
+        }
         SYSCALL_KILL => sys_kill(args[0], args[1] as i32),
         SYSCALL_TKILL => sys_tkill(args[0], args[1] as i32),
         SYSCALL_TGKILL => sys_tgkill(args[0], args[1], args[2] as i32),
@@ -493,6 +522,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         }
         SYSCALL_SIGRETURN => sys_sigreturn(),
         SYSCALL_SETPRIORITY => sys_setpriority(args[0], args[1], args[2] as isize),
+        SYSCALL_GETPRIORITY => sys_getpriority(args[0], args[1]),
         SYSCALL_REBOOT => sys_reboot(),
         SYSCALL_SETREGID => sys_setregid(args[0], args[1]),
         SYSCALL_SETGID => sys_setgid(args[0]),
@@ -521,6 +551,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         SYSCALL_UNAME => sys_uname(args[0] as *mut UtsName),
         SYSCALL_SETHOSTNAME => sys_sethostname(args[0] as *const u8, args[1]),
         SYSCALL_SETDOMAINNAME => sys_setdomainname(args[0] as *const u8, args[1]),
+        SYSCALL_GETRLIMIT => sys_getrlimit(args[0], args[1] as *mut RLimit),
+        SYSCALL_SETRLIMIT => sys_setrlimit(args[0], args[1] as *const RLimit),
         SYSCALL_GETRUSAGE => sys_getrusage(args[0] as isize, args[1] as *mut RUsage),
         SYSCALL_UMASK => sys_umask(args[0]),
         SYSCALL_GETTIMEOFDAY => sys_gettimeofday(args[0] as *mut TimeVal, args[1] as *mut TimeZone),
@@ -645,6 +677,17 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         SYSCALL_FANOTIFY_INIT => sys_fanotify_init(args[0], args[1]),
         SYSCALL_CLOCK_ADJTIME => sys_clock_adjtime(args[0], args[1] as *mut Timex),
         SYSCALL_SENDMMSG => sys_sendmmsg(args[0], args[1], args[2], args[3]),
+        SYSCALL_SCHED_SETATTR => sys_sched_setattr(
+            args[0] as isize,
+            args[1] as *const SchedAttr,
+            args[2] as u32,
+        ),
+        SYSCALL_SCHED_GETATTR => sys_sched_getattr(
+            args[0] as isize,
+            args[1] as *mut SchedAttr,
+            args[2] as u32,
+            args[3] as u32,
+        ),
         SYSCALL_RENAMEAT2 => sys_renameat2(
             args[0] as isize,
             args[1] as *const u8,
