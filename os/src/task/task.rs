@@ -191,6 +191,7 @@ pub struct TaskControlBlock {
     // 文件系统
     fd_table: SpinLock<Arc<FdTable>>,
     cwd: Arc<SpinLock<Arc<Path>>>,
+    root: Arc<SpinLock<Arc<Path>>>,
     exe_path: Arc<SpinLock<String>>,
     limits: Arc<ResourceLimits>,
 
@@ -260,6 +261,7 @@ impl TaskControlBlock {
             // 文件系统
             fd_table: SpinLock::new(FdTable::new()),
             cwd: Arc::new(SpinLock::new(Path::zero_init())),
+            root: Arc::new(SpinLock::new(Path::zero_init())),
             exe_path: Arc::new(SpinLock::new(String::new())),
             limits: Arc::new(ResourceLimits::new()),
 
@@ -306,6 +308,7 @@ impl TaskControlBlock {
         kernel_stack.set_top(kernel_stack_top);
 
         // 创建进程控制块
+        let root = init_root_fs();
         let task_ctrl_block = Arc::new(Self {
             // 固定数据
             kernel_stack,
@@ -338,7 +341,8 @@ impl TaskControlBlock {
 
             // 文件系统
             fd_table: SpinLock::new(FdTable::new()),
-            cwd: Arc::new(SpinLock::new(init_root_fs())),
+            cwd: Arc::new(SpinLock::new(root.clone())),
+            root: Arc::new(SpinLock::new(root)),
             exe_path: Arc::new(SpinLock::new(String::new())),
             limits: Arc::new(ResourceLimits::new()),
 
@@ -405,7 +409,7 @@ impl TaskControlBlock {
             .unwrap_or_else(|| self.clone());
 
         // 创建线程或是进程
-        let (tgid, pgid, sid, thread_group, parent, children, cwd, exe_path) = if is_thread {
+        let (tgid, pgid, sid, thread_group, parent, children, cwd, root, exe_path) = if is_thread {
             // 创建线程，属于同一线程组
             (
                 self.tgid(),
@@ -415,6 +419,7 @@ impl TaskControlBlock {
                 self.parent.clone(),
                 self.children.clone(),
                 self.cwd.clone(),
+                self.root.clone(),
                 self.exe_path.clone(),
             )
         } else {
@@ -427,6 +432,7 @@ impl TaskControlBlock {
                 Arc::new(SpinLock::new(Some(Arc::downgrade(&process_leader)))),
                 Arc::new(SpinLock::new(BTreeMap::new())),
                 Arc::new(SpinLock::new(Path::from_existed_user(&self.cwd()))),
+                Arc::new(SpinLock::new(Path::from_existed_user(&self.root()))),
                 Arc::new(SpinLock::new(self.exe_path())),
             )
         };
@@ -505,6 +511,7 @@ impl TaskControlBlock {
             // 文件系统
             fd_table: SpinLock::new(fd_table),
             cwd,
+            root,
             exe_path,
             limits,
 
@@ -661,6 +668,9 @@ impl TaskControlBlock {
     pub fn cwd(&self) -> Arc<Path> {
         self.cwd.lock().clone()
     }
+    pub fn root(&self) -> Arc<Path> {
+        self.root.lock().clone()
+    }
     pub fn exe_path(&self) -> String {
         self.exe_path.lock().clone()
     }
@@ -772,6 +782,9 @@ impl TaskControlBlock {
     }
     pub fn set_cwd(&self, path: Arc<Path>) {
         *self.cwd.lock() = path;
+    }
+    pub fn set_root(&self, path: Arc<Path>) {
+        *self.root.lock() = path;
     }
     pub fn set_exe_path(&self, path: String) {
         *self.exe_path.lock() = path;

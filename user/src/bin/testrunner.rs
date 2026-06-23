@@ -579,7 +579,7 @@ const LTP_SKIP: &[&str] = &[
 ];
 
 #[cfg(target_arch = "loongarch64")]
-const LTP_ARCH_MUSL_SKIP: &[&str] = &["mknod06", "rename11"];
+const LTP_ARCH_MUSL_SKIP: &[&str] = &[];
 
 #[cfg(not(target_arch = "loongarch64"))]
 const LTP_ARCH_MUSL_SKIP: &[&str] = &[];

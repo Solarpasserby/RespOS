@@ -318,6 +318,8 @@ fn create_mount_backing_root(fs: &Arc<dyn SuperBlockOp>) -> SysResult<MountBacki
         let path = alloc::format!("/{}", name);
         match real_root.create("/", name.as_str(), InodeType::Directory) {
             Ok(inode) => {
+                let _ = inode.set_mode(path.as_str(), 0o755);
+                let _ = inode.set_owner(path.as_str(), 0, 0);
                 return Ok(MountBackingRoot {
                     parent_inode: real_root,
                     root: Arc::new(Dentry::new(path, None, inode)),
