@@ -51,7 +51,7 @@
 
 // 正文
 #set text(size: 11pt, font: font-body, lang: "zh")
-#set par(justify: true, leading: 0.65em, first-line-indent: 2em)
+#set par(justify: true, leading: 0.8em, first-line-indent: 2em)
 
 // 标题编号和样式
 #set heading(numbering: "1.1")
@@ -125,7 +125,7 @@
   #set par(first-line-indent: 0em)
   #text(size: 10.5pt, font: font-hei, weight: "bold", fill: ink)[#title]
   #v(0.25em)
-  #text(size: 9.5pt, font: font-mono, fill: rgb("#475467"))[#body]
+  #text(size: 9.8pt, font: font-song, fill: rgb("#475467"))[#body]
 ]
 
 // ============================================================
@@ -219,7 +219,9 @@
 #v(1.2em)
 #show outline.entry: it => {
   let size = if it.level == 1 { 13.5pt } else if it.level == 2 { 12pt } else { 11pt }
-  text(size: size, font: font-hei, weight: "bold", fill: ink, it)
+  let weight = if it.level <= 2 { "bold" } else { "regular" }
+  let fill = if it.level <= 2 { ink } else { muted }
+  text(size: size, font: font-hei, weight: weight, fill: fill, it)
 }
 #outline(
   title: none,
@@ -228,6 +230,38 @@
 
 #set align(left)
 #set par(first-line-indent: 2em)
+
+#pagebreak()
+#set align(center)
+#set par(first-line-indent: 0em)
+#text(size: 18pt, font: font-hei, weight: "bold", fill: ink)[文档约定]
+#v(0.8em)
+#set align(left)
+#set par(first-line-indent: 2em)
+
+本文档默认使用 Linux / Unix 内核语境中的常见术语。模块名、系统调用名、结构体名、寄存器名和源码路径使用等宽字体；章节正文使用“任务”指代内核调度实体，使用“进程”指代线程组层面的用户可见语义。未特别说明时，虚拟地址、页表、文件描述符和信号语义均以当前 RespOS 初赛实现为准。
+
+#figure(
+  kind: table,
+  supplement: [表],
+  caption: [常用缩写与术语],
+)[
+  #table(
+    columns: (auto, 1fr),
+    align: (center + horizon, left + horizon),
+    inset: 7pt,
+    table.header([缩写 / 术语], [含义]),
+    [ABI], [应用二进制接口，本文主要指 Linux 用户态程序期望的系统调用和数据结构语义。],
+    [TCB], [`TaskControlBlock`，RespOS 中描述线程级调度实体的核心任务控制块。],
+    [TGID / TID], [线程组 ID / 线程 ID；TGID 对应用户常见的进程 ID，TID 对应调度实体。],
+    [VMA], [虚拟内存区域，对应 `MapArea` 记录的一段连续虚拟页区间。],
+    [COW], [写时复制，`fork` 后共享只读页，首次写入时再复制物理页。],
+    [PTE / TLB], [页表项 / 地址转换缓存，分别对应页表元数据和硬件地址翻译缓存。],
+    [VFS], [虚拟文件系统抽象层，用统一 trait 连接 Ext4、procfs、devfs、pipe 等后端。],
+    [fd], [文件描述符，用户态整数句柄，内核通过 `FdTable` 映射到 `FileOp` 对象。],
+    [trap], [用户态因系统调用、中断或异常进入内核的统一控制流入口。],
+  )
+]
 
 = 概述
 
