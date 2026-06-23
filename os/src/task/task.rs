@@ -50,6 +50,111 @@ impl TidAddress {
     }
 }
 
+struct ResourceLimits {
+    fsize_cur: AtomicUsize,
+    fsize_max: AtomicUsize,
+}
+
+impl ResourceLimits {
+    fn new() -> Self {
+        Self {
+            fsize_cur: AtomicUsize::new(usize::MAX),
+            fsize_max: AtomicUsize::new(usize::MAX),
+        }
+    }
+
+    fn from_parent(parent: &Self) -> Self {
+        let (cur, max) = parent.fsize_limit();
+        Self {
+            fsize_cur: AtomicUsize::new(cur),
+            fsize_max: AtomicUsize::new(max),
+        }
+    }
+
+    fn fsize_limit(&self) -> (usize, usize) {
+        (
+            self.fsize_cur.load(Ordering::Relaxed),
+            self.fsize_max.load(Ordering::Relaxed),
+        )
+    }
+
+    fn set_fsize_limit(&self, cur: usize, max: usize) -> SysResult {
+        if cur > max {
+            return Err(Errno::EINVAL);
+        }
+        self.fsize_cur.store(cur, Ordering::Relaxed);
+        self.fsize_max.store(max, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+struct IntervalTimer {
+    deadline_ms: AtomicUsize,
+    interval_ms: AtomicUsize,
+}
+
+impl IntervalTimer {
+    fn new() -> Self {
+        Self {
+            deadline_ms: AtomicUsize::new(0),
+            interval_ms: AtomicUsize::new(0),
+        }
+    }
+}
+
+struct TaskTimers {
+    timers: [IntervalTimer; 3],
+}
+
+impl TaskTimers {
+    fn new() -> Self {
+        Self {
+            timers: [
+                IntervalTimer::new(),
+                IntervalTimer::new(),
+                IntervalTimer::new(),
+            ],
+        }
+    }
+
+    fn fields(&self, which: usize) -> Option<(&AtomicUsize, &AtomicUsize, Sig)> {
+        match which {
+            0 => Some((
+                &self.timers[0].deadline_ms,
+                &self.timers[0].interval_ms,
+                Sig::SIGALRM,
+            )),
+            1 => Some((
+                &self.timers[1].deadline_ms,
+                &self.timers[1].interval_ms,
+                Sig::SIGVTALRM,
+            )),
+            2 => Some((
+                &self.timers[2].deadline_ms,
+                &self.timers[2].interval_ms,
+                Sig::SIGPROF,
+            )),
+            _ => None,
+        }
+    }
+}
+
+struct TaskInner {
+    tid_address: TidAddress,
+    sig_context_addr: usize,
+    sigsuspend_saved_mask: Option<SigSet>,
+}
+
+impl TaskInner {
+    fn new() -> Self {
+        Self {
+            tid_address: TidAddress::new(),
+            sig_context_addr: 0,
+            sigsuspend_saved_mask: None,
+        }
+    }
+}
+
 /// 任务控制块——此处的任务是对一定资源和某个程序的抽象表述
 #[repr(C)]
 pub struct TaskControlBlock {
@@ -87,29 +192,21 @@ pub struct TaskControlBlock {
     fd_table: SpinLock<Arc<FdTable>>,
     cwd: Arc<SpinLock<Arc<Path>>>,
     exe_path: Arc<SpinLock<String>>,
-    fsize_cur: AtomicUsize,
-    fsize_max: AtomicUsize,
+    limits: Arc<ResourceLimits>,
 
     //信号
     sig_pending: SpinLock<SigPending>, // 本线程的信号队列 + 掩码（独享）
     sig_stack: SpinLock<SignalStack>,  // 本线程的备用信号栈（独享）
     sig_handler: Arc<SpinLock<SigHandler>>, // 线程组共享的 handler 注册表（共享）
-    sig_context_addr: AtomicUsize,     // 用户栈上 SigContext 的地址
-    sigsuspend_saved_mask: SpinLock<Option<SigSet>>,
 
     // 线程同步
-    tid_address: SpinLock<TidAddress>,
+    inner: SpinLock<TaskInner>,
     // ===== 新增：可中断状态标记 =====
     // 标记当前线程是否处于"可被信号中断"的阻塞中（futex_wait / sigtimedwait / wait4）
     interruptible: AtomicBool,
     // 信号中断标记：当线程在 interruptible 状态下被信号唤醒时置为 true
     interrupted: AtomicBool,
-    alarm_deadline_ms: AtomicUsize,
-    alarm_interval_ms: AtomicUsize,
-    virtual_timer_deadline_ms: AtomicUsize,
-    virtual_timer_interval_ms: AtomicUsize,
-    prof_timer_deadline_ms: AtomicUsize,
-    prof_timer_interval_ms: AtomicUsize,
+    itimers: Arc<TaskTimers>,
     personality: AtomicUsize,
     did_exec: AtomicBool,
     start_time_ms: AtomicUsize,
@@ -164,28 +261,20 @@ impl TaskControlBlock {
             fd_table: SpinLock::new(FdTable::new()),
             cwd: Arc::new(SpinLock::new(Path::zero_init())),
             exe_path: Arc::new(SpinLock::new(String::new())),
-            fsize_cur: AtomicUsize::new(usize::MAX),
-            fsize_max: AtomicUsize::new(usize::MAX),
+            limits: Arc::new(ResourceLimits::new()),
 
             //信号
             sig_pending: SpinLock::new(SigPending::new()),
             sig_stack: SpinLock::new(SignalStack::default()),
             sig_handler: Arc::new(SpinLock::new(SigHandler::new())),
-            sig_context_addr: AtomicUsize::new(0),
-            sigsuspend_saved_mask: SpinLock::new(None),
 
             // 线程同步
-            tid_address: SpinLock::new(TidAddress::new()),
+            inner: SpinLock::new(TaskInner::new()),
 
             // 可中断状态
             interruptible: AtomicBool::new(false),
             interrupted: AtomicBool::new(false),
-            alarm_deadline_ms: AtomicUsize::new(0),
-            alarm_interval_ms: AtomicUsize::new(0),
-            virtual_timer_deadline_ms: AtomicUsize::new(0),
-            virtual_timer_interval_ms: AtomicUsize::new(0),
-            prof_timer_deadline_ms: AtomicUsize::new(0),
-            prof_timer_interval_ms: AtomicUsize::new(0),
+            itimers: Arc::new(TaskTimers::new()),
             personality: AtomicUsize::new(0),
             did_exec: AtomicBool::new(false),
             start_time_ms: AtomicUsize::new(get_accounting_ms()),
@@ -251,28 +340,20 @@ impl TaskControlBlock {
             fd_table: SpinLock::new(FdTable::new()),
             cwd: Arc::new(SpinLock::new(init_root_fs())),
             exe_path: Arc::new(SpinLock::new(String::new())),
-            fsize_cur: AtomicUsize::new(usize::MAX),
-            fsize_max: AtomicUsize::new(usize::MAX),
+            limits: Arc::new(ResourceLimits::new()),
 
             //信号
             sig_pending: SpinLock::new(SigPending::new()),
             sig_stack: SpinLock::new(SignalStack::default()),
             sig_handler: Arc::new(SpinLock::new(SigHandler::new())),
-            sig_context_addr: AtomicUsize::new(0),
-            sigsuspend_saved_mask: SpinLock::new(None),
 
             // 线程同步
-            tid_address: SpinLock::new(TidAddress::new()),
+            inner: SpinLock::new(TaskInner::new()),
 
             // 可中断状态
             interruptible: AtomicBool::new(false),
             interrupted: AtomicBool::new(false),
-            alarm_deadline_ms: AtomicUsize::new(0),
-            alarm_interval_ms: AtomicUsize::new(0),
-            virtual_timer_deadline_ms: AtomicUsize::new(0),
-            virtual_timer_interval_ms: AtomicUsize::new(0),
-            prof_timer_deadline_ms: AtomicUsize::new(0),
-            prof_timer_interval_ms: AtomicUsize::new(0),
+            itimers: Arc::new(TaskTimers::new()),
             personality: AtomicUsize::new(0),
             did_exec: AtomicBool::new(false),
             start_time_ms: AtomicUsize::new(get_accounting_ms()),
@@ -365,6 +446,16 @@ impl TaskControlBlock {
         } else {
             FdTable::from_existed_user(&self.fd_table.lock())
         };
+        let limits = if is_thread {
+            self.limits.clone()
+        } else {
+            Arc::new(ResourceLimits::from_parent(&self.limits))
+        };
+        let itimers = if is_thread {
+            self.itimers.clone()
+        } else {
+            Arc::new(TaskTimers::new())
+        };
         let current_sig_mask = self.op_sig_pending(|pending| pending.mask);
         let (sig_handler, sig_pending, sig_stack) = if is_thread {
             (
@@ -415,28 +506,20 @@ impl TaskControlBlock {
             fd_table: SpinLock::new(fd_table),
             cwd,
             exe_path,
-            fsize_cur: AtomicUsize::new(self.fsize_limit().0),
-            fsize_max: AtomicUsize::new(self.fsize_limit().1),
+            limits,
 
             // 信号
             sig_pending,
             sig_stack,
             sig_handler,
-            sig_context_addr: AtomicUsize::new(0),
-            sigsuspend_saved_mask: SpinLock::new(None),
 
             // 线程同步
-            tid_address: SpinLock::new(TidAddress::new()),
+            inner: SpinLock::new(TaskInner::new()),
 
             // 可中断状态
             interruptible: AtomicBool::new(false),
             interrupted: AtomicBool::new(false),
-            alarm_deadline_ms: AtomicUsize::new(0),
-            alarm_interval_ms: AtomicUsize::new(0),
-            virtual_timer_deadline_ms: AtomicUsize::new(0),
-            virtual_timer_interval_ms: AtomicUsize::new(0),
-            prof_timer_deadline_ms: AtomicUsize::new(0),
-            prof_timer_interval_ms: AtomicUsize::new(0),
+            itimers,
             personality: AtomicUsize::new(self.personality()),
             did_exec: AtomicBool::new(false),
             start_time_ms: AtomicUsize::new(get_accounting_ms()),
@@ -756,26 +839,27 @@ impl TaskControlBlock {
 
     // tid_address 设置
     pub fn set_clear_child_tid(&self, addr: usize) {
-        self.tid_address.lock().clear_child_tid = (addr != 0).then_some(addr);
+        self.inner.lock().tid_address.clear_child_tid = (addr != 0).then_some(addr);
     }
 
     pub fn set_set_child_tid(&self, addr: usize) {
-        self.tid_address.lock().set_child_tid = Some(addr);
+        self.inner.lock().tid_address.set_child_tid = Some(addr);
     }
 
     pub fn clear_child_tid_addr(&self) -> Option<usize> {
-        self.tid_address.lock().clear_child_tid
+        self.inner.lock().tid_address.clear_child_tid
     }
     pub fn set_robust_list(&self, head: usize, len: usize) {
-        let mut tid_address = self.tid_address.lock();
-        tid_address.robust_list_head = (head != 0).then_some(head);
-        tid_address.robust_list_len = len;
+        let mut inner = self.inner.lock();
+        inner.tid_address.robust_list_head = (head != 0).then_some(head);
+        inner.tid_address.robust_list_len = len;
     }
     pub fn robust_list(&self) -> Option<(usize, usize)> {
-        let tid_address = self.tid_address.lock();
-        tid_address
+        let inner = self.inner.lock();
+        inner
+            .tid_address
             .robust_list_head
-            .map(|head| (head, tid_address.robust_list_len))
+            .map(|head| (head, inner.tid_address.robust_list_len))
     }
 
     // exec 时关闭线程组中除自身外的其它线程，只清理线程私有状态。
@@ -849,11 +933,11 @@ impl TaskControlBlock {
     }
 
     pub fn set_sigsuspend_saved_mask(&self, mask: Option<SigSet>) {
-        *self.sigsuspend_saved_mask.lock() = mask;
+        self.inner.lock().sigsuspend_saved_mask = mask;
     }
 
     pub fn take_sigsuspend_saved_mask(&self) -> Option<SigSet> {
-        self.sigsuspend_saved_mask.lock().take()
+        self.inner.lock().sigsuspend_saved_mask.take()
     }
 
     // 信号入口：给线程发送信号
@@ -978,11 +1062,11 @@ impl TaskControlBlock {
         }
     }
     pub fn set_sig_context_addr(&self, addr: usize) {
-        self.sig_context_addr.store(addr, Ordering::Relaxed);
+        self.inner.lock().sig_context_addr = addr;
     }
 
     pub fn sig_context_addr(&self) -> usize {
-        self.sig_context_addr.load(Ordering::Relaxed)
+        self.inner.lock().sig_context_addr
     }
 
     pub fn real_timer_remaining_ms(&self) -> usize {
@@ -994,24 +1078,7 @@ impl TaskControlBlock {
     }
 
     fn itimer_fields(&self, which: usize) -> Option<(&AtomicUsize, &AtomicUsize, Sig)> {
-        match which {
-            0 => Some((
-                &self.alarm_deadline_ms,
-                &self.alarm_interval_ms,
-                Sig::SIGALRM,
-            )),
-            1 => Some((
-                &self.virtual_timer_deadline_ms,
-                &self.virtual_timer_interval_ms,
-                Sig::SIGVTALRM,
-            )),
-            2 => Some((
-                &self.prof_timer_deadline_ms,
-                &self.prof_timer_interval_ms,
-                Sig::SIGPROF,
-            )),
-            _ => None,
-        }
+        self.itimers.fields(which)
     }
 
     pub fn itimer_remaining_ms(&self, which: usize) -> usize {
@@ -1151,18 +1218,10 @@ impl TaskControlBlock {
         self.fd_table.lock().set_nofile_limit(cur, max)
     }
     pub fn fsize_limit(&self) -> (usize, usize) {
-        (
-            self.fsize_cur.load(Ordering::Relaxed),
-            self.fsize_max.load(Ordering::Relaxed),
-        )
+        self.limits.fsize_limit()
     }
     pub fn set_fsize_limit(&self, cur: usize, max: usize) -> SysResult {
-        if cur > max {
-            return Err(Errno::EINVAL);
-        }
-        self.fsize_cur.store(cur, Ordering::Relaxed);
-        self.fsize_max.store(max, Ordering::Relaxed);
-        Ok(())
+        self.limits.set_fsize_limit(cur, max)
     }
 }
 

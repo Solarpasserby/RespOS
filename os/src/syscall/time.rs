@@ -61,6 +61,7 @@ pub struct SigEvent {
 #[derive(Copy, Clone, Default)]
 struct PosixTimer {
     owner_tgid: usize,
+    clock_id: usize,
     signo: i32,
     deadline_ms: usize,
     interval_ms: usize,
@@ -208,13 +209,26 @@ fn timespec_from_us(us: usize) -> TimeSpec {
 pub fn clock_time_ms(clock_id: usize) -> SysResult<usize> {
     const CLOCK_REALTIME: usize = 0;
     const CLOCK_MONOTONIC: usize = 1;
+    const CLOCK_PROCESS_CPUTIME_ID: usize = 2;
+    const CLOCK_THREAD_CPUTIME_ID: usize = 3;
+    const CLOCK_MONOTONIC_RAW: usize = 4;
+    const CLOCK_REALTIME_COARSE: usize = 5;
+    const CLOCK_MONOTONIC_COARSE: usize = 6;
     const CLOCK_BOOTTIME: usize = 7;
     const CLOCK_REALTIME_ALARM: usize = 8;
     const CLOCK_BOOTTIME_ALARM: usize = 9;
+    const CLOCK_TAI: usize = 11;
 
     match clock_id {
-        CLOCK_REALTIME | CLOCK_REALTIME_ALARM => Ok(realtime_us() / 1000),
-        CLOCK_MONOTONIC | CLOCK_BOOTTIME | CLOCK_BOOTTIME_ALARM => Ok(get_time_ms()),
+        CLOCK_REALTIME | CLOCK_REALTIME_COARSE | CLOCK_REALTIME_ALARM => Ok(realtime_us() / 1000),
+        CLOCK_MONOTONIC
+        | CLOCK_PROCESS_CPUTIME_ID
+        | CLOCK_THREAD_CPUTIME_ID
+        | CLOCK_MONOTONIC_RAW
+        | CLOCK_MONOTONIC_COARSE
+        | CLOCK_BOOTTIME
+        | CLOCK_BOOTTIME_ALARM
+        | CLOCK_TAI => Ok(get_time_ms()),
         _ => Err(Errno::EINVAL),
     }
 }
@@ -393,7 +407,9 @@ fn posix_timer_remaining_ms(timer: &PosixTimer) -> usize {
     if timer.deadline_ms == 0 {
         0
     } else {
-        timer.deadline_ms.saturating_sub(get_timeout_ms())
+        timer
+            .deadline_ms
+            .saturating_sub(clock_time_ms(timer.clock_id).unwrap_or(usize::MAX))
     }
 }
 
@@ -431,6 +447,7 @@ pub fn sys_timer_create(
     let id = NEXT_POSIX_TIMER_ID.fetch_add(1, Ordering::Relaxed) as i32;
     let timer = PosixTimer {
         owner_tgid: task.tgid(),
+        clock_id,
         signo,
         deadline_ms: 0,
         interval_ms: 0,
@@ -507,20 +524,13 @@ pub fn sys_timer_settime(
             return Err(Errno::EINVAL);
         }
         let old = posix_timer_snapshot(timer);
-        let deadline_ms = if value_ms == 0 {
+        let now_ms = clock_time_ms(timer.clock_id)?;
+        timer.deadline_ms = if value_ms == 0 {
             0
         } else if flags & TIMER_ABSTIME != 0 {
-            value_ms
-                .max(get_time_ms())
-                .saturating_sub(get_time_ms())
-                .max(1)
+            value_ms.max(now_ms)
         } else {
-            value_ms
-        };
-        timer.deadline_ms = if deadline_ms == 0 {
-            0
-        } else {
-            get_timeout_ms().saturating_add(deadline_ms)
+            now_ms.saturating_add(value_ms)
         };
         timer.interval_ms = interval_ms;
         old
@@ -537,9 +547,12 @@ pub fn check_posix_timers(task: &TaskControlBlock) {
     {
         let mut timers = POSIX_TIMERS.lock();
         for timer in timers.values_mut() {
+            let Ok(now_ms) = clock_time_ms(timer.clock_id) else {
+                continue;
+            };
             if timer.owner_tgid != task.tgid()
                 || timer.deadline_ms == 0
-                || get_timeout_ms() < timer.deadline_ms
+                || now_ms < timer.deadline_ms
             {
                 continue;
             }
@@ -547,7 +560,7 @@ pub fn check_posix_timers(task: &TaskControlBlock) {
             timer.deadline_ms = if timer.interval_ms == 0 {
                 0
             } else {
-                get_timeout_ms().saturating_add(timer.interval_ms)
+                now_ms.saturating_add(timer.interval_ms)
             };
         }
     }

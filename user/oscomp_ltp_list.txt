@@ -1,6 +1,10 @@
 # oscomp LTP test list - Phase 1: identity — process & system info (37 tests)
+# 测例 getcontext01，musl LTP 编译期未启用 HAVE_GETCONTEXT，运行时内核修复无法改变 TCONF 分支
+# 测例 gethostbyname_r01，musl resolver 返回码差异，当前不是内核 syscall 语义问题
+# 测例 gethostid01，musl libc 未导出 sethostid，LTP 编译期走 TCONF 分支
+# 测例 gethostname02，musl gethostname 基于 uname 后截断复制，短缓冲不返回 ENAMETOOLONG
 confstr01
-#getcontext01 # musl LTP 编译期未启用 HAVE_GETCONTEXT，运行时内核修复无法改变 TCONF 分支
+#getcontext01
 getdomainname01
 getegid01
 getegid01_16
@@ -9,10 +13,10 @@ getegid02_16
 geteuid01
 getgid01
 getgid03
-#gethostbyname_r01 # musl resolver 返回码差异，当前不是内核 syscall 语义问题
-#gethostid01 # musl libc 未导出 sethostid，LTP 编译期走 TCONF 分支
+#gethostbyname_r01
+#gethostid01
 gethostname01
-#gethostname02 # musl gethostname 基于 uname 后截断复制，短缓冲不返回 ENAMETOOLONG
+#gethostname02
 getpagesize01
 getpgid01
 getpgid02
@@ -46,6 +50,7 @@ utsname04
 #times03
 
 # oscomp LTP test list - Phase 3: clock_timer — clocks, timers, alarms (30 tests)
+# 测例 clock_gettime04，la musl没有解决
 adjtimex01
 alarm02
 alarm03
@@ -56,7 +61,7 @@ clock_adjtime02
 clock_getres01
 clock_gettime01
 clock_gettime02
-#clock_gettime04 #la musl没有解决
+#clock_gettime04
 clock_nanosleep02
 clock_settime02
 getitimer01
@@ -78,6 +83,8 @@ timerfd_gettime01
 timerfd_settime01
 
 # oscomp LTP test list - Phase 4: early_process — exit, abort, fork (15 tests)
+# 测例 fork13 可以通过但占用时间长收益低，目前在 testrunner 中标记跳过
+# 测例 fork14 实现复杂，且该测例收益很小，目前在 testrunner 中标记跳过
 #exit01
 #exit02
 #exit_group01
@@ -95,6 +102,7 @@ timerfd_settime01
 #pause01
 
 # oscomp LTP test list - Phase 5: fd — file descriptors (53 tests)
+# 测例 creat09，暂未解决
 close01
 close02
 close_range02
@@ -103,7 +111,7 @@ creat03
 creat04
 creat05
 creat08
-#creat09 #未解决
+#creat09
 dup01
 dup02
 dup03
@@ -184,6 +192,8 @@ flock06
 #vmsplice04
 
 # oscomp LTP test list - Phase 7: io_basic — open, read, write, lseek (45 tests)
+# 测例 openat03，暂未解决
+# 测例 openat04，暂未解决
 fsync01
 fsync03
 llseek01
@@ -205,8 +215,8 @@ open11
 openat01
 openat02
 openat02_child
-#openat03 # 未解决
-#openat04 # 未解决
+#openat03
+#openat04
 openat201
 openat202
 openat203
@@ -441,6 +451,7 @@ umask01
 #utime07
 
 # oscomp LTP test list - Phase 12: signal — signal handling (20 tests)
+# 测例 rt_sigqueueinfo01 sigwait01 报错奇怪收益低跳过完整通过
 #kill03
 #kill05
 #kill06

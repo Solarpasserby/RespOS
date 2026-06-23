@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::{env, fs, io, time::SystemTime};
+use std::{env, fs};
 
 fn main() {
     let c_path = PathBuf::from("c/lwext4")
@@ -34,34 +34,29 @@ fn main() {
 
     let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
     let lwext4_lib = &format!("lwext4-{}", arch);
-    let lwext4_lib_path = &format!("c/lwext4/lib{}.a", lwext4_lib);
-    if !Path::new(lwext4_lib_path).exists()
-        || lwext4_sources_newer_than_lib(&c_path, Path::new(lwext4_lib_path)).unwrap_or(true)
-    {
-        let status = Command::new("make")
-            .args(&[
-                "musl-generic",
-                "-C",
-                c_path.to_str().expect("invalid path of lwext4"),
-            ])
-            .arg(&format!("ARCH={}", arch))
-            .status()
-            .expect("failed to execute process: make lwext4");
-        assert!(status.success());
+    let status = Command::new("make")
+        .args(&[
+            "musl-generic",
+            "-C",
+            c_path.to_str().expect("invalid path of lwext4"),
+        ])
+        .arg(&format!("ARCH={}", arch))
+        .status()
+        .expect("failed to execute process: make lwext4");
+    assert!(status.success());
 
-        if !Path::new("src/bindings.rs").exists() {
-            let cc = &format!("{}-linux-musl-gcc", arch);
-            let output = Command::new(cc)
-                .args(["-print-sysroot"])
-                .output()
-                .expect("failed to execute process: gcc -print-sysroot");
+    if !Path::new("src/bindings.rs").exists() {
+        let cc = &format!("{}-linux-musl-gcc", arch);
+        let output = Command::new(cc)
+            .args(["-print-sysroot"])
+            .output()
+            .expect("failed to execute process: gcc -print-sysroot");
 
-            let sysroot = core::str::from_utf8(&output.stdout).unwrap();
-            let sysroot = sysroot.trim_end();
-            let sysroot_inc = &format!("-I{}/include/", sysroot);
+        let sysroot = core::str::from_utf8(&output.stdout).unwrap();
+        let sysroot = sysroot.trim_end();
+        let sysroot_inc = &format!("-I{}/include/", sysroot);
 
-            generates_bindings_to_rust(sysroot_inc);
-        }
+        generates_bindings_to_rust(sysroot_inc);
     }
 
     /* No longer need to implement the libc.a
@@ -85,30 +80,6 @@ fn main() {
     );
     println!("cargo:rerun-if-changed=c/wrapper.h");
     println!("cargo:rerun-if-changed={}", c_path.to_str().unwrap());
-}
-
-fn lwext4_sources_newer_than_lib(c_path: &Path, lib_path: &Path) -> io::Result<bool> {
-    let lib_mtime = fs::metadata(lib_path)?.modified()?;
-    for source in ["src", "include", "CMakeLists.txt", "Makefile"] {
-        if newest_mtime(&c_path.join(source))? > lib_mtime {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-fn newest_mtime(path: &Path) -> io::Result<SystemTime> {
-    let mut newest = fs::metadata(path)?.modified()?;
-    if path.is_dir() {
-        for entry in fs::read_dir(path)? {
-            let entry = entry?;
-            let mtime = newest_mtime(&entry.path())?;
-            if mtime > newest {
-                newest = mtime;
-            }
-        }
-    }
-    Ok(newest)
 }
 
 fn generates_bindings_to_rust(mpath: &str) {
