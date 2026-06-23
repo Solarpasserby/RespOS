@@ -18,3 +18,11 @@ kernel-la
 testrunner_output.log
 rv-output.txt
 la-output.txt
+output-rv.txt
+output-la.txt
+debug-laoutput.txt
+debug-rvoutput.txt
+judge/**
+!judge/**/
+!judge/**/*.py
+!judge/baseline/*

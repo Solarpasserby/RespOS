@@ -2,9 +2,8 @@
 
 use super::{Errno, SysResult};
 use crate::config::{MMAP_MIN_ADDR, PAGE_SIZE};
-use crate::mm::{MapPermission, VPNRange, VirtAddr};
+use crate::mm::{MapPermission, MmapBacking, VPNRange, VirtAddr, mmap_file_backing};
 use crate::task::current_task;
-use alloc::vec;
 use bitflags::bitflags;
 
 /// 系统调用 sys-brk
@@ -83,6 +82,7 @@ pub fn sys_mmap(
     }
     let replace = flags.contains(MMAPFLAGS::MAP_FIXED);
     let noreplace = flags.contains(MMAPFLAGS::MAP_FIXED_NOREPLACE);
+    let locked = flags.contains(MMAPFLAGS::MAP_LOCKED);
     let fixed = replace || noreplace;
     if fixed && (_addr % PAGE_SIZE != 0 || _addr == 0) {
         return Err(Errno::EINVAL);
@@ -99,13 +99,14 @@ pub fn sys_mmap(
             return Err(Errno::EINVAL);
         }
         task.op_memory_set_write(|memory_set| {
-            let start = if has_shared {
-                memory_set
-                    .mmap_shared_anonymous(fixed_addr, map_len, permission, replace, noreplace)?
+            let backing = if has_shared {
+                MmapBacking::SharedAnonymous
             } else {
-                memory_set
-                    .mmap_lazy_anonymous(fixed_addr, map_len, permission, replace, noreplace)?
+                MmapBacking::LazyAnonymous
             };
+            let start = memory_set.mmap_area(
+                fixed_addr, map_len, permission, replace, noreplace, locked, backing,
+            )?;
             memory_set.flush_tlb();
             Ok(start)
         })
@@ -118,23 +119,12 @@ pub fn sys_mmap(
         if !file.readable() {
             return Err(Errno::EACCES);
         }
-
-        let mut file_data = vec![0u8; map_len];
-        let origin_offset = file.get_offset();
-        file.seek(offset as isize)?;
-        let read_result = file.read(&mut file_data[..len]);
-        let restore_result = file.seek(origin_offset as isize);
-        read_result?;
-        restore_result?;
+        let backing = mmap_file_backing(file, offset, len, map_len, has_shared)?;
 
         task.op_memory_set_write(|memory_set| {
-            let start = if has_shared {
-                memory_set
-                    .mmap_shared_framed(fixed_addr, map_len, permission, replace, noreplace)?
-            } else {
-                memory_set.mmap_framed(fixed_addr, map_len, permission, replace, noreplace)?
-            };
-            memory_set.write_bytes_to_mapped_range(start, &file_data)?;
+            let start = memory_set.mmap_area(
+                fixed_addr, map_len, permission, replace, noreplace, locked, backing,
+            )?;
             memory_set.flush_tlb();
             Ok(start)
         })

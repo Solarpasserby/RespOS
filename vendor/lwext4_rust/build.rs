@@ -34,32 +34,29 @@ fn main() {
 
     let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
     let lwext4_lib = &format!("lwext4-{}", arch);
-    let lwext4_lib_path = &format!("c/lwext4/lib{}.a", lwext4_lib);
-    if !Path::new(lwext4_lib_path).exists() {
-        let status = Command::new("make")
-            .args(&[
-                "musl-generic",
-                "-C",
-                c_path.to_str().expect("invalid path of lwext4"),
-            ])
-            .arg(&format!("ARCH={}", arch))
-            .status()
-            .expect("failed to execute process: make lwext4");
-        assert!(status.success());
+    let status = Command::new("make")
+        .args(&[
+            "musl-generic",
+            "-C",
+            c_path.to_str().expect("invalid path of lwext4"),
+        ])
+        .arg(&format!("ARCH={}", arch))
+        .status()
+        .expect("failed to execute process: make lwext4");
+    assert!(status.success());
 
-        if !Path::new("src/bindings.rs").exists() {
-            let cc = &format!("{}-linux-musl-gcc", arch);
-            let output = Command::new(cc)
-                .args(["-print-sysroot"])
-                .output()
-                .expect("failed to execute process: gcc -print-sysroot");
+    if !Path::new("src/bindings.rs").exists() {
+        let cc = &format!("{}-linux-musl-gcc", arch);
+        let output = Command::new(cc)
+            .args(["-print-sysroot"])
+            .output()
+            .expect("failed to execute process: gcc -print-sysroot");
 
-            let sysroot = core::str::from_utf8(&output.stdout).unwrap();
-            let sysroot = sysroot.trim_end();
-            let sysroot_inc = &format!("-I{}/include/", sysroot);
+        let sysroot = core::str::from_utf8(&output.stdout).unwrap();
+        let sysroot = sysroot.trim_end();
+        let sysroot_inc = &format!("-I{}/include/", sysroot);
 
-            generates_bindings_to_rust(sysroot_inc);
-        }
+        generates_bindings_to_rust(sysroot_inc);
     }
 
     /* No longer need to implement the libc.a

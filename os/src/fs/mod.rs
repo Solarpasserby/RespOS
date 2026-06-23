@@ -13,6 +13,7 @@ mod page_cache;
 mod path;
 mod pipe;
 pub mod proc;
+mod special;
 mod stdio;
 pub mod vfs;
 
@@ -24,4 +25,5 @@ pub use namei::*;
 pub use page_cache::*;
 pub use path::*;
 pub use pipe::*;
+pub use special::*;
 pub use stdio::*;

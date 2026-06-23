@@ -37,7 +37,7 @@ impl TaskManager {
         }
     }
 
-    pub fn for_each(&self, f: impl Fn(&Arc<TaskControlBlock>)) {
+    pub fn for_each(&self, mut f: impl FnMut(&Arc<TaskControlBlock>)) {
         for task in self.0.lock().values() {
             f(&task.upgrade().unwrap())
         }

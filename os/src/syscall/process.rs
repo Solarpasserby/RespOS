@@ -3,17 +3,19 @@
 use super::time::TimeVal;
 use super::{Errno, SysResult};
 use crate::config::{CLK_TCK, USER_STACK_SIZE};
-use crate::fs::{AT_FDCWD, path_open};
+use crate::fs::{AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW, File, FileOp, OpenFlags, path_open};
 use crate::loader::get_app_data_by_name;
 use crate::mm::{
     MapPermission, VPNRange, VirtAddr, copy_cstr_from_user, copy_from_user, copy_to_user,
     extract_cstrings_from_user,
 };
+use crate::signal::{LinuxSigInfo, SigInfo};
 use crate::task::{
-    CloneFlags, TASK_MANAGER, WaitOption, add_task, current_task, do_futex, exit_and_run_next,
-    exit_group_and_run_next, yield_current_task,
+    CloneFlags, TASK_MANAGER, TaskControlBlock, WaitOption, add_task, blocking_and_run_next,
+    current_task, do_futex, exit_and_run_next, exit_group_and_run_next, yield_current_task,
 };
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 #[cfg(target_arch = "loongarch64")]
@@ -37,6 +39,27 @@ fn shebang_busybox_path(script_path: &str) -> &'static str {
     } else {
         "/musl/busybox"
     }
+}
+
+fn process_leader(task: &Arc<TaskControlBlock>) -> Arc<TaskControlBlock> {
+    task.op_thread_group(|tg| tg.iter().find(|task| task.tid() == task.tgid()))
+        .unwrap_or_else(|| task.clone())
+}
+
+fn set_process_pgid(task: &Arc<TaskControlBlock>, pgid: usize) {
+    task.op_thread_group(|tg| {
+        for member in tg.iter() {
+            member.set_pgid(pgid);
+        }
+    });
+}
+
+fn set_process_sid(task: &Arc<TaskControlBlock>, sid: usize) {
+    task.op_thread_group(|tg| {
+        for member in tg.iter() {
+            member.set_sid(sid);
+        }
+    });
 }
 
 // 判断执行文件是否为 shell 脚本，若为 shell 脚本，则更改执行环境和参数
@@ -101,6 +124,21 @@ pub struct RLimit {
     pub max: usize,
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct CapUserHeader {
+    pub version: u32,
+    pub pid: i32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct CapUserData {
+    pub effective: u32,
+    pub permitted: u32,
+    pub inheritable: u32,
+}
+
 impl Default for RUsage {
     fn default() -> Self {
         Self {
@@ -122,6 +160,40 @@ impl Default for RUsage {
             ru_nivcsw: 0,
         }
     }
+}
+
+fn rusage_from_ticks(utime: usize, stime: usize) -> RUsage {
+    RUsage {
+        ru_utime: TimeVal {
+            sec: utime / CLK_TCK,
+            usec: (utime % CLK_TCK) * (1_000_000 / CLK_TCK),
+        },
+        ru_stime: TimeVal {
+            sec: stime / CLK_TCK,
+            usec: (stime % CLK_TCK) * (1_000_000 / CLK_TCK),
+        },
+        ..RUsage::default()
+    }
+}
+
+pub fn sys_getrusage(who: isize, usage: *mut RUsage) -> SysResult<usize> {
+    const RUSAGE_SELF: isize = 0;
+    const RUSAGE_CHILDREN: isize = -1;
+
+    let task = current_task().expect("[kernel] current task is None.");
+    let rusage = match who {
+        RUSAGE_SELF => {
+            let ticks = task.elapsed_ticks();
+            rusage_from_ticks(ticks, ticks)
+        }
+        RUSAGE_CHILDREN => {
+            let (utime, stime) = task.child_ticks();
+            rusage_from_ticks(utime, stime)
+        }
+        _ => return Err(Errno::EINVAL),
+    };
+    copy_to_user(usage, &rusage as *const RUsage, 1)?;
+    Ok(0)
 }
 
 /// 系统调用 sys_exit_group
@@ -159,6 +231,49 @@ pub fn sys_sched_getaffinity(pid: usize, cpusetsize: usize, mask: *mut u8) -> Sy
     Ok(cpusetsize)
 }
 
+fn check_cap_header(header: CapUserHeader) -> SysResult<CapUserHeader> {
+    const LINUX_CAPABILITY_VERSION_1: u32 = 0x1998_0330;
+    const LINUX_CAPABILITY_VERSION_2: u32 = 0x2007_1026;
+    const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
+
+    match header.version {
+        LINUX_CAPABILITY_VERSION_1 | LINUX_CAPABILITY_VERSION_2 | LINUX_CAPABILITY_VERSION_3 => {}
+        _ => return Err(Errno::EINVAL),
+    }
+
+    let task = current_task().expect("[kernel] current task is None.");
+    if header.pid < 0 {
+        return Err(Errno::EINVAL);
+    }
+    if header.pid != 0 && header.pid as usize != task.tid() && header.pid as usize != task.tgid() {
+        return Err(Errno::ESRCH);
+    }
+
+    Ok(header)
+}
+
+pub fn sys_capget(hdrp: *mut CapUserHeader, datap: *mut CapUserData) -> SysResult<usize> {
+    let mut header = CapUserHeader::default();
+    copy_from_user(&mut header as *mut CapUserHeader, hdrp, 1)?;
+    let _ = check_cap_header(header)?;
+
+    if !datap.is_null() {
+        let data = [CapUserData::default(); 2];
+        copy_to_user(datap, data.as_ptr(), data.len())?;
+    }
+    Ok(0)
+}
+
+pub fn sys_capset(hdrp: *const CapUserHeader, datap: *const CapUserData) -> SysResult<usize> {
+    let mut header = CapUserHeader::default();
+    copy_from_user(&mut header as *mut CapUserHeader, hdrp, 1)?;
+    let _ = check_cap_header(header)?;
+
+    let mut data = [CapUserData::default(); 2];
+    copy_from_user(data.as_mut_ptr(), datap, data.len())?;
+    Ok(0)
+}
+
 pub fn sys_gettid() -> SysResult<usize> {
     Ok(current_task()
         .expect("[kernel] current task is None.")
@@ -167,20 +282,86 @@ pub fn sys_gettid() -> SysResult<usize> {
 
 /// 系统调用 sys-setpgid
 ///
-/// 当前内核尚未建模 session/controlling terminal，只维护进程组号本身。
-/// 这足以覆盖 libc/LTP harness 常见的 setpgid(0, 0) 初始化路径。
+/// 当前内核尚未建模 controlling terminal，但维护 sid/pgid 的基本关系。
 ///
-/// TODO[ABI-COMPAT]: 补齐跨 session、已 exec 子进程、非子进程等 EPERM/EACCES 规则。
+/// TODO[ABI-COMPAT]: 补齐 job-control 相关的 tty 前后台进程组规则。
 pub fn sys_setpgid(pid: usize, pgid: usize) -> SysResult<usize> {
-    let current = current_task().expect("[kernel] current task is None.");
+    let current_thread = current_task().expect("[kernel] current task is None.");
+    let current = process_leader(&current_thread);
+    if (pgid as isize) < 0 {
+        return Err(Errno::EINVAL);
+    }
+    if (pid as isize) < 0 {
+        return Err(Errno::ESRCH);
+    }
+
     let target = if pid == 0 {
-        current
+        current.clone()
     } else {
-        TASK_MANAGER.get(pid).ok_or(Errno::ESRCH)?
+        process_leader(&TASK_MANAGER.get(pid).ok_or(Errno::ESRCH)?)
     };
+    if !target.is_process_leader() {
+        return Err(Errno::ESRCH);
+    }
+
+    let target_is_current = target.tgid() == current.tgid();
+    if !target_is_current {
+        let is_child = current.op_children_mut(|children| children.contains_key(&target.tgid()));
+        if !is_child {
+            return Err(Errno::ESRCH);
+        }
+        if target.did_exec() {
+            return Err(Errno::EACCES);
+        }
+    }
+    if target.sid() != current.sid() {
+        return Err(Errno::EPERM);
+    }
+    if target.sid() == target.tgid() {
+        return Err(Errno::EPERM);
+    }
+
     let new_pgid = if pgid == 0 { target.tgid() } else { pgid };
-    target.set_pgid(new_pgid);
+    if new_pgid != target.tgid() {
+        let mut group_exists_in_session = false;
+        TASK_MANAGER.for_each(|task| {
+            if task.is_process_leader() && task.sid() == current.sid() && task.pgid() == new_pgid {
+                group_exists_in_session = true;
+            }
+        });
+        if !group_exists_in_session {
+            return Err(Errno::EPERM);
+        }
+    }
+
+    set_process_pgid(&target, new_pgid);
     Ok(0)
+}
+
+pub fn sys_getpgid(pid: usize) -> SysResult<usize> {
+    let current_thread = current_task().expect("[kernel] current task is None.");
+    let target = if pid == 0 {
+        process_leader(&current_thread)
+    } else {
+        process_leader(&TASK_MANAGER.get(pid).ok_or(Errno::ESRCH)?)
+    };
+    Ok(target.pgid())
+}
+
+/// 系统调用 sys-setsid
+///
+/// 当前内核还没有完整建模 session/controlling terminal；这里保留 Linux 的关键可见语义：
+/// 进程组 leader 不能 setsid，成功后调用者成为新的进程组 leader，并返回新 session id。
+pub fn sys_setsid() -> SysResult<usize> {
+    let current_thread = current_task().expect("[kernel] current task is None.");
+    let current = process_leader(&current_thread);
+    let pid = current.tgid();
+    if current.pgid() == pid {
+        return Err(Errno::EPERM);
+    }
+    set_process_sid(&current, pid);
+    set_process_pgid(&current, pid);
+    Ok(pid)
 }
 
 pub fn sys_prlimit64(
@@ -190,6 +371,7 @@ pub fn sys_prlimit64(
     old_limit: *mut RLimit,
 ) -> SysResult<usize> {
     const RLIMIT_NOFILE: usize = 7;
+    const RLIMIT_FSIZE: usize = 1;
     const RLIMIT_STACK: usize = 3;
     const RLIM_INFINITY: usize = usize::MAX;
 
@@ -201,6 +383,10 @@ pub fn sys_prlimit64(
     let old = match resource {
         RLIMIT_NOFILE => {
             let (cur, max) = task.nofile_limit();
+            RLimit { cur, max }
+        }
+        RLIMIT_FSIZE => {
+            let (cur, max) = task.fsize_limit();
             RLimit { cur, max }
         }
         RLIMIT_STACK => RLimit {
@@ -216,8 +402,10 @@ pub fn sys_prlimit64(
     if !new_limit.is_null() {
         let mut limit = RLimit { cur: 0, max: 0 };
         copy_from_user(&mut limit as *mut RLimit, new_limit, 1)?;
-        if resource == RLIMIT_NOFILE {
-            task.set_nofile_limit(limit.cur, limit.max)?;
+        match resource {
+            RLIMIT_NOFILE => task.set_nofile_limit(limit.cur, limit.max)?,
+            RLIMIT_FSIZE => task.set_fsize_limit(limit.cur, limit.max)?,
+            _ => {}
         }
     }
 
@@ -280,6 +468,10 @@ pub fn sys_clone(
     }
 
     let current_task = current_task().expect("[kernel] current task is None.");
+    if flags.contains(CloneFlags::CLONE_NEWUTS) && current_task.euid() != 0 {
+        return Err(Errno::EPERM);
+    }
+
     let share_vm = flags.share_user_vm();
     // 此处发生任务复制
     let new_task = current_task.clone_(flags);
@@ -379,31 +571,7 @@ pub fn sys_execve(path: *const u8, args: *const usize, envp: *const usize) -> Sy
     }
 
     if let Ok(file) = path_open(AT_FDCWD, &path, 0, 0) {
-        // info!("[kernel] execute file in fs");
-        let exe_path = file.path().global_abs_path();
-        let all_data = file.read_all()?;
-
-        if !is_elf(all_data.as_slice()) {
-            if let Some((shell_path, shell_args)) =
-                shebang_args(exe_path.as_str(), all_data.as_slice(), args_vec.as_slice())
-            {
-                let shell_file = path_open(AT_FDCWD, shell_path.as_str(), 0, 0)?;
-                let shell_exe_path = shell_file.path().global_abs_path();
-                let shell_data = shell_file.read_all()?;
-                task.execve(
-                    shell_exe_path,
-                    shell_data.as_slice(),
-                    shell_args,
-                    envs_vec,
-                    true,
-                )?;
-                return Ok(0);
-            }
-            return Err(Errno::ENOEXEC);
-        }
-
-        task.execve(exe_path, all_data.as_slice(), args_vec, envs_vec, true)?;
-        Ok(0)
+        exec_fs_file(task, file, args_vec, envs_vec)
     } else if !path.starts_with("/") {
         // 从内核中加载的应用程序
         if let Some(data) = get_app_data_by_name(path.as_str()) {
@@ -419,6 +587,84 @@ pub fn sys_execve(path: *const u8, args: *const usize, envp: *const usize) -> Sy
     }
 }
 
+fn exec_fs_file(
+    task: Arc<crate::task::TaskControlBlock>,
+    file: Arc<File>,
+    args_vec: Vec<String>,
+    envs_vec: Vec<String>,
+) -> SysResult<usize> {
+    let exe_path = file.path().global_abs_path();
+    let all_data = file.read_all()?;
+
+    if !is_elf(all_data.as_slice()) {
+        if let Some((shell_path, shell_args)) =
+            shebang_args(exe_path.as_str(), all_data.as_slice(), args_vec.as_slice())
+        {
+            let shell_file = path_open(AT_FDCWD, shell_path.as_str(), 0, 0)?;
+            let shell_exe_path = shell_file.path().global_abs_path();
+            let shell_data = shell_file.read_all()?;
+            task.execve(
+                shell_exe_path,
+                shell_data.as_slice(),
+                shell_args,
+                envs_vec,
+                true,
+            )?;
+            return Ok(0);
+        }
+        return Err(Errno::ENOEXEC);
+    }
+
+    task.execve(exe_path, all_data.as_slice(), args_vec, envs_vec, true)?;
+    Ok(0)
+}
+
+pub fn sys_execveat(
+    dirfd: isize,
+    path: *const u8,
+    args: *const usize,
+    envp: *const usize,
+    flags: usize,
+) -> SysResult<usize> {
+    const EXECVEAT_ALLOWED_FLAGS: usize = AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW;
+    if flags & !EXECVEAT_ALLOWED_FLAGS != 0 {
+        return Err(Errno::EINVAL);
+    }
+
+    let path = copy_cstr_from_user(path)?;
+    let open_flags = if flags & AT_SYMLINK_NOFOLLOW != 0 {
+        usize::from(OpenFlags::O_NOFOLLOW)
+    } else {
+        0
+    };
+    let file = if path.is_empty() {
+        if flags & AT_EMPTY_PATH == 0 {
+            return Err(Errno::ENOENT);
+        }
+        let fd_entry = current_task()
+            .expect("[kernel] current task is None.")
+            .get_fd_entry(dirfd as usize)?;
+        let file = fd_entry.get_file();
+        let file = file.as_any().downcast_ref::<File>().ok_or(Errno::EACCES)?;
+        Arc::new(File::new(file.path(), file.inode(), file.get_flags()))
+    } else {
+        path_open(dirfd, &path, open_flags, 0)?
+    };
+
+    let args_vec = if args.is_null() {
+        Vec::new()
+    } else {
+        extract_cstrings_from_user(args)?
+    };
+    let envs_vec = if envp.is_null() {
+        Vec::new()
+    } else {
+        extract_cstrings_from_user(envp)?
+    };
+    let task = current_task().expect("[kernel] current task is None.");
+    exec_fs_file(task, file, args_vec, envs_vec)
+}
+
 /// 等待子任务结束
 ///
 /// - 参数：
@@ -431,27 +677,38 @@ pub fn sys_wait4(
     rusage: *mut RUsage,
 ) -> SysResult<usize> {
     let options = WaitOption::from_bits(options as i32).ok_or(Errno::EINVAL)?;
-
-    // pid == 0 和 pid < -1 需要按进程组等待；当前任务结构尚未维护 pgid，
-    // 先显式拒绝，避免把进程组语义错误地退化成等待任意子任务。
-    if pid == 0 || pid < -1 {
-        return Err(Errno::EINVAL);
+    if pid == i32::MIN as isize {
+        return Err(Errno::ESRCH);
     }
 
     let nohang = options.contains(WaitOption::WNOHANG);
 
     loop {
         let task = current_task().expect("[kernel] current task is None.");
+        let current_pgid = task.pgid();
+        let target_pid = (pid > 0).then_some(pid as usize);
+        let target_pgid = if pid == 0 {
+            Some(current_pgid)
+        } else if pid < -1 {
+            Some((-pid) as usize)
+        } else {
+            None
+        };
         let wait_result = task.op_children_mut(|children| {
-            let matches_pid = |child_tid: usize| pid == -1 || pid as usize == child_tid;
-
-            if !children.keys().any(|child_tid| matches_pid(*child_tid)) {
+            if !children.iter().any(|(child_tid, child)| {
+                pid == -1 || target_pid == Some(*child_tid) || target_pgid == Some(child.pgid())
+            }) {
                 return Err(Errno::ECHILD);
             }
 
             Ok(children
                 .iter()
-                .find(|(child_tid, child)| matches_pid(**child_tid) && child.is_exited())
+                .find(|(child_tid, child)| {
+                    (pid == -1
+                        || target_pid == Some(**child_tid)
+                        || target_pgid == Some(child.pgid()))
+                        && child.is_exited()
+                })
                 .map(|(child_tid, child)| (*child_tid, child.wait_status())))
         })?;
 
@@ -486,8 +743,6 @@ pub fn sys_wait4(
                 children.remove(&child_tid).unwrap();
             });
 
-            warn! {"[kernel] (wait4) parent:{}, child:{}.", task.tid(), child_tid};
-
             return Ok(child_tid);
         }
 
@@ -495,7 +750,131 @@ pub fn sys_wait4(
             return Ok(0);
         }
 
-        yield_current_task();
+        blocking_and_run_next();
+    }
+}
+
+const WAITID_P_ALL: usize = 0;
+const WAITID_P_PID: usize = 1;
+const WAITID_P_PGID: usize = 2;
+const WAITID_WNOHANG: usize = 1;
+const WAITID_WSTOPPED: usize = 2;
+const WAITID_WEXITED: usize = 4;
+const WAITID_WCONTINUED: usize = 8;
+const WAITID_WNOWAIT: usize = 0x01000000;
+const WAITID_ALLOWED_OPTIONS: usize =
+    WAITID_WNOHANG | WAITID_WSTOPPED | WAITID_WEXITED | WAITID_WCONTINUED | WAITID_WNOWAIT;
+
+fn waitid_child_info(pid: usize, status: i32) -> LinuxSigInfo {
+    if status & 0x7f == 0 {
+        LinuxSigInfo::new_child(pid, (status >> 8) & 0xff, SigInfo::CLD_EXITED)
+    } else {
+        let code = if status & 0x80 != 0 {
+            SigInfo::CLD_DUMPED
+        } else {
+            SigInfo::CLD_KILLED
+        };
+        LinuxSigInfo::new_child(pid, status & 0x7f, code)
+    }
+}
+
+pub fn sys_waitid(
+    idtype: usize,
+    id: usize,
+    infop: *mut LinuxSigInfo,
+    options: usize,
+    _rusage: usize,
+) -> SysResult<usize> {
+    if options & !WAITID_ALLOWED_OPTIONS != 0
+        || options & (WAITID_WEXITED | WAITID_WSTOPPED | WAITID_WCONTINUED) == 0
+    {
+        return Err(Errno::EINVAL);
+    }
+    if idtype > WAITID_P_PGID {
+        return Err(Errno::EINVAL);
+    }
+
+    let nohang = options & WAITID_WNOHANG != 0;
+    let nowait = options & WAITID_WNOWAIT != 0;
+
+    loop {
+        let task = current_task().expect("[kernel] current task is None.");
+        let current_pgid = task.pgid();
+        let target_pgid = if idtype == WAITID_P_PGID && id == 0 {
+            current_pgid
+        } else {
+            id
+        };
+
+        let wait_result = task.op_children_mut(|children| {
+            if !children.iter().any(|(child_tid, child)| match idtype {
+                WAITID_P_ALL => true,
+                WAITID_P_PID => *child_tid == id,
+                WAITID_P_PGID => child.pgid() == target_pgid,
+                _ => false,
+            }) {
+                return Err(Errno::ECHILD);
+            }
+
+            Ok(children.iter().find_map(|(child_tid, child)| {
+                let matches_id = match idtype {
+                    WAITID_P_ALL => true,
+                    WAITID_P_PID => *child_tid == id,
+                    WAITID_P_PGID => child.pgid() == target_pgid,
+                    _ => false,
+                };
+                if !matches_id {
+                    return None;
+                }
+                if options & (WAITID_WSTOPPED | WAITID_WCONTINUED) != 0 {
+                    if let Some((code, status)) = child.peek_wait_event() {
+                        if (code == SigInfo::CLD_STOPPED && options & WAITID_WSTOPPED != 0)
+                            || (code == SigInfo::CLD_CONTINUED && options & WAITID_WCONTINUED != 0)
+                        {
+                            return Some((
+                                *child_tid,
+                                LinuxSigInfo::new_child(*child_tid, status, code),
+                                false,
+                            ));
+                        }
+                    }
+                }
+                if options & WAITID_WEXITED != 0 && child.is_exited() {
+                    return Some((
+                        *child_tid,
+                        waitid_child_info(*child_tid, child.wait_status()),
+                        true,
+                    ));
+                }
+                None
+            }))
+        })?;
+
+        if let Some((child_tid, info, exited)) = wait_result {
+            if !infop.is_null() {
+                copy_to_user(infop, &info as *const LinuxSigInfo, 1)?;
+            }
+            if !nowait {
+                if exited {
+                    task.op_children_mut(|children| {
+                        children.remove(&child_tid).unwrap();
+                    });
+                } else {
+                    task.op_children_mut(|children| {
+                        if let Some(child) = children.get(&child_tid) {
+                            child.take_wait_event();
+                        }
+                    });
+                }
+            }
+            return Ok(0);
+        }
+
+        if nohang {
+            return Ok(0);
+        }
+
+        blocking_and_run_next();
     }
 }
 

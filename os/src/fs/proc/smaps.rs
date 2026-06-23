@@ -78,7 +78,7 @@ fn generate_smaps() -> String {
 
     let mut result = String::new();
     task.op_memory_set_read(|mm| {
-        mm.each_area(|start, end, perm| {
+        mm.each_area(|start, end, perm, _shared, _locked| {
             let p = perm_to_smaps_str(perm);
             let _ = writeln!(result, "{:016x}-{:016x} {} 00000000 00:00 0", start, end, p);
             let _ = writeln!(result);

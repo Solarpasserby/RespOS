@@ -11,11 +11,11 @@ use crate::fs::mount::init_root_fs;
 use crate::fs::{FdEntry, FdTable, Path};
 use crate::mm::{MemorySet, copy_from_user, copy_to_user};
 use crate::mutex::SpinLock;
-use crate::signal::sig_handler::SigHandler;
+use crate::signal::sig_handler::{ActionType, SigHandler};
 use crate::signal::sig_info::SigInfo;
 use crate::signal::sig_stack::{SS_DISABLE, SignalStack};
 use crate::signal::sig_struct::SigPending;
-use crate::signal::{SiField, Sig};
+use crate::signal::{SiField, Sig, SigSet};
 use crate::syscall::{Errno, SysResult};
 use crate::timer::{get_accounting_ms, get_timeout_ms};
 use crate::trap::TrapContext;
@@ -50,6 +50,111 @@ impl TidAddress {
     }
 }
 
+struct ResourceLimits {
+    fsize_cur: AtomicUsize,
+    fsize_max: AtomicUsize,
+}
+
+impl ResourceLimits {
+    fn new() -> Self {
+        Self {
+            fsize_cur: AtomicUsize::new(usize::MAX),
+            fsize_max: AtomicUsize::new(usize::MAX),
+        }
+    }
+
+    fn from_parent(parent: &Self) -> Self {
+        let (cur, max) = parent.fsize_limit();
+        Self {
+            fsize_cur: AtomicUsize::new(cur),
+            fsize_max: AtomicUsize::new(max),
+        }
+    }
+
+    fn fsize_limit(&self) -> (usize, usize) {
+        (
+            self.fsize_cur.load(Ordering::Relaxed),
+            self.fsize_max.load(Ordering::Relaxed),
+        )
+    }
+
+    fn set_fsize_limit(&self, cur: usize, max: usize) -> SysResult {
+        if cur > max {
+            return Err(Errno::EINVAL);
+        }
+        self.fsize_cur.store(cur, Ordering::Relaxed);
+        self.fsize_max.store(max, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+struct IntervalTimer {
+    deadline_ms: AtomicUsize,
+    interval_ms: AtomicUsize,
+}
+
+impl IntervalTimer {
+    fn new() -> Self {
+        Self {
+            deadline_ms: AtomicUsize::new(0),
+            interval_ms: AtomicUsize::new(0),
+        }
+    }
+}
+
+struct TaskTimers {
+    timers: [IntervalTimer; 3],
+}
+
+impl TaskTimers {
+    fn new() -> Self {
+        Self {
+            timers: [
+                IntervalTimer::new(),
+                IntervalTimer::new(),
+                IntervalTimer::new(),
+            ],
+        }
+    }
+
+    fn fields(&self, which: usize) -> Option<(&AtomicUsize, &AtomicUsize, Sig)> {
+        match which {
+            0 => Some((
+                &self.timers[0].deadline_ms,
+                &self.timers[0].interval_ms,
+                Sig::SIGALRM,
+            )),
+            1 => Some((
+                &self.timers[1].deadline_ms,
+                &self.timers[1].interval_ms,
+                Sig::SIGVTALRM,
+            )),
+            2 => Some((
+                &self.timers[2].deadline_ms,
+                &self.timers[2].interval_ms,
+                Sig::SIGPROF,
+            )),
+            _ => None,
+        }
+    }
+}
+
+struct TaskInner {
+    tid_address: TidAddress,
+    sig_context_addr: usize,
+    sigsuspend_saved_mask: Option<SigSet>,
+}
+
+impl TaskInner {
+    fn new() -> Self {
+        Self {
+            tid_address: TidAddress::new(),
+            sig_context_addr: 0,
+            sigsuspend_saved_mask: None,
+        }
+    }
+}
+
 /// 任务控制块——此处的任务是对一定资源和某个程序的抽象表述
 #[repr(C)]
 pub struct TaskControlBlock {
@@ -60,6 +165,7 @@ pub struct TaskControlBlock {
     tid: RwLock<TidHandle>,
     tgid: AtomicUsize,
     pgid: AtomicUsize,
+    sid: AtomicUsize,
     uid: AtomicUsize,
     euid: AtomicUsize,
     suid: AtomicUsize,
@@ -75,6 +181,8 @@ pub struct TaskControlBlock {
     children: Arc<SpinLock<BTreeMap<usize, Arc<TaskControlBlock>>>>,
     exit_code: AtomicI32,
     exit_signal: AtomicI32,
+    wait_event_code: AtomicI32,
+    wait_event_status: AtomicI32,
     // task_context: TaskContext, // 注意任务上下文的处理
 
     // 内存管理
@@ -83,24 +191,25 @@ pub struct TaskControlBlock {
     // 文件系统
     fd_table: SpinLock<Arc<FdTable>>,
     cwd: Arc<SpinLock<Arc<Path>>>,
+    root: Arc<SpinLock<Arc<Path>>>,
     exe_path: Arc<SpinLock<String>>,
+    limits: Arc<ResourceLimits>,
 
     //信号
     sig_pending: SpinLock<SigPending>, // 本线程的信号队列 + 掩码（独享）
     sig_stack: SpinLock<SignalStack>,  // 本线程的备用信号栈（独享）
     sig_handler: Arc<SpinLock<SigHandler>>, // 线程组共享的 handler 注册表（共享）
-    sig_context_addr: AtomicUsize,     // 用户栈上 SigContext 的地址
 
     // 线程同步
-    tid_address: SpinLock<TidAddress>,
+    inner: SpinLock<TaskInner>,
     // ===== 新增：可中断状态标记 =====
     // 标记当前线程是否处于"可被信号中断"的阻塞中（futex_wait / sigtimedwait / wait4）
     interruptible: AtomicBool,
     // 信号中断标记：当线程在 interruptible 状态下被信号唤醒时置为 true
     interrupted: AtomicBool,
-    alarm_deadline_ms: AtomicUsize,
-    alarm_interval_ms: AtomicUsize,
+    itimers: Arc<TaskTimers>,
     personality: AtomicUsize,
+    did_exec: AtomicBool,
     start_time_ms: AtomicUsize,
     child_utime_ticks: AtomicUsize,
     child_stime_ticks: AtomicUsize,
@@ -126,6 +235,7 @@ impl TaskControlBlock {
             tid: RwLock::new(TidHandle(0)),
             tgid: AtomicUsize::new(0),
             pgid: AtomicUsize::new(0),
+            sid: AtomicUsize::new(0),
             uid: AtomicUsize::new(0),
             euid: AtomicUsize::new(0),
             suid: AtomicUsize::new(0),
@@ -141,6 +251,8 @@ impl TaskControlBlock {
             children: Arc::new(SpinLock::new(BTreeMap::new())),
             exit_code: AtomicI32::new(0),
             exit_signal: AtomicI32::new(0),
+            wait_event_code: AtomicI32::new(0),
+            wait_event_status: AtomicI32::new(0),
             // task_context: TaskContext, // 注意任务上下文的处理
 
             // 内存管理
@@ -149,23 +261,24 @@ impl TaskControlBlock {
             // 文件系统
             fd_table: SpinLock::new(FdTable::new()),
             cwd: Arc::new(SpinLock::new(Path::zero_init())),
+            root: Arc::new(SpinLock::new(Path::zero_init())),
             exe_path: Arc::new(SpinLock::new(String::new())),
+            limits: Arc::new(ResourceLimits::new()),
 
             //信号
             sig_pending: SpinLock::new(SigPending::new()),
             sig_stack: SpinLock::new(SignalStack::default()),
             sig_handler: Arc::new(SpinLock::new(SigHandler::new())),
-            sig_context_addr: AtomicUsize::new(0),
 
             // 线程同步
-            tid_address: SpinLock::new(TidAddress::new()),
+            inner: SpinLock::new(TaskInner::new()),
 
             // 可中断状态
             interruptible: AtomicBool::new(false),
             interrupted: AtomicBool::new(false),
-            alarm_deadline_ms: AtomicUsize::new(0),
-            alarm_interval_ms: AtomicUsize::new(0),
+            itimers: Arc::new(TaskTimers::new()),
             personality: AtomicUsize::new(0),
+            did_exec: AtomicBool::new(false),
             start_time_ms: AtomicUsize::new(get_accounting_ms()),
             child_utime_ticks: AtomicUsize::new(0),
             child_stime_ticks: AtomicUsize::new(0),
@@ -195,6 +308,7 @@ impl TaskControlBlock {
         kernel_stack.set_top(kernel_stack_top);
 
         // 创建进程控制块
+        let root = init_root_fs();
         let task_ctrl_block = Arc::new(Self {
             // 固定数据
             kernel_stack,
@@ -203,6 +317,7 @@ impl TaskControlBlock {
             tid: RwLock::new(tid),
             tgid: AtomicUsize::new(tgid),
             pgid: AtomicUsize::new(tgid),
+            sid: AtomicUsize::new(tgid),
             uid: AtomicUsize::new(0),
             euid: AtomicUsize::new(0),
             suid: AtomicUsize::new(0),
@@ -218,30 +333,33 @@ impl TaskControlBlock {
             children: Arc::new(SpinLock::new(BTreeMap::new())),
             exit_code: AtomicI32::new(0),
             exit_signal: AtomicI32::new(0),
+            wait_event_code: AtomicI32::new(0),
+            wait_event_status: AtomicI32::new(0),
 
             // 内存管理
             memory_set: Arc::new(RwLock::new(memory_set)),
 
             // 文件系统
             fd_table: SpinLock::new(FdTable::new()),
-            cwd: Arc::new(SpinLock::new(init_root_fs())),
+            cwd: Arc::new(SpinLock::new(root.clone())),
+            root: Arc::new(SpinLock::new(root)),
             exe_path: Arc::new(SpinLock::new(String::new())),
+            limits: Arc::new(ResourceLimits::new()),
 
             //信号
             sig_pending: SpinLock::new(SigPending::new()),
             sig_stack: SpinLock::new(SignalStack::default()),
             sig_handler: Arc::new(SpinLock::new(SigHandler::new())),
-            sig_context_addr: AtomicUsize::new(0),
 
             // 线程同步
-            tid_address: SpinLock::new(TidAddress::new()),
+            inner: SpinLock::new(TaskInner::new()),
 
             // 可中断状态
             interruptible: AtomicBool::new(false),
             interrupted: AtomicBool::new(false),
-            alarm_deadline_ms: AtomicUsize::new(0),
-            alarm_interval_ms: AtomicUsize::new(0),
+            itimers: Arc::new(TaskTimers::new()),
             personality: AtomicUsize::new(0),
+            did_exec: AtomicBool::new(false),
             start_time_ms: AtomicUsize::new(get_accounting_ms()),
             child_utime_ticks: AtomicUsize::new(0),
             child_stime_ticks: AtomicUsize::new(0),
@@ -291,15 +409,17 @@ impl TaskControlBlock {
             .unwrap_or_else(|| self.clone());
 
         // 创建线程或是进程
-        let (tgid, pgid, thread_group, parent, children, cwd, exe_path) = if is_thread {
+        let (tgid, pgid, sid, thread_group, parent, children, cwd, root, exe_path) = if is_thread {
             // 创建线程，属于同一线程组
             (
                 self.tgid(),
                 self.pgid(),
+                self.sid(),
                 self.thread_group.clone(),
                 self.parent.clone(),
                 self.children.clone(),
                 self.cwd.clone(),
+                self.root.clone(),
                 self.exe_path.clone(),
             )
         } else {
@@ -307,10 +427,12 @@ impl TaskControlBlock {
             (
                 tid.0,
                 self.pgid(),
+                self.sid(),
                 Arc::new(SpinLock::new(ThreadGroup::new())),
                 Arc::new(SpinLock::new(Some(Arc::downgrade(&process_leader)))),
                 Arc::new(SpinLock::new(BTreeMap::new())),
                 Arc::new(SpinLock::new(Path::from_existed_user(&self.cwd()))),
+                Arc::new(SpinLock::new(Path::from_existed_user(&self.root()))),
                 Arc::new(SpinLock::new(self.exe_path())),
             )
         };
@@ -329,6 +451,16 @@ impl TaskControlBlock {
             self.fd_table.lock().clone()
         } else {
             FdTable::from_existed_user(&self.fd_table.lock())
+        };
+        let limits = if is_thread {
+            self.limits.clone()
+        } else {
+            Arc::new(ResourceLimits::from_parent(&self.limits))
+        };
+        let itimers = if is_thread {
+            self.itimers.clone()
+        } else {
+            Arc::new(TaskTimers::new())
         };
         let current_sig_mask = self.op_sig_pending(|pending| pending.mask);
         let (sig_handler, sig_pending, sig_stack) = if is_thread {
@@ -354,6 +486,7 @@ impl TaskControlBlock {
             tid: RwLock::new(tid),
             tgid: AtomicUsize::new(tgid),
             pgid: AtomicUsize::new(pgid),
+            sid: AtomicUsize::new(sid),
             uid: AtomicUsize::new(self.uid()),
             euid: AtomicUsize::new(self.euid()),
             suid: AtomicUsize::new(self.suid()),
@@ -369,6 +502,8 @@ impl TaskControlBlock {
             children,
             exit_code: AtomicI32::new(0),
             exit_signal: AtomicI32::new(0),
+            wait_event_code: AtomicI32::new(0),
+            wait_event_status: AtomicI32::new(0),
 
             // 内存管理
             memory_set,
@@ -376,23 +511,24 @@ impl TaskControlBlock {
             // 文件系统
             fd_table: SpinLock::new(fd_table),
             cwd,
+            root,
             exe_path,
+            limits,
 
             // 信号
             sig_pending,
             sig_stack,
             sig_handler,
-            sig_context_addr: AtomicUsize::new(0),
 
             // 线程同步
-            tid_address: SpinLock::new(TidAddress::new()),
+            inner: SpinLock::new(TaskInner::new()),
 
             // 可中断状态
             interruptible: AtomicBool::new(false),
             interrupted: AtomicBool::new(false),
-            alarm_deadline_ms: AtomicUsize::new(0),
-            alarm_interval_ms: AtomicUsize::new(0),
+            itimers,
             personality: AtomicUsize::new(self.personality()),
+            did_exec: AtomicBool::new(false),
             start_time_ms: AtomicUsize::new(get_accounting_ms()),
             child_utime_ticks: AtomicUsize::new(0),
             child_stime_ticks: AtomicUsize::new(0),
@@ -430,9 +566,6 @@ impl TaskControlBlock {
             return Err(Errno::EINVAL);
         }
 
-        // 记录可执行文件路径，供 /proc/self/exe 使用
-        self.set_exe_path(exe_path);
-
         let (memory_set, _token, mut user_sp, entry_point, aux_vec) =
             MemorySet::from_elf_data(elf_data);
 
@@ -466,6 +599,11 @@ impl TaskControlBlock {
             linux_abi,
         );
 
+        // 记录可执行文件路径，供 /proc/self/exe 使用。到这里 exec 已经完成了
+        // 新地址空间和用户栈的关键构造，父进程不应再能修改它的 pgid。
+        self.set_exe_path(exe_path);
+        self.did_exec.store(true, Ordering::Relaxed);
+
         /* ===== 修改线程组 ===== */
         self.close_other_threads_for_exec();
 
@@ -493,6 +631,9 @@ impl TaskControlBlock {
     }
     pub fn pgid(&self) -> usize {
         self.pgid.load(Ordering::Relaxed)
+    }
+    pub fn sid(&self) -> usize {
+        self.sid.load(Ordering::Relaxed)
     }
     pub fn uid(&self) -> usize {
         self.uid.load(Ordering::Relaxed)
@@ -527,6 +668,9 @@ impl TaskControlBlock {
     pub fn cwd(&self) -> Arc<Path> {
         self.cwd.lock().clone()
     }
+    pub fn root(&self) -> Arc<Path> {
+        self.root.lock().clone()
+    }
     pub fn exe_path(&self) -> String {
         self.exe_path.lock().clone()
     }
@@ -536,7 +680,7 @@ impl TaskControlBlock {
     pub fn wait_status(&self) -> i32 {
         let signal = self.exit_signal.load(Ordering::Relaxed);
         if signal != 0 {
-            signal & 0x7f
+            signal & 0xff
         } else {
             (self.exit_code() & 0xff) << 8
         }
@@ -551,6 +695,9 @@ impl TaskControlBlock {
     }
     pub fn is_blocked(&self) -> bool {
         self.status() == TaskStatus::Blocked
+    }
+    pub fn is_stopped(&self) -> bool {
+        self.status() == TaskStatus::Stopped
     }
     // ===== 可中断状态管理 =====
 
@@ -599,12 +746,18 @@ impl TaskControlBlock {
     pub fn is_process_leader(&self) -> bool {
         self.tid() == self.tgid()
     }
+    pub fn did_exec(&self) -> bool {
+        self.did_exec.load(Ordering::Relaxed)
+    }
     /* ======= 设置内部数据 ====== */
     pub fn set_tgid(&self, tgid: usize) {
         self.tgid.swap(tgid, Ordering::Relaxed);
     }
     pub fn set_pgid(&self, pgid: usize) {
         self.pgid.store(pgid, Ordering::Relaxed);
+    }
+    pub fn set_sid(&self, sid: usize) {
+        self.sid.store(sid, Ordering::Relaxed);
     }
     pub fn set_uid_triplet(&self, uid: usize, euid: usize, suid: usize) {
         self.uid.store(uid, Ordering::Relaxed);
@@ -630,6 +783,9 @@ impl TaskControlBlock {
     pub fn set_cwd(&self, path: Arc<Path>) {
         *self.cwd.lock() = path;
     }
+    pub fn set_root(&self, path: Arc<Path>) {
+        *self.root.lock() = path;
+    }
     pub fn set_exe_path(&self, path: String) {
         *self.exe_path.lock() = path;
     }
@@ -638,8 +794,35 @@ impl TaskControlBlock {
         self.exit_code.swap(exit_code, Ordering::Relaxed);
     }
     pub fn set_exit_signal(&self, signal: i32) {
+        let signal = signal & 0x7f;
+        let core_dumped = ActionType::default(Sig::from(signal)) == ActionType::Core;
         self.exit_code.store(0, Ordering::Relaxed);
-        self.exit_signal.store(signal & 0x7f, Ordering::Relaxed);
+        self.exit_signal.store(
+            signal | if core_dumped { 0x80 } else { 0 },
+            Ordering::Relaxed,
+        );
+    }
+    pub fn set_wait_event(&self, code: i32, status: i32) {
+        self.wait_event_status.store(status, Ordering::Relaxed);
+        self.wait_event_code.store(code, Ordering::Release);
+    }
+    pub fn take_wait_event(&self) -> Option<(i32, i32)> {
+        let code = self.wait_event_code.swap(0, Ordering::AcqRel);
+        (code != 0).then(|| (code, self.wait_event_status.load(Ordering::Acquire)))
+    }
+    pub fn peek_wait_event(&self) -> Option<(i32, i32)> {
+        let code = self.wait_event_code.load(Ordering::Acquire);
+        (code != 0).then(|| (code, self.wait_event_status.load(Ordering::Acquire)))
+    }
+    pub fn notify_parent_sigchld(&self, code: i32) {
+        self.op_parent(|parent| {
+            if let Some(parent) = parent.as_ref().and_then(|parent| parent.upgrade()) {
+                let siginfo =
+                    SigInfo::new(Sig::SIGCHLD.raw(), code, SiField::Kill { tid: self.tid() });
+                parent.receive_siginfo(siginfo, false);
+                crate::task::scheduler::wakeup_task(parent.tid());
+            }
+        });
     }
     pub fn set_parent(&self, parent: &Arc<TaskControlBlock>) {
         *self.parent.lock() = Some(Arc::downgrade(parent));
@@ -660,32 +843,36 @@ impl TaskControlBlock {
     pub fn set_blocked(&self) {
         *self.task_status.lock() = TaskStatus::Blocked;
     }
+    pub fn set_stopped(&self) {
+        *self.task_status.lock() = TaskStatus::Stopped;
+    }
     pub fn set_exited(&self) {
         *self.task_status.lock() = TaskStatus::Exited;
     }
 
     // tid_address 设置
     pub fn set_clear_child_tid(&self, addr: usize) {
-        self.tid_address.lock().clear_child_tid = (addr != 0).then_some(addr);
+        self.inner.lock().tid_address.clear_child_tid = (addr != 0).then_some(addr);
     }
 
     pub fn set_set_child_tid(&self, addr: usize) {
-        self.tid_address.lock().set_child_tid = Some(addr);
+        self.inner.lock().tid_address.set_child_tid = Some(addr);
     }
 
     pub fn clear_child_tid_addr(&self) -> Option<usize> {
-        self.tid_address.lock().clear_child_tid
+        self.inner.lock().tid_address.clear_child_tid
     }
     pub fn set_robust_list(&self, head: usize, len: usize) {
-        let mut tid_address = self.tid_address.lock();
-        tid_address.robust_list_head = (head != 0).then_some(head);
-        tid_address.robust_list_len = len;
+        let mut inner = self.inner.lock();
+        inner.tid_address.robust_list_head = (head != 0).then_some(head);
+        inner.tid_address.robust_list_len = len;
     }
     pub fn robust_list(&self) -> Option<(usize, usize)> {
-        let tid_address = self.tid_address.lock();
-        tid_address
+        let inner = self.inner.lock();
+        inner
+            .tid_address
             .robust_list_head
-            .map(|head| (head, tid_address.robust_list_len))
+            .map(|head| (head, inner.tid_address.robust_list_len))
     }
 
     // exec 时关闭线程组中除自身外的其它线程，只清理线程私有状态。
@@ -748,6 +935,22 @@ impl TaskControlBlock {
         } else {
             Some(stack)
         }
+    }
+
+    pub fn raw_sigstack(&self) -> SignalStack {
+        *self.sig_stack.lock()
+    }
+
+    pub fn set_sigstack(&self, stack: SignalStack) {
+        *self.sig_stack.lock() = stack;
+    }
+
+    pub fn set_sigsuspend_saved_mask(&self, mask: Option<SigSet>) {
+        self.inner.lock().sigsuspend_saved_mask = mask;
+    }
+
+    pub fn take_sigsuspend_saved_mask(&self) -> Option<SigSet> {
+        self.inner.lock().sigsuspend_saved_mask.take()
     }
 
     // 信号入口：给线程发送信号
@@ -872,51 +1075,84 @@ impl TaskControlBlock {
         }
     }
     pub fn set_sig_context_addr(&self, addr: usize) {
-        self.sig_context_addr.store(addr, Ordering::Relaxed);
+        self.inner.lock().sig_context_addr = addr;
     }
 
     pub fn sig_context_addr(&self) -> usize {
-        self.sig_context_addr.load(Ordering::Relaxed)
+        self.inner.lock().sig_context_addr
     }
 
     pub fn real_timer_remaining_ms(&self) -> usize {
-        let deadline = self.alarm_deadline_ms.load(Ordering::Relaxed);
+        self.itimer_remaining_ms(0)
+    }
+
+    pub fn real_timer_interval_ms(&self) -> usize {
+        self.itimer_interval_ms(0)
+    }
+
+    fn itimer_fields(&self, which: usize) -> Option<(&AtomicUsize, &AtomicUsize, Sig)> {
+        self.itimers.fields(which)
+    }
+
+    pub fn itimer_remaining_ms(&self, which: usize) -> usize {
+        let Some((deadline, _, _)) = self.itimer_fields(which) else {
+            return 0;
+        };
+        let deadline = deadline.load(Ordering::Relaxed);
         if deadline == 0 {
             return 0;
         }
         deadline.saturating_sub(get_timeout_ms())
     }
 
-    pub fn real_timer_interval_ms(&self) -> usize {
-        self.alarm_interval_ms.load(Ordering::Relaxed)
+    pub fn itimer_interval_ms(&self, which: usize) -> usize {
+        let Some((_, interval, _)) = self.itimer_fields(which) else {
+            return 0;
+        };
+        interval.load(Ordering::Relaxed)
     }
 
     pub fn set_real_timer_ms(&self, value_ms: usize, interval_ms: usize) -> usize {
-        let old_remaining = self.real_timer_remaining_ms();
+        self.set_itimer_ms(0, value_ms, interval_ms)
+    }
+
+    pub fn set_itimer_ms(&self, which: usize, value_ms: usize, interval_ms: usize) -> usize {
+        let Some((deadline_ref, interval_ref, _)) = self.itimer_fields(which) else {
+            return 0;
+        };
+        let old_remaining = self.itimer_remaining_ms(which);
         let deadline = if value_ms == 0 {
             0
         } else {
             get_timeout_ms().saturating_add(value_ms)
         };
-        self.alarm_deadline_ms.store(deadline, Ordering::Relaxed);
-        self.alarm_interval_ms.store(interval_ms, Ordering::Relaxed);
+        deadline_ref.store(deadline, Ordering::Relaxed);
+        interval_ref.store(interval_ms, Ordering::Relaxed);
         old_remaining
     }
 
     pub fn check_real_timer(&self) {
-        let deadline = self.alarm_deadline_ms.load(Ordering::Relaxed);
+        self.check_itimer(0);
+        self.check_itimer(1);
+        self.check_itimer(2);
+    }
+
+    fn check_itimer(&self, which: usize) {
+        let Some((deadline_ref, interval_ref, sig)) = self.itimer_fields(which) else {
+            return;
+        };
+        let deadline = deadline_ref.load(Ordering::Relaxed);
         if deadline == 0 || get_timeout_ms() < deadline {
             return;
         }
 
-        let interval = self.alarm_interval_ms.load(Ordering::Relaxed);
+        let interval = interval_ref.load(Ordering::Relaxed);
         let next_deadline = if interval == 0 {
             0
         } else {
             get_timeout_ms().saturating_add(interval)
         };
-        if self
-            .alarm_deadline_ms
+        if deadline_ref
             .compare_exchange(
                 deadline,
                 next_deadline,
@@ -928,7 +1164,7 @@ impl TaskControlBlock {
             return;
         }
 
-        let siginfo = SigInfo::new(Sig::SIGALRM.raw(), SigInfo::KERNEL, SiField::None);
+        let siginfo = SigInfo::new(sig.raw(), SigInfo::KERNEL, SiField::None);
         self.receive_siginfo(siginfo, false);
     }
 
@@ -977,6 +1213,11 @@ impl TaskControlBlock {
     pub fn close(&self, fd: usize) -> SysResult {
         self.fd_table.lock().close(fd)
     }
+    pub fn unshare_fd_table(&self) {
+        let current = self.fd_table.lock().clone();
+        let new_table = FdTable::from_existed_user(&current);
+        *self.fd_table.lock() = new_table;
+    }
     pub fn get_fd_entry(&self, fd: usize) -> SysResult<FdEntry> {
         self.fd_table.lock().get_fd_entry(fd)
     }
@@ -988,6 +1229,12 @@ impl TaskControlBlock {
     }
     pub fn set_nofile_limit(&self, cur: usize, max: usize) -> SysResult {
         self.fd_table.lock().set_nofile_limit(cur, max)
+    }
+    pub fn fsize_limit(&self) -> (usize, usize) {
+        self.limits.fsize_limit()
+    }
+    pub fn set_fsize_limit(&self, cur: usize, max: usize) -> SysResult {
+        self.limits.set_fsize_limit(cur, max)
     }
 }
 
@@ -1227,6 +1474,7 @@ pub fn task_group_exit(task: Arc<TaskControlBlock>, exit_code: i32) {
                 SiField::Kill { tid: leader.tid() },
             );
             parent.receive_siginfo(siginfo, false);
+            crate::task::scheduler::wakeup_task(parent.tid());
         }
     });
 
@@ -1277,6 +1525,7 @@ pub fn task_group_exit_by_signal(task: Arc<TaskControlBlock>, signal: i32) {
                 SiField::Kill { tid: leader.tid() },
             );
             parent.receive_siginfo(siginfo, false);
+            crate::task::scheduler::wakeup_task(parent.tid());
         }
     });
 
@@ -1460,6 +1709,7 @@ pub enum TaskStatus {
     Ready,   // 已就绪
     Running, // 正在运行
     Blocked, // 阻塞
+    Stopped, // 已被停止信号暂停
     Exited,  // 已退出
 }
 

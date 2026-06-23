@@ -14,10 +14,6 @@ use core::arch::global_asm;
 
 pub use context::TrapContext;
 
-const PTHREAD_FAULT_TRACE: bool = false;
-const PTHREAD_TLS_FAULT_ERA: usize = 0x120004c50;
-const PTHREAD_NULL_TCB_FAULT_ERA: usize = 0x12001be94;
-
 /// 页错误原因
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageFaultCause {
@@ -51,29 +47,8 @@ fn is_page_fault(exception: estat::Exception) -> bool {
     )
 }
 
-fn handle_user_page_fault(cx: &TrapContext, exception: estat::Exception) {
+fn handle_user_page_fault(_cx: &TrapContext, exception: estat::Exception) {
     let badv = badv::read();
-    if PTHREAD_FAULT_TRACE
-        && (cx.era == PTHREAD_TLS_FAULT_ERA || cx.era == PTHREAD_NULL_TCB_FAULT_ERA)
-    {
-        let (tid, tgid) = current_task()
-            .map(|task| (task.tid(), task.tgid()))
-            .unwrap_or((usize::MAX, usize::MAX));
-        println!(
-            "[la-pthread-trace] fault tid={} tgid={} cause={:?} era={:#x} badv={:#x} tp={:#x} sp={:#x} a0={:#x} a1={:#x} a2={:#x} a3={:#x}",
-            tid,
-            tgid,
-            estat::Trap::Exception(exception),
-            cx.era,
-            badv,
-            cx.x[2],
-            cx.x[3],
-            cx.x[4],
-            cx.x[5],
-            cx.x[6],
-            cx.x[7]
-        );
-    }
     let result = current_task()
         .expect("[kernel] current task is None.")
         .op_memory_set_write(|memory_set| {
@@ -144,6 +119,7 @@ pub fn trap_handler(cx: &mut TrapContext) {
         estat::Trap::Interrupt(estat::Interrupt::Timer) => {
             clear_timer_interrupt();
             set_next_ti_trigger();
+            check_all_task_timers();
             yield_current_task();
         }
         estat::Trap::Exception(estat::Exception::Syscall) => {
@@ -182,9 +158,7 @@ pub fn trap_handler(cx: &mut TrapContext) {
             );
         }
     }
-    if let Some(task) = current_task() {
-        task.check_real_timer();
-    }
+    check_all_task_timers();
     handle_signals();
 }
 

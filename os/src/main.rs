@@ -25,6 +25,7 @@ pub mod fs;
 pub mod loader;
 pub mod mm;
 pub mod mutex;
+pub mod net;
 pub mod signal;
 pub mod syscall;
 pub mod task;
@@ -65,6 +66,7 @@ fn rust_main_high() -> ! {
 
     trap::init();
     mm::init();
+    net::init();
     task::add_initproc();
     trap::enable_timer_interrupt();
     timer::set_next_ti_trigger();

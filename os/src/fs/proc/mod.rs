@@ -11,6 +11,7 @@
 mod cpuinfo;
 mod dirs;
 mod exe;
+mod maps;
 mod meminfo;
 mod mounts;
 mod smaps;

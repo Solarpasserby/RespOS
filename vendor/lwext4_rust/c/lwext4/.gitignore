@@ -1,5 +1,6 @@
 build_*/
 ext_images/
+liblwext4-*.a
 
 .cproject
 .project

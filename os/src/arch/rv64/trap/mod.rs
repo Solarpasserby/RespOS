@@ -127,6 +127,7 @@ pub fn trap_handler(cx: &mut TrapContext) {
         }
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
             set_next_ti_trigger();
+            check_all_task_timers();
             yield_current_task();
         }
         _ => {
@@ -137,9 +138,7 @@ pub fn trap_handler(cx: &mut TrapContext) {
             );
         }
     };
-    if let Some(task) = current_task() {
-        task.check_real_timer();
-    }
+    check_all_task_timers();
     handle_signals();
     return;
 }

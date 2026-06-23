@@ -5,9 +5,12 @@
 //! 核心数据结构参照 Linux 的 `struct vfsmount` / `struct mount` / mount tree。
 
 use super::Path;
-use super::namei::{AT_FDCWD, filename_lookup, filename_lookup_no_follow_final_mount};
+use super::namei::{
+    AT_FDCWD, filename_lookup, filename_lookup_no_follow_final_mount,
+    filename_lookup_no_follow_final_symlink,
+};
 use super::vfs::Dentry;
-use super::vfs::{InodeType, SuperBlockOp};
+use super::vfs::{InodeOp, InodeType, SuperBlockOp};
 use crate::fs::dev::init_devfs;
 use crate::fs::proc::init_procfs;
 use crate::syscall::{Errno, SysResult};
@@ -24,6 +27,9 @@ lazy_static! {
 
 pub const MS_RDONLY: i32 = 1;
 const MS_REMOUNT: usize = 32;
+const MS_BIND: usize = 4096;
+const MS_MOVE: usize = 8192;
+const MS_PRIVATE: usize = 1 << 18;
 static MOUNT_BACKING_ID: AtomicUsize = AtomicUsize::new(0);
 
 /// 代表一个被挂载的文件系统实例（类比 Linux `struct vfsmount`）。
@@ -43,6 +49,14 @@ pub struct Mount {
     pub vfs_mount: Arc<VfsMount>,
     pub parent: Option<Weak<Mount>>,
     pub children: Mutex<Vec<Arc<Mount>>>,
+    expire_attempts: AtomicUsize,
+    backing_root: Option<MountBackingRoot>,
+}
+
+#[derive(Clone)]
+struct MountBackingRoot {
+    parent_inode: Arc<dyn InodeOp>,
+    root: Arc<Dentry>,
 }
 
 /// 全局挂载表（类比 Linux mount tree）。
@@ -105,6 +119,8 @@ impl Mount {
             vfs_mount,
             parent: None,
             children: Mutex::new(Vec::new()),
+            expire_attempts: AtomicUsize::new(0),
+            backing_root: None,
         })
     }
 
@@ -118,6 +134,24 @@ impl Mount {
             vfs_mount,
             parent: Some(Arc::downgrade(&parent)),
             children: Mutex::new(Vec::new()),
+            expire_attempts: AtomicUsize::new(0),
+            backing_root: None,
+        })
+    }
+
+    fn new_child_with_backing_root(
+        mountpoint: Arc<Dentry>,
+        vfs_mount: Arc<VfsMount>,
+        parent: Arc<Mount>,
+        backing_root: MountBackingRoot,
+    ) -> Arc<Self> {
+        Arc::new(Mount {
+            mountpoint,
+            vfs_mount,
+            parent: Some(Arc::downgrade(&parent)),
+            children: Mutex::new(Vec::new()),
+            expire_attempts: AtomicUsize::new(0),
+            backing_root: Some(backing_root),
         })
     }
 }
@@ -214,21 +248,61 @@ pub fn do_mount(_source: &str, target: &str, fstype: &str, flags: usize) -> SysR
         return Ok(0);
     }
 
+    if flags & MS_PRIVATE != 0 {
+        return Ok(0);
+    }
+
+    if flags & MS_MOVE != 0 {
+        let source_mount = lookup_mount_target(_source)?;
+        let parent_mount = get_mount_by_vfsmount(&target_path.mnt).ok_or(Errno::EINVAL)?;
+        if get_mount_by_dentry(&target_path.dentry).is_some() {
+            return Err(Errno::EBUSY);
+        }
+        let moved_mount = Arc::new(Mount {
+            mountpoint: target_path.dentry.clone(),
+            vfs_mount: source_mount.vfs_mount.clone(),
+            parent: Some(Arc::downgrade(&parent_mount)),
+            children: Mutex::new(Vec::new()),
+            expire_attempts: AtomicUsize::new(0),
+            backing_root: source_mount.backing_root.clone(),
+        });
+        remove_mount_tree_without_cleanup(&source_mount);
+        add_mount(moved_mount);
+        return Ok(0);
+    }
+
     if get_mount_by_dentry(&target_path.dentry).is_some() {
         return Err(Errno::EBUSY);
+    }
+
+    if flags & MS_BIND != 0 {
+        let source_path = filename_lookup(AT_FDCWD, _source, 0)?;
+        let vfs_mount = VfsMount::new(
+            source_path.dentry.clone(),
+            source_path.mnt.fs.clone(),
+            flags as i32,
+        );
+        let parent_mount = get_mount_by_vfsmount(&target_path.mnt).ok_or(Errno::EINVAL)?;
+        add_mount(Mount::new_child(
+            target_path.dentry.clone(),
+            vfs_mount,
+            parent_mount,
+        ));
+        return Ok(0);
     }
 
     match fstype {
         "ext2" | "ext3" | "ext4" | "vfat" => {
             info!("[kernel] mount: {} on {} type {}", _source, target, fstype);
             let ext4_fs = crate::fs::ext4::super_block();
-            let root_dentry = create_mount_backing_root(&ext4_fs)?;
-            let vfs_mount = VfsMount::new(root_dentry, ext4_fs, flags as i32);
+            let backing_root = create_mount_backing_root(&ext4_fs)?;
+            let vfs_mount = VfsMount::new(backing_root.root.clone(), ext4_fs, flags as i32);
             let parent_mount = get_mount_by_vfsmount(&target_path.mnt).ok_or(Errno::EINVAL)?;
-            add_mount(Mount::new_child(
+            add_mount(Mount::new_child_with_backing_root(
                 target_path.dentry.clone(),
                 vfs_mount,
                 parent_mount,
+                backing_root,
             ));
             Ok(0)
         }
@@ -236,14 +310,21 @@ pub fn do_mount(_source: &str, target: &str, fstype: &str, flags: usize) -> SysR
     }
 }
 
-fn create_mount_backing_root(fs: &Arc<dyn SuperBlockOp>) -> SysResult<Arc<Dentry>> {
+fn create_mount_backing_root(fs: &Arc<dyn SuperBlockOp>) -> SysResult<MountBackingRoot> {
     let real_root = fs.root_inode();
     for _ in 0..1024 {
         let id = MOUNT_BACKING_ID.fetch_add(1, Ordering::Relaxed);
         let name = alloc::format!(".respos_mount_{}", id);
         let path = alloc::format!("/{}", name);
         match real_root.create("/", name.as_str(), InodeType::Directory) {
-            Ok(inode) => return Ok(Arc::new(Dentry::new(path, None, inode))),
+            Ok(inode) => {
+                let _ = inode.set_mode(path.as_str(), 0o755);
+                let _ = inode.set_owner(path.as_str(), 0, 0);
+                return Ok(MountBackingRoot {
+                    parent_inode: real_root,
+                    root: Arc::new(Dentry::new(path, None, inode)),
+                });
+            }
             Err(Errno::EEXIST) => continue,
             Err(err) => return Err(err),
         }
@@ -258,8 +339,18 @@ const UMOUNT_NOFOLLOW: usize = 8;
 const UMOUNT_ALLOWED_FLAGS: usize = MNT_FORCE | MNT_DETACH | MNT_EXPIRE | UMOUNT_NOFOLLOW;
 
 pub fn do_umount2(target: &str, flags: usize) -> SysResult<usize> {
-    if flags & !UMOUNT_ALLOWED_FLAGS != 0 || flags & MNT_EXPIRE != 0 {
+    if flags & !UMOUNT_ALLOWED_FLAGS != 0
+        || flags & (MNT_EXPIRE | MNT_FORCE) == (MNT_EXPIRE | MNT_FORCE)
+        || flags & (MNT_EXPIRE | MNT_DETACH) == (MNT_EXPIRE | MNT_DETACH)
+    {
         return Err(Errno::EINVAL);
+    }
+
+    if flags & UMOUNT_NOFOLLOW != 0 {
+        let path = filename_lookup_no_follow_final_symlink(AT_FDCWD, target)?;
+        if path.dentry.get_inode().node_type() == InodeType::SymLink {
+            return Err(Errno::EINVAL);
+        }
     }
 
     let mount = lookup_mount_target(target)?;
@@ -268,6 +359,9 @@ pub fn do_umount2(target: &str, flags: usize) -> SysResult<usize> {
     }
     if flags & MNT_DETACH == 0 && !mount.children.lock().is_empty() {
         return Err(Errno::EBUSY);
+    }
+    if flags & MNT_EXPIRE != 0 && mount.expire_attempts.fetch_add(1, Ordering::Relaxed) < 2 {
+        return Err(Errno::EAGAIN);
     }
 
     remove_mount_tree(&mount);
@@ -289,9 +383,17 @@ fn lookup_mount_target(target: &str) -> SysResult<Arc<Mount>> {
 }
 
 fn remove_mount_tree(mount: &Arc<Mount>) {
+    remove_mount_tree_inner(mount, true);
+}
+
+fn remove_mount_tree_without_cleanup(mount: &Arc<Mount>) {
+    remove_mount_tree_inner(mount, false);
+}
+
+fn remove_mount_tree_inner(mount: &Arc<Mount>, cleanup_backing_root: bool) {
     let children = mount.children.lock().clone();
     for child in children {
-        remove_mount_tree(&child);
+        remove_mount_tree_inner(&child, cleanup_backing_root);
     }
 
     if let Some(parent) = mount.parent.as_ref().and_then(Weak::upgrade) {
@@ -305,6 +407,55 @@ fn remove_mount_tree(mount: &Arc<Mount>) {
         .lock()
         .mount_table
         .retain(|entry| !Arc::ptr_eq(entry, mount));
+
+    if cleanup_backing_root {
+        cleanup_mount_backing_root(mount);
+    }
+}
+
+fn cleanup_mount_backing_root(mount: &Arc<Mount>) {
+    let Some(backing_root) = mount.backing_root.as_ref() else {
+        return;
+    };
+    if let Err(_err) = remove_backing_tree(&backing_root.parent_inode, &backing_root.root) {
+        warn!(
+            "[kernel] mount: failed to cleanup backing root {}: {:?}",
+            backing_root.root.abs_path, _err
+        );
+    }
+}
+
+fn remove_backing_tree(parent_inode: &Arc<dyn InodeOp>, dentry: &Arc<Dentry>) -> SysResult {
+    let inode = dentry.try_get_inode().ok_or(Errno::ENOENT)?;
+    if inode.node_type() == InodeType::Directory {
+        let entries = inode.readdir(&dentry.abs_path)?;
+        for entry in entries {
+            let Some(name) = dirent_name(entry.d_name.as_slice()) else {
+                continue;
+            };
+            if name == "." || name == ".." {
+                continue;
+            }
+            let child_abs_path = if dentry.abs_path == "/" {
+                alloc::format!("/{}", name)
+            } else {
+                alloc::format!("{}/{}", dentry.abs_path, name)
+            };
+            let child_inode = inode.lookup(&dentry.abs_path, name)?;
+            let child = Arc::new(Dentry::new(
+                child_abs_path,
+                Some(dentry.clone()),
+                child_inode,
+            ));
+            remove_backing_tree(&inode, &child)?;
+        }
+    }
+    parent_inode.unlink(dentry)
+}
+
+fn dirent_name(d_name: &[u8]) -> Option<&str> {
+    let len = d_name.iter().position(|&b| b == 0).unwrap_or(d_name.len());
+    core::str::from_utf8(&d_name[..len]).ok()
 }
 
 /// 初始化根文件系统，返回根 Path 供 init 进程使用。

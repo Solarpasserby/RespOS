@@ -39,7 +39,9 @@ pub fn handle_signal() {
     let task = current_task().unwrap();
 
     while let Some((sig, siginfo)) = task.op_sig_pending_mut(|p| p.fetch_signal()) {
-        let old_mask = task.op_sig_pending(|p| p.mask);
+        let old_mask = task
+            .take_sigsuspend_saved_mask()
+            .unwrap_or_else(|| task.op_sig_pending(|p| p.mask));
         let action = task.op_sig_handler(|h| h.get(sig));
 
         if !action.is_user() {
@@ -58,10 +60,13 @@ pub fn handle_signal() {
                         exit_by_signal_and_run_next(sig.raw());
                     }
                     ActionType::Stop => {
-                        // TODO: 将当前线程置为 Stopped 状态，发 SIGCHLD 给父进程
+                        task.set_wait_event(SigInfo::CLD_STOPPED, sig.raw());
+                        task.notify_parent_sigchld(SigInfo::CLD_STOPPED);
+                        crate::task::stop_current_and_run_next();
                     }
                     ActionType::Cont => {
-                        // TODO: 恢复当前线程为 Running 状态，发 SIGCHLD 给父进程
+                        task.set_wait_event(SigInfo::CLD_CONTINUED, sig.raw());
+                        task.notify_parent_sigchld(SigInfo::CLD_CONTINUED);
                     }
                 }
             }

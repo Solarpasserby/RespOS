@@ -3,7 +3,6 @@
 #![no_std]
 #![no_main]
 
-#[macro_use]
 extern crate user_lib;
 
 use user_lib::{exec, fork, wait, yield_};
@@ -15,7 +14,7 @@ fn main() -> i32 {
         {
             let argv = ["testrunner\0".as_ptr(), core::ptr::null()];
             exec("testrunner\0", &argv);
-            println!("[initproc] failed to exec testrunner, falling back to shell");
+            // println!("[initproc] failed to exec testrunner, falling back to shell");
         }
 
         let argv = ["user_shell\0".as_ptr(), core::ptr::null()];
@@ -28,10 +27,12 @@ fn main() -> i32 {
                 yield_();
                 continue;
             }
+            /*
             println!(
                 "[initproc] Released a zombie process, pid={}, exit_code={}",
                 pid, exit_code,
             );
+            */
         }
     }
     0

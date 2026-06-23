@@ -1,6 +1,6 @@
 use super::{Errno, SysResult};
 use crate::config::PAGE_SIZE;
-use crate::mm::{FrameTracker, MapPermission, VirtAddr, frame_alloc};
+use crate::mm::{FrameTracker, MapPermission, MmapBacking, VirtAddr, frame_alloc};
 use crate::task::current_task;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
@@ -91,7 +91,15 @@ pub fn sys_shmat(shmid: usize, shmaddr: usize, shmflg: usize) -> SysResult<usize
 
     let task = current_task().expect("[kernel] current task is None.");
     task.op_memory_set_write(|memory_set| {
-        let start = memory_set.mmap_shared_frames(addr, size, permission, &frames)?;
+        let start = memory_set.mmap_area(
+            addr,
+            size,
+            permission,
+            false,
+            false,
+            false,
+            MmapBacking::SharedFrames(frames.as_slice()),
+        )?;
         memory_set.flush_tlb();
         Ok(start)
     })
