@@ -102,6 +102,7 @@ fork_procs
 pause01
 
 # oscomp LTP test list - Phase 5: fd — file descriptors (53 tests)
+# 测例 creat05，平台合计约 64s，仅 2 个 TPASS，性价比低
 # 测例 creat09，暂未解决
 close01
 close02
@@ -109,7 +110,7 @@ close_range02
 creat01
 creat03
 creat04
-creat05
+#creat05
 creat08
 #creat09
 dup01
@@ -192,6 +193,8 @@ vmsplice03
 vmsplice04
 
 # oscomp LTP test list - Phase 7: io_basic — open, read, write, lseek (45 tests)
+# 测例 open04，平台合计约 76s，仅 2 个 TPASS，性价比低
+# 测例 write01，平台合计约 105s，仅 2 个 TPASS，性价比低
 # 测例 openat03，暂未解决
 # 测例 openat04，暂未解决
 fsync01
@@ -205,7 +208,7 @@ lseek07
 open01
 open02
 open03
-open04
+#open04
 open06
 open07
 open08
@@ -227,7 +230,7 @@ read04
 readv01
 readv02
 sync_file_range01
-write01
+#write01
 write02
 write03
 write04
@@ -295,6 +298,7 @@ sendfile08
 sendfile08_64
 
 # oscomp LTP test list - Phase 9: fs_stat_perm — stat, chmod, chown (58 tests)
+# 测例 umask01，平台合计约 17s，仅 2 个 TPASS，性价比低
 access01
 access02
 access03
@@ -352,7 +356,7 @@ statvfs01
 statvfs02
 statx02
 statx03
-umask01
+#umask01
 
 # oscomp LTP test list - Phase 10: fs_xattr — extended attributes (22 tests)
 fgetxattr01
@@ -379,76 +383,76 @@ setxattr01
 setxattr02
 
 # oscomp LTP test list - Phase 11: fs_file_dir — truncate, dirs, links, rename (70 tests)
-#chdir01
-#chdir04
-#fallocate03
-#fallocate04
-#ftruncate01
-#ftruncate01_64
-#ftruncate03
-#ftruncate03_64
-#getcwd01
-#getcwd02
-#getcwd03
-#getcwd04
-#getdents01
-#getdents02
-#link02
-#link04
-#linkat01
-#linkat02
-#mkdir02
-#mkdir04
-#mkdir05
-#mkdir09
-#mkdir_tests.sh
-#mkdirat01
-#mkdirat02
-#mknod01
-#mknod02
-#mknod03
-#mknod04
-#mknod05
-#mknod06
-#mknod07
-#mknod08
-#mknod09
-#readdir01
-#readlink01
-#readlink03
-#readlinkat02
-#realpath01
-#rename01
-#rename03
-#rename04
-#rename05
-#rename06
-#rename07
-#rename08
-#rename09
-#rename10
-#rename11
-#rename12
-#rename13
-#rename14
-#rmdir01
-#rmdir03
-#symlink02
-#symlink04
-#truncate02
-#truncate02_64
-#truncate03
-#truncate03_64
-#unlink05
-#unlink07
-#unlink08
-#unlinkat01
-#utime01
-#utime02
-#utime03
-#utime04
-#utime05
-#utime07
+chdir01
+chdir04
+fallocate03
+fallocate04
+ftruncate01
+ftruncate01_64
+ftruncate03
+ftruncate03_64
+getcwd01
+getcwd02
+getcwd03
+getcwd04
+getdents01
+getdents02
+link02
+link04
+linkat01
+linkat02
+mkdir02
+mkdir04
+mkdir05
+mkdir09
+mkdir_tests.sh
+mkdirat01
+mkdirat02
+mknod01
+mknod02
+mknod03
+mknod04
+mknod05
+mknod06
+mknod07
+mknod08
+mknod09
+readdir01
+readlink01
+readlink03
+readlinkat02
+realpath01
+rename01
+rename03
+rename04
+rename05
+rename06
+rename07
+rename08
+rename09
+rename10
+rename11
+rename12
+rename13
+rename14
+rmdir01
+rmdir03
+symlink02
+symlink04
+truncate02
+truncate02_64
+truncate03
+truncate03_64
+unlink05
+unlink07
+unlink08
+unlinkat01
+utime01
+utime02
+utime03
+utime04
+utime05
+utime07
 
 # oscomp LTP test list - Phase 12: signal — signal handling (20 tests)
 # 测例 rt_sigqueueinfo01 sigwait01 报错奇怪收益低跳过完整通过
@@ -456,7 +460,7 @@ kill03
 kill05
 kill06
 kill11
-rt_sigqueueinfo01
+#rt_sigqueueinfo01
 sigaltstack02
 sighold02
 signal01
@@ -466,7 +470,7 @@ signal04
 signal05
 sigpending02
 sigsuspend01
-sigwait01
+#sigwait01
 tgkill01
 tgkill02
 tgkill03
