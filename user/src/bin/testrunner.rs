@@ -598,7 +598,54 @@ fn ltp_skip(group_name: &str, name: &str) -> bool {
 
 include!(concat!(env!("OUT_DIR"), "/ltp_cases.rs"));
 
-const LTP_BIN_DIR: &str = "ltp/testcases/bin/";
+const MUSL_LTP_BIN_DIR: &str = "/musl/ltp/testcases/bin/";
+const GLIBC_LTP_BIN_DIR: &str = "/glibc/ltp/testcases/bin/";
+
+// 依赖 LTP 可执行目录中额外辅助程序的父测例。
+// 这里与 LTP_SKIP 分开维护：辅助程序不应作为独立测例运行，
+// 但依赖文件完整时，对应父测例仍然可以正常执行。
+const LTP_CASE_DEPENDENCIES: &[(&str, &str)] = &[
+    ("execl01", "execl01_child"),
+    ("execle01", "execle01_child"),
+    ("execlp01", "execlp01_child"),
+    ("execv01", "execv01_child"),
+    ("execve01", "execve01_child"),
+    ("execve02", "execve_child"),
+    ("execve05", "execve_child"),
+    ("execve06", "execve06_child"),
+    ("execveat01", "execveat_child"),
+    ("execveat02", "execveat_errno"),
+    ("execveat03", "execveat_child"),
+    ("execvp01", "execvp01_child"),
+    ("mount03", "mount03_suid_child"),
+    ("openat02", "openat02_child"),
+    ("pipe2_02", "pipe2_02_child"),
+];
+
+fn file_exists(path: &str) -> bool {
+    let fd = open(path, O_RDONLY, 0);
+    if fd < 0 {
+        return false;
+    }
+    let _ = close(fd as usize);
+    true
+}
+
+fn missing_ltp_dependency(case_name: &str, case_path_prefix: &str) -> Option<String> {
+    for (parent, dependency) in LTP_CASE_DEPENDENCIES {
+        if *parent != case_name {
+            continue;
+        }
+
+        let mut path = String::from(case_path_prefix);
+        path.push_str(dependency);
+        path.push('\0');
+        if !file_exists(&path) {
+            return Some(path);
+        }
+    }
+    None
+}
 
 fn ltp_script_exit_code(status: i32) -> i32 {
     let signal = status & 0x7f;
@@ -657,6 +704,29 @@ fn run_ltp_selected(
         for name in phase.cases.iter() {
             let name_str = *name;
             if ltp_skip(group_name, name_str) {
+                skip += 1;
+                continue;
+            }
+
+            // LTP 测例可能切换到临时目录。正常情况下 fork 后父子进程的
+            // 工作目录状态相互独立；这里仍在每个测例前恢复工作目录，
+            // 避免异常退出或不完整的 CLONE_FS 语义影响后续测例。
+            if chdir(workdir) < 0 {
+                println!(
+                    "[testrunner] cannot restore {} before {}",
+                    strip_nul(workdir),
+                    name_str
+                );
+            }
+
+            // 部分评测镜像保留了父测例，却遗漏了对应辅助程序。
+            // 在 LTP 创建临时目录前仅跳过该父测例，避免污染后续执行环境。
+            if let Some(dependency) = missing_ltp_dependency(name_str, case_path_prefix) {
+                println!(
+                    "[testrunner] skip {}: missing {}",
+                    name_str,
+                    strip_nul(&dependency)
+                );
                 skip += 1;
                 continue;
             }
@@ -741,7 +811,7 @@ fn _run_ltp_musl() {
     run_ltp_selected(
         "/musl/\0",
         "ltp-musl",
-        LTP_BIN_DIR,
+        MUSL_LTP_BIN_DIR,
         "PATH=/musl/ltp/testcases/bin:/musl:/bin",
         "LD_LIBRARY_PATH=/musl/lib:/musl",
         "LTPROOT=/musl/ltp",
@@ -755,7 +825,7 @@ fn _run_ltp_glibc() {
     run_ltp_selected(
         "/glibc/\0",
         "ltp-glibc",
-        LTP_BIN_DIR,
+        GLIBC_LTP_BIN_DIR,
         "PATH=/glibc/ltp/testcases/bin:/glibc:/bin",
         "LD_LIBRARY_PATH=/glibc/lib:/glibc",
         "LTPROOT=/glibc/ltp",
