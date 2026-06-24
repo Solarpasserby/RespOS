@@ -26,28 +26,21 @@ pub fn sys_brk(addr: usize) -> SysResult<usize> {
                 memory_set.remove_area_with_overlap_range(VPNRange::new(new_end, old_end))?;
             }
         } else if new_end > old_end {
-            let remap_result = {
-                #[cfg(target_arch = "loongarch64")]
-                {
-                    memory_set.remap_writable_area_eager_from_end(old_end, new_end)
-                }
-                #[cfg(target_arch = "riscv64")]
-                {
-                    memory_set.remap_writable_area_lazy_from_end(old_end, new_end)
-                }
-            };
-            match remap_result {
+            if new_end > VirtAddr::from(MMAP_MIN_ADDR).floor() {
+                return Ok(old_brk);
+            }
+
+            match memory_set.remap_writable_area_lazy_from_end(old_end, new_end) {
                 Ok(()) => {}
                 Err(Errno::EINVAL) => {
-                    // 如果 brk 区间中间曾被 munmap()，旧堆顶所在的连续尾段可能已经
-                    // 不存在。此时从旧堆顶页边界新建一段匿名堆 VMA，保持 brk 可继续增长。
-                    memory_set.insert_framed_area_va_lazy(
-                        VirtAddr::from(old_end),
-                        VirtAddr::from(new_end),
-                        MapPermission::READ | MapPermission::WRITE | MapPermission::USER,
-                    );
+                    if memory_set
+                        .ensure_private_writable_anonymous_range(VPNRange::new(old_end, new_end))
+                        .is_err()
+                    {
+                        return Ok(old_brk);
+                    }
                 }
-                Err(err) => return Err(err),
+                Err(_) => return Ok(old_brk),
             }
         }
 
@@ -73,8 +66,13 @@ pub fn sys_mmap(
     let map_len = len.checked_add(PAGE_SIZE - 1).ok_or(Errno::ENOMEM)? & !(PAGE_SIZE - 1);
 
     let prot = MMapProt::from_bits(prot as u32).ok_or(Errno::EINVAL)?;
-    let flags = MMAPFLAGS::from_bits(flags as u32).ok_or(Errno::EINVAL)?;
-    let shared_validate = flags.contains(MMAPFLAGS::MAP_SHARED_VALIDATE);
+    let raw_flags = flags as u32;
+    let shared_validate =
+        raw_flags & MMAPFLAGS::MAP_SHARED_VALIDATE.bits() == MMAPFLAGS::MAP_SHARED_VALIDATE.bits();
+    if shared_validate && raw_flags & !MMAPFLAGS::all().bits() != 0 {
+        return Err(Errno::EOPNOTSUPP);
+    }
+    let flags = MMAPFLAGS::from_bits_truncate(raw_flags);
     let has_shared = flags.contains(MMAPFLAGS::MAP_SHARED) || shared_validate;
     let has_private = flags.contains(MMAPFLAGS::MAP_PRIVATE) && !shared_validate;
     if has_shared == has_private {
@@ -112,7 +110,10 @@ pub fn sys_mmap(
         })
     } else {
         // 文件映射：当前是假实现，只把文件内容读入一份私有物理页拷贝。
-        if fd < 0 || offset % PAGE_SIZE != 0 {
+        if fd < 0 {
+            return Err(Errno::EBADF);
+        }
+        if offset % PAGE_SIZE != 0 {
             return Err(Errno::EINVAL);
         }
         let file = task.get_fd_entry(fd as usize)?.get_file();
@@ -169,6 +170,66 @@ pub fn sys_mprotect(addr: usize, len: usize, prot: u32) -> SysResult<usize> {
         memory_set.flush_tlb();
         Ok(0)
     })
+}
+
+fn mlock_vpn_range(addr: usize, len: usize) -> SysResult<Option<(VPNRange, usize)>> {
+    if len == 0 {
+        return Ok(None);
+    }
+    let end = addr.checked_add(len).ok_or(Errno::EINVAL)?;
+    let start_vpn = VirtAddr::from(addr).floor();
+    let end_vpn = VirtAddr::from(end).ceil();
+    let locked_len = end_vpn.0.saturating_sub(start_vpn.0) * PAGE_SIZE;
+    Ok(Some((VPNRange::new(start_vpn, end_vpn), locked_len)))
+}
+
+/// 系统调用 sys_mlock
+///
+/// 当前内核没有换出机制，锁页成功不需要额外状态；仍按 Linux ABI 校验地址区间和
+/// RLIMIT_MEMLOCK，并在失败时返回 ENOMEM/EPERM。
+pub fn sys_mlock(addr: usize, len: usize) -> SysResult<usize> {
+    let Some((vpn_range, locked_len)) = mlock_vpn_range(addr, len)? else {
+        return Ok(0);
+    };
+
+    let task = current_task().expect("[kernel] current task is None.");
+    task.op_memory_set_read(|memory_set| memory_set.check_user_mapped_range(vpn_range))
+        .map_err(|err| {
+            if err == Errno::EFAULT {
+                Errno::ENOMEM
+            } else {
+                err
+            }
+        })?;
+
+    if task.euid() != 0 {
+        let limit = task.memlock_limit().0;
+        if limit == 0 {
+            return Err(Errno::EPERM);
+        }
+        if locked_len > limit {
+            return Err(Errno::ENOMEM);
+        }
+    }
+
+    Ok(0)
+}
+
+/// 系统调用 sys_munlock
+pub fn sys_munlock(addr: usize, len: usize) -> SysResult<usize> {
+    let Some((vpn_range, _)) = mlock_vpn_range(addr, len)? else {
+        return Ok(0);
+    };
+    let task = current_task().expect("[kernel] current task is None.");
+    task.op_memory_set_read(|memory_set| memory_set.check_user_mapped_range(vpn_range))
+        .map_err(|err| {
+            if err == Errno::EFAULT {
+                Errno::ENOMEM
+            } else {
+                err
+            }
+        })?;
+    Ok(0)
 }
 
 /// 系统调用 sys_madvise

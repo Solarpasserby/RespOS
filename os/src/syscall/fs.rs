@@ -7,7 +7,7 @@ use crate::fs::mount::{do_mount, do_umount2};
 use crate::fs::vfs::{InodeOp, InodeType};
 use crate::fs::{
     AT_EMPTY_PATH, AT_FDCWD, AT_NO_AUTOMOUNT, AT_SYMLINK_NOFOLLOW, FdEntry, File, FileOp, KStat,
-    OpenFlags, Path, Pipe, Stat, Statfs64, check_dir_search_permission, filename_create,
+    OpenFlags, Path, Pipe, SpecialFd, Stat, Statfs64, check_dir_search_permission, filename_create,
     filename_link, filename_link_tmpfile, filename_lookup, filename_lookup_no_follow_final_symlink,
     filename_rename, filename_symlink, filename_unlink, init_fdset, make_pipe, open_named_fifo,
     path_open,
@@ -1999,7 +1999,6 @@ pub fn sys_ftruncate(fd: usize, length: isize) -> SysResult<usize> {
     if !file.writable() {
         return Err(Errno::EINVAL);
     }
-    let file = file.as_any().downcast_ref::<File>().ok_or(Errno::EINVAL)?;
     file.truncate(length as usize)
 }
 
@@ -2429,6 +2428,8 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SysResult<usize> {
     const F_DUPFD_CLOEXEC: usize = 1030;
     const F_SETPIPE_SZ: usize = 1031;
     const F_GETPIPE_SZ: usize = 1032;
+    const F_ADD_SEALS: usize = 1033;
+    const F_GET_SEALS: usize = 1034;
     const FD_CLOEXEC: usize = 1;
 
     let task = current_task().expect("[kernel] current task is None.");
@@ -2487,6 +2488,22 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SysResult<usize> {
         F_SETPIPE_SZ => {
             let pipe = pipe_ref(&fd_entry.file).ok_or(Errno::EBADF)?;
             pipe.set_capacity(arg)
+        }
+        F_GET_SEALS => {
+            let memfd = fd_entry
+                .file
+                .as_any()
+                .downcast_ref::<SpecialFd>()
+                .ok_or(Errno::EINVAL)?;
+            Ok(memfd.seals())
+        }
+        F_ADD_SEALS => {
+            let memfd = fd_entry
+                .file
+                .as_any()
+                .downcast_ref::<SpecialFd>()
+                .ok_or(Errno::EINVAL)?;
+            memfd.add_seals(arg)
         }
         F_GETLK => {
             let flock = arg as *mut LinuxFlock;

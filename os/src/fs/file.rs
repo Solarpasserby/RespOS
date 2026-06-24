@@ -67,6 +67,10 @@ pub trait FileOp: Any + Send + Sync {
     fn fsync(&self) -> SysResult<usize> {
         Ok(0)
     }
+    /// 调整文件长度。普通文件和 memfd 支持该操作，其他特殊 fd 默认拒绝。
+    fn truncate(&self, _size: usize) -> SysResult<usize> {
+        Err(Errno::EINVAL)
+    }
 }
 
 impl File {
@@ -384,6 +388,10 @@ impl FileOp for File {
             }
         }
         Ok(0)
+    }
+
+    fn truncate(&self, size: usize) -> SysResult<usize> {
+        File::truncate(self, size)
     }
 }
 

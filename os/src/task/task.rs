@@ -53,6 +53,8 @@ impl TidAddress {
 struct ResourceLimits {
     fsize_cur: AtomicUsize,
     fsize_max: AtomicUsize,
+    memlock_cur: AtomicUsize,
+    memlock_max: AtomicUsize,
 }
 
 impl ResourceLimits {
@@ -60,14 +62,19 @@ impl ResourceLimits {
         Self {
             fsize_cur: AtomicUsize::new(usize::MAX),
             fsize_max: AtomicUsize::new(usize::MAX),
+            memlock_cur: AtomicUsize::new(usize::MAX),
+            memlock_max: AtomicUsize::new(usize::MAX),
         }
     }
 
     fn from_parent(parent: &Self) -> Self {
         let (cur, max) = parent.fsize_limit();
+        let (memlock_cur, memlock_max) = parent.memlock_limit();
         Self {
             fsize_cur: AtomicUsize::new(cur),
             fsize_max: AtomicUsize::new(max),
+            memlock_cur: AtomicUsize::new(memlock_cur),
+            memlock_max: AtomicUsize::new(memlock_max),
         }
     }
 
@@ -84,6 +91,22 @@ impl ResourceLimits {
         }
         self.fsize_cur.store(cur, Ordering::Relaxed);
         self.fsize_max.store(max, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn memlock_limit(&self) -> (usize, usize) {
+        (
+            self.memlock_cur.load(Ordering::Relaxed),
+            self.memlock_max.load(Ordering::Relaxed),
+        )
+    }
+
+    fn set_memlock_limit(&self, cur: usize, max: usize) -> SysResult {
+        if cur > max {
+            return Err(Errno::EINVAL);
+        }
+        self.memlock_cur.store(cur, Ordering::Relaxed);
+        self.memlock_max.store(max, Ordering::Relaxed);
         Ok(())
     }
 }
@@ -1253,6 +1276,12 @@ impl TaskControlBlock {
     }
     pub fn set_fsize_limit(&self, cur: usize, max: usize) -> SysResult {
         self.limits.set_fsize_limit(cur, max)
+    }
+    pub fn memlock_limit(&self) -> (usize, usize) {
+        self.limits.memlock_limit()
+    }
+    pub fn set_memlock_limit(&self, cur: usize, max: usize) -> SysResult {
+        self.limits.set_memlock_limit(cur, max)
     }
 }
 

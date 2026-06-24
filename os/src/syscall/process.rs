@@ -374,6 +374,7 @@ pub fn sys_prlimit64(
     const RLIMIT_NOFILE: usize = 7;
     const RLIMIT_FSIZE: usize = 1;
     const RLIMIT_STACK: usize = 3;
+    const RLIMIT_MEMLOCK: usize = 8;
     const RLIM_INFINITY: usize = usize::MAX;
 
     let task = current_task().expect("[kernel] current task is None.");
@@ -394,6 +395,10 @@ pub fn sys_prlimit64(
             cur: USER_STACK_SIZE,
             max: RLIM_INFINITY,
         },
+        RLIMIT_MEMLOCK => {
+            let (cur, max) = task.memlock_limit();
+            RLimit { cur, max }
+        }
         _ => RLimit {
             cur: RLIM_INFINITY,
             max: RLIM_INFINITY,
@@ -406,6 +411,7 @@ pub fn sys_prlimit64(
         match resource {
             RLIMIT_NOFILE => task.set_nofile_limit(limit.cur, limit.max)?,
             RLIMIT_FSIZE => task.set_fsize_limit(limit.cur, limit.max)?,
+            RLIMIT_MEMLOCK => task.set_memlock_limit(limit.cur, limit.max)?,
             _ => {}
         }
     }

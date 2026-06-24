@@ -160,7 +160,14 @@ hosts: files dns\n",
 // 脚本解析环境配置
 fn prepare_bin_shell(shell_path: &str) {
     let _ = mkdir("/bin\0", 0o755);
-    for applet in ["/bin/busybox\0", "/bin/sh\0", "/bin/cp\0", "/bin/grep\0"] {
+    for applet in [
+        "/bin/busybox\0",
+        "/bin/sh\0",
+        "/bin/cp\0",
+        "/bin/grep\0",
+        "/bin/true\0",
+        "/bin/false\0",
+    ] {
         let _ = unlink(applet);
         let _ = symlink(shell_path, applet);
     }
@@ -424,7 +431,9 @@ fn cleanup_benchmark_state() {
     let _ = unlink("/tmp/hello\0");
     let _ = unlink("/bin/busybox\0");
     let _ = unlink("/bin/cp\0");
+    let _ = unlink("/bin/false\0");
     let _ = unlink("/bin/sh\0");
+    let _ = unlink("/bin/true\0");
     let _ = unlink("/musl/cp\0");
     let _ = unlink("/musl/hello\0");
     let _ = unlink("/glibc/cp\0");

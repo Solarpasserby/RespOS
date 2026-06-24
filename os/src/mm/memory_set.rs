@@ -120,7 +120,10 @@ struct MmapPlacement {
 pub(crate) enum MmapBacking<'a> {
     LazyAnonymous,
     SharedAnonymous,
-    SharedFrames(&'a [Arc<FrameTracker>]),
+    SharedFrames {
+        attach_id: usize,
+        frames: &'a [Arc<FrameTracker>],
+    },
     PrivateFile {
         file: Arc<dyn FileOp>,
         offset: usize,
@@ -340,6 +343,111 @@ impl MemorySet {
             .any(|area| area.vpn_range.intersect_with(vpn_range))
     }
 
+    pub fn shm_attach_ids_for_frames(&self, frames: &[Arc<FrameTracker>]) -> Vec<usize> {
+        let mut ids = Vec::new();
+        if frames.is_empty() {
+            return ids;
+        }
+        for area in self.areas.iter() {
+            let Some(attach_id) = area.shm_attach_id else {
+                continue;
+            };
+            if ids.contains(&attach_id) {
+                continue;
+            }
+            if area
+                .data_frames
+                .values()
+                .any(|frame| frames.iter().any(|target| Arc::ptr_eq(frame, target)))
+            {
+                ids.push(attach_id);
+            }
+        }
+        ids
+    }
+
+    pub fn remove_shm_attachment(&mut self, vpn_start: VirtPageNum) -> SysResult<usize> {
+        let attach_id = self
+            .areas
+            .iter()
+            .rev()
+            .find(|area| area.vpn_range.contain(&vpn_start))
+            .and_then(|area| area.shm_attach_id)
+            .ok_or(Errno::EINVAL)?;
+
+        let mut idx = 0;
+        let mut removed = false;
+        while idx < self.areas.len() {
+            if self.areas[idx].shm_attach_id == Some(attach_id) {
+                let mut area = self.areas.remove(idx);
+                area.unmap(&mut self.page_table);
+                removed = true;
+            } else {
+                idx += 1;
+            }
+        }
+        if removed {
+            Ok(attach_id)
+        } else {
+            Err(Errno::EINVAL)
+        }
+    }
+
+    fn is_private_writable_anonymous(area: &MapArea) -> bool {
+        area.map_type == MapType::Framed
+            && !area.shared
+            && area.file_backing.is_none()
+            && area
+                .map_perm
+                .contains(MapPermission::WRITE | MapPermission::USER)
+    }
+
+    /// 确保一段 brk 增长区间可作为私有匿名堆使用。
+    ///
+    /// 已存在的私有匿名可写 VMA 直接复用，空洞补成 lazy 匿名 VMA；
+    /// 一旦遇到文件映射、共享映射或不可写 VMA，就按 Linux brk 失败语义拒绝。
+    pub fn ensure_private_writable_anonymous_range(&mut self, vpn_range: VPNRange) -> SysResult {
+        for area in self
+            .areas
+            .iter()
+            .filter(|area| area.vpn_range.intersect_with(&vpn_range))
+        {
+            if !Self::is_private_writable_anonymous(area) {
+                return Err(Errno::ENOMEM);
+            }
+        }
+
+        let mut cursor = vpn_range.get_start();
+        let end = vpn_range.get_end();
+        while cursor < end {
+            if let Some(area) = self
+                .areas
+                .iter()
+                .find(|area| area.vpn_range.contain(&cursor))
+            {
+                cursor = area.vpn_range.get_end().min(end);
+                continue;
+            }
+
+            let next = self
+                .areas
+                .iter()
+                .filter_map(|area| {
+                    let start = area.vpn_range.get_start();
+                    (start > cursor && start < end).then_some(start)
+                })
+                .min()
+                .unwrap_or(end);
+            self.insert_framed_area_va_lazy(
+                VirtAddr::from(cursor),
+                VirtAddr::from(next),
+                MapPermission::READ | MapPermission::WRITE | MapPermission::USER,
+            );
+            cursor = next;
+        }
+        Ok(())
+    }
+
     fn prepare_mmap(&mut self, request: MmapRequest) -> SysResult<MmapPlacement> {
         let start = self.choose_mmap_start(request.addr, request.map_len)?;
         if start < MMAP_MIN_ADDR {
@@ -386,7 +494,7 @@ impl MemorySet {
         locked: bool,
         backing: MmapBacking<'_>,
     ) -> SysResult<usize> {
-        if let MmapBacking::SharedFrames(frames) = &backing {
+        if let MmapBacking::SharedFrames { frames, .. } = &backing {
             if frames.len() != map_len / PAGE_SIZE {
                 return Err(Errno::EINVAL);
             }
@@ -421,13 +529,14 @@ impl MemorySet {
                 area.locked = placement.locked;
                 self.push_empty_map_area(area, None, 0);
             }
-            MmapBacking::SharedFrames(frames) => {
+            MmapBacking::SharedFrames { attach_id, frames } => {
                 let mut area = MapArea::new_shared(
                     VirtAddr::from(placement.start),
                     VirtAddr::from(placement.end),
                     placement.map_perm,
                 );
                 area.locked = placement.locked;
+                area.shm_attach_id = Some(attach_id);
                 for (vpn, frame) in area.vpn_range.into_iter().zip(frames.iter()) {
                     self.page_table
                         .map(vpn, frame.ppn(), PTEFlags::from(placement.map_perm));
@@ -620,24 +729,6 @@ impl MemorySet {
         old_vpn_end: VirtPageNum,
         new_vpn_end: VirtPageNum,
     ) -> SysResult {
-        self.remap_writable_area_from_end(old_vpn_end, new_vpn_end, false)
-    }
-
-    /// 立即分配新增页的重映射版本，供 LoongArch 避开当前尚不稳定的用户堆 lazy fault 路径。
-    pub fn remap_writable_area_eager_from_end(
-        &mut self,
-        old_vpn_end: VirtPageNum,
-        new_vpn_end: VirtPageNum,
-    ) -> SysResult {
-        self.remap_writable_area_from_end(old_vpn_end, new_vpn_end, true)
-    }
-
-    fn remap_writable_area_from_end(
-        &mut self,
-        old_vpn_end: VirtPageNum,
-        new_vpn_end: VirtPageNum,
-        eager_alloc: bool,
-    ) -> SysResult {
         let (idx, area) = self
             .areas
             .iter_mut()
@@ -664,13 +755,6 @@ impl MemorySet {
             }
         }
         area.vpn_range = VPNRange::new(vpn_start, new_vpn_end);
-        if eager_alloc && new_vpn_end > old_vpn_end {
-            for vpn in VPNRange::new(old_vpn_end, new_vpn_end) {
-                if !area.data_frames.contains_key(&vpn) {
-                    area.map_one(&mut self.page_table, vpn)?;
-                }
-            }
-        }
         Ok(())
     }
 
@@ -1115,6 +1199,11 @@ impl MemorySet {
         let heap_bottom = user_stack_top + PAGE_SIZE;
         memory_set.heap_bottom = heap_bottom;
         memory_set.brk = heap_bottom;
+        memory_set.insert_framed_area_va_lazy(
+            VirtAddr::from(heap_bottom),
+            VirtAddr::from(heap_bottom),
+            MapPermission::READ | MapPermission::WRITE | MapPermission::USER,
+        );
 
         // 不再映射异常上下文到用户空间，发生异常时，切换到内核将用户上下文存入内核栈
 
@@ -1358,6 +1447,7 @@ struct MapArea {
     shared: bool,
     locked: bool,
     file_backing: Option<FileBacking>,
+    shm_attach_id: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -1374,6 +1464,7 @@ struct MapAreaMeta {
     shared: bool,
     locked: bool,
     file_backing: Option<FileBacking>,
+    shm_attach_id: Option<usize>,
 }
 
 struct MapAreaSplit {
@@ -1402,6 +1493,7 @@ impl MapArea {
             shared: false,
             locked: false,
             file_backing: None,
+            shm_attach_id: None,
         }
     }
 
@@ -1449,6 +1541,7 @@ impl MapArea {
             shared: self.shared,
             locked: self.locked,
             file_backing: self.file_backing.clone(),
+            shm_attach_id: self.shm_attach_id,
         }
     }
 
@@ -1465,6 +1558,7 @@ impl MapArea {
             shared: meta.shared,
             locked: meta.locked,
             file_backing: meta.file_backing,
+            shm_attach_id: meta.shm_attach_id,
         }
     }
 

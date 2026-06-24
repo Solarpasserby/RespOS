@@ -410,14 +410,21 @@ pub fn sys_open_tree(_dfd: isize, path: *const u8, flags: usize) -> SysResult<us
 }
 
 pub fn sys_memfd_create(name: *const u8, flags: usize) -> SysResult<usize> {
+    const MEMFD_NAME_MAX: usize = 249;
     if flags & !MFD_ALLOWED_FLAGS != 0 {
         return Err(Errno::EINVAL);
     }
-    let _ = copy_cstr_from_user(name)?;
-    alloc_special_fd_with_type(
-        fd_flags(false, flags & MFD_CLOEXEC != 0),
-        InodeType::Regular,
-    )
+    let name = copy_cstr_from_user(name)?;
+    if name.len() > MEMFD_NAME_MAX {
+        return Err(Errno::EINVAL);
+    }
+    let task = current_task().expect("[kernel] current task is None.");
+    let fd_flags = fd_flags(false, flags & MFD_CLOEXEC != 0);
+    let file = Arc::new(SpecialFd::new_memfd(
+        fd_flags,
+        flags & MFD_ALLOW_SEALING != 0,
+    ));
+    task.alloc_fd(FdEntry::new(file, fd_flags))
 }
 
 pub fn sys_memfd_secret(flags: usize) -> SysResult<usize> {
