@@ -200,7 +200,6 @@ fn dentry_name(dentry: &Arc<Dentry>) -> SysResult<String> {
 fn inode_allows_perm(dentry: &Arc<Dentry>, mask: u32) -> SysResult<bool> {
     let task = current_task().expect("[kernel] current task is None.");
     let euid = task.fsuid() as u32;
-    let egid = task.fsgid() as u32;
     if euid == 0 {
         return Ok(true);
     }
@@ -209,7 +208,7 @@ fn inode_allows_perm(dentry: &Arc<Dentry>, mask: u32) -> SysResult<bool> {
     let mode = stat.mode & 0o777;
     let perm = if euid == stat.uid {
         (mode >> 6) & 0o7
-    } else if egid == stat.gid {
+    } else if task.in_group(stat.gid as usize) {
         (mode >> 3) & 0o7
     } else {
         mode & 0o7
@@ -700,9 +699,10 @@ fn resolve_path_from(
         // 如果 child 是相对 symlink，后续解析必须以“链接所在目录”为起点。
         // 因此先保存当前目录 path，再去 lookup child。
         let symlink_base = Path::new(nd.mnt.clone(), nd.dentry.clone());
-        if nd.dentry.get_inode().node_type() == InodeType::Directory {
-            check_dir_search_permission(&nd.dentry)?;
+        if nd.dentry.get_inode().node_type() != InodeType::Directory {
+            return Err(Errno::ENOTDIR);
         }
+        check_dir_search_permission(&nd.dentry)?;
         // 中间路径必须穿过 mount；最后一级是否穿过 mount 由调用者决定。
         let child = lookup_dentry_maybe_follow_mount(&mut nd, !is_last || follow_final_mount)?;
         let child_path = Path::new(nd.mnt.clone(), child.clone());
@@ -801,7 +801,18 @@ pub fn filename_unlink(dirfd: isize, path: &str, remove_dir: bool) -> SysResult 
     let parent = target.get_parent().ok_or(Errno::EBUSY)?;
     check_sticky_rename_permission(&parent, &target)?;
     let name = dentry_name(&target)?;
-    parent.get_inode().unlink(&target)?;
+    let target_inode = target.get_inode();
+    let orphaned_open_file = target_ty == InodeType::Regular
+        && Arc::strong_count(&target_inode) > 2
+        && target_inode
+            .as_any()
+            .downcast_ref::<Ext4Inode>()
+            .map(|inode| inode.orphan_regular_file(&target.abs_path))
+            .transpose()?
+            .is_some();
+    if !orphaned_open_file {
+        parent.get_inode().unlink(&target)?;
+    }
     parent.remove_child(name.as_str());
     remove_dentry_cache_tree(&target.abs_path);
     Ok(())

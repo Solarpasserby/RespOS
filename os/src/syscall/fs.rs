@@ -2139,7 +2139,7 @@ fn access_mode_allowed(stat: &KStat, mode: usize, use_effective_ids: bool) -> bo
     } else {
         task.uid()
     } as u32;
-    let gid = if use_effective_ids {
+    let primary_gid = if use_effective_ids {
         task.egid()
     } else {
         task.gid()
@@ -2155,7 +2155,8 @@ fn access_mode_allowed(stat: &KStat, mode: usize, use_effective_ids: bool) -> bo
 
     let granted = if uid == stat.uid {
         (perm >> 6) & 0o7
-    } else if gid == stat.gid {
+    } else if primary_gid == stat.gid || task.supplementary_groups().contains(&(stat.gid as usize))
+    {
         (perm >> 3) & 0o7
     } else {
         perm & 0o7

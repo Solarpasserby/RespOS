@@ -3,6 +3,7 @@
 use super::time::TimeVal;
 use super::{Errno, SysResult};
 use crate::config::{CLK_TCK, USER_STACK_SIZE};
+use crate::fs::vfs::InodeType;
 use crate::fs::{AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW, File, FileOp, OpenFlags, path_open};
 use crate::loader::get_app_data_by_name;
 use crate::mm::{
@@ -570,20 +571,51 @@ pub fn sys_execve(path: *const u8, args: *const usize, envp: *const usize) -> Sy
         }
     }
 
-    if let Ok(file) = path_open(AT_FDCWD, &path, 0, 0) {
-        exec_fs_file(task, file, args_vec, envs_vec)
-    } else if !path.starts_with("/") {
-        // 从内核中加载的应用程序
-        if let Some(data) = get_app_data_by_name(path.as_str()) {
-            if !is_elf(data) {
-                return Err(Errno::ENOEXEC);
+    match path_open(AT_FDCWD, &path, 0, 0) {
+        Ok(file) => exec_fs_file(task, file, args_vec, envs_vec),
+        Err(Errno::ENOENT) if !path.starts_with("/") => {
+            // 从内核中加载的应用程序
+            if let Some(data) = get_app_data_by_name(path.as_str()) {
+                if !is_elf(data) {
+                    return Err(Errno::ENOEXEC);
+                }
+                Ok(task.execve(path.clone(), data, args_vec, envs_vec, false)?)
+            } else {
+                Err(Errno::ENOENT)
             }
-            Ok(task.execve(path.clone(), data, args_vec, envs_vec, false)?)
-        } else {
-            Err(Errno::ENOENT)
         }
+        Err(err) => Err(err),
+    }
+}
+
+fn check_exec_permission(task: &Arc<crate::task::TaskControlBlock>, file: &Arc<File>) -> SysResult {
+    let inode = file.inode();
+    if inode.node_type() == InodeType::Directory {
+        return Err(Errno::EACCES);
+    }
+
+    let path = file.path().abs_path();
+    let stat = inode.stat(path.as_str())?;
+    let mode = stat.mode & 0o777;
+    if task.fsuid() == 0 {
+        if mode & 0o111 != 0 {
+            return Ok(());
+        }
+        return Err(Errno::EACCES);
+    }
+
+    let exec_bit = if task.fsuid() as u32 == stat.uid {
+        0o100
+    } else if task.in_group(stat.gid as usize) {
+        0o010
     } else {
-        Err(Errno::ENOENT)
+        0o001
+    };
+
+    if mode & exec_bit != 0 {
+        Ok(())
+    } else {
+        Err(Errno::EACCES)
     }
 }
 
@@ -593,6 +625,8 @@ fn exec_fs_file(
     args_vec: Vec<String>,
     envs_vec: Vec<String>,
 ) -> SysResult<usize> {
+    check_exec_permission(&task, &file)?;
+
     let exe_path = file.path().global_abs_path();
     let all_data = file.read_all()?;
 
@@ -601,6 +635,7 @@ fn exec_fs_file(
             shebang_args(exe_path.as_str(), all_data.as_slice(), args_vec.as_slice())
         {
             let shell_file = path_open(AT_FDCWD, shell_path.as_str(), 0, 0)?;
+            check_exec_permission(&task, &shell_file)?;
             let shell_exe_path = shell_file.path().global_abs_path();
             let shell_data = shell_file.read_all()?;
             task.execve(
@@ -998,6 +1033,8 @@ fn can_set_gid(task_gid: usize, task_egid: usize, task_sgid: usize, target: usiz
 
 pub fn sys_setreuid(ruid: usize, euid: usize) -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
+    let old_ruid = task.uid();
+    let old_suid = task.suid();
     let new_ruid = resolve_new_id(ruid, task.uid());
     let new_euid = resolve_new_id(euid, task.euid());
     if task.euid() != 0
@@ -1006,10 +1043,10 @@ pub fn sys_setreuid(ruid: usize, euid: usize) -> SysResult<usize> {
     {
         return Err(Errno::EPERM);
     }
-    let new_suid = if !is_unchanged_id(ruid) {
+    let new_suid = if !is_unchanged_id(ruid) || (!is_unchanged_id(euid) && new_euid != old_ruid) {
         new_euid
     } else {
-        task.suid()
+        old_suid
     };
     task.set_uid_triplet(new_ruid, new_euid, new_suid);
     Ok(0)
@@ -1044,6 +1081,8 @@ pub fn sys_setgid(gid: usize) -> SysResult<usize> {
 
 pub fn sys_setregid(rgid: usize, egid: usize) -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
+    let old_rgid = task.gid();
+    let old_sgid = task.sgid();
     let new_rgid = resolve_new_id(rgid, task.gid());
     let new_egid = resolve_new_id(egid, task.egid());
     if task.euid() != 0
@@ -1052,10 +1091,10 @@ pub fn sys_setregid(rgid: usize, egid: usize) -> SysResult<usize> {
     {
         return Err(Errno::EPERM);
     }
-    let new_sgid = if !is_unchanged_id(rgid) {
+    let new_sgid = if !is_unchanged_id(rgid) || (!is_unchanged_id(egid) && new_egid != old_rgid) {
         new_egid
     } else {
-        task.sgid()
+        old_sgid
     };
     task.set_gid_triplet(new_rgid, new_egid, new_sgid);
     Ok(0)
@@ -1124,15 +1163,18 @@ pub fn sys_getresgid(rgid: *mut u32, egid: *mut u32, sgid: *mut u32) -> SysResul
 
 pub fn sys_getgroups(size: usize, list: *mut u32) -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
-    let egid = task.egid() as u32;
+    let groups = task.supplementary_groups();
     if size == 0 {
-        return Ok(1);
+        return Ok(groups.len());
     }
-    if size < 1 {
+    if size < groups.len() {
         return Err(Errno::EINVAL);
     }
-    copy_to_user(list, &egid as *const u32, 1)?;
-    Ok(1)
+    for (idx, gid) in groups.iter().enumerate() {
+        let gid = *gid as u32;
+        copy_to_user(list.wrapping_add(idx), &gid as *const u32, 1)?;
+    }
+    Ok(groups.len())
 }
 
 pub fn sys_setgroups(size: usize, list: *const u32) -> SysResult<usize> {
@@ -1144,18 +1186,22 @@ pub fn sys_setgroups(size: usize, list: *const u32) -> SysResult<usize> {
     if size > NGROUPS_MAX {
         return Err(Errno::EINVAL);
     }
-    if size != 0 {
+    let mut groups = Vec::with_capacity(size);
+    for idx in 0..size {
         let mut gid = 0u32;
-        copy_from_user(&mut gid as *mut u32, list, 1)?;
-        task.set_fsgid(gid as usize);
+        copy_from_user(&mut gid as *mut u32, list.wrapping_add(idx), 1)?;
+        groups.push(gid as usize);
     }
+    task.set_supplementary_groups(groups);
     Ok(0)
 }
 
 pub fn sys_setfsuid(uid: usize) -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
     let old = task.fsuid();
-    if task.euid() == 0 || can_set_uid(task.uid(), task.euid(), task.suid(), uid) {
+    if !is_unchanged_id(uid)
+        && (task.euid() == 0 || can_set_uid(task.uid(), task.euid(), task.suid(), uid))
+    {
         task.set_fsuid(uid);
     }
     Ok(old)
@@ -1164,7 +1210,9 @@ pub fn sys_setfsuid(uid: usize) -> SysResult<usize> {
 pub fn sys_setfsgid(gid: usize) -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
     let old = task.fsgid();
-    if task.euid() == 0 || can_set_gid(task.gid(), task.egid(), task.sgid(), gid) {
+    if !is_unchanged_id(gid)
+        && (task.euid() == 0 || can_set_gid(task.gid(), task.egid(), task.sgid(), gid))
+    {
         task.set_fsgid(gid);
     }
     Ok(old)

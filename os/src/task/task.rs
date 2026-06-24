@@ -174,6 +174,7 @@ pub struct TaskControlBlock {
     sgid: AtomicUsize,
     fsuid: AtomicUsize,
     fsgid: AtomicUsize,
+    supplementary_groups: SpinLock<Vec<usize>>,
     umask: AtomicUsize,
     thread_group: Arc<SpinLock<ThreadGroup>>,
     task_status: SpinLock<TaskStatus>,
@@ -244,6 +245,7 @@ impl TaskControlBlock {
             sgid: AtomicUsize::new(0),
             fsuid: AtomicUsize::new(0),
             fsgid: AtomicUsize::new(0),
+            supplementary_groups: SpinLock::new(Vec::new()),
             umask: AtomicUsize::new(0o022),
             thread_group: Arc::new(SpinLock::new(ThreadGroup::new())),
             task_status: SpinLock::new(TaskStatus::Ready),
@@ -326,6 +328,7 @@ impl TaskControlBlock {
             sgid: AtomicUsize::new(0),
             fsuid: AtomicUsize::new(0),
             fsgid: AtomicUsize::new(0),
+            supplementary_groups: SpinLock::new(Vec::new()),
             umask: AtomicUsize::new(0o022),
             thread_group: Arc::new(SpinLock::new(ThreadGroup::new())),
             task_status: SpinLock::new(TaskStatus::Ready),
@@ -495,6 +498,7 @@ impl TaskControlBlock {
             sgid: AtomicUsize::new(self.sgid()),
             fsuid: AtomicUsize::new(self.fsuid()),
             fsgid: AtomicUsize::new(self.fsgid()),
+            supplementary_groups: SpinLock::new(self.supplementary_groups()),
             umask: AtomicUsize::new(self.umask()),
             thread_group,
             task_status: SpinLock::new(TaskStatus::Ready),
@@ -557,13 +561,17 @@ impl TaskControlBlock {
         self: &Arc<Self>,
         exe_path: String,
         elf_data: &[u8],
-        args: Vec<String>,
+        mut args: Vec<String>,
         envs: Vec<String>,
         linux_abi: bool,
     ) -> SysResult<usize> {
         // 简化模型：只有进程 leader 可以 exec，避免非 leader exec 后父子关系和 tgid 语义混乱。
         if !self.is_process_leader() {
             return Err(Errno::EINVAL);
+        }
+
+        if args.is_empty() {
+            args.push(String::new());
         }
 
         let (memory_set, _token, mut user_sp, entry_point, aux_vec) =
@@ -578,6 +586,7 @@ impl TaskControlBlock {
         /* ===== 修改用户栈数据 ===== */
         let (argv_base, envp_base, auxv_base, stack_top) = init_user_stack(
             &mut memory_set_guard,
+            exe_path.as_str(),
             args.as_slice(),
             envs.as_slice(),
             aux_vec,
@@ -658,6 +667,12 @@ impl TaskControlBlock {
     }
     pub fn fsgid(&self) -> usize {
         self.fsgid.load(Ordering::Relaxed)
+    }
+    pub fn supplementary_groups(&self) -> Vec<usize> {
+        self.supplementary_groups.lock().clone()
+    }
+    pub fn in_group(&self, gid: usize) -> bool {
+        self.fsgid() == gid || self.supplementary_groups.lock().contains(&gid)
     }
     pub fn umask(&self) -> usize {
         self.umask.load(Ordering::Relaxed)
@@ -776,6 +791,9 @@ impl TaskControlBlock {
     }
     pub fn set_fsgid(&self, gid: usize) {
         self.fsgid.store(gid, Ordering::Relaxed);
+    }
+    pub fn set_supplementary_groups(&self, groups: Vec<usize>) {
+        *self.supplementary_groups.lock() = groups;
     }
     pub fn set_umask(&self, mask: usize) -> usize {
         self.umask.swap(mask & 0o777, Ordering::Relaxed)
@@ -1537,6 +1555,7 @@ pub fn task_group_exit_by_signal(task: Arc<TaskControlBlock>, signal: i32) {
 // 将命令行参数和环境变量压入用户栈
 fn init_user_stack(
     memory_set: &mut MemorySet,
+    exe_path: &str,
     args_vec: &[String],
     envs_vec: &[String],
     mut auxv: Vec<AuxHeader>,
@@ -1615,6 +1634,13 @@ fn init_user_stack(
     // 字符串内容可以位于指针数组之上，argv/envp 数组保存实际地址。
     let envp = push_strings_to_stack(memory_set, envs_vec, user_sp)?;
     let argv = push_strings_to_stack(memory_set, args_vec, user_sp)?;
+    let execfn_addr = {
+        let addr = push_bytes_to_stack(memory_set, &[0], user_sp)?;
+        *user_sp = addr - exe_path.len();
+        memory_set.write_bytes_to_mapped_range(*user_sp, exe_path.as_bytes())?;
+        *user_sp = align_down(*user_sp);
+        *user_sp
+    };
 
     // —— 压入 AT_PLATFORM 字符串 ——
     #[cfg(target_arch = "riscv64")]
@@ -1652,7 +1678,7 @@ fn init_user_stack(
     });
     auxv.push(AuxHeader {
         aux_type: AT_EXECFN,
-        value: argv[0],
+        value: execfn_addr,
     });
     auxv.push(AuxHeader {
         aux_type: AT_NULL,

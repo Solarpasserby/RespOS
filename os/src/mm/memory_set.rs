@@ -17,7 +17,6 @@ use crate::task::{
 };
 use crate::trap::PageFaultCause;
 use alloc::collections::BTreeMap;
-use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use bitflags::bitflags;
@@ -44,8 +43,6 @@ lazy_static! {
     /// 由于内核空间被所有用户空间共享，所以使用 `Arc` 来实现共享，使用 `Mutex` 来实现内部可变性
     pub static ref KERNEL_SPACE: Arc<Mutex<MemorySet>> =
         Arc::new(Mutex::new(MemorySet::new_kernel()));
-    static ref SHARED_FILE_FRAMES: Mutex<BTreeMap<String, BTreeMap<usize, Arc<FrameTracker>>>> =
-        Mutex::new(BTreeMap::new());
 }
 
 fn read_dynamic_linker(interp: &str) -> Option<Vec<u8>> {
@@ -58,50 +55,35 @@ fn read_dynamic_linker(interp: &str) -> Option<Vec<u8>> {
     None
 }
 
-fn read_mmap_file_data(
-    file: Arc<dyn FileOp>,
-    offset: usize,
-    len: usize,
-    map_len: usize,
-) -> SysResult<Vec<u8>> {
-    let mut file_data = alloc::vec![0u8; map_len];
-    let origin_offset = file.get_offset();
-    file.seek(offset as isize)?;
-    let read_result = file.read(&mut file_data[..len]);
-    let restore_result = file.seek(origin_offset as isize);
-    read_result?;
-    restore_result?;
-    Ok(file_data)
-}
-
-fn shared_file_frames(
-    key: &str,
-    offset: usize,
-    map_len: usize,
-    file_data: &[u8],
-) -> SysResult<Vec<Arc<FrameTracker>>> {
-    let first_page = offset / PAGE_SIZE;
-    let page_count = map_len / PAGE_SIZE;
-    let mut registry = SHARED_FILE_FRAMES.lock();
-    let frames = registry.entry(String::from(key)).or_default();
-    let mut out = Vec::with_capacity(page_count);
-
-    for i in 0..page_count {
-        let page_idx = first_page + i;
-        let frame = if let Some(frame) = frames.get(&page_idx) {
-            frame.clone()
-        } else {
-            let frame = Arc::new(frame_alloc().ok_or(Errno::ENOMEM)?);
-            let start = i * PAGE_SIZE;
-            let end = (start + PAGE_SIZE).min(file_data.len());
-            frame.ppn().get_bytes_array()[..end - start].copy_from_slice(&file_data[start..end]);
-            frames.insert(page_idx, frame.clone());
-            frame
-        };
-        out.push(frame);
+fn read_file_at(file: Arc<dyn FileOp>, offset: usize, buf: &mut [u8]) -> SysResult<usize> {
+    if let Some(file) = file.as_any().downcast_ref::<File>() {
+        return file.read_at_offset(offset, buf);
     }
 
-    Ok(out)
+    let origin_offset = file.get_offset();
+    file.seek(offset as isize)?;
+    let mut done = 0usize;
+    let read_result = loop {
+        if done >= buf.len() {
+            break Ok(done);
+        }
+        match file.read(&mut buf[done..]) {
+            Ok(0) => break Ok(done),
+            Ok(n) => done += n,
+            Err(err) => break Err(err),
+        }
+    };
+    let restore_result = file.seek(origin_offset as isize);
+    match read_result {
+        Ok(n) => {
+            restore_result?;
+            Ok(n)
+        }
+        Err(err) => {
+            let _ = restore_result;
+            Err(err)
+        }
+    }
 }
 
 /// 地址空间
@@ -140,12 +122,14 @@ pub(crate) enum MmapBacking<'a> {
     SharedAnonymous,
     SharedFrames(&'a [Arc<FrameTracker>]),
     PrivateFile {
-        data: Vec<u8>,
+        file: Arc<dyn FileOp>,
+        offset: usize,
+        len: usize,
     },
     SharedFile {
-        key: Option<String>,
+        file: Arc<dyn FileOp>,
         offset: usize,
-        data: Vec<u8>,
+        len: usize,
     },
 }
 
@@ -153,21 +137,13 @@ pub(crate) fn mmap_file_backing(
     file: Arc<dyn FileOp>,
     offset: usize,
     len: usize,
-    map_len: usize,
+    _map_len: usize,
     shared: bool,
 ) -> SysResult<MmapBacking<'static>> {
-    let key = shared
-        .then(|| {
-            file.as_any()
-                .downcast_ref::<File>()
-                .map(|file| file.path().global_abs_path())
-        })
-        .flatten();
-    let data = read_mmap_file_data(file, offset, len, map_len)?;
     if shared {
-        Ok(MmapBacking::SharedFile { key, offset, data })
+        Ok(MmapBacking::SharedFile { file, offset, len })
     } else {
-        Ok(MmapBacking::PrivateFile { data })
+        Ok(MmapBacking::PrivateFile { file, offset, len })
     }
 }
 
@@ -459,46 +435,29 @@ impl MemorySet {
                 }
                 self.areas.push(area);
             }
-            MmapBacking::PrivateFile { data } => {
-                self.push_empty_map_area(
-                    MapArea::new_with_flags(
-                        VirtAddr::from(placement.start),
-                        VirtAddr::from(placement.end),
-                        MapType::Framed,
-                        placement.map_perm,
-                        false,
-                        placement.locked,
-                    ),
-                    None,
-                    0,
-                );
-                self.write_bytes_to_mapped_range(placement.start, &data)?;
+            MmapBacking::PrivateFile { file, offset, len } => {
+                self.push_map_area_lazy(MapArea::new_file_backed(
+                    VirtAddr::from(placement.start),
+                    VirtAddr::from(placement.end),
+                    placement.map_perm,
+                    false,
+                    placement.locked,
+                    file,
+                    offset,
+                    len,
+                ));
             }
-            MmapBacking::SharedFile { key, offset, data } => {
-                if let Some(key) = key {
-                    let frames = shared_file_frames(&key, offset, map_len, &data)?;
-                    let mut area = MapArea::new_shared(
-                        VirtAddr::from(placement.start),
-                        VirtAddr::from(placement.end),
-                        placement.map_perm,
-                    );
-                    area.locked = placement.locked;
-                    for (vpn, frame) in area.vpn_range.into_iter().zip(frames.iter()) {
-                        self.page_table
-                            .map(vpn, frame.ppn(), PTEFlags::from(placement.map_perm));
-                        area.data_frames.insert(vpn, frame.clone());
-                    }
-                    self.areas.push(area);
-                } else {
-                    let mut area = MapArea::new_shared(
-                        VirtAddr::from(placement.start),
-                        VirtAddr::from(placement.end),
-                        placement.map_perm,
-                    );
-                    area.locked = placement.locked;
-                    self.push_empty_map_area(area, None, 0);
-                    self.write_bytes_to_mapped_range(placement.start, &data)?;
-                }
+            MmapBacking::SharedFile { file, offset, len } => {
+                self.push_map_area_lazy(MapArea::new_file_backed(
+                    VirtAddr::from(placement.start),
+                    VirtAddr::from(placement.end),
+                    placement.map_perm,
+                    true,
+                    placement.locked,
+                    file,
+                    offset,
+                    len,
+                ));
             }
         }
 
@@ -1398,14 +1357,23 @@ struct MapArea {
     map_perm: MapPermission,
     shared: bool,
     locked: bool,
+    file_backing: Option<FileBacking>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
+struct FileBacking {
+    file: Arc<dyn FileOp>,
+    offset: usize,
+    len: usize,
+}
+
+#[derive(Clone)]
 struct MapAreaMeta {
     map_type: MapType,
     map_perm: MapPermission,
     shared: bool,
     locked: bool,
+    file_backing: Option<FileBacking>,
 }
 
 struct MapAreaSplit {
@@ -1433,6 +1401,7 @@ impl MapArea {
             map_perm,
             shared: false,
             locked: false,
+            file_backing: None,
         }
     }
 
@@ -1456,12 +1425,30 @@ impl MapArea {
         area
     }
 
+    pub fn new_file_backed(
+        start_va: VirtAddr,
+        end_va: VirtAddr,
+        map_perm: MapPermission,
+        shared: bool,
+        locked: bool,
+        file: Arc<dyn FileOp>,
+        offset: usize,
+        len: usize,
+    ) -> Self {
+        let mut area = Self::new(start_va, end_va, MapType::Framed, map_perm);
+        area.shared = shared;
+        area.locked = locked;
+        area.file_backing = Some(FileBacking { file, offset, len });
+        area
+    }
+
     fn meta(&self) -> MapAreaMeta {
         MapAreaMeta {
             map_type: self.map_type,
             map_perm: self.map_perm,
             shared: self.shared,
             locked: self.locked,
+            file_backing: self.file_backing.clone(),
         }
     }
 
@@ -1477,6 +1464,7 @@ impl MapArea {
             map_perm: meta.map_perm,
             shared: meta.shared,
             locked: meta.locked,
+            file_backing: meta.file_backing,
         }
     }
 
@@ -1499,7 +1487,7 @@ impl MapArea {
             Some(Self::from_parts(
                 VPNRange::new(area_start, overlap_start),
                 self.data_frames,
-                meta,
+                meta.clone(),
             ))
         } else {
             None
@@ -1508,14 +1496,14 @@ impl MapArea {
         let middle = Self::from_parts(
             VPNRange::new(overlap_start, overlap_end),
             middle_and_right,
-            meta,
+            meta.clone(),
         );
 
         let right = if overlap_end < area_end {
             Some(Self::from_parts(
                 VPNRange::new(overlap_end, area_end),
                 right_frames,
-                meta,
+                meta.clone(),
             ))
         } else {
             None
@@ -1606,6 +1594,19 @@ impl MapArea {
             MapType::Framed => {
                 let frame = frame_alloc().ok_or(Errno::ENOMEM)?;
                 ppn = frame.ppn();
+                if let Some(backing) = &self.file_backing {
+                    let page_offset = (vpn - self.vpn_range.get_start()) * PAGE_SIZE;
+                    if page_offset < backing.len {
+                        let file_offset =
+                            backing.offset.checked_add(page_offset).ok_or(Errno::EIO)?;
+                        let read_len = (backing.len - page_offset).min(PAGE_SIZE);
+                        read_file_at(
+                            backing.file.clone(),
+                            file_offset,
+                            &mut ppn.get_bytes_array()[..read_len],
+                        )?;
+                    }
+                }
                 self.data_frames.insert(vpn, Arc::new(frame));
             }
         }

@@ -1,6 +1,7 @@
 // os/src/vfs/file.rs
 
 use super::vfs::{InodeOp, InodeType, LinuxDirent64};
+use crate::fs::ext4::Ext4Inode;
 use crate::fs::page_cache::PageCache;
 use crate::fs::{KStat, Path};
 use crate::syscall::{Errno, SysResult};
@@ -69,6 +70,14 @@ pub trait FileOp: Any + Send + Sync {
 }
 
 impl File {
+    fn storage_path(&self, path: &str) -> alloc::string::String {
+        self.inode
+            .as_any()
+            .downcast_ref::<Ext4Inode>()
+            .map(|inode| inode.storage_path(path))
+            .unwrap_or_else(|| alloc::string::String::from(path))
+    }
+
     pub fn new(path: Arc<Path>, inode: Arc<dyn InodeOp>, flags: OpenFlags) -> Self {
         let abs_path = path.abs_path();
         let ty = inode.node_type();
@@ -128,7 +137,8 @@ impl File {
 
     pub fn read_all(&self) -> SysResult<Vec<u8>> {
         let inner = self.inner.lock();
-        let path = inner.path.abs_path();
+        let visible_path = inner.path.abs_path();
+        let path = self.storage_path(&visible_path);
 
         if let Some(ref pc) = inner.page_cache {
             let size = pc.len();
@@ -196,7 +206,8 @@ impl File {
 
     pub fn truncate(&self, size: usize) -> SysResult<usize> {
         let inner = self.inner.lock();
-        let path = inner.path.abs_path();
+        let visible_path = inner.path.abs_path();
+        let path = self.storage_path(&visible_path);
         match self.inode.truncate(&path, size) {
             Ok(_) => {}
             Err(Errno::ENOENT) if inner.page_cache.is_some() => {}
@@ -217,11 +228,26 @@ impl File {
         }
         Ok(0)
     }
+
+    pub fn read_at_offset(&self, offset: usize, buf: &mut [u8]) -> SysResult<usize> {
+        let inner = self.inner.lock();
+        let visible_path = inner.path.abs_path();
+        let path = self.storage_path(&visible_path);
+        if let Some(ref pc) = inner.page_cache {
+            let lower = inner.write_back.then_some((&self.inode, path.as_str()));
+            pc.read_at(offset, buf, lower)
+        } else {
+            self.inode.read_at(&path, offset, buf)
+        }
+    }
 }
 
 impl Drop for File {
     fn drop(&mut self) {
         let _ = <Self as FileOp>::fsync(self);
+        if let Some(inode) = self.inode.as_any().downcast_ref::<Ext4Inode>() {
+            inode.cleanup_orphan();
+        }
     }
 }
 
@@ -232,7 +258,8 @@ impl FileOp for File {
 
     fn read<'a>(&'a self, buf: &'a mut [u8]) -> SysResult<usize> {
         let mut inner = self.inner.lock();
-        let path = inner.path.abs_path();
+        let visible_path = inner.path.abs_path();
+        let path = self.storage_path(&visible_path);
         let offset = inner.offset;
         let n = if let Some(ref pc) = inner.page_cache {
             let lower = inner.write_back.then_some((&self.inode, path.as_str()));
@@ -246,7 +273,8 @@ impl FileOp for File {
 
     fn write<'a>(&'a self, buf: &'a [u8]) -> SysResult<usize> {
         let mut inner = self.inner.lock();
-        let path = inner.path.abs_path();
+        let visible_path = inner.path.abs_path();
+        let path = self.storage_path(&visible_path);
         if inner.flags.contains(OpenFlags::O_APPEND) {
             let append_off = if let Some(ref pc) = inner.page_cache {
                 pc.len()
@@ -263,6 +291,13 @@ impl FileOp for File {
             let end = offset.checked_add(n).ok_or(Errno::EINVAL)?;
             if end > pc.len() {
                 pc.resize(end);
+            }
+            if inner.write_back && n != 0 {
+                let written = self.inode.write_at(&path, offset, &buf[..n])?;
+                if written != n {
+                    return Err(Errno::EIO);
+                }
+                pc.mark_clean_range(offset, n);
             }
             n
         } else {
@@ -305,7 +340,8 @@ impl FileOp for File {
 
     fn get_stat(&self) -> SysResult<KStat> {
         let inner = self.inner.lock();
-        let path = inner.path.abs_path();
+        let visible_path = inner.path.abs_path();
+        let path = self.storage_path(&visible_path);
         if let Some(ref pc) = inner.page_cache {
             let mut stat = match self.inode.stat(&path) {
                 Ok(stat) => stat,
@@ -339,7 +375,8 @@ impl FileOp for File {
         let inner = self.inner.lock();
         if let Some(ref pc) = inner.page_cache {
             if inner.write_back {
-                let path = inner.path.abs_path();
+                let visible_path = inner.path.abs_path();
+                let path = self.storage_path(&visible_path);
                 match pc.sync(&self.inode, &path) {
                     Ok(_) | Err(Errno::ENOENT) => {}
                     Err(err) => return Err(err),
