@@ -172,14 +172,23 @@ pub(crate) enum MmapBacking<'a> {
 pub(crate) fn mmap_file_backing(
     file: Arc<dyn FileOp>,
     offset: usize,
-    len: usize,
-    _map_len: usize,
+    _len: usize,
+    map_len: usize,
     shared: bool,
 ) -> SysResult<MmapBacking<'static>> {
+    let file_len = file.get_stat()?.size.saturating_sub(offset).min(map_len);
     if shared {
-        Ok(MmapBacking::SharedFile { file, offset, len })
+        Ok(MmapBacking::SharedFile {
+            file,
+            offset,
+            len: file_len,
+        })
     } else {
-        Ok(MmapBacking::PrivateFile { file, offset, len })
+        Ok(MmapBacking::PrivateFile {
+            file,
+            offset,
+            len: file_len,
+        })
     }
 }
 
@@ -447,6 +456,14 @@ impl MemorySet {
             .filter(|area| area.vpn_range.intersect_with(&vpn_range))
         {
             if !Self::is_private_writable_anonymous(area) {
+                println!(
+                    "[brk] conflicting area=[{:#x}, {:#x}), perm={:?}, shared={}, file_backed={}",
+                    area.vpn_range.get_start().0,
+                    area.vpn_range.get_end().0,
+                    area.map_perm,
+                    area.shared,
+                    area.file_backing.is_some()
+                );
                 return Err(Errno::ENOMEM);
             }
         }
@@ -483,17 +500,38 @@ impl MemorySet {
     }
 
     fn prepare_mmap(&mut self, request: MmapRequest) -> SysResult<MmapPlacement> {
-        let start = self.choose_mmap_start(request.addr, request.map_len)?;
+        let mut start = self.choose_mmap_start(request.addr, request.map_len)?;
+        if request.addr.is_some()
+            && !request.replace
+            && !request.noreplace
+            && (start < MMAP_MIN_ADDR
+                || start
+                    .checked_add(request.map_len)
+                    .filter(|end| *end <= MMAP_MAX_ADDR)
+                    .is_none())
+        {
+            start = self.choose_mmap_start(None, request.map_len)?;
+        }
         if start < MMAP_MIN_ADDR {
             return Err(Errno::EINVAL);
         }
-        let end = start.checked_add(request.map_len).ok_or(Errno::ENOMEM)?;
+        let mut end = start.checked_add(request.map_len).ok_or(Errno::ENOMEM)?;
         if end > MMAP_MAX_ADDR {
             return Err(Errno::ENOMEM);
         }
 
-        let vpn_range = VPNRange::new(VirtAddr::from(start).floor(), VirtAddr::from(end).ceil());
-        let intersects = self.area_intersects(&vpn_range);
+        let mut vpn_range =
+            VPNRange::new(VirtAddr::from(start).floor(), VirtAddr::from(end).ceil());
+        let mut intersects = self.area_intersects(&vpn_range);
+        if request.addr.is_some() && !request.replace && !request.noreplace && intersects {
+            start = self.choose_mmap_start(None, request.map_len)?;
+            end = start.checked_add(request.map_len).ok_or(Errno::ENOMEM)?;
+            if end > MMAP_MAX_ADDR {
+                return Err(Errno::ENOMEM);
+            }
+            vpn_range = VPNRange::new(VirtAddr::from(start).floor(), VirtAddr::from(end).ceil());
+            intersects = self.area_intersects(&vpn_range);
+        }
         if request.noreplace && intersects {
             return Err(Errno::EEXIST);
         } else if request.replace {
@@ -909,10 +947,7 @@ impl MemorySet {
             .enumerate()
             .rev()
             .find(|(_, area)| {
-                area.vpn_range.get_end() == old_vpn_end
-                    && area
-                        .map_perm
-                        .contains(MapPermission::WRITE | MapPermission::USER)
+                area.vpn_range.get_end() == old_vpn_end && Self::is_private_writable_anonymous(area)
             })
             .ok_or(Errno::EINVAL)?;
 
@@ -1053,6 +1088,86 @@ impl MemorySet {
             }
         }
         Ok(())
+    }
+
+    pub fn set_locked_range(&mut self, vpn_range: VPNRange, locked: bool) -> SysResult {
+        for vpn in vpn_range {
+            let area = self
+                .areas
+                .iter()
+                .rev()
+                .find(|area| area.vpn_range.contain(&vpn))
+                .ok_or(Errno::ENOMEM)?;
+            if !area.map_perm.contains(MapPermission::USER) {
+                return Err(Errno::ENOMEM);
+            }
+        }
+
+        let mut idx = 0;
+        while idx < self.areas.len() {
+            if !self.areas[idx].vpn_range.intersect_with(&vpn_range) {
+                idx += 1;
+                continue;
+            }
+
+            let area = self.areas.remove(idx);
+            let overlap_start = area.vpn_range.get_start().max(vpn_range.get_start());
+            let overlap_end = area.vpn_range.get_end().min(vpn_range.get_end());
+            let split = area.split_by_overlap(overlap_start, overlap_end);
+            let mut middle = split.middle;
+            middle.locked = locked;
+
+            if let Some(left) = split.left {
+                self.areas.insert(idx, left);
+                idx += 1;
+            }
+            self.areas.insert(idx, middle);
+            idx += 1;
+            if let Some(right) = split.right {
+                self.areas.insert(idx, right);
+                idx += 1;
+            }
+        }
+        Ok(())
+    }
+
+    /// 校验 madvise 对指定地址范围的基础 Linux 语义。
+    ///
+    /// 对当前内核暂不产生实际页回收/预取行为的 advice，也必须先完成地址范围
+    /// 和 advice 适用对象校验，不能把非法入参当作成功。
+    pub fn check_madvise_range(&self, vpn_range: VPNRange, advice: i32) -> SysResult {
+        for vpn in vpn_range {
+            let area = self
+                .areas
+                .iter()
+                .rev()
+                .find(|area| area.vpn_range.contain(&vpn))
+                .ok_or(Errno::ENOMEM)?;
+            if !area.map_perm.contains(MapPermission::USER) {
+                return Err(Errno::ENOMEM);
+            }
+
+            match advice {
+                4 => {
+                    // MADV_DONTNEED is rejected for locked mappings.
+                    if area.locked {
+                        return Err(Errno::EINVAL);
+                    }
+                }
+                8 => {
+                    // MADV_FREE applies only to private anonymous mappings.
+                    if !Self::is_private_writable_anonymous(area) {
+                        return Err(Errno::EINVAL);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        match advice {
+            5 | 12 | 13 => Err(Errno::EINVAL),
+            _ => Ok(()),
+        }
     }
 
     fn modify_user_pte_perm(&mut self, vpn: VirtPageNum, map_perm: MapPermission) {
@@ -1441,15 +1556,11 @@ impl MemorySet {
             None,
             0,
         );
-        // 映射堆段，初始不分配堆内存
+        // 映射堆段，初始不分配堆内存。当前用户栈不是放在固定高地址，
+        // 因此 brk 区必须放在栈之后，避免静态程序中堆和栈起点重叠。
         let heap_bottom = user_stack_top + PAGE_SIZE;
         memory_set.heap_bottom = heap_bottom;
         memory_set.brk = heap_bottom;
-        memory_set.insert_framed_area_va_lazy(
-            VirtAddr::from(heap_bottom),
-            VirtAddr::from(heap_bottom),
-            MapPermission::READ | MapPermission::WRITE | MapPermission::USER,
-        );
 
         // 不再映射异常上下文到用户空间，发生异常时，切换到内核将用户上下文存入内核栈
 
@@ -1491,27 +1602,54 @@ impl MemorySet {
 
                 let shared_frame = area.data_frames.get(&vpn).unwrap().clone();
                 let ppn = shared_frame.ppn();
+                let parent_pte = user_space.page_table.translate(vpn).unwrap();
 
                 if area.shared {
-                    let child_flags = PTEFlags::from_bits(area.map_perm.bits).unwrap();
-                    memory_set.page_table.map(vpn, ppn, child_flags)?;
+                    let child_flags = parent_pte.flags();
+                    if let Err(err) = memory_set.page_table.map(vpn, ppn, child_flags) {
+                        println!(
+                            "[fork] duplicate shared vpn={:#x}, area=[{:#x}, {:#x}), err={:?}",
+                            vpn.0,
+                            area.vpn_range.get_start().0,
+                            area.vpn_range.get_end().0,
+                            err
+                        );
+                        return Err(err);
+                    }
                 } else if is_writable {
                     // COW 共享：标记父进程 PTE 为只读 + COW
-                    let parent_pte = user_space.page_table.translate(vpn).unwrap();
                     let mut flags = parent_pte.flags();
                     flags.remove(PTEFlags::WRITE | PTEFlags::DIRTY);
                     user_space.page_table.modify_pte(vpn, flags);
                     user_space.page_table.make_pte_cow(vpn);
 
                     // 子进程 PTE 同样为只读 + COW
-                    let mut child_flags = PTEFlags::from_bits(area.map_perm.bits).unwrap();
+                    let mut child_flags = parent_pte.flags();
                     child_flags.remove(PTEFlags::WRITE | PTEFlags::DIRTY);
-                    memory_set.page_table.map(vpn, ppn, child_flags)?;
+                    if let Err(err) = memory_set.page_table.map(vpn, ppn, child_flags) {
+                        println!(
+                            "[fork] duplicate cow vpn={:#x}, area=[{:#x}, {:#x}), err={:?}",
+                            vpn.0,
+                            area.vpn_range.get_start().0,
+                            area.vpn_range.get_end().0,
+                            err
+                        );
+                        return Err(err);
+                    }
                     memory_set.page_table.make_pte_cow(vpn);
                 } else {
                     // 只读页直接共享，无需 COW
-                    let child_flags = PTEFlags::from_bits(area.map_perm.bits).unwrap();
-                    memory_set.page_table.map(vpn, ppn, child_flags)?;
+                    let child_flags = parent_pte.flags();
+                    if let Err(err) = memory_set.page_table.map(vpn, ppn, child_flags) {
+                        println!(
+                            "[fork] duplicate readonly vpn={:#x}, area=[{:#x}, {:#x}), err={:?}",
+                            vpn.0,
+                            area.vpn_range.get_start().0,
+                            area.vpn_range.get_end().0,
+                            err
+                        );
+                        return Err(err);
+                    }
                 }
                 new_area.data_frames.insert(vpn, shared_frame);
             }
@@ -2041,6 +2179,8 @@ impl MapArea {
                             file_offset,
                             &mut ppn.get_bytes_array()[..read_len],
                         )?;
+                    } else {
+                        return Err(Errno::EIO);
                     }
                 }
                 self.data_frames.insert(vpn, Arc::new(frame));

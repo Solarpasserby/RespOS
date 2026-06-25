@@ -26,17 +26,14 @@ pub fn sys_brk(addr: usize) -> SysResult<usize> {
                 memory_set.remove_area_with_overlap_range(VPNRange::new(new_end, old_end))?;
             }
         } else if new_end > old_end {
-            match memory_set.remap_writable_area_lazy_from_end(old_end, new_end) {
-                Ok(()) => {}
-                Err(Errno::EINVAL) => {
-                    if memory_set
-                        .ensure_private_writable_anonymous_range(VPNRange::new(old_end, new_end))
-                        .is_err()
-                    {
-                        return Ok(old_brk);
-                    }
-                }
-                Err(_) => return Ok(old_brk),
+            if let Err(_err) =
+                memory_set.ensure_private_writable_anonymous_range(VPNRange::new(old_end, new_end))
+            {
+                println!(
+                    "[brk] grow failed old={:#x}, requested={:#x}, heap_bottom={:#x}, err={:?}",
+                    old_brk, addr, memory_set.heap_bottom, _err
+                );
+                return Ok(old_brk);
             }
         }
 
@@ -91,7 +88,13 @@ pub fn sys_mmap(
     if fixed && (_addr % PAGE_SIZE != 0 || _addr == 0) {
         return Err(Errno::EINVAL);
     }
-    let fixed_addr = fixed.then_some(_addr);
+    let requested_addr = if fixed {
+        Some(_addr)
+    } else if _addr != 0 {
+        Some(_addr & !(PAGE_SIZE - 1))
+    } else {
+        None
+    };
 
     let mut permission = MapPermission::from(prot);
     permission |= MapPermission::USER;
@@ -108,7 +111,13 @@ pub fn sys_mmap(
                 MmapBacking::LazyAnonymous
             };
             let start = memory_set.mmap_area(
-                fixed_addr, map_len, permission, replace, noreplace, locked, backing,
+                requested_addr,
+                map_len,
+                permission,
+                replace,
+                noreplace,
+                locked,
+                backing,
             )?;
             memory_set.flush_tlb();
             Ok(start)
@@ -124,7 +133,13 @@ pub fn sys_mmap(
 
         task.op_memory_set_write(|memory_set| {
             let start = memory_set.mmap_area(
-                fixed_addr, map_len, permission, replace, noreplace, locked, backing,
+                requested_addr,
+                map_len,
+                permission,
+                replace,
+                noreplace,
+                locked,
+                backing,
             )?;
             memory_set.flush_tlb();
             Ok(start)
@@ -250,6 +265,7 @@ pub fn sys_mlock(addr: usize, len: usize) -> SysResult<usize> {
         }
     }
 
+    task.op_memory_set_write(|memory_set| memory_set.set_locked_range(vpn_range, true))?;
     Ok(0)
 }
 
@@ -267,6 +283,7 @@ pub fn sys_munlock(addr: usize, len: usize) -> SysResult<usize> {
                 err
             }
         })?;
+    task.op_memory_set_write(|memory_set| memory_set.set_locked_range(vpn_range, false))?;
     Ok(0)
 }
 
@@ -282,11 +299,11 @@ pub fn sys_madvise(addr: usize, len: usize, advice: i32) -> SysResult<usize> {
         return Ok(0);
     }
     let end = addr.checked_add(len).ok_or(Errno::EINVAL)?;
+    let start_vpn = VirtAddr::from(addr).floor();
+    let end_vpn = VirtAddr::from(end).ceil();
 
     match advice {
         18 | 19 => {
-            let start_vpn = VirtAddr::from(addr).floor();
-            let end_vpn = VirtAddr::from(end).ceil();
             let task = current_task().expect("[kernel] current task is None.");
             task.op_memory_set_write(|memory_set| {
                 memory_set.advise_fork_behavior(VPNRange::new(start_vpn, end_vpn), advice == 18)
@@ -313,7 +330,13 @@ pub fn sys_madvise(addr: usize, len: usize, advice: i32) -> SysResult<usize> {
         | 23 // MADV_POPULATE_WRITE
         | 25 // MADV_COLLAPSE
         | 26 // MADV_GUARD_INSTALL
-        | 27 => Ok(0), // MADV_GUARD_REMOVE
+        | 27 => {
+            let task = current_task().expect("[kernel] current task is None.");
+            task.op_memory_set_read(|memory_set| {
+                memory_set.check_madvise_range(VPNRange::new(start_vpn, end_vpn), advice)
+            })?;
+            Ok(0)
+        } // MADV_GUARD_REMOVE
         _ => Err(Errno::EINVAL),
     }
 }
