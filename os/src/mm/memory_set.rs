@@ -88,6 +88,37 @@ fn read_file_at(file: Arc<dyn FileOp>, offset: usize, buf: &mut [u8]) -> SysResu
     }
 }
 
+fn write_file_at(file: Arc<dyn FileOp>, offset: usize, buf: &[u8]) -> SysResult<usize> {
+    if let Some(file) = file.as_any().downcast_ref::<File>() {
+        return file.write_at_offset(offset, buf);
+    }
+
+    let origin_offset = file.get_offset();
+    file.seek(offset as isize)?;
+    let mut done = 0usize;
+    let write_result = loop {
+        if done >= buf.len() {
+            break Ok(done);
+        }
+        match file.write(&buf[done..]) {
+            Ok(0) => break Ok(done),
+            Ok(n) => done += n,
+            Err(err) => break Err(err),
+        }
+    };
+    let restore_result = file.seek(origin_offset as isize);
+    match write_result {
+        Ok(n) => {
+            restore_result?;
+            Ok(n)
+        }
+        Err(err) => {
+            let _ = restore_result;
+            Err(err)
+        }
+    }
+}
+
 /// 地址空间
 ///
 /// 一系列有关联的逻辑段 [`MapArea`]，地址不一定连续
@@ -301,6 +332,7 @@ impl MemorySet {
             .find(|(_, area)| area.vpn_range.get_start() == vpn_start)
             .ok_or(Errno::EINVAL)?;
 
+        area.notify_mmap_close();
         area.unmap(&mut self.page_table);
         self.areas.remove(idx);
         Ok(())
@@ -323,6 +355,7 @@ impl MemorySet {
             let split = area.split_by_overlap(overlap_start, overlap_end);
 
             let mut middle = split.middle;
+            middle.notify_mmap_close();
             middle.unmap(&mut self.page_table);
 
             if let Some(left) = split.left {
@@ -558,7 +591,7 @@ impl MemorySet {
                 ));
             }
             MmapBacking::SharedFile { file, offset, len } => {
-                self.push_map_area_lazy(MapArea::new_file_backed(
+                let area = MapArea::new_file_backed(
                     VirtAddr::from(placement.start),
                     VirtAddr::from(placement.end),
                     placement.map_perm,
@@ -567,7 +600,9 @@ impl MemorySet {
                     file,
                     offset,
                     len,
-                ));
+                );
+                area.notify_mmap_open();
+                self.push_map_area_lazy(area);
             }
         }
 
@@ -693,6 +728,143 @@ impl MemorySet {
         Ok(())
     }
 
+    pub fn mremap_range(
+        &mut self,
+        old_addr: usize,
+        old_len: usize,
+        new_len: usize,
+        maymove: bool,
+        fixed_addr: Option<usize>,
+    ) -> SysResult<usize> {
+        let old_end = old_addr.checked_add(old_len).ok_or(Errno::ENOMEM)?;
+        let old_range = VPNRange::new(
+            VirtAddr::from(old_addr).floor(),
+            VirtAddr::from(old_end).floor(),
+        );
+        let new_pages = new_len / PAGE_SIZE;
+        let old_pages = old_len / PAGE_SIZE;
+        if new_pages == 0 || old_pages == 0 {
+            return Err(Errno::EINVAL);
+        }
+
+        if let Some(new_addr) = fixed_addr {
+            let new_end = new_addr.checked_add(new_len).ok_or(Errno::ENOMEM)?;
+            if new_addr < MMAP_MIN_ADDR || new_end > MMAP_MAX_ADDR {
+                return Err(Errno::ENOMEM);
+            }
+            let new_start = VirtAddr::from(new_addr).floor();
+            let new_range = VPNRange::new(new_start, VirtAddr::from(new_end).floor());
+            let mut middle = self.take_exact_area(old_range)?;
+            middle.notify_mmap_close();
+            middle.unmap_ptes_only(&mut self.page_table);
+            self.remove_area_with_overlap_range(new_range)?;
+            middle.rebase(new_start, new_pages);
+            middle.remap_existing_frames(&mut self.page_table)?;
+            middle.notify_mmap_open();
+            self.areas.push(middle);
+            return Ok(new_addr);
+        }
+
+        if new_len == old_len {
+            return Ok(old_addr);
+        }
+
+        if new_len < old_len {
+            let keep_end = old_addr.checked_add(new_len).ok_or(Errno::ENOMEM)?;
+            self.remove_area_with_overlap_range(VPNRange::new(
+                VirtAddr::from(keep_end).floor(),
+                VirtAddr::from(old_end).floor(),
+            ))?;
+            return Ok(old_addr);
+        }
+
+        let new_end = old_addr.checked_add(new_len).ok_or(Errno::ENOMEM)?;
+        if new_end <= MMAP_MAX_ADDR {
+            let extension = VPNRange::new(
+                VirtAddr::from(old_end).floor(),
+                VirtAddr::from(new_end).floor(),
+            );
+            if !self.area_intersects(&extension) {
+                self.extend_area_end(old_range, VirtAddr::from(new_end).floor())?;
+                return Ok(old_addr);
+            }
+        }
+
+        if !maymove {
+            return Err(Errno::ENOMEM);
+        }
+
+        let new_addr = self.choose_mmap_start(None, new_len)?;
+        let new_end = new_addr.checked_add(new_len).ok_or(Errno::ENOMEM)?;
+        let new_start = VirtAddr::from(new_addr).floor();
+        let new_range = VPNRange::new(new_start, VirtAddr::from(new_end).floor());
+        if self.area_intersects(&new_range) {
+            return Err(Errno::ENOMEM);
+        }
+        let mut middle = self.take_exact_area(old_range)?;
+        middle.notify_mmap_close();
+        middle.unmap_ptes_only(&mut self.page_table);
+        middle.rebase(new_start, new_pages);
+        middle.remap_existing_frames(&mut self.page_table)?;
+        middle.notify_mmap_open();
+        self.areas.push(middle);
+        Ok(new_addr)
+    }
+
+    fn take_exact_area(&mut self, vpn_range: VPNRange) -> SysResult<MapArea> {
+        let mut idx = 0;
+        while idx < self.areas.len() {
+            if !self.areas[idx].vpn_range.contain_range(&vpn_range) {
+                idx += 1;
+                continue;
+            }
+
+            let area = self.areas.remove(idx);
+            let split = area.split_by_overlap(vpn_range.get_start(), vpn_range.get_end());
+            if let Some(left) = split.left {
+                self.areas.insert(idx, left);
+                idx += 1;
+            }
+            if let Some(right) = split.right {
+                self.areas.insert(idx, right);
+            }
+            return Ok(split.middle);
+        }
+        Err(Errno::EFAULT)
+    }
+
+    fn extend_area_end(&mut self, old_range: VPNRange, new_end: VirtPageNum) -> SysResult {
+        let (idx, area) = self
+            .areas
+            .iter_mut()
+            .enumerate()
+            .rev()
+            .find(|(_, area)| area.vpn_range.contain_range(&old_range))
+            .ok_or(Errno::EFAULT)?;
+
+        if area.vpn_range.get_start() != old_range.get_start()
+            || area.vpn_range.get_end() != old_range.get_end()
+        {
+            let area = self.areas.remove(idx);
+            let split = area.split_by_overlap(old_range.get_start(), old_range.get_end());
+            let mut middle = split.middle;
+            middle.resize_end(new_end, &mut self.page_table);
+            if let Some(left) = split.left {
+                self.areas.insert(idx, left);
+                self.areas.insert(idx + 1, middle);
+            } else {
+                self.areas.insert(idx, middle);
+            }
+            if let Some(right) = split.right {
+                self.areas.push(right);
+            }
+            return Ok(());
+        }
+
+        area.resize_end(new_end, &mut self.page_table);
+        Ok(())
+    }
+
     /// 惰性重映射：只修改 VPN 范围，不分配/释放物理页（由 page fault handler 按需处理）
     pub fn remap_area_lazy(
         &mut self,
@@ -708,6 +880,7 @@ impl MemorySet {
             .ok_or(Errno::EINVAL)?;
 
         if vpn_start == new_vpn_end {
+            area.notify_mmap_close();
             area.unmap(&mut self.page_table);
             self.areas.remove(idx);
             return Ok(());
@@ -745,6 +918,7 @@ impl MemorySet {
 
         let vpn_start = area.vpn_range.get_start();
         if vpn_start == new_vpn_end {
+            area.notify_mmap_close();
             area.unmap(&mut self.page_table);
             self.areas.remove(idx);
             return Ok(());
@@ -779,6 +953,20 @@ impl MemorySet {
             }
         }
 
+        if new_map_perm.contains(MapPermission::WRITE) {
+            for area in self
+                .areas
+                .iter()
+                .filter(|area| area.vpn_range.intersect_with(&vpn_range))
+            {
+                if area.shared {
+                    if let Some(backing) = &area.file_backing {
+                        backing.file.mmap_allowed(true, true)?;
+                    }
+                }
+            }
+        }
+
         let mut idx = 0;
         while idx < self.areas.len() {
             if !self.areas[idx].vpn_range.intersect_with(&vpn_range) {
@@ -791,6 +979,11 @@ impl MemorySet {
             let overlap_end = area.vpn_range.get_end().min(vpn_range.get_end());
             let split = area.split_by_overlap(overlap_start, overlap_end);
             let mut middle = split.middle;
+            let old_writable = middle.map_perm.contains(MapPermission::WRITE);
+            let new_writable = new_map_perm.contains(MapPermission::WRITE);
+            if old_writable && !new_writable {
+                middle.notify_mmap_close();
+            }
 
             // 修改中间段已映射页的 PTE 权限
             let mapped_vpns: Vec<_> = middle.data_frames.keys().copied().collect();
@@ -798,6 +991,9 @@ impl MemorySet {
                 self.modify_user_pte_perm(vpn, new_map_perm);
             }
             middle.map_perm = new_map_perm;
+            if !old_writable && new_writable {
+                middle.notify_mmap_open();
+            }
 
             if let Some(left) = split.left {
                 self.areas.insert(idx, left);
@@ -807,6 +1003,50 @@ impl MemorySet {
             self.areas.insert(idx, middle);
             idx += 1;
 
+            if let Some(right) = split.right {
+                self.areas.insert(idx, right);
+                idx += 1;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn advise_fork_behavior(&mut self, vpn_range: VPNRange, wipe_on_fork: bool) -> SysResult {
+        for vpn in vpn_range {
+            let area = self
+                .areas
+                .iter()
+                .rev()
+                .find(|area| area.vpn_range.contain(&vpn))
+                .ok_or(Errno::ENOMEM)?;
+            if !area.map_perm.contains(MapPermission::USER) {
+                return Err(Errno::EFAULT);
+            }
+            if area.shared || area.file_backing.is_some() {
+                return Err(Errno::EINVAL);
+            }
+        }
+
+        let mut idx = 0;
+        while idx < self.areas.len() {
+            if !self.areas[idx].vpn_range.intersect_with(&vpn_range) {
+                idx += 1;
+                continue;
+            }
+
+            let area = self.areas.remove(idx);
+            let overlap_start = area.vpn_range.get_start().max(vpn_range.get_start());
+            let overlap_end = area.vpn_range.get_end().min(vpn_range.get_end());
+            let split = area.split_by_overlap(overlap_start, overlap_end);
+            let mut middle = split.middle;
+            middle.wipe_on_fork = wipe_on_fork;
+
+            if let Some(left) = split.left {
+                self.areas.insert(idx, left);
+                idx += 1;
+            }
+            self.areas.insert(idx, middle);
+            idx += 1;
             if let Some(right) = split.right {
                 self.areas.insert(idx, right);
                 idx += 1;
@@ -881,6 +1121,9 @@ impl MemorySet {
 
     /// 回收内部地址空间
     pub fn recycle_data_pages(&mut self) {
+        for area in self.areas.iter() {
+            area.notify_mmap_close();
+        }
         self.areas.clear();
         // LoongArch 当前所有用户进程共用 ASID 0。release 下如果在退出
         // 后立即回收页表页帧，后续短进程复用这些页帧时可能与残留的
@@ -902,14 +1145,14 @@ impl MemorySet {
         }
     }
     /// 创建一个拥有内核空间根页表页信息的地址空间，主要用于用户进程
-    pub fn from_kernel_page_table() -> Self {
-        Self {
+    pub fn from_kernel_page_table() -> SysResult<Self> {
+        Ok(Self {
             brk: 0,
             heap_bottom: 0,
             mmap_start: Self::initial_mmap_start(),
-            page_table: PageTable::from_kernel(),
+            page_table: PageTable::from_kernel()?,
             areas: Vec::new(),
-        }
+        })
     }
 
     /// 创建内核地址空间
@@ -996,7 +1239,8 @@ impl MemorySet {
     ///
     /// 内部完成对elf文件的解析，当前内核对堆栈地址的处理能力不完善
     pub fn from_elf_data(elf_data: &[u8]) -> (Self, usize, usize, usize, Vec<AuxHeader>) {
-        let mut memory_set = Self::from_kernel_page_table();
+        let mut memory_set =
+            Self::from_kernel_page_table().expect("failed to allocate initial user page table");
 
         // 在用户空间映射 sigreturn 跳板页
         memory_set.map_trampoline();
@@ -1042,7 +1286,7 @@ impl MemorySet {
                 }
 
                 let map_area = MapArea::new(start_va, end_va, MapType::Framed, map_perm);
-                max_vpn_end = map_area.vpn_range.get_end();
+                max_vpn_end = max_vpn_end.max(map_area.vpn_range.get_end());
                 let data_offset = start_va.0 & (PAGE_SIZE - 1);
                 memory_set.push_empty_map_area(
                     map_area,
@@ -1104,6 +1348,7 @@ impl MemorySet {
                             map_perm |= MapPermission::EXECUTE;
                         }
                         let map_area = MapArea::new(start_va, end_va, MapType::Framed, map_perm);
+                        max_vpn_end = max_vpn_end.max(map_area.vpn_range.get_end());
                         let data_offset = start_va.0 & (PAGE_SIZE - 1);
                         memory_set.push_empty_map_area(
                             map_area,
@@ -1225,7 +1470,7 @@ impl MemorySet {
     /// - 只读页：直接共享物理帧，保持只读
     /// - 惰性未分配页：只复制 VPN 范围，各自按需分配
     pub fn from_existed_user(user_space: &mut MemorySet) -> SysResult<Self> {
-        let mut memory_set = Self::from_kernel_page_table();
+        let mut memory_set = Self::from_kernel_page_table()?;
         memory_set.brk = user_space.brk;
         memory_set.heap_bottom = user_space.heap_bottom;
         memory_set.mmap_start = user_space.mmap_start;
@@ -1235,6 +1480,9 @@ impl MemorySet {
             let is_writable = area.map_perm.contains(MapPermission::WRITE);
 
             for vpn in area.vpn_range {
+                if area.wipe_on_fork {
+                    continue;
+                }
                 if !area.data_frames.contains_key(&vpn) {
                     // 惰性未分配页：PTE 无效，data_frames 无记录
                     // 子进程也跳过，各自在访问时按需分配
@@ -1267,6 +1515,7 @@ impl MemorySet {
                 }
                 new_area.data_frames.insert(vpn, shared_frame);
             }
+            new_area.notify_mmap_open();
             memory_set.areas.push(new_area);
         }
         user_space.flush_tlb();
@@ -1447,6 +1696,7 @@ struct MapArea {
     map_perm: MapPermission,
     shared: bool,
     locked: bool,
+    wipe_on_fork: bool,
     file_backing: Option<FileBacking>,
     shm_attach_id: Option<usize>,
 }
@@ -1464,6 +1714,7 @@ struct MapAreaMeta {
     map_perm: MapPermission,
     shared: bool,
     locked: bool,
+    wipe_on_fork: bool,
     file_backing: Option<FileBacking>,
     shm_attach_id: Option<usize>,
 }
@@ -1493,6 +1744,7 @@ impl MapArea {
             map_perm,
             shared: false,
             locked: false,
+            wipe_on_fork: false,
             file_backing: None,
             shm_attach_id: None,
         }
@@ -1541,6 +1793,7 @@ impl MapArea {
             map_perm: self.map_perm,
             shared: self.shared,
             locked: self.locked,
+            wipe_on_fork: self.wipe_on_fork,
             file_backing: self.file_backing.clone(),
             shm_attach_id: self.shm_attach_id,
         }
@@ -1558,6 +1811,7 @@ impl MapArea {
             map_perm: meta.map_perm,
             shared: meta.shared,
             locked: meta.locked,
+            wipe_on_fork: meta.wipe_on_fork,
             file_backing: meta.file_backing,
             shm_attach_id: meta.shm_attach_id,
         }
@@ -1577,12 +1831,15 @@ impl MapArea {
         let meta = self.meta();
         let mut middle_and_right = self.data_frames.split_off(&overlap_start);
         let right_frames = middle_and_right.split_off(&overlap_end);
+        let left_meta = Self::meta_for_subrange(&meta, area_start, area_start, overlap_start);
+        let middle_meta = Self::meta_for_subrange(&meta, area_start, overlap_start, overlap_end);
+        let right_meta = Self::meta_for_subrange(&meta, area_start, overlap_end, area_end);
 
         let left = if overlap_start > area_start {
             Some(Self::from_parts(
                 VPNRange::new(area_start, overlap_start),
                 self.data_frames,
-                meta.clone(),
+                left_meta,
             ))
         } else {
             None
@@ -1591,14 +1848,14 @@ impl MapArea {
         let middle = Self::from_parts(
             VPNRange::new(overlap_start, overlap_end),
             middle_and_right,
-            meta.clone(),
+            middle_meta,
         );
 
         let right = if overlap_end < area_end {
             Some(Self::from_parts(
                 VPNRange::new(overlap_end, area_end),
                 right_frames,
-                meta.clone(),
+                right_meta,
             ))
         } else {
             None
@@ -1611,6 +1868,22 @@ impl MapArea {
         }
     }
 
+    fn meta_for_subrange(
+        meta: &MapAreaMeta,
+        area_start: VirtPageNum,
+        range_start: VirtPageNum,
+        range_end: VirtPageNum,
+    ) -> MapAreaMeta {
+        let mut meta = meta.clone();
+        if let Some(backing) = &mut meta.file_backing {
+            let delta = (range_start - area_start) * PAGE_SIZE;
+            let range_len = (range_end - range_start) * PAGE_SIZE;
+            backing.offset = backing.offset.saturating_add(delta);
+            backing.len = backing.len.saturating_sub(delta).min(range_len);
+        }
+        meta
+    }
+
     /// 复制构造空逻辑段
     ///
     /// 只指定了一段与传入逻辑段一致的虚拟内存，内部没有实际的映射的页帧
@@ -1620,6 +1893,74 @@ impl MapArea {
             BTreeMap::new(),
             another.meta(),
         )
+    }
+
+    fn page_count(&self) -> usize {
+        self.vpn_range.get_end() - self.vpn_range.get_start()
+    }
+
+    fn notify_mmap_open(&self) {
+        if let Some(backing) = &self.file_backing {
+            backing.file.mmap_open(
+                self.shared,
+                self.map_perm.contains(MapPermission::WRITE),
+                self.page_count(),
+            );
+        }
+    }
+
+    fn notify_mmap_close(&self) {
+        if let Some(backing) = &self.file_backing {
+            backing.file.mmap_close(
+                self.shared,
+                self.map_perm.contains(MapPermission::WRITE),
+                self.page_count(),
+            );
+        }
+    }
+
+    fn resize_end(&mut self, new_end: VirtPageNum, page_table: &mut PageTable) {
+        let old_end = self.vpn_range.get_end();
+        if new_end < old_end {
+            for vpn in VPNRange::new(new_end, old_end) {
+                self.unmap_one(page_table, vpn);
+            }
+        }
+        self.vpn_range = VPNRange::new(self.vpn_range.get_start(), new_end);
+        let byte_len = self.page_count() * PAGE_SIZE;
+        if let Some(backing) = &mut self.file_backing {
+            backing.len = byte_len;
+        }
+    }
+
+    fn unmap_ptes_only(&self, page_table: &mut PageTable) {
+        for vpn in self.data_frames.keys().copied() {
+            page_table.try_unmap(vpn);
+        }
+    }
+
+    fn rebase(&mut self, new_start: VirtPageNum, new_pages: usize) {
+        let old_start = self.vpn_range.get_start();
+        let mut data_frames = BTreeMap::new();
+        for (vpn, frame) in core::mem::take(&mut self.data_frames) {
+            let offset = vpn - old_start;
+            if offset < new_pages {
+                data_frames.insert(VirtPageNum(new_start.0 + offset), frame);
+            }
+        }
+        self.data_frames = data_frames;
+        self.vpn_range = VPNRange::new(new_start, VirtPageNum(new_start.0 + new_pages));
+        if let Some(backing) = &mut self.file_backing {
+            backing.len = new_pages * PAGE_SIZE;
+        }
+    }
+
+    fn remap_existing_frames(&self, page_table: &mut PageTable) -> SysResult {
+        let flags = PTEFlags::from(self.map_perm);
+        for (vpn, frame) in self.data_frames.iter() {
+            page_table.map(*vpn, frame.ppn(), flags)?;
+        }
+        Ok(())
     }
 
     /// 为逻辑段上所有虚拟页创建物理页帧并建立映射
@@ -1732,6 +2073,22 @@ impl MapArea {
     pub fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
         match self.map_type {
             MapType::Framed => {
+                if self.shared {
+                    if let (Some(backing), Some(frame)) =
+                        (&self.file_backing, self.data_frames.get(&vpn))
+                    {
+                        let page_offset = (vpn - self.vpn_range.get_start()) * PAGE_SIZE;
+                        if page_offset < backing.len {
+                            let file_offset = backing.offset.saturating_add(page_offset);
+                            let write_len = (backing.len - page_offset).min(PAGE_SIZE);
+                            let _ = write_file_at(
+                                backing.file.clone(),
+                                file_offset,
+                                &frame.ppn().get_bytes_array()[..write_len],
+                            );
+                        }
+                    }
+                }
                 self.data_frames.remove(&vpn);
             }
             _ => {}

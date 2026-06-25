@@ -52,6 +52,17 @@ pub trait FileOp: Any + Send + Sync {
     fn get_stat(&self) -> SysResult<KStat>;
     fn readable(&self) -> bool;
     fn writable(&self) -> bool;
+    fn mmap_allowed(&self, shared: bool, writable: bool) -> SysResult {
+        if !self.readable() {
+            return Err(Errno::EACCES);
+        }
+        if shared && writable && !self.writable() {
+            return Err(Errno::EACCES);
+        }
+        Ok(())
+    }
+    fn mmap_open(&self, _shared: bool, _writable: bool, _pages: usize) {}
+    fn mmap_close(&self, _shared: bool, _writable: bool, _pages: usize) {}
     // 非阻塞可读：数据是否立即可用—— pipe 非空 / 文件总是可读
     fn read_ready(&self) -> bool {
         true
@@ -70,6 +81,10 @@ pub trait FileOp: Any + Send + Sync {
     /// 调整文件长度。普通文件和 memfd 支持该操作，其他特殊 fd 默认拒绝。
     fn truncate(&self, _size: usize) -> SysResult<usize> {
         Err(Errno::EINVAL)
+    }
+    /// 将指定范围打洞。默认文件类型不支持，memfd 支持按 Linux seal 语义清零范围。
+    fn punch_hole(&self, _offset: usize, _len: usize) -> SysResult<usize> {
+        Err(Errno::EOPNOTSUPP)
     }
 }
 
@@ -242,6 +257,30 @@ impl File {
             pc.read_at(offset, buf, lower)
         } else {
             self.inode.read_at(&path, offset, buf)
+        }
+    }
+
+    pub fn write_at_offset(&self, offset: usize, buf: &[u8]) -> SysResult<usize> {
+        let inner = self.inner.lock();
+        let visible_path = inner.path.abs_path();
+        let path = self.storage_path(&visible_path);
+        if let Some(ref pc) = inner.page_cache {
+            let lower = inner.write_back.then_some((&self.inode, path.as_str()));
+            let n = pc.write_at(offset, buf, lower)?;
+            let end = offset.checked_add(n).ok_or(Errno::EINVAL)?;
+            if end > pc.len() {
+                pc.resize(end);
+            }
+            if inner.write_back && n != 0 {
+                let written = self.inode.write_at(&path, offset, &buf[..n])?;
+                if written != n {
+                    return Err(Errno::EIO);
+                }
+                pc.mark_clean_range(offset, n);
+            }
+            Ok(n)
+        } else {
+            self.inode.write_at(&path, offset, buf)
         }
     }
 }

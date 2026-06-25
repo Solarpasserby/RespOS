@@ -26,10 +26,6 @@ pub fn sys_brk(addr: usize) -> SysResult<usize> {
                 memory_set.remove_area_with_overlap_range(VPNRange::new(new_end, old_end))?;
             }
         } else if new_end > old_end {
-            if new_end > VirtAddr::from(MMAP_MIN_ADDR).floor() {
-                return Ok(old_brk);
-            }
-
             match memory_set.remap_writable_area_lazy_from_end(old_end, new_end) {
                 Ok(()) => {}
                 Err(Errno::EINVAL) => {
@@ -60,12 +56,6 @@ pub fn sys_mmap(
     fd: isize,
     offset: usize,
 ) -> SysResult<usize> {
-    if len == 0 {
-        return Err(Errno::EINVAL);
-    }
-    let map_len = len.checked_add(PAGE_SIZE - 1).ok_or(Errno::ENOMEM)? & !(PAGE_SIZE - 1);
-
-    let prot = MMapProt::from_bits(prot as u32).ok_or(Errno::EINVAL)?;
     let raw_flags = flags as u32;
     let shared_validate =
         raw_flags & MMAPFLAGS::MAP_SHARED_VALIDATE.bits() == MMAPFLAGS::MAP_SHARED_VALIDATE.bits();
@@ -73,6 +63,22 @@ pub fn sys_mmap(
         return Err(Errno::EOPNOTSUPP);
     }
     let flags = MMAPFLAGS::from_bits_truncate(raw_flags);
+    let task = current_task().expect("[kernel] current task is None.");
+    let file = if flags.contains(MMAPFLAGS::MAP_ANONYMOUS) {
+        None
+    } else {
+        if fd < 0 {
+            return Err(Errno::EBADF);
+        }
+        Some(task.get_fd_entry(fd as usize)?.get_file())
+    };
+
+    if len == 0 {
+        return Err(Errno::EINVAL);
+    }
+    let map_len = len.checked_add(PAGE_SIZE - 1).ok_or(Errno::ENOMEM)? & !(PAGE_SIZE - 1);
+
+    let prot = MMapProt::from_bits(prot as u32).ok_or(Errno::EINVAL)?;
     let has_shared = flags.contains(MMAPFLAGS::MAP_SHARED) || shared_validate;
     let has_private = flags.contains(MMAPFLAGS::MAP_PRIVATE) && !shared_validate;
     if has_shared == has_private {
@@ -90,7 +96,6 @@ pub fn sys_mmap(
     let mut permission = MapPermission::from(prot);
     permission |= MapPermission::USER;
 
-    let task = current_task().expect("[kernel] current task is None.");
     if flags.contains(MMAPFLAGS::MAP_ANONYMOUS) {
         // 匿名映射忽略 fd，但 offset 必须为 0。
         if offset != 0 {
@@ -110,16 +115,11 @@ pub fn sys_mmap(
         })
     } else {
         // 文件映射：当前是假实现，只把文件内容读入一份私有物理页拷贝。
-        if fd < 0 {
-            return Err(Errno::EBADF);
-        }
         if offset % PAGE_SIZE != 0 {
             return Err(Errno::EINVAL);
         }
-        let file = task.get_fd_entry(fd as usize)?.get_file();
-        if !file.readable() {
-            return Err(Errno::EACCES);
-        }
+        let file = file.expect("non-anonymous mmap must have a file");
+        file.mmap_allowed(has_shared, prot.contains(MMapProt::PROT_WRITE))?;
         let backing = mmap_file_backing(file, offset, len, map_len, has_shared)?;
 
         task.op_memory_set_write(|memory_set| {
@@ -144,6 +144,44 @@ pub fn sys_munmap(addr: usize, len: usize) -> SysResult<usize> {
         memory_set.munmap_range(addr, map_len)?;
         memory_set.flush_tlb();
         Ok(0)
+    })
+}
+
+pub fn sys_mremap(
+    old_addr: usize,
+    old_size: usize,
+    new_size: usize,
+    flags: usize,
+    new_addr: usize,
+) -> SysResult<usize> {
+    const MREMAP_MAYMOVE: usize = 1;
+    const MREMAP_FIXED: usize = 2;
+    const MREMAP_DONTUNMAP: usize = 4;
+    const MREMAP_KNOWN_MASK: usize = MREMAP_MAYMOVE | MREMAP_FIXED | MREMAP_DONTUNMAP;
+
+    if old_addr % PAGE_SIZE != 0 || old_size == 0 || new_size == 0 {
+        return Err(Errno::EINVAL);
+    }
+    if flags & !MREMAP_KNOWN_MASK != 0 {
+        return Err(Errno::EINVAL);
+    }
+    if flags & MREMAP_DONTUNMAP != 0 {
+        return Err(Errno::EINVAL);
+    }
+    if flags & MREMAP_FIXED != 0 && (flags & MREMAP_MAYMOVE == 0 || new_addr % PAGE_SIZE != 0) {
+        return Err(Errno::EINVAL);
+    }
+
+    let old_len = old_size.checked_add(PAGE_SIZE - 1).ok_or(Errno::ENOMEM)? & !(PAGE_SIZE - 1);
+    let new_len = new_size.checked_add(PAGE_SIZE - 1).ok_or(Errno::ENOMEM)? & !(PAGE_SIZE - 1);
+    let maymove = flags & MREMAP_MAYMOVE != 0;
+    let fixed_addr = (flags & MREMAP_FIXED != 0).then_some(new_addr);
+
+    let task = current_task().expect("[kernel] current task is None.");
+    task.op_memory_set_write(|memory_set| {
+        let start = memory_set.mremap_range(old_addr, old_len, new_len, maymove, fixed_addr)?;
+        memory_set.flush_tlb();
+        Ok(start)
     })
 }
 
@@ -234,8 +272,8 @@ pub fn sys_munlock(addr: usize, len: usize) -> SysResult<usize> {
 
 /// 系统调用 sys_madvise
 ///
-/// 当前内核没有页回收器，也没有 per-VMA 行为标志；这里先按 Linux ABI 接受 libc
-/// 常见 advice，尤其是 glibc pthread 栈缓存路径使用的 MADV_DONTNEED/MADV_FREE。
+/// 当前内核没有页回收器；多数 advice 只做 ABI 接受。
+/// MADV_WIPEONFORK/MADV_KEEPONFORK 会记录到 VMA，fork 时按 Linux 语义处理。
 pub fn sys_madvise(addr: usize, len: usize, advice: i32) -> SysResult<usize> {
     if addr % PAGE_SIZE != 0 {
         return Err(Errno::EINVAL);
@@ -243,9 +281,18 @@ pub fn sys_madvise(addr: usize, len: usize, advice: i32) -> SysResult<usize> {
     if len == 0 {
         return Ok(0);
     }
-    let _end = addr.checked_add(len).ok_or(Errno::EINVAL)?;
+    let end = addr.checked_add(len).ok_or(Errno::EINVAL)?;
 
     match advice {
+        18 | 19 => {
+            let start_vpn = VirtAddr::from(addr).floor();
+            let end_vpn = VirtAddr::from(end).ceil();
+            let task = current_task().expect("[kernel] current task is None.");
+            task.op_memory_set_write(|memory_set| {
+                memory_set.advise_fork_behavior(VPNRange::new(start_vpn, end_vpn), advice == 18)
+            })?;
+            Ok(0)
+        }
         0  // MADV_NORMAL
         | 1  // MADV_RANDOM
         | 2  // MADV_SEQUENTIAL
@@ -260,8 +307,6 @@ pub fn sys_madvise(addr: usize, len: usize, advice: i32) -> SysResult<usize> {
         | 15 // MADV_NOHUGEPAGE
         | 16 // MADV_DONTDUMP
         | 17 // MADV_DODUMP
-        | 18 // MADV_WIPEONFORK
-        | 19 // MADV_KEEPONFORK
         | 20 // MADV_COLD
         | 21 // MADV_PAGEOUT
         | 22 // MADV_POPULATE_READ

@@ -1107,13 +1107,33 @@ pub fn sys_vmsplice(fd: usize, iov: *const IoVec, iovcnt: usize, flags: usize) -
 pub fn sys_openat(dirfd: isize, path: *const u8, flags: usize, mode: usize) -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
     let path = copy_cstr_from_user(path)?;
+    let open_flags = OpenFlags::from(flags);
+    if dirfd == AT_FDCWD {
+        if let Some(fd_text) = path.strip_prefix("/proc/self/fd/") {
+            if !fd_text.is_empty() && !fd_text.contains('/') {
+                let fd = fd_text.parse::<usize>().map_err(|_| Errno::ENOENT)?;
+                let old_entry = task.get_fd_entry(fd)?;
+                if let Some(special) = old_entry.file.as_any().downcast_ref::<SpecialFd>() {
+                    let reopened = special.reopen(open_flags).ok_or(Errno::EACCES)?;
+                    let file: alloc::sync::Arc<dyn FileOp> = alloc::sync::Arc::new(reopened);
+                    if open_flags.contains(OpenFlags::O_TRUNC)
+                        && open_flags.intersects(OpenFlags::O_WRONLY | OpenFlags::O_RDWR)
+                    {
+                        file.truncate(0)?;
+                    }
+                    let new_fd = task.alloc_fd(FdEntry::new(file, open_flags))?;
+                    return Ok(new_fd);
+                }
+            }
+        }
+    }
     let file = path_open(dirfd, path.as_str(), flags, mode)?;
     let file: alloc::sync::Arc<dyn FileOp> = if file.inode().node_type() == InodeType::Fifo {
-        open_named_fifo(file.path().abs_path().as_str(), OpenFlags::from(flags))?
+        open_named_fifo(file.path().abs_path().as_str(), open_flags)?
     } else {
         file
     };
-    let fd = task.alloc_fd(FdEntry::new(file, flags.into()))?;
+    let fd = task.alloc_fd(FdEntry::new(file, open_flags))?;
     Ok(fd)
 }
 
@@ -2029,11 +2049,16 @@ pub fn sys_truncate(path: *const u8, length: isize) -> SysResult<usize> {
 
 pub fn sys_fallocate(fd: usize, mode: usize, offset: isize, len: isize) -> SysResult<usize> {
     const FALLOC_FL_KEEP_SIZE: usize = 0x01;
+    const FALLOC_FL_PUNCH_HOLE: usize = 0x02;
+    const FALLOC_ALLOWED_FLAGS: usize = FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE;
 
     if offset < 0 || len <= 0 {
         return Err(Errno::EINVAL);
     }
-    if mode & !FALLOC_FL_KEEP_SIZE != 0 {
+    if mode & !FALLOC_ALLOWED_FLAGS != 0 {
+        return Err(Errno::EOPNOTSUPP);
+    }
+    if mode & FALLOC_FL_PUNCH_HOLE != 0 && mode & FALLOC_FL_KEEP_SIZE == 0 {
         return Err(Errno::EOPNOTSUPP);
     }
 
@@ -2045,7 +2070,9 @@ pub fn sys_fallocate(fd: usize, mode: usize, offset: isize, len: isize) -> SysRe
     if !file.writable() {
         return Err(Errno::EBADF);
     }
-    let file = file.as_any().downcast_ref::<File>().ok_or(Errno::EINVAL)?;
+    if mode & FALLOC_FL_PUNCH_HOLE != 0 {
+        return file.punch_hole(offset as usize, len as usize);
+    }
     if mode & FALLOC_FL_KEEP_SIZE == 0 && file.get_stat()?.size < end {
         file.truncate(end)?;
     }

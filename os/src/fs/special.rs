@@ -1,6 +1,7 @@
 use super::vfs::InodeType;
 use super::{FileOp, KStat, OpenFlags};
 use crate::syscall::{Errno, SysResult};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
 use spin::Mutex;
@@ -16,8 +17,9 @@ pub struct SpecialFd {
     ty: InodeType,
     mode: u32,
     offset: Mutex<usize>,
-    data: Option<Mutex<Vec<u8>>>,
-    seals: Mutex<usize>,
+    data: Option<Arc<Mutex<Vec<u8>>>>,
+    seals: Arc<Mutex<usize>>,
+    writable_shared_mappings: Arc<Mutex<usize>>,
 }
 
 impl SpecialFd {
@@ -31,7 +33,8 @@ impl SpecialFd {
             },
             offset: Mutex::new(0),
             data: None,
-            seals: Mutex::new(0),
+            seals: Arc::new(Mutex::new(0)),
+            writable_shared_mappings: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -41,9 +44,22 @@ impl SpecialFd {
             ty: InodeType::Regular,
             mode: 0o600,
             offset: Mutex::new(0),
-            data: Some(Mutex::new(Vec::new())),
-            seals: Mutex::new(if allow_sealing { 0 } else { F_SEAL_SEAL }),
+            data: Some(Arc::new(Mutex::new(Vec::new()))),
+            seals: Arc::new(Mutex::new(if allow_sealing { 0 } else { F_SEAL_SEAL })),
+            writable_shared_mappings: Arc::new(Mutex::new(0)),
         }
+    }
+
+    pub fn reopen(&self, flags: OpenFlags) -> Option<Self> {
+        Some(Self {
+            flags,
+            ty: self.ty,
+            mode: self.mode,
+            offset: Mutex::new(0),
+            data: Some(self.data.as_ref()?.clone()),
+            seals: self.seals.clone(),
+            writable_shared_mappings: self.writable_shared_mappings.clone(),
+        })
     }
 
     pub fn seals(&self) -> usize {
@@ -54,9 +70,15 @@ impl SpecialFd {
         if seals & !F_SEAL_MASK != 0 {
             return Err(Errno::EINVAL);
         }
+        if !self.writable() {
+            return Err(Errno::EPERM);
+        }
         let mut current = self.seals.lock();
         if *current & F_SEAL_SEAL != 0 {
             return Err(Errno::EPERM);
+        }
+        if seals & F_SEAL_WRITE != 0 && *self.writable_shared_mappings.lock() > 0 {
+            return Err(Errno::EBUSY);
         }
         *current |= seals;
         Ok(0)
@@ -146,6 +168,34 @@ impl FileOp for SpecialFd {
                 .intersects(OpenFlags::O_WRONLY | OpenFlags::O_RDWR)
     }
 
+    fn mmap_allowed(&self, shared: bool, writable: bool) -> SysResult {
+        if !self.readable() {
+            return Err(Errno::EACCES);
+        }
+        if shared && writable {
+            if !self.writable() {
+                return Err(Errno::EACCES);
+            }
+            if self.seals() & F_SEAL_WRITE != 0 {
+                return Err(Errno::EPERM);
+            }
+        }
+        Ok(())
+    }
+
+    fn mmap_open(&self, shared: bool, writable: bool, pages: usize) {
+        if shared && writable && pages > 0 {
+            *self.writable_shared_mappings.lock() += pages;
+        }
+    }
+
+    fn mmap_close(&self, shared: bool, writable: bool, pages: usize) {
+        if shared && writable && pages > 0 {
+            let mut count = self.writable_shared_mappings.lock();
+            *count = count.saturating_sub(pages);
+        }
+    }
+
     fn read_ready(&self) -> bool {
         self.data.is_some()
     }
@@ -161,6 +211,19 @@ impl FileOp for SpecialFd {
             return Err(Errno::EPERM);
         }
         data.resize(size, 0);
+        Ok(0)
+    }
+
+    fn punch_hole(&self, offset: usize, len: usize) -> SysResult<usize> {
+        if self.seals() & F_SEAL_WRITE != 0 {
+            return Err(Errno::EPERM);
+        }
+        let mut data = self.data.as_ref().ok_or(Errno::EINVAL)?.lock();
+        if offset >= data.len() {
+            return Ok(0);
+        }
+        let end = offset.saturating_add(len).min(data.len());
+        data[offset..end].fill(0);
         Ok(0)
     }
 }

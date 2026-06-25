@@ -172,6 +172,7 @@ const SYSCALL_MPROTECT: usize = 226;
 const SYSCALL_MSYNC: usize = 227;
 const SYSCALL_MLOCK: usize = 228;
 const SYSCALL_MUNLOCK: usize = 229;
+const SYSCALL_MREMAP: usize = 216;
 const SYSCALL_MADVISE: usize = 233;
 const SYSCALL_PERF_EVENT_OPEN: usize = 241;
 const SYSCALL_ACCEPT4: usize = 242;
@@ -603,6 +604,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         ),
         SYSCALL_FADVISE64 => sys_fadvise64(args[0], args[1] as isize, args[2] as isize, args[3]),
         SYSCALL_MPROTECT => sys_mprotect(args[0], args[1], args[2] as u32),
+        SYSCALL_MREMAP => sys_mremap(args[0], args[1], args[2], args[3], args[4]),
         SYSCALL_MSYNC => sys_msync(args[0], args[1], args[2] as i32),
         SYSCALL_MLOCK => sys_mlock(args[0], args[1]),
         SYSCALL_MUNLOCK => sys_munlock(args[0], args[1]),

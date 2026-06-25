@@ -1,6 +1,6 @@
 // os/src/arch/rv64/mm/page_table.rs
 
-use crate::config::KERNEL_BASE;
+use crate::config::{KERNEL_BASE, PAGE_SIZE_BITS};
 use crate::mm::{
     FrameTracker, KERNEL_SPACE, MapPermission, PPN_WIDTH_SV39, PhysAddr, PhysPageNum, VirtAddr,
     VirtPageNum, frame_alloc,
@@ -29,18 +29,18 @@ impl PageTable {
         }
     }
     /// 依据内核空间页表创建新页表
-    pub fn from_kernel() -> Self {
-        let frame = frame_alloc().unwrap();
+    pub fn from_kernel() -> SysResult<Self> {
+        let frame = frame_alloc().ok_or(Errno::ENOMEM)?;
         let kernel_page_table = &KERNEL_SPACE.lock().page_table;
         let kernel_root_ppn = kernel_page_table.root_ppn;
         // 拷贝内核空间的根页表页
-        let index = VirtAddr::from(KERNEL_BASE).floor().indexes()[0];
+        let index = (KERNEL_BASE >> (PAGE_SIZE_BITS + 18)) & 0x1FF;
         frame.ppn().get_pte_array()[index..]
             .copy_from_slice(&kernel_root_ppn.get_pte_array()[index..]);
-        PageTable {
+        Ok(PageTable {
             root_ppn: frame.ppn(),
             frames: vec![frame],
-        }
+        })
     }
     /// 临时页表无数据，仅用于查询用户程序的数据
     pub fn from_token(satp: usize) -> Self {
@@ -140,7 +140,9 @@ impl PageTable {
     /// 一般用于初始化一个新分配的物理页帧，所以还需要页表项标志位数据
     pub fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) -> SysResult {
         let pte = self.find_pte_create(vpn)?;
-        assert!(!pte.is_valid(), "vpn {:?} is mapped before mapping", vpn); // 页表项应当没有被创建
+        if pte.is_valid() {
+            return Err(Errno::EEXIST);
+        }
         *pte = PageTableEntry::new(
             ppn,
             flags | PTEFlags::VALID | PTEFlags::ACCESSED | PTEFlags::DIRTY,
@@ -251,7 +253,11 @@ impl PTEFlags {
 
 impl From<MapPermission> for PTEFlags {
     fn from(value: MapPermission) -> Self {
-        PTEFlags::from_bits(value.bits()).unwrap()
+        let mut flags = PTEFlags::from_bits(value.bits()).unwrap();
+        if flags.contains(PTEFlags::WRITE) {
+            flags.insert(PTEFlags::READ);
+        }
+        flags
     }
 }
 

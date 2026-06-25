@@ -21,7 +21,7 @@
 //   bit 62: NX (No Execute)
 //   bit 63: RPLV
 
-use crate::config::KERNEL_BASE;
+use crate::config::{KERNEL_BASE, PAGE_SIZE_BITS};
 use crate::mm::{FrameTracker, frame_alloc as alloc_frame};
 use crate::mm::{
     KERNEL_SPACE, MapPermission, PPN_WIDTH, PhysAddr, PhysPageNum, VirtAddr, VirtPageNum,
@@ -102,19 +102,18 @@ impl PageTable {
         }
     }
 
-    pub fn from_kernel() -> Self {
-        let frame = alloc_frame().unwrap();
+    pub fn from_kernel() -> SysResult<Self> {
+        let frame = alloc_frame().ok_or(Errno::ENOMEM)?;
         let kernel_page_table = &KERNEL_SPACE.lock().page_table;
         let kernel_root_ppn = kernel_page_table.root_ppn;
-        let vpn = VirtPageNum::from(VirtAddr::from(KERNEL_BASE).floor().0);
-        let pgd_idx = (vpn.0 >> 18) & 0x1FF;
+        let pgd_idx = (KERNEL_BASE >> (PAGE_SIZE_BITS + 18)) & 0x1FF;
         let dst = frame.ppn().get_pte_array();
         let src = kernel_root_ppn.get_pte_array();
         dst[pgd_idx..].copy_from_slice(&src[pgd_idx..]);
-        PageTable {
+        Ok(PageTable {
             root_ppn: frame.ppn(),
             frames: vec![frame],
-        }
+        })
     }
 
     pub fn from_token(token: usize) -> Self {
@@ -219,7 +218,9 @@ impl PageTable {
 impl PageTable {
     pub fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) -> SysResult {
         let pte = self.find_pte_create(vpn)?;
-        assert!(!pte.is_valid(), "vpn {:?} is mapped before mapping", vpn);
+        if pte.is_valid() {
+            return Err(Errno::EEXIST);
+        }
         *pte = PageTableEntry::new(ppn, flags | PTEFlags::VALID | PTEFlags::ACCESSED);
         Ok(())
     }
