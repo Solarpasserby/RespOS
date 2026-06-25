@@ -2,6 +2,7 @@
 
 use super::queue::{FUTEX_QUEUES, FutexKey, FutexQ, futex_hash_idx};
 use crate::mm::copy_from_user;
+use crate::mutex::SpinNoIrqLock;
 use crate::syscall::{Errno, SysResult};
 use crate::task::scheduler::{
     prepare_current_task_blocked, remove_task, switch_to_next_task, wakeup_task,
@@ -9,8 +10,20 @@ use crate::task::scheduler::{
 use crate::task::{current_task, futex::FUTEX_BITSET_MATCH_ANY, yield_current_task};
 use crate::timer::{TimeSpec, get_time_ms, get_timeout_ms};
 use alloc::vec::Vec;
+use lazy_static::lazy_static;
 
 const FUTEX_TRACE: bool = false;
+
+struct TimedFutexWait {
+    tid: usize,
+    deadline: FutexDeadline,
+    timed_out: bool,
+}
+
+lazy_static! {
+    static ref TIMED_FUTEX_WAITS: SpinNoIrqLock<Vec<TimedFutexWait>> =
+        SpinNoIrqLock::new(Vec::new());
+}
 
 fn read_futex_value(uaddr: usize) -> SysResult<u32> {
     let mut val: u32 = 0;
@@ -151,6 +164,50 @@ enum FutexDeadline {
     TimeoutClock(usize),
 }
 
+impl FutexDeadline {
+    fn expired(self) -> bool {
+        match self {
+            FutexDeadline::UserClock(deadline_ms) => get_time_ms() >= deadline_ms,
+            FutexDeadline::TimeoutClock(deadline_ms) => get_timeout_ms() >= deadline_ms,
+        }
+    }
+}
+
+fn register_timed_wait(tid: usize, deadline: FutexDeadline) {
+    TIMED_FUTEX_WAITS.lock().push(TimedFutexWait {
+        tid,
+        deadline,
+        timed_out: false,
+    });
+}
+
+fn finish_timed_wait(tid: usize) -> bool {
+    let mut waits = TIMED_FUTEX_WAITS.lock();
+    if let Some(pos) = waits.iter().position(|wait| wait.tid == tid) {
+        waits.remove(pos).timed_out
+    } else {
+        false
+    }
+}
+
+pub fn check_futex_timeouts() {
+    let mut expired = Vec::new();
+    {
+        let mut waits = TIMED_FUTEX_WAITS.lock();
+        for wait in waits.iter_mut() {
+            if !wait.timed_out && wait.deadline.expired() {
+                wait.timed_out = true;
+                expired.push(wait.tid);
+            }
+        }
+    }
+
+    for tid in expired {
+        FUTEX_QUEUES.lock().remove_tid(tid);
+        wakeup_task(tid);
+    }
+}
+
 fn futex_deadline_ms(timeout_ptr: usize, absolute: bool) -> SysResult<Option<FutexDeadline>> {
     if timeout_ptr == 0 {
         return Ok(None);
@@ -202,11 +259,7 @@ fn futex_wait_timed_common(
             );
             return Err(Errno::EAGAIN);
         }
-        let timed_out = match deadline {
-            FutexDeadline::UserClock(deadline_ms) => get_time_ms() >= deadline_ms,
-            FutexDeadline::TimeoutClock(deadline_ms) => get_timeout_ms() >= deadline_ms,
-        };
-        if timed_out {
+        if deadline.expired() {
             trace_futex("wait-timedout", &key, expected_val, bitset as usize);
             return Err(Errno::ETIMEDOUT);
         }
@@ -218,6 +271,25 @@ fn futex_wait_timed_common(
 
         {
             let mut queues = FUTEX_QUEUES.lock();
+            let actual_val = read_futex_value(uaddr)?;
+            if actual_val != expected_val {
+                trace_futex(
+                    "wait-timed-changed",
+                    &key,
+                    expected_val,
+                    actual_val as usize,
+                );
+                return Err(Errno::EAGAIN);
+            }
+
+            if !prepare_current_task_blocked() {
+                drop(queues);
+                task.set_interruptible(true);
+                yield_current_task();
+                task.set_interruptible(false);
+                continue;
+            }
+
             queues.bucket_by_idx(hash_idx).push_back(FutexQ {
                 key: key.clone(),
                 tid: task.tid(),
@@ -226,11 +298,13 @@ fn futex_wait_timed_common(
         }
 
         task.set_interruptible(true);
-        yield_current_task();
+        register_timed_wait(task.tid(), deadline);
+        switch_to_next_task();
         task.set_interruptible(false);
 
         if task.is_interrupted() {
             task.clear_interrupted();
+            finish_timed_wait(task.tid());
             let mut queues = FUTEX_QUEUES.lock();
             queues
                 .bucket_by_idx(hash_idx)
@@ -239,14 +313,17 @@ fn futex_wait_timed_common(
             return Err(Errno::EINTR);
         }
 
-        let mut queues = FUTEX_QUEUES.lock();
-        let bucket = queues.bucket_by_idx(hash_idx);
-        let old_len = bucket.len();
-        bucket.retain(|q| !(q.tid == task.tid() && q.key == key));
-        if bucket.len() == old_len {
-            trace_futex("wait-timed-woken", &key, expected_val, bitset as usize);
-            return Ok(0);
+        if finish_timed_wait(task.tid()) {
+            trace_futex("wait-timedout", &key, expected_val, bitset as usize);
+            return Err(Errno::ETIMEDOUT);
         }
+
+        FUTEX_QUEUES
+            .lock()
+            .bucket_by_idx(hash_idx)
+            .retain(|q| !(q.tid == task.tid() && q.key == key));
+        trace_futex("wait-timed-woken", &key, expected_val, bitset as usize);
+        return Ok(0);
     }
 }
 
@@ -257,19 +334,26 @@ fn futex_wake_common(uaddr: usize, nr_wake: u32, bitset: u32, private: bool) -> 
 
     let key = futex_key(uaddr, private);
     let hash_idx = futex_hash_idx(uaddr);
-    let mut queues = FUTEX_QUEUES.lock();
-    let bucket = queues.bucket_by_idx(hash_idx);
-    let mut woken = 0usize;
+    let mut woken_tids = Vec::new();
 
-    let mut i = 0;
-    while i < bucket.len() && woken < nr_wake as usize {
-        if bucket[i].key == key && (bucket[i].bitset & bitset) != 0 {
-            let futex_q = bucket.remove(i).unwrap();
-            wakeup_task(futex_q.tid);
-            woken += 1;
-        } else {
-            i += 1;
+    {
+        let mut queues = FUTEX_QUEUES.lock();
+        let bucket = queues.bucket_by_idx(hash_idx);
+        let mut i = 0;
+        while i < bucket.len() && woken_tids.len() < nr_wake as usize {
+            if bucket[i].key == key && (bucket[i].bitset & bitset) != 0 {
+                let futex_q = bucket.remove(i).unwrap();
+                woken_tids.push(futex_q.tid);
+            } else {
+                i += 1;
+            }
         }
+    }
+
+    let woken = woken_tids.len();
+    for tid in woken_tids {
+        finish_timed_wait(tid);
+        wakeup_task(tid);
     }
 
     trace_futex("wake", &key, nr_wake, woken);
@@ -296,20 +380,19 @@ fn futex_requeue_common(
 
     let source_idx = futex_hash_idx(uaddr);
     let target_idx = futex_hash_idx(uaddr2);
-    let mut queues = FUTEX_QUEUES.lock();
     let mut moved = Vec::new();
+    let mut woken_tids = Vec::new();
     let mut affected = 0usize;
-    let mut woken = 0usize;
     let mut requeued = 0usize;
 
     {
+        let mut queues = FUTEX_QUEUES.lock();
         let source_bucket = queues.bucket_by_idx(source_idx);
         let mut idx = 0;
-        while idx < source_bucket.len() && woken < nr_wake as usize {
+        while idx < source_bucket.len() && woken_tids.len() < nr_wake as usize {
             if source_bucket[idx].key == source_key {
                 let futex_q = source_bucket.remove(idx).unwrap();
-                wakeup_task(futex_q.tid);
-                woken += 1;
+                woken_tids.push(futex_q.tid);
                 affected += 1;
             } else {
                 idx += 1;
@@ -327,13 +410,18 @@ fn futex_requeue_common(
                 idx += 1;
             }
         }
+
+        if !moved.is_empty() {
+            let target_bucket = queues.bucket_by_idx(target_idx);
+            for futex_q in moved {
+                target_bucket.push_back(futex_q);
+            }
+        }
     }
 
-    if !moved.is_empty() {
-        let target_bucket = queues.bucket_by_idx(target_idx);
-        for futex_q in moved {
-            target_bucket.push_back(futex_q);
-        }
+    for tid in woken_tids {
+        finish_timed_wait(tid);
+        wakeup_task(tid);
     }
 
     Ok(affected)

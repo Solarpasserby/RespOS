@@ -465,9 +465,12 @@ pub fn sys_clone(
     #[cfg(not(target_arch = "loongarch64"))]
     let (tls, ctid) = (arg3, arg4);
 
-    // 简化模型：CLONE_THREAD 表示真正线程，必须共享地址空间。
-    // 不共享地址空间的可调度实体按新进程处理，而不是放进同一线程组。
-    if flags.contains(CloneFlags::CLONE_THREAD) && !flags.contains(CloneFlags::CLONE_VM) {
+    if stack == 0 && flags.bits() == 0 {
+        return Err(Errno::EINVAL);
+    }
+
+    // Linux 要求线程必须共享信号处理表和地址空间，且共享信号处理表必须共享地址空间。
+    if flags.contains(CloneFlags::CLONE_THREAD) && !flags.contains(CloneFlags::CLONE_SIGHAND) {
         return Err(Errno::EINVAL);
     }
     if flags.contains(CloneFlags::CLONE_SIGHAND) && !flags.contains(CloneFlags::CLONE_VM) {
@@ -481,7 +484,7 @@ pub fn sys_clone(
 
     let share_vm = flags.share_user_vm();
     // 此处发生任务复制
-    let new_task = current_task.clone_(flags);
+    let new_task = current_task.clone_(flags)?;
     let new_tid = new_task.tid();
 
     #[cfg(target_arch = "loongarch64")]
@@ -554,6 +557,9 @@ pub fn sys_clone(
     new_task_trap_cx.set_a0(0);
 
     add_task(new_task);
+    if flags.contains(CloneFlags::CLONE_VFORK) {
+        blocking_and_run_next();
+    }
     // 系统调用返回新创建任务的 pid
     Ok(new_tid)
 }

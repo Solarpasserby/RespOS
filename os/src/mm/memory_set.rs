@@ -45,6 +45,8 @@ lazy_static! {
         Arc::new(Mutex::new(MemorySet::new_kernel()));
 }
 
+const KERNEL_STACK_EAGER_SIZE: usize = KERNEL_STACK_SIZE;
+
 fn read_dynamic_linker(interp: &str) -> Option<Vec<u8>> {
     if let Ok(file) = path_open(AT_FDCWD, interp, 0, 0) {
         if let Ok(data) = file.read_all() {
@@ -199,30 +201,29 @@ impl MemorySet {
     }
 
     /// 对外暴露的添加内核栈段的接口
-    pub fn insert_stack_area(&mut self, stack_top: usize) {
-        let stack_bottom_va = VirtAddr::from(stack_top - KERNEL_STACK_SIZE);
+    pub fn insert_stack_area(&mut self, stack_top: usize) -> SysResult {
+        let stack_bottom_va = VirtAddr::from(stack_top - KERNEL_STACK_EAGER_SIZE);
         let stack_bottom_vpn = VirtPageNum::from(stack_bottom_va);
         if self
             .areas
             .iter()
             .any(|area| area.vpn_range.get_start() == stack_bottom_vpn)
         {
-            return;
+            return Ok(());
         }
-        self.push_empty_map_area(
-            MapArea::new(
-                (stack_top - KERNEL_STACK_SIZE).into(),
-                stack_top.into(),
-                MapType::Framed,
-                MapPermission::READ | MapPermission::WRITE,
-            ),
-            None,
-            0,
-        )
+        let mut area = MapArea::new(
+            (stack_top - KERNEL_STACK_EAGER_SIZE).into(),
+            stack_top.into(),
+            MapType::Framed,
+            MapPermission::READ | MapPermission::WRITE,
+        );
+        area.map(&mut self.page_table)?;
+        self.areas.push(area);
+        Ok(())
     }
     /// 对外暴露的删除内核栈段的接口
     pub fn remove_stack_area(&mut self, stack_top: usize) {
-        let stack_bottom_va = VirtAddr::from(stack_top - KERNEL_STACK_SIZE);
+        let stack_bottom_va = VirtAddr::from(stack_top - KERNEL_STACK_EAGER_SIZE);
         let stack_bottom_vpn = VirtPageNum::from(stack_bottom_va);
         if let Some((idx, area)) = self
             .areas
@@ -539,7 +540,7 @@ impl MemorySet {
                 area.shm_attach_id = Some(attach_id);
                 for (vpn, frame) in area.vpn_range.into_iter().zip(frames.iter()) {
                     self.page_table
-                        .map(vpn, frame.ppn(), PTEFlags::from(placement.map_perm));
+                        .map(vpn, frame.ppn(), PTEFlags::from(placement.map_perm))?;
                     area.data_frames.insert(vpn, frame.clone());
                 }
                 self.areas.push(area);
@@ -1223,7 +1224,7 @@ impl MemorySet {
     /// - 可写页：父子共享物理帧，两边 PTE 标记为只读 + COW
     /// - 只读页：直接共享物理帧，保持只读
     /// - 惰性未分配页：只复制 VPN 范围，各自按需分配
-    pub fn from_existed_user(user_space: &mut MemorySet) -> Self {
+    pub fn from_existed_user(user_space: &mut MemorySet) -> SysResult<Self> {
         let mut memory_set = Self::from_kernel_page_table();
         memory_set.brk = user_space.brk;
         memory_set.heap_bottom = user_space.heap_bottom;
@@ -1245,7 +1246,7 @@ impl MemorySet {
 
                 if area.shared {
                     let child_flags = PTEFlags::from_bits(area.map_perm.bits).unwrap();
-                    memory_set.page_table.map(vpn, ppn, child_flags);
+                    memory_set.page_table.map(vpn, ppn, child_flags)?;
                 } else if is_writable {
                     // COW 共享：标记父进程 PTE 为只读 + COW
                     let parent_pte = user_space.page_table.translate(vpn).unwrap();
@@ -1257,19 +1258,19 @@ impl MemorySet {
                     // 子进程 PTE 同样为只读 + COW
                     let mut child_flags = PTEFlags::from_bits(area.map_perm.bits).unwrap();
                     child_flags.remove(PTEFlags::WRITE | PTEFlags::DIRTY);
-                    memory_set.page_table.map(vpn, ppn, child_flags);
+                    memory_set.page_table.map(vpn, ppn, child_flags)?;
                     memory_set.page_table.make_pte_cow(vpn);
                 } else {
                     // 只读页直接共享，无需 COW
                     let child_flags = PTEFlags::from_bits(area.map_perm.bits).unwrap();
-                    memory_set.page_table.map(vpn, ppn, child_flags);
+                    memory_set.page_table.map(vpn, ppn, child_flags)?;
                 }
                 new_area.data_frames.insert(vpn, shared_frame);
             }
             memory_set.areas.push(new_area);
         }
         user_space.flush_tlb();
-        memory_set
+        Ok(memory_set)
     }
 }
 
@@ -1705,7 +1706,7 @@ impl MapArea {
             }
         }
         let pte_flags = PTEFlags::from(self.map_perm);
-        page_table.map(vpn, ppn, pte_flags);
+        page_table.map(vpn, ppn, pte_flags)?;
         Ok(())
     }
 
@@ -1723,7 +1724,7 @@ impl MapArea {
 
         page_table.unmap(vpn);
         self.data_frames.insert(vpn, Arc::new(frame));
-        page_table.map(vpn, ppn, PTEFlags::from(self.map_perm));
+        page_table.map(vpn, ppn, PTEFlags::from(self.map_perm))?;
         Ok(())
     }
 

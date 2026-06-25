@@ -162,6 +162,32 @@ impl TaskTimers {
     }
 }
 
+pub struct NetNamespace {
+    loopback_tag: AtomicUsize,
+}
+
+impl NetNamespace {
+    const DEFAULT_LOOPBACK_TAG: usize = 0;
+
+    fn new() -> Self {
+        Self {
+            loopback_tag: AtomicUsize::new(Self::DEFAULT_LOOPBACK_TAG),
+        }
+    }
+
+    pub fn loopback_tag(&self) -> usize {
+        self.loopback_tag.load(Ordering::Relaxed)
+    }
+
+    pub fn set_loopback_tag(&self, value: usize) {
+        self.loopback_tag.store(value, Ordering::Relaxed);
+    }
+
+    pub fn default_loopback_tag() -> usize {
+        Self::DEFAULT_LOOPBACK_TAG
+    }
+}
+
 struct TaskInner {
     tid_address: TidAddress,
     sig_context_addr: usize,
@@ -218,6 +244,7 @@ pub struct TaskControlBlock {
     root: Arc<SpinLock<Arc<Path>>>,
     exe_path: Arc<SpinLock<String>>,
     limits: Arc<ResourceLimits>,
+    net_ns: Arc<NetNamespace>,
 
     //信号
     sig_pending: SpinLock<SigPending>, // 本线程的信号队列 + 掩码（独享）
@@ -289,6 +316,7 @@ impl TaskControlBlock {
             root: Arc::new(SpinLock::new(Path::zero_init())),
             exe_path: Arc::new(SpinLock::new(String::new())),
             limits: Arc::new(ResourceLimits::new()),
+            net_ns: Arc::new(NetNamespace::new()),
 
             //信号
             sig_pending: SpinLock::new(SigPending::new()),
@@ -318,7 +346,8 @@ impl TaskControlBlock {
         let tid: TidHandle = tid_alloc();
         let tgid = tid.0;
         // 创建地址空间会拷贝内核页表，先创建内核栈生成页表映射，以保证任务切换后能正确访问内核栈
-        let mut kernel_stack = KernelStack::new(&tid);
+        let mut kernel_stack =
+            KernelStack::new(&tid).expect("failed to allocate init kernel stack");
         let (memory_set, token, user_sp, entry_point, _aux_vec) =
             MemorySet::from_elf_data(elf_data);
 
@@ -371,6 +400,7 @@ impl TaskControlBlock {
             root: Arc::new(SpinLock::new(root)),
             exe_path: Arc::new(SpinLock::new(String::new())),
             limits: Arc::new(ResourceLimits::new()),
+            net_ns: Arc::new(NetNamespace::new()),
 
             //信号
             sig_pending: SpinLock::new(SigPending::new()),
@@ -416,11 +446,11 @@ impl TaskControlBlock {
     }
 
     /// 克隆父线程，创建子线程
-    pub fn clone_(self: &Arc<Self>, flags: CloneFlags) -> Arc<Self> {
+    pub fn clone_(self: &Arc<Self>, flags: CloneFlags) -> SysResult<Arc<Self>> {
         let tid = tid_alloc();
 
         // 克隆内核栈
-        let mut kernel_stack = KernelStack::new(&tid);
+        let mut kernel_stack = KernelStack::new(&tid)?;
         let mut kernel_stack_top = kernel_stack.get_top(); // 由于栈是新建的，栈顶就是栈顶边界
         kernel_stack_top -= core::mem::size_of::<TrapContext>();
         self.clone_trap_cx(kernel_stack_top);
@@ -435,7 +465,18 @@ impl TaskControlBlock {
             .unwrap_or_else(|| self.clone());
 
         // 创建线程或是进程
-        let (tgid, pgid, sid, thread_group, parent, children, cwd, root, exe_path) = if is_thread {
+        let (
+            tgid,
+            pgid,
+            sid,
+            thread_group,
+            parent,
+            children,
+            cwd,
+            root,
+            exe_path,
+            parent_for_child,
+        ) = if is_thread {
             // 创建线程，属于同一线程组
             (
                 self.tgid(),
@@ -447,19 +488,27 @@ impl TaskControlBlock {
                 self.cwd.clone(),
                 self.root.clone(),
                 self.exe_path.clone(),
+                None,
             )
         } else {
+            let parent_for_child = if flags.contains(CloneFlags::CLONE_PARENT) {
+                self.op_parent(|parent| parent.as_ref().and_then(|parent| parent.upgrade()))
+                    .unwrap_or_else(|| INITPROC.clone())
+            } else {
+                process_leader.clone()
+            };
             // 创建进程
             (
                 tid.0,
                 self.pgid(),
                 self.sid(),
                 Arc::new(SpinLock::new(ThreadGroup::new())),
-                Arc::new(SpinLock::new(Some(Arc::downgrade(&process_leader)))),
+                Arc::new(SpinLock::new(Some(Arc::downgrade(&parent_for_child)))),
                 Arc::new(SpinLock::new(BTreeMap::new())),
                 Arc::new(SpinLock::new(Path::from_existed_user(&self.cwd()))),
                 Arc::new(SpinLock::new(Path::from_existed_user(&self.root()))),
                 Arc::new(SpinLock::new(self.exe_path())),
+                Some(parent_for_child),
             )
         };
 
@@ -469,7 +518,7 @@ impl TaskControlBlock {
         } else {
             Arc::new(RwLock::new(MemorySet::from_existed_user(
                 &mut self.memory_set.write(),
-            )))
+            )?))
         };
 
         // 是否与父线程共享文件数据
@@ -487,6 +536,11 @@ impl TaskControlBlock {
             self.itimers.clone()
         } else {
             Arc::new(TaskTimers::new())
+        };
+        let net_ns = if flags.contains(CloneFlags::CLONE_NEWNET) {
+            Arc::new(NetNamespace::new())
+        } else {
+            self.net_ns.clone()
         };
         let current_sig_mask = self.op_sig_pending(|pending| pending.mask);
         let (sig_handler, sig_pending, sig_stack) = if is_thread {
@@ -541,6 +595,7 @@ impl TaskControlBlock {
             root,
             exe_path,
             limits,
+            net_ns,
 
             // 信号
             sig_pending,
@@ -565,8 +620,8 @@ impl TaskControlBlock {
         task_ctrl_block.write_task_cx(kernel_stack_top);
 
         // 只有新进程进入 children；同线程组内的新线程不由 wait4 回收。
-        if !is_thread {
-            self.add_child(task_ctrl_block.clone());
+        if let Some(parent) = parent_for_child {
+            parent.add_child(task_ctrl_block.clone());
         }
         // 在线程组中添加线程
         task_ctrl_block.op_thread_group_mut(|tg| tg.add(task_ctrl_block.clone()));
@@ -574,7 +629,7 @@ impl TaskControlBlock {
         // 在任务管理器中添加线程号到线程的映射
         TASK_MANAGER.add(&task_ctrl_block);
 
-        task_ctrl_block
+        Ok(task_ctrl_block)
     }
 
     /// 载入可执行程序，主要修改地址空间、用户栈、异常上下文等数据
@@ -699,6 +754,9 @@ impl TaskControlBlock {
     }
     pub fn umask(&self) -> usize {
         self.umask.load(Ordering::Relaxed)
+    }
+    pub fn net_ns(&self) -> Arc<NetNamespace> {
+        self.net_ns.clone()
     }
     pub fn status(&self) -> TaskStatus {
         self.task_status.lock().clone()
@@ -1504,10 +1562,13 @@ pub fn task_group_exit(task: Arc<TaskControlBlock>, exit_code: i32) {
     // robust list 仍然依赖用户地址，必须在拆掉用户地址空间前处理。
     exit_robust_list(&leader);
 
-    // 回收进程级共享资源。
-    task.op_memory_set_write(|mem| {
-        mem.recycle_data_pages();
-    });
+    // CLONE_VM creates a separate process that shares the same mm. Exiting one
+    // owner must not tear down mappings still referenced by another task.
+    if Arc::strong_count(&task.memory_set) == 1 {
+        task.op_memory_set_write(|mem| {
+            mem.recycle_data_pages();
+        });
+    }
     task.fd_table.lock().clear();
 
     leader.set_exit_code(exit_code);
@@ -1845,6 +1906,5 @@ impl CloneFlags {
     /// 地址空间，避免 exec 替换掉父进程地址空间。
     pub fn share_user_vm(self) -> bool {
         self.contains(Self::CLONE_VM)
-            && !(self.contains(Self::CLONE_VFORK) && !self.contains(Self::CLONE_THREAD))
     }
 }

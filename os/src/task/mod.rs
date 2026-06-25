@@ -20,7 +20,7 @@ use crate::loader::get_app_data_by_name;
 use alloc::sync::Arc;
 pub use aux::*;
 pub use context::TaskContext;
-pub use futex::do_futex;
+pub use futex::{check_futex_timeouts, do_futex};
 use lazy_static::lazy_static;
 pub use manager::TASK_MANAGER;
 pub use processor::{current_task, current_user_token, run_tasks, take_current_task};

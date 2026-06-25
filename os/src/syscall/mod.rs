@@ -203,7 +203,7 @@ const SYSCALL_MEMFD_SECRET: usize = 447;
 
 mod errno;
 mod fs;
-mod ipc;
+pub(crate) mod ipc;
 mod mm;
 mod net;
 mod process;
@@ -231,6 +231,7 @@ use time::*;
 pub use time::check_posix_timers;
 
 pub fn check_all_task_timers() {
+    crate::task::check_futex_timeouts();
     crate::task::TASK_MANAGER.for_each(|task| {
         task.check_real_timer();
         check_posix_timers(task);

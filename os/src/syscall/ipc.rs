@@ -6,6 +6,7 @@ use crate::timer::get_time_ms;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use lazy_static::lazy_static;
 use spin::Mutex;
 
@@ -20,6 +21,7 @@ const IPC_INFO: usize = 3;
 const SHM_RDONLY: usize = 0o10000;
 const SHM_RND: usize = 0o20000;
 const SHM_REMAP: usize = 0o40000;
+const SHM_HUGETLB: usize = 0o4000;
 const SHM_LOCK: usize = 11;
 const SHM_UNLOCK: usize = 12;
 const SHM_STAT: usize = 13;
@@ -30,9 +32,17 @@ const SHM_LOCKED: u32 = 0o2000;
 
 const SHMMNI: usize = 4096;
 const SHMMIN: usize = 1;
-const SHMMAX: usize = usize::MAX - (1 << 24);
-const SHMALL: usize = usize::MAX / PAGE_SIZE;
+const DEFAULT_SHMMAX: usize = usize::MAX - (1 << 24);
+const DEFAULT_SHMALL: usize = usize::MAX / PAGE_SIZE;
 const MODE_MASK: u32 = 0o777;
+#[cfg(target_arch = "loongarch64")]
+const SHMLBA: usize = 0x10000;
+#[cfg(not(target_arch = "loongarch64"))]
+const SHMLBA: usize = PAGE_SIZE;
+
+static SHMMAX_VALUE: AtomicUsize = AtomicUsize::new(DEFAULT_SHMMAX);
+static SHMMNI_VALUE: AtomicUsize = AtomicUsize::new(SHMMNI);
+static SHMALL_VALUE: AtomicUsize = AtomicUsize::new(DEFAULT_SHMALL);
 
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
@@ -90,6 +100,7 @@ struct ShmSegment {
     id: usize,
     index: usize,
     size: usize,
+    map_len: usize,
     mode: u32,
     uid: u32,
     gid: u32,
@@ -125,7 +136,7 @@ impl ShmTable {
     }
 
     fn alloc_id(&mut self) -> SysResult<(usize, usize)> {
-        if self.segments.len() >= SHMMNI {
+        if self.segments.len() >= shmmni_value() {
             return Err(Errno::ENOSPC);
         }
         let id = self.next_id;
@@ -169,6 +180,33 @@ impl ShmTable {
 
 lazy_static! {
     static ref SHM_TABLE: Mutex<ShmTable> = Mutex::new(ShmTable::new());
+}
+
+pub(crate) fn shmmax_value() -> usize {
+    SHMMAX_VALUE.load(Ordering::Relaxed)
+}
+
+pub(crate) fn shmmni_value() -> usize {
+    SHMMNI_VALUE.load(Ordering::Relaxed)
+}
+
+pub(crate) fn shmall_value() -> usize {
+    SHMALL_VALUE.load(Ordering::Relaxed)
+}
+
+pub(crate) fn set_shmmax_value(value: usize) -> SysResult<()> {
+    SHMMAX_VALUE.store(value, Ordering::Relaxed);
+    Ok(())
+}
+
+pub(crate) fn set_shmmni_value(value: usize) -> SysResult<()> {
+    SHMMNI_VALUE.store(value, Ordering::Relaxed);
+    Ok(())
+}
+
+pub(crate) fn set_shmall_value(value: usize) -> SysResult<()> {
+    SHMALL_VALUE.store(value, Ordering::Relaxed);
+    Ok(())
 }
 
 fn now_sec() -> isize {
@@ -260,6 +298,9 @@ fn lookup_shm_id(table: &ShmTable, shmid: usize, by_index: bool) -> SysResult<us
 
 pub fn sys_shmget(key: isize, size: usize, shmflg: usize) -> SysResult<usize> {
     let mut table = SHM_TABLE.lock();
+    if shmflg & SHM_HUGETLB != 0 {
+        return Err(Errno::EINVAL);
+    }
     if key != IPC_PRIVATE {
         if let Some(segment) = table.find_by_key(key) {
             if shmflg & IPC_CREAT != 0 && shmflg & IPC_EXCL != 0 {
@@ -278,11 +319,19 @@ pub fn sys_shmget(key: isize, size: usize, shmflg: usize) -> SysResult<usize> {
         }
     }
 
-    if size < SHMMIN || size > SHMMAX {
+    if size < SHMMIN || size > shmmax_value() {
         return Err(Errno::EINVAL);
     }
     let map_len = size.checked_add(PAGE_SIZE - 1).ok_or(Errno::ENOMEM)? & !(PAGE_SIZE - 1);
     let page_count = map_len / PAGE_SIZE;
+    let used_pages: usize = table
+        .segments
+        .values()
+        .map(|segment| segment.map_len / PAGE_SIZE)
+        .sum();
+    if used_pages.checked_add(page_count).ok_or(Errno::ENOSPC)? > shmall_value() {
+        return Err(Errno::ENOSPC);
+    }
     let mut frames = Vec::new();
     for _ in 0..page_count {
         frames.push(Arc::new(crate::mm::frame_alloc().ok_or(Errno::ENOMEM)?));
@@ -297,6 +346,7 @@ pub fn sys_shmget(key: isize, size: usize, shmflg: usize) -> SysResult<usize> {
             id,
             index,
             size,
+            map_len,
             mode: (shmflg as u32) & MODE_MASK,
             uid,
             gid,
@@ -316,7 +366,7 @@ pub fn sys_shmget(key: isize, size: usize, shmflg: usize) -> SysResult<usize> {
 }
 
 pub fn sys_shmat(shmid: usize, shmaddr: usize, shmflg: usize) -> SysResult<usize> {
-    let (size, frames, readonly, attach_id) = {
+    let (map_len, frames, readonly, attach_id) = {
         let mut table = SHM_TABLE.lock();
         let segment = table.segments.get_mut(&shmid).ok_or(Errno::EINVAL)?;
         let readonly = (shmflg & SHM_RDONLY) != 0;
@@ -328,11 +378,11 @@ pub fn sys_shmat(shmid: usize, shmaddr: usize, shmflg: usize) -> SysResult<usize
         segment.lpid = current_task()
             .expect("[kernel] current task is None.")
             .tgid() as i32;
-        let size = segment.size;
+        let map_len = segment.map_len;
         let frames = segment.frames.clone();
         let attach_id = table.alloc_attach_id()?;
         table.attach_owners.insert(attach_id, shmid);
-        (size, frames, readonly, attach_id)
+        (map_len, frames, readonly, attach_id)
     };
 
     let addr = if shmaddr == 0 {
@@ -343,7 +393,7 @@ pub fn sys_shmat(shmid: usize, shmaddr: usize, shmflg: usize) -> SysResult<usize
     } else if shmaddr % PAGE_SIZE == 0 {
         Some(shmaddr)
     } else if shmflg & SHM_RND != 0 {
-        let rounded = shmaddr & !(PAGE_SIZE - 1);
+        let rounded = shmaddr & !(SHMLBA - 1);
         if rounded == 0 && shmflg & SHM_REMAP != 0 {
             return Err(Errno::EINVAL);
         }
@@ -361,7 +411,7 @@ pub fn sys_shmat(shmid: usize, shmaddr: usize, shmflg: usize) -> SysResult<usize
     let result = task.op_memory_set_write(|memory_set| {
         let start = memory_set.mmap_area(
             addr,
-            size,
+            map_len,
             permission,
             shmflg & SHM_REMAP != 0,
             false,
@@ -384,11 +434,11 @@ pub fn sys_shmctl(shmid: usize, cmd: usize, buf: usize) -> SysResult<usize> {
     match cmd {
         IPC_INFO => {
             let info = ShmInfoLimits {
-                shmmax: SHMMAX,
+                shmmax: shmmax_value(),
                 shmmin: SHMMIN,
-                shmmni: SHMMNI,
-                shmseg: SHMMNI,
-                shmall: SHMALL,
+                shmmni: shmmni_value(),
+                shmseg: shmmni_value(),
+                shmall: shmall_value(),
                 unused: [0; 4],
             };
             copy_to_user(buf as *mut ShmInfoLimits, &info as *const ShmInfoLimits, 1)?;
@@ -399,7 +449,7 @@ pub fn sys_shmctl(shmid: usize, cmd: usize, buf: usize) -> SysResult<usize> {
             let pages = table
                 .segments
                 .values()
-                .map(|segment| (segment.size + PAGE_SIZE - 1) / PAGE_SIZE)
+                .map(|segment| segment.map_len / PAGE_SIZE)
                 .sum();
             let info = ShmInfo {
                 used_ids: table.segments.len() as i32,

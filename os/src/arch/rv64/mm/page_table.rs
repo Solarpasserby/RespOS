@@ -5,6 +5,7 @@ use crate::mm::{
     FrameTracker, KERNEL_SPACE, MapPermission, PPN_WIDTH_SV39, PhysAddr, PhysPageNum, VirtAddr,
     VirtPageNum, frame_alloc,
 };
+use crate::syscall::{Errno, SysResult};
 use alloc::string::String;
 use alloc::{vec, vec::Vec};
 use bitflags::*;
@@ -90,21 +91,19 @@ pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> &'static mut T {
 /// 均返回页表项的可变借用，用于修改或读取页表项
 impl PageTable {
     /// 根据虚拟地址寻找目标页表项，若发现多级页表不存在则创建
-    fn find_pte_create(&mut self, vpn: VirtPageNum) -> Option<&mut PageTableEntry> {
+    fn find_pte_create(&mut self, vpn: VirtPageNum) -> SysResult<&mut PageTableEntry> {
         let idxs = vpn.indexes();
         let mut ppn = self.root_ppn;
-        let mut result: Option<&mut PageTableEntry> = None;
         for i in 0..3 {
             let pte = &mut ppn.get_pte_array()[idxs[i]];
             if i == 2 {
                 // 直接返回目标的页表项，
-                result = Some(pte);
-                break;
+                return Ok(pte);
             }
             // 页表页由页帧分配器分配得到，默认为空，没有修改的页表项均无效
             if !pte.is_valid() {
                 // 当前页表项无效，表示当前非叶子页表页的孩子页表页不存在，创建新的页表页
-                let frame = frame_alloc().unwrap();
+                let frame = frame_alloc().ok_or(Errno::ENOMEM)?;
                 // 更新当前页表页上的页表项
                 *pte = PageTableEntry::new(frame.ppn(), PTEFlags::VALID);
                 // 加入页表，由页表统一维护页表页帧
@@ -112,7 +111,7 @@ impl PageTable {
             }
             ppn = pte.ppn();
         }
-        result
+        Err(Errno::EFAULT)
     }
 
     /// 根据虚拟地址寻找目标页表项
@@ -139,13 +138,14 @@ impl PageTable {
     /// 在页表中建立物理地址和虚拟地址的映射关系
     ///
     /// 一般用于初始化一个新分配的物理页帧，所以还需要页表项标志位数据
-    pub fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) {
-        let pte = self.find_pte_create(vpn).unwrap();
+    pub fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) -> SysResult {
+        let pte = self.find_pte_create(vpn)?;
         assert!(!pte.is_valid(), "vpn {:?} is mapped before mapping", vpn); // 页表项应当没有被创建
         *pte = PageTableEntry::new(
             ppn,
             flags | PTEFlags::VALID | PTEFlags::ACCESSED | PTEFlags::DIRTY,
         ); // 被映射的物理页帧必定有效，这里需要统一配置
+        Ok(())
     }
     /// 在页表中消除物理页和虚拟页的映射关系
     pub fn unmap(&mut self, vpn: VirtPageNum) {

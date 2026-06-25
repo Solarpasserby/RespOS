@@ -26,6 +26,7 @@ use crate::mm::{FrameTracker, frame_alloc as alloc_frame};
 use crate::mm::{
     KERNEL_SPACE, MapPermission, PPN_WIDTH, PhysAddr, PhysPageNum, VirtAddr, VirtPageNum,
 };
+use crate::syscall::{Errno, SysResult};
 use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec;
@@ -180,22 +181,22 @@ fn get_vpn_indexes(vpn: VirtPageNum) -> [usize; 3] {
 }
 
 impl PageTable {
-    fn find_pte_create(&mut self, vpn: VirtPageNum) -> Option<&mut PageTableEntry> {
+    fn find_pte_create(&mut self, vpn: VirtPageNum) -> SysResult<&mut PageTableEntry> {
         let idxs = get_vpn_indexes(vpn);
         let mut ppn = self.root_ppn;
         for i in 0..3 {
             let pte = &mut ppn.get_pte_array()[idxs[i]];
             if i == 2 {
-                return Some(pte);
+                return Ok(pte);
             }
             if !pte.is_valid() {
-                let frame = alloc_frame().unwrap();
+                let frame = alloc_frame().ok_or(Errno::ENOMEM)?;
                 *pte = PageTableEntry::new_table(frame.ppn());
                 self.frames.push(frame);
             }
             ppn = pte.ppn();
         }
-        None
+        Err(Errno::EFAULT)
     }
 
     fn find_pte(&self, vpn: VirtPageNum) -> Option<&mut PageTableEntry> {
@@ -216,10 +217,11 @@ impl PageTable {
 }
 
 impl PageTable {
-    pub fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) {
-        let pte = self.find_pte_create(vpn).unwrap();
+    pub fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) -> SysResult {
+        let pte = self.find_pte_create(vpn)?;
         assert!(!pte.is_valid(), "vpn {:?} is mapped before mapping", vpn);
         *pte = PageTableEntry::new(ppn, flags | PTEFlags::VALID | PTEFlags::ACCESSED);
+        Ok(())
     }
 
     pub fn unmap(&mut self, vpn: VirtPageNum) {

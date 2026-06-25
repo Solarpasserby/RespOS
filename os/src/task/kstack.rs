@@ -3,6 +3,7 @@
 use super::tid::TidHandle;
 use crate::config::{KERNEL_STACK_SIZE, KERNEL_STACK_TOP, PAGE_SIZE};
 use crate::mm::KERNEL_SPACE;
+use crate::syscall::SysResult;
 use alloc::vec::Vec;
 use core::cell::SyncUnsafeCell;
 use lazy_static::lazy_static;
@@ -79,15 +80,18 @@ impl KernelStack {
         }
     }
 
-    pub fn new(tid_handle: &TidHandle) -> Self {
+    pub fn new(tid_handle: &TidHandle) -> SysResult<Self> {
         let _tid = tid_handle.0;
         let slot = KERNEL_STACK_ALLOCATOR.lock().alloc();
         let stack_top = get_kernel_stack_top_edge(slot);
-        KERNEL_SPACE.lock().insert_stack_area(stack_top);
-        Self {
+        if let Err(err) = KERNEL_SPACE.lock().insert_stack_area(stack_top) {
+            KERNEL_STACK_ALLOCATOR.lock().dealloc(slot);
+            return Err(err);
+        }
+        Ok(Self {
             top: SyncUnsafeCell::new(stack_top),
             slot,
-        }
+        })
     }
 
     pub fn get_top_edge(&self) -> usize {
