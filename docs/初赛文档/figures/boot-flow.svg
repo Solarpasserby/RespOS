@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="470" viewBox="0 0 920 470">
+  <defs>
+    <style>
+      .title{font:700 22px sans-serif;fill:#202124}
+      .head{font:700 17px sans-serif;fill:#202124}
+      .text{font:14px sans-serif;fill:#344054}
+      .mono{font:13px monospace;fill:#344054}
+      .rv{fill:#eef4ff;stroke:#6172f3;stroke-width:1.3;rx:8}
+      .la{fill:#fff7ed;stroke:#f97316;stroke-width:1.3;rx:8}
+      .common{fill:#f8fafc;stroke:#98a2b3;stroke-width:1.2;rx:8}
+      .arrow{stroke:#667085;stroke-width:1.8;fill:none;marker-end:url(#arrow)}
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#667085"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="920" height="470" fill="#ffffff"/>
+  <text x="460" y="34" text-anchor="middle" class="title">双架构启动与高地址切换</text>
+
+  <text x="240" y="74" text-anchor="middle" class="head">RISC-V 64</text>
+  <text x="680" y="74" text-anchor="middle" class="head">LoongArch 64</text>
+
+  <rect x="65" y="95" width="350" height="58" class="rv"/>
+  <text x="240" y="121" text-anchor="middle" class="mono">_start: set boot_stack</text>
+  <text x="240" y="142" text-anchor="middle" class="text">汇编建立早期栈</text>
+  <rect x="65" y="178" width="350" height="58" class="rv"/>
+  <text x="240" y="204" text-anchor="middle" class="mono">boot_pagetable + satp</text>
+  <text x="240" y="225" text-anchor="middle" class="text">映射低地址和高半区 1 GiB 大页</text>
+  <rect x="65" y="261" width="350" height="58" class="rv"/>
+  <text x="240" y="287" text-anchor="middle" class="mono">enter_main: sp += KERNEL_BASE</text>
+  <text x="240" y="308" text-anchor="middle" class="text">跳转到高地址 rust_main</text>
+
+  <rect x="505" y="95" width="350" height="58" class="la"/>
+  <text x="680" y="121" text-anchor="middle" class="mono">_start: configure DMW0/DMW1</text>
+  <text x="680" y="142" text-anchor="middle" class="text">直接映射阶段运行</text>
+  <rect x="505" y="178" width="350" height="58" class="la"/>
+  <text x="680" y="204" text-anchor="middle" class="mono">enable_boot_paging()</text>
+  <text x="680" y="225" text-anchor="middle" class="text">构造临时三级页表并配置 TLB refill</text>
+  <rect x="505" y="261" width="350" height="58" class="la"/>
+  <text x="680" y="287" text-anchor="middle" class="mono">jump_to_high_half()</text>
+  <text x="680" y="308" text-anchor="middle" class="text">进入共享的高地址内核模型</text>
+
+  <rect x="285" y="365" width="350" height="68" class="common"/>
+  <text x="460" y="392" text-anchor="middle" class="mono">rust_main_high()</text>
+  <text x="460" y="414" text-anchor="middle" class="text">trap::init -> mm::init -> net::init -> task::run_tasks</text>
+
+  <path d="M240 153 L240 178" class="arrow"/>
+  <path d="M240 236 L240 261" class="arrow"/>
+  <path d="M240 319 C270 350 330 360 365 365" class="arrow"/>
+  <path d="M680 153 L680 178" class="arrow"/>
+  <path d="M680 236 L680 261" class="arrow"/>
+  <path d="M680 319 C650 350 590 360 555 365" class="arrow"/>
+</svg>

@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="360" viewBox="0 0 920 360">
+  <defs>
+    <style>
+      .box { fill: #f8fafc; stroke: #64748b; stroke-width: 1.4; rx: 8; }
+      .drv { fill: #eff6ff; stroke: #2563eb; stroke-width: 1.5; rx: 8; }
+      .fs { fill: #ecfdf5; stroke: #16a34a; stroke-width: 1.5; rx: 8; }
+      .plat { fill: #fff7ed; stroke: #ea580c; stroke-width: 1.5; rx: 8; }
+      .text { font-family: Arial, Helvetica, sans-serif; font-size: 15px; fill: #1f2937; }
+      .small { font-family: Arial, Helvetica, sans-serif; font-size: 12px; fill: #475569; }
+      .arrow { stroke: #475569; stroke-width: 1.7; fill: none; marker-end: url(#arrow); }
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+      <path d="M0,0 L10,4 L0,8 Z" fill="#475569"/>
+    </marker>
+  </defs>
+
+  <rect x="40" y="55" width="150" height="64" class="fs"/>
+  <text x="115" y="84" text-anchor="middle" class="text">Ext4 / VFS</text>
+  <text x="115" y="104" text-anchor="middle" class="small">file read / write</text>
+
+  <rect x="260" y="55" width="150" height="64" class="fs"/>
+  <text x="335" y="84" text-anchor="middle" class="text">Disk</text>
+  <text x="335" y="104" text-anchor="middle" class="small">KernelDevOp adapter</text>
+
+  <rect x="480" y="55" width="150" height="64" class="drv"/>
+  <text x="555" y="84" text-anchor="middle" class="text">BlockDevice</text>
+  <text x="555" y="104" text-anchor="middle" class="small">read_block / write_block</text>
+
+  <rect x="700" y="55" width="160" height="64" class="drv"/>
+  <text x="780" y="84" text-anchor="middle" class="text">VirtIOBlk</text>
+  <text x="780" y="104" text-anchor="middle" class="small">virtio-drivers</text>
+
+  <rect x="480" y="215" width="150" height="64" class="plat"/>
+  <text x="555" y="244" text-anchor="middle" class="text">VirtIoHalImpl</text>
+  <text x="555" y="264" text-anchor="middle" class="small">DMA / share / MMIO</text>
+
+  <rect x="700" y="215" width="160" height="64" class="plat"/>
+  <text x="780" y="244" text-anchor="middle" class="text">platform config</text>
+  <text x="780" y="264" text-anchor="middle" class="small">MMIO / PCI transport</text>
+
+  <rect x="40" y="215" width="150" height="64" class="fs"/>
+  <text x="115" y="244" text-anchor="middle" class="text">devfs</text>
+  <text x="115" y="264" text-anchor="middle" class="small">/dev/null / loop0 ...</text>
+
+  <rect x="260" y="215" width="150" height="64" class="box"/>
+  <text x="335" y="244" text-anchor="middle" class="text">InodeOp</text>
+  <text x="335" y="264" text-anchor="middle" class="small">device file behavior</text>
+
+  <path d="M190 87 H260" class="arrow"/>
+  <path d="M410 87 H480" class="arrow"/>
+  <path d="M630 87 H700" class="arrow"/>
+  <path d="M780 119 V215" class="arrow"/>
+  <path d="M700 247 H630" class="arrow"/>
+  <path d="M555 215 V119" class="arrow"/>
+  <path d="M190 247 H260" class="arrow"/>
+  <path d="M410 247 H480" class="arrow"/>
+</svg>

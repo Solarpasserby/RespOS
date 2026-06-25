@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="300" viewBox="0 0 920 300">
+  <defs>
+    <style>
+      .box { fill: #f8fafc; stroke: #64748b; stroke-width: 1.4; rx: 8; }
+      .dev { fill: #fff7ed; stroke: #ea580c; stroke-width: 1.5; rx: 8; }
+      .queue { fill: #ecfdf5; stroke: #16a34a; stroke-width: 1.5; rx: 8; }
+      .text { font-family: Arial, Helvetica, sans-serif; font-size: 15px; fill: #1f2937; }
+      .small { font-family: Arial, Helvetica, sans-serif; font-size: 12px; fill: #475569; }
+      .arrow { stroke: #475569; stroke-width: 1.7; fill: none; marker-end: url(#arrow); }
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+      <path d="M0,0 L10,4 L0,8 Z" fill="#475569"/>
+    </marker>
+  </defs>
+
+  <rect x="45" y="70" width="150" height="62" class="box"/>
+  <text x="120" y="98" text-anchor="middle" class="text">smoltcp send</text>
+  <text x="120" y="118" text-anchor="middle" class="small">fill packet bytes</text>
+
+  <rect x="270" y="70" width="150" height="62" class="dev"/>
+  <text x="345" y="98" text-anchor="middle" class="text">TxToken</text>
+  <text x="345" y="118" text-anchor="middle" class="small">checksum + enqueue</text>
+
+  <rect x="495" y="70" width="150" height="62" class="queue"/>
+  <text x="570" y="98" text-anchor="middle" class="text">queue</text>
+  <text x="570" y="118" text-anchor="middle" class="small">pending packets</text>
+
+  <rect x="720" y="70" width="150" height="62" class="dev"/>
+  <text x="795" y="98" text-anchor="middle" class="text">RxTokenScoop</text>
+  <text x="795" y="118" text-anchor="middle" class="small">return as receive</text>
+
+  <rect x="270" y="190" width="150" height="62" class="queue"/>
+  <text x="345" y="218" text-anchor="middle" class="text">buffer pool</text>
+  <text x="345" y="238" text-anchor="middle" class="small">reuse Vec&lt;u8&gt;</text>
+
+  <rect x="720" y="190" width="150" height="62" class="box"/>
+  <text x="795" y="218" text-anchor="middle" class="text">Interface::poll</text>
+  <text x="795" y="238" text-anchor="middle" class="small">drive protocol state</text>
+
+  <path d="M195 101 H270" class="arrow"/>
+  <path d="M420 101 H495" class="arrow"/>
+  <path d="M645 101 H720" class="arrow"/>
+  <path d="M795 132 V190" class="arrow"/>
+  <path d="M720 221 H420" class="arrow"/>
+  <path d="M345 190 V132" class="arrow"/>
+</svg>

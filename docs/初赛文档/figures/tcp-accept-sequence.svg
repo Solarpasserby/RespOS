@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="430" viewBox="0 0 920 430">
+  <defs>
+    <style>
+      .head { font-family: Arial, Helvetica, sans-serif; font-size: 16px; font-weight: 700; fill: #1f2937; }
+      .text { font-family: Arial, Helvetica, sans-serif; font-size: 14px; fill: #1f2937; }
+      .small { font-family: Arial, Helvetica, sans-serif; font-size: 12px; fill: #475569; }
+      .life { stroke: #94a3b8; stroke-width: 1.4; stroke-dasharray: 5 5; }
+      .msg { stroke: #475569; stroke-width: 1.6; fill: none; marker-end: url(#arrow); }
+      .return { stroke: #64748b; stroke-width: 1.4; fill: none; stroke-dasharray: 4 4; marker-end: url(#arrow2); }
+      .note { fill: #f8fafc; stroke: #64748b; stroke-width: 1.2; rx: 7; }
+      .hot { fill: #fff7ed; stroke: #ea580c; stroke-width: 1.4; rx: 7; }
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+      <path d="M0,0 L10,4 L0,8 Z" fill="#475569"/>
+    </marker>
+    <marker id="arrow2" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+      <path d="M0,0 L10,4 L0,8 Z" fill="#64748b"/>
+    </marker>
+  </defs>
+
+  <text x="80" y="34" text-anchor="middle" class="head">用户程序</text>
+  <text x="260" y="34" text-anchor="middle" class="head">监听 Socket</text>
+  <text x="470" y="34" text-anchor="middle" class="head">LISTEN_TABLE</text>
+  <text x="670" y="34" text-anchor="middle" class="head">smoltcp</text>
+  <text x="835" y="34" text-anchor="middle" class="head">accept4</text>
+
+  <line x1="80" y1="50" x2="80" y2="395" class="life"/>
+  <line x1="260" y1="50" x2="260" y2="395" class="life"/>
+  <line x1="470" y1="50" x2="470" y2="395" class="life"/>
+  <line x1="670" y1="50" x2="670" y2="395" class="life"/>
+  <line x1="835" y1="50" x2="835" y2="395" class="life"/>
+
+  <path d="M80 82 H260" class="msg"/>
+  <text x="170" y="75" text-anchor="middle" class="text">listen(fd)</text>
+
+  <path d="M260 125 H470" class="msg"/>
+  <text x="365" y="118" text-anchor="middle" class="text">listen(endpoint, listen_handle)</text>
+
+  <rect x="376" y="138" width="188" height="46" class="note"/>
+  <text x="470" y="158" text-anchor="middle" class="small">端口表记录 listen handle</text>
+  <text x="470" y="176" text-anchor="middle" class="small">accept_queue 仍为空</text>
+
+  <path d="M670 215 H470" class="msg"/>
+  <text x="570" y="208" text-anchor="middle" class="text">握手完成，listen handle 变为 Established</text>
+
+  <path d="M470 250 H470" class="msg"/>
+  <rect x="354" y="232" width="232" height="62" class="hot"/>
+  <text x="470" y="255" text-anchor="middle" class="text">promote_listener(port)</text>
+  <text x="470" y="275" text-anchor="middle" class="small">旧 handle 入 accept_queue</text>
+  <text x="470" y="291" text-anchor="middle" class="small">新建 listen handle 继续监听</text>
+
+  <path d="M80 330 H835" class="msg"/>
+  <text x="455" y="323" text-anchor="middle" class="text">accept4(fd)</text>
+
+  <path d="M835 360 H470" class="msg"/>
+  <text x="652" y="353" text-anchor="middle" class="text">accept(port)</text>
+
+  <path d="M470 385 H835" class="return"/>
+  <text x="652" y="378" text-anchor="middle" class="text">connected handle + 地址元组</text>
+
+  <path d="M835 407 H80" class="return"/>
+  <text x="455" y="400" text-anchor="middle" class="text">构造 TcpSocket，分配新 fd</text>
+</svg>
