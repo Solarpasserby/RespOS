@@ -245,6 +245,10 @@ pub fn waitpid(pid: usize, exit_code: &mut i32) -> isize {
         }
     }
 }
+pub fn waitpid_nohang(pid: usize, exit_code: &mut i32) -> isize {
+    const WNOHANG: usize = 1;
+    sys_wait4_options(pid as isize, exit_code as *mut _, WNOHANG)
+}
 
 pub fn socket(domain: usize, socket_type: usize, protocol: usize) -> isize {
     sys_socket(domain, socket_type, protocol)

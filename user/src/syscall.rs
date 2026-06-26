@@ -270,6 +270,13 @@ pub fn sys_wait4(pid: isize, exit_code: *mut i32) -> isize {
     )
 }
 
+pub fn sys_wait4_options(pid: isize, exit_code: *mut i32, options: usize) -> isize {
+    syscall(
+        SYSCALL_WAIT4,
+        [pid as usize, exit_code as usize, options, 0, 0, 0],
+    )
+}
+
 pub fn sys_kill(pid: usize, signum: i32) -> isize {
     syscall(SYSCALL_KILL, [pid, signum as usize, 0, 0, 0, 0])
 }

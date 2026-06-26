@@ -9,7 +9,7 @@ extern crate alloc;
 use alloc::string::String;
 use user_lib::{
     O_CREATE, O_RDONLY, O_TRUNC, O_WRONLY, chdir, chmod, close, exec, execve, exit, fork, mkdir,
-    open, poweroff, read, symlink, time_get, unlink, waitpid, write,
+    kill, open, poweroff, read, symlink, time_get, unlink, waitpid, waitpid_nohang, write, SIGKILL,
 };
 
 const BUSYBOX_PATH: &str = "/musl/busybox\0";
@@ -26,6 +26,7 @@ const IOZONE_SCRIPT: &str = "iozone_testcode.sh\0";
 const NETPERF_SCRIPT: &str = "netperf_testcode.sh\0";
 const IPERF_SCRIPT: &str = "iperf_testcode.sh\0";
 const CYCLICTEST_SCRIPT: &str = "cyclictest_testcode.sh\0";
+const LTP_CASE_TIMEOUT_MS: isize = 120_000;
 
 const RV_MUSL_LOADER: &str = "/lib/ld-musl-riscv64.so.1\0";
 const RV_MUSL_SF_LOADER: &str = "/lib/ld-musl-riscv64-sf.so.1\0";
@@ -665,52 +666,6 @@ include!(concat!(env!("OUT_DIR"), "/ltp_cases.rs"));
 const MUSL_LTP_BIN_DIR: &str = "/musl/ltp/testcases/bin/";
 const GLIBC_LTP_BIN_DIR: &str = "/glibc/ltp/testcases/bin/";
 
-// 依赖 LTP 可执行目录中额外辅助程序的父测例。
-// 这里与 LTP_SKIP 分开维护：辅助程序不应作为独立测例运行，
-// 但依赖文件完整时，对应父测例仍然可以正常执行。
-const LTP_CASE_DEPENDENCIES: &[(&str, &str)] = &[
-    ("execl01", "execl01_child"),
-    ("execle01", "execle01_child"),
-    ("execlp01", "execlp01_child"),
-    ("execv01", "execv01_child"),
-    ("execve01", "execve01_child"),
-    ("execve02", "execve_child"),
-    ("execve05", "execve_child"),
-    ("execve06", "execve06_child"),
-    ("execveat01", "execveat_child"),
-    ("execveat02", "execveat_errno"),
-    ("execveat03", "execveat_child"),
-    ("execvp01", "execvp01_child"),
-    ("mount03", "mount03_suid_child"),
-    ("openat02", "openat02_child"),
-    ("pipe2_02", "pipe2_02_child"),
-];
-
-fn file_exists(path: &str) -> bool {
-    let fd = open(path, O_RDONLY, 0);
-    if fd < 0 {
-        return false;
-    }
-    let _ = close(fd as usize);
-    true
-}
-
-fn missing_ltp_dependency(case_name: &str, case_path_prefix: &str) -> Option<String> {
-    for (parent, dependency) in LTP_CASE_DEPENDENCIES {
-        if *parent != case_name {
-            continue;
-        }
-
-        let mut path = String::from(case_path_prefix);
-        path.push_str(dependency);
-        path.push('\0');
-        if !file_exists(&path) {
-            return Some(path);
-        }
-    }
-    None
-}
-
 fn ltp_script_exit_code(status: i32) -> i32 {
     let signal = status & 0x7f;
     if signal != 0 {
@@ -734,6 +689,35 @@ fn print_ltp_case_time(group_name: &str, name: &str, ret: i32, elapsed_ms: isize
         "LTP CASE TIME {} {} {} {}",
         group_name, name, ret, elapsed_ms
     );
+}
+
+fn wait_ltp_case_with_timeout(pid: usize, name: &str, start_ms: isize) -> Result<i32, i32> {
+    let mut ec: i32 = 0;
+    loop {
+        let waited = waitpid_nohang(pid, &mut ec);
+        if waited == pid as isize {
+            return Ok(ec);
+        }
+        if waited < 0 {
+            return Err(1);
+        }
+
+        let elapsed_ms = ltp_elapsed_ms(start_ms);
+        if elapsed_ms >= LTP_CASE_TIMEOUT_MS {
+            println!(
+                "[testrunner] kill {} after {} ms timeout",
+                name, elapsed_ms
+            );
+            let _ = kill(pid, SIGKILL);
+            let waited = waitpid(pid, &mut ec);
+            if waited == pid as isize {
+                return Ok(ec);
+            }
+            return Err(1);
+        }
+
+        user_lib::yield_();
+    }
 }
 
 fn run_ltp_selected(
@@ -783,18 +767,6 @@ fn run_ltp_selected(
                 );
             }
 
-            // 部分评测镜像保留了父测例，却遗漏了对应辅助程序。
-            // 在 LTP 创建临时目录前仅跳过该父测例，避免污染后续执行环境。
-            if let Some(dependency) = missing_ltp_dependency(name_str, case_path_prefix) {
-                println!(
-                    "[testrunner] skip {}: missing {}",
-                    name_str,
-                    strip_nul(&dependency)
-                );
-                skip += 1;
-                continue;
-            }
-
             let mut path = String::from(case_path_prefix);
             path.push_str(name_str);
             path.push('\0');
@@ -835,15 +807,14 @@ fn run_ltp_selected(
                 continue;
             }
 
-            let mut ec: i32 = 0;
-            let waited = waitpid(pid as usize, &mut ec);
+            let waited = wait_ltp_case_with_timeout(pid as usize, name_str, start_ms);
             let elapsed_ms = ltp_elapsed_ms(start_ms);
-            if waited < 0 {
+            if waited.is_err() {
                 println!("FAIL LTP CASE {} : 1", name_str);
                 print_ltp_case_time(group_name, name_str, 1, elapsed_ms);
                 fail += 1;
             } else {
-                let ret = ltp_script_exit_code(ec);
+                let ret = ltp_script_exit_code(waited.unwrap());
                 println!("FAIL LTP CASE {} : {}", name_str, ret);
                 print_ltp_case_time(group_name, name_str, ret, elapsed_ms);
                 if ret == 0 {
