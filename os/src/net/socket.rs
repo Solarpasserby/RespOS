@@ -678,6 +678,10 @@ impl FileOp for Socket {
         self
     }
 
+    fn splice_supported(&self) -> bool {
+        true
+    }
+
     fn read<'a>(&'a self, buf: &'a mut [u8]) -> SysResult<usize> {
         match &self.inner {
             SocketInner::Tcp(tcp) => tcp.recv(buf),

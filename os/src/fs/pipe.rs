@@ -151,6 +151,9 @@ impl FileOp for NamedFifoEnd {
     fn as_any(&self) -> &dyn Any {
         self.inner.as_any()
     }
+    fn splice_supported(&self) -> bool {
+        true
+    }
     fn read<'a>(&'a self, buf: &'a mut [u8]) -> SysResult<usize> {
         self.inner.read(buf)
     }
@@ -238,6 +241,9 @@ pub fn open_named_fifo(path: &str, flags: OpenFlags) -> SysResult<Arc<dyn FileOp
 impl FileOp for Pipe {
     fn as_any(&self) -> &dyn Any {
         self
+    }
+    fn splice_supported(&self) -> bool {
+        true
     }
     fn read<'a>(&'a self, buf: &'a mut [u8]) -> SysResult<usize> {
         if buf.is_empty() {

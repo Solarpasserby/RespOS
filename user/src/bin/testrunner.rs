@@ -634,7 +634,6 @@ const LTP_SKIP: &[&str] = &[
     "execvp01_child",
     "execveat_child",
     "openat02_child",
-    "pipe2_02_child",
     "mount03_suid_child",
     "writev03",
     // fork13 能通过，但运行时间过长占用评测时间，且考虑到收益很小，跳过
@@ -850,8 +849,8 @@ fn main() -> i32 {
     // _run_lmbench_glibc();
     // _run_cyclictest_musl();
     // _run_cyclictest_glibc();
-    // _run_ltp_musl();
-    // _run_ltp_glibc();
+    _run_ltp_musl();
+    _run_ltp_glibc();
     println!("[testrunner] all selected tests finished, powering off");
     poweroff();
     0
@@ -880,8 +879,8 @@ fn main() -> i32 {
     // _run_lmbench_glibc();
     // _run_cyclictest_musl(); // 系统调用不可用
     // _run_cyclictest_glibc();
-    // _run_ltp_musl();
-    // _run_ltp_glibc();
+    _run_ltp_musl();
+    _run_ltp_glibc();
     println!("[testrunner] all selected tests finished, powering off");
     poweroff();
     0
