@@ -35,6 +35,7 @@ pub struct Ext4Inode {
     mode_override: Mutex<Option<u32>>,
     owner_override: Mutex<Option<(u32, u32)>>,
     nlink_override: Mutex<Option<u32>>,
+    orphan_path: Mutex<Option<String>>,
     /// 共享页缓存，挂载在 inode 上，同一 inode 的所有 File 共享
     page_cache: Arc<PageCache>,
     xattrs: Mutex<HashMap<String, Vec<u8>>>,
@@ -59,6 +60,7 @@ impl Ext4Inode {
             mode_override: Mutex::new(None),
             owner_override: Mutex::new(None),
             nlink_override: Mutex::new(None),
+            orphan_path: Mutex::new(None),
             page_cache: PageCache::new(0),
             xattrs: Mutex::new(HashMap::new()),
         }
@@ -177,6 +179,35 @@ impl Ext4Inode {
         if ret != 0 {
             return Err(Self::map_lwext4_err(ret));
         }
+        Ok(())
+    }
+
+    fn file_remove(path: &str, ty: InodeType) -> SysResult {
+        let _guard = EXT4_OP_LOCK.lock();
+        let file = &mut Ext4File::new(path, ty.into());
+        file.file_remove(path).map_err(Self::map_lwext4_err)?;
+        Ok(())
+    }
+
+    pub fn storage_path(&self, path: &str) -> String {
+        self.orphan_path
+            .lock()
+            .clone()
+            .unwrap_or_else(|| String::from(path))
+    }
+
+    pub fn cleanup_orphan(&self) {
+        if let Some(path) = self.orphan_path.lock().take() {
+            let _ = Self::file_remove(&path, self.node_type());
+        }
+    }
+
+    pub fn orphan_regular_file(&self, old_path: &str) -> SysResult {
+        let orphan_path = alloc::format!("{}.respos_orphan_{}", old_path, self.ino);
+        let _ = Self::file_remove(&orphan_path, InodeType::Regular);
+        Self::file_rename(old_path, &orphan_path)?;
+        *self.orphan_path.lock() = Some(orphan_path);
+        *self.nlink_override.lock() = Some(0);
         Ok(())
     }
 

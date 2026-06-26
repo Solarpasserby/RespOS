@@ -50,40 +50,198 @@ impl TidAddress {
     }
 }
 
-struct ResourceLimits {
-    fsize_cur: AtomicUsize,
-    fsize_max: AtomicUsize,
+const RLIMIT_COUNT: usize = 16;
+const RLIMIT_FSIZE: usize = 1;
+const RLIMIT_STACK: usize = 3;
+const RLIMIT_MEMLOCK: usize = 8;
+const DEFAULT_CPU_AFFINITY_MASK: usize = 0b11;
+const SCHED_OTHER: usize = 0;
+const SCHED_FIFO: usize = 1;
+const SCHED_RR: usize = 2;
+const ROOT_CAP_MASK: usize = u32::MAX as usize;
+
+pub const RLIMIT_NOFILE: usize = 7;
+
+#[derive(Copy, Clone)]
+struct LimitPair {
+    cur: usize,
+    max: usize,
 }
 
-impl ResourceLimits {
+struct ResourceLimits {
+    limits: SpinLock<[LimitPair; RLIMIT_COUNT]>,
+}
+
+struct SchedState {
+    nice: AtomicI32,
+    policy: AtomicUsize,
+    priority: AtomicI32,
+    cpu_affinity_mask: AtomicUsize,
+    reset_on_fork: AtomicBool,
+}
+
+impl SchedState {
     fn new() -> Self {
         Self {
-            fsize_cur: AtomicUsize::new(usize::MAX),
-            fsize_max: AtomicUsize::new(usize::MAX),
+            nice: AtomicI32::new(0),
+            policy: AtomicUsize::new(SCHED_OTHER),
+            priority: AtomicI32::new(0),
+            cpu_affinity_mask: AtomicUsize::new(DEFAULT_CPU_AFFINITY_MASK),
+            reset_on_fork: AtomicBool::new(false),
         }
     }
 
     fn from_parent(parent: &Self) -> Self {
-        let (cur, max) = parent.fsize_limit();
+        let mut nice = parent.nice();
+        let mut policy = parent.policy();
+        let mut priority = parent.priority();
+        if parent.reset_on_fork() {
+            if matches!(policy, SCHED_FIFO | SCHED_RR) {
+                policy = SCHED_OTHER;
+                priority = 0;
+            }
+            nice = nice.max(0);
+        }
+
         Self {
-            fsize_cur: AtomicUsize::new(cur),
-            fsize_max: AtomicUsize::new(max),
+            nice: AtomicI32::new(nice),
+            policy: AtomicUsize::new(policy),
+            priority: AtomicI32::new(priority),
+            cpu_affinity_mask: AtomicUsize::new(parent.cpu_affinity_mask()),
+            reset_on_fork: AtomicBool::new(false),
+        }
+    }
+
+    fn nice(&self) -> i32 {
+        self.nice.load(Ordering::Relaxed)
+    }
+
+    fn policy(&self) -> usize {
+        self.policy.load(Ordering::Relaxed)
+    }
+
+    fn priority(&self) -> i32 {
+        self.priority.load(Ordering::Relaxed)
+    }
+
+    fn cpu_affinity_mask(&self) -> usize {
+        self.cpu_affinity_mask.load(Ordering::Relaxed)
+    }
+
+    fn reset_on_fork(&self) -> bool {
+        self.reset_on_fork.load(Ordering::Relaxed)
+    }
+
+    fn set_nice(&self, nice: i32) {
+        self.nice.store(nice.clamp(-20, 19), Ordering::Relaxed);
+    }
+
+    fn set_sched(&self, policy: usize, priority: i32, reset_on_fork: bool) {
+        self.policy.store(policy, Ordering::Relaxed);
+        self.priority.store(priority, Ordering::Relaxed);
+        self.reset_on_fork.store(reset_on_fork, Ordering::Relaxed);
+    }
+
+    fn set_cpu_affinity_mask(&self, mask: usize) {
+        self.cpu_affinity_mask.store(mask, Ordering::Relaxed);
+    }
+}
+
+struct CapState {
+    effective: AtomicUsize,
+    permitted: AtomicUsize,
+    inheritable: AtomicUsize,
+}
+
+impl CapState {
+    fn root() -> Self {
+        Self {
+            effective: AtomicUsize::new(ROOT_CAP_MASK),
+            permitted: AtomicUsize::new(ROOT_CAP_MASK),
+            inheritable: AtomicUsize::new(0),
+        }
+    }
+
+    fn from_parent(parent: &Self) -> Self {
+        Self {
+            effective: AtomicUsize::new(parent.effective()),
+            permitted: AtomicUsize::new(parent.permitted()),
+            inheritable: AtomicUsize::new(parent.inheritable()),
+        }
+    }
+
+    fn effective(&self) -> usize {
+        self.effective.load(Ordering::Relaxed)
+    }
+
+    fn permitted(&self) -> usize {
+        self.permitted.load(Ordering::Relaxed)
+    }
+
+    fn inheritable(&self) -> usize {
+        self.inheritable.load(Ordering::Relaxed)
+    }
+
+    fn has_cap(&self, cap: usize) -> bool {
+        cap < usize::BITS as usize && (self.effective() & (1usize << cap)) != 0
+    }
+
+    fn set(&self, effective: usize, permitted: usize, inheritable: usize) {
+        self.effective.store(effective, Ordering::Relaxed);
+        self.permitted.store(permitted, Ordering::Relaxed);
+        self.inheritable.store(inheritable, Ordering::Relaxed);
+    }
+
+    fn set_effective(&self, effective: usize) {
+        self.effective.store(effective, Ordering::Relaxed);
+    }
+
+    fn set_permitted(&self, permitted: usize) {
+        self.permitted.store(permitted, Ordering::Relaxed);
+    }
+}
+
+impl ResourceLimits {
+    fn new() -> Self {
+        let mut limits = [LimitPair {
+            cur: usize::MAX,
+            max: usize::MAX,
+        }; RLIMIT_COUNT];
+        limits[RLIMIT_STACK] = LimitPair {
+            cur: crate::config::USER_STACK_SIZE,
+            max: usize::MAX,
+        };
+        Self {
+            limits: SpinLock::new(limits),
+        }
+    }
+
+    fn from_parent(parent: &Self) -> Self {
+        Self {
+            limits: SpinLock::new(*parent.limits.lock()),
         }
     }
 
     fn fsize_limit(&self) -> (usize, usize) {
-        (
-            self.fsize_cur.load(Ordering::Relaxed),
-            self.fsize_max.load(Ordering::Relaxed),
-        )
+        self.rlimit(RLIMIT_FSIZE).unwrap()
     }
 
     fn set_fsize_limit(&self, cur: usize, max: usize) -> SysResult {
+        self.set_rlimit(RLIMIT_FSIZE, cur, max)
+    }
+
+    fn rlimit(&self, resource: usize) -> Option<(usize, usize)> {
+        let limits = self.limits.lock();
+        limits.get(resource).map(|limit| (limit.cur, limit.max))
+    }
+
+    fn set_rlimit(&self, resource: usize, cur: usize, max: usize) -> SysResult {
         if cur > max {
             return Err(Errno::EINVAL);
         }
-        self.fsize_cur.store(cur, Ordering::Relaxed);
-        self.fsize_max.store(max, Ordering::Relaxed);
+        let mut limits = self.limits.lock();
+        let limit = limits.get_mut(resource).ok_or(Errno::EINVAL)?;
+        *limit = LimitPair { cur, max };
         Ok(())
     }
 }
@@ -139,6 +297,32 @@ impl TaskTimers {
     }
 }
 
+pub struct NetNamespace {
+    loopback_tag: AtomicUsize,
+}
+
+impl NetNamespace {
+    const DEFAULT_LOOPBACK_TAG: usize = 0;
+
+    fn new() -> Self {
+        Self {
+            loopback_tag: AtomicUsize::new(Self::DEFAULT_LOOPBACK_TAG),
+        }
+    }
+
+    pub fn loopback_tag(&self) -> usize {
+        self.loopback_tag.load(Ordering::Relaxed)
+    }
+
+    pub fn set_loopback_tag(&self, value: usize) {
+        self.loopback_tag.store(value, Ordering::Relaxed);
+    }
+
+    pub fn default_loopback_tag() -> usize {
+        Self::DEFAULT_LOOPBACK_TAG
+    }
+}
+
 struct TaskInner {
     tid_address: TidAddress,
     sig_context_addr: usize,
@@ -174,7 +358,10 @@ pub struct TaskControlBlock {
     sgid: AtomicUsize,
     fsuid: AtomicUsize,
     fsgid: AtomicUsize,
+    supplementary_groups: SpinLock<Vec<usize>>,
     umask: AtomicUsize,
+    sched: SchedState,
+    caps: CapState,
     thread_group: Arc<SpinLock<ThreadGroup>>,
     task_status: SpinLock<TaskStatus>,
     parent: Arc<SpinLock<Option<Weak<TaskControlBlock>>>>,
@@ -194,6 +381,7 @@ pub struct TaskControlBlock {
     root: Arc<SpinLock<Arc<Path>>>,
     exe_path: Arc<SpinLock<String>>,
     limits: Arc<ResourceLimits>,
+    net_ns: Arc<NetNamespace>,
 
     //信号
     sig_pending: SpinLock<SigPending>, // 本线程的信号队列 + 掩码（独享）
@@ -244,7 +432,10 @@ impl TaskControlBlock {
             sgid: AtomicUsize::new(0),
             fsuid: AtomicUsize::new(0),
             fsgid: AtomicUsize::new(0),
+            supplementary_groups: SpinLock::new(Vec::new()),
             umask: AtomicUsize::new(0o022),
+            sched: SchedState::new(),
+            caps: CapState::root(),
             thread_group: Arc::new(SpinLock::new(ThreadGroup::new())),
             task_status: SpinLock::new(TaskStatus::Ready),
             parent: Arc::new(SpinLock::new(None)),
@@ -264,6 +455,7 @@ impl TaskControlBlock {
             root: Arc::new(SpinLock::new(Path::zero_init())),
             exe_path: Arc::new(SpinLock::new(String::new())),
             limits: Arc::new(ResourceLimits::new()),
+            net_ns: Arc::new(NetNamespace::new()),
 
             //信号
             sig_pending: SpinLock::new(SigPending::new()),
@@ -293,7 +485,8 @@ impl TaskControlBlock {
         let tid: TidHandle = tid_alloc();
         let tgid = tid.0;
         // 创建地址空间会拷贝内核页表，先创建内核栈生成页表映射，以保证任务切换后能正确访问内核栈
-        let mut kernel_stack = KernelStack::new(&tid);
+        let mut kernel_stack =
+            KernelStack::new(&tid).expect("failed to allocate init kernel stack");
         let (memory_set, token, user_sp, entry_point, _aux_vec) =
             MemorySet::from_elf_data(elf_data);
 
@@ -326,7 +519,10 @@ impl TaskControlBlock {
             sgid: AtomicUsize::new(0),
             fsuid: AtomicUsize::new(0),
             fsgid: AtomicUsize::new(0),
+            supplementary_groups: SpinLock::new(Vec::new()),
             umask: AtomicUsize::new(0o022),
+            sched: SchedState::new(),
+            caps: CapState::root(),
             thread_group: Arc::new(SpinLock::new(ThreadGroup::new())),
             task_status: SpinLock::new(TaskStatus::Ready),
             parent: Arc::new(SpinLock::new(None)),
@@ -345,6 +541,7 @@ impl TaskControlBlock {
             root: Arc::new(SpinLock::new(root)),
             exe_path: Arc::new(SpinLock::new(String::new())),
             limits: Arc::new(ResourceLimits::new()),
+            net_ns: Arc::new(NetNamespace::new()),
 
             //信号
             sig_pending: SpinLock::new(SigPending::new()),
@@ -390,11 +587,11 @@ impl TaskControlBlock {
     }
 
     /// 克隆父线程，创建子线程
-    pub fn clone_(self: &Arc<Self>, flags: CloneFlags) -> Arc<Self> {
+    pub fn clone_(self: &Arc<Self>, flags: CloneFlags) -> SysResult<Arc<Self>> {
         let tid = tid_alloc();
 
         // 克隆内核栈
-        let mut kernel_stack = KernelStack::new(&tid);
+        let mut kernel_stack = KernelStack::new(&tid)?;
         let mut kernel_stack_top = kernel_stack.get_top(); // 由于栈是新建的，栈顶就是栈顶边界
         kernel_stack_top -= core::mem::size_of::<TrapContext>();
         self.clone_trap_cx(kernel_stack_top);
@@ -409,7 +606,18 @@ impl TaskControlBlock {
             .unwrap_or_else(|| self.clone());
 
         // 创建线程或是进程
-        let (tgid, pgid, sid, thread_group, parent, children, cwd, root, exe_path) = if is_thread {
+        let (
+            tgid,
+            pgid,
+            sid,
+            thread_group,
+            parent,
+            children,
+            cwd,
+            root,
+            exe_path,
+            parent_for_child,
+        ) = if is_thread {
             // 创建线程，属于同一线程组
             (
                 self.tgid(),
@@ -421,19 +629,27 @@ impl TaskControlBlock {
                 self.cwd.clone(),
                 self.root.clone(),
                 self.exe_path.clone(),
+                None,
             )
         } else {
+            let parent_for_child = if flags.contains(CloneFlags::CLONE_PARENT) {
+                self.op_parent(|parent| parent.as_ref().and_then(|parent| parent.upgrade()))
+                    .unwrap_or_else(|| INITPROC.clone())
+            } else {
+                process_leader.clone()
+            };
             // 创建进程
             (
                 tid.0,
                 self.pgid(),
                 self.sid(),
                 Arc::new(SpinLock::new(ThreadGroup::new())),
-                Arc::new(SpinLock::new(Some(Arc::downgrade(&process_leader)))),
+                Arc::new(SpinLock::new(Some(Arc::downgrade(&parent_for_child)))),
                 Arc::new(SpinLock::new(BTreeMap::new())),
                 Arc::new(SpinLock::new(Path::from_existed_user(&self.cwd()))),
                 Arc::new(SpinLock::new(Path::from_existed_user(&self.root()))),
                 Arc::new(SpinLock::new(self.exe_path())),
+                Some(parent_for_child),
             )
         };
 
@@ -443,7 +659,7 @@ impl TaskControlBlock {
         } else {
             Arc::new(RwLock::new(MemorySet::from_existed_user(
                 &mut self.memory_set.write(),
-            )))
+            )?))
         };
 
         // 是否与父线程共享文件数据
@@ -461,6 +677,11 @@ impl TaskControlBlock {
             self.itimers.clone()
         } else {
             Arc::new(TaskTimers::new())
+        };
+        let net_ns = if flags.contains(CloneFlags::CLONE_NEWNET) {
+            Arc::new(NetNamespace::new())
+        } else {
+            self.net_ns.clone()
         };
         let current_sig_mask = self.op_sig_pending(|pending| pending.mask);
         let (sig_handler, sig_pending, sig_stack) = if is_thread {
@@ -495,7 +716,10 @@ impl TaskControlBlock {
             sgid: AtomicUsize::new(self.sgid()),
             fsuid: AtomicUsize::new(self.fsuid()),
             fsgid: AtomicUsize::new(self.fsgid()),
+            supplementary_groups: SpinLock::new(self.supplementary_groups()),
             umask: AtomicUsize::new(self.umask()),
+            sched: SchedState::from_parent(&self.sched),
+            caps: CapState::from_parent(&self.caps),
             thread_group,
             task_status: SpinLock::new(TaskStatus::Ready),
             parent,
@@ -514,6 +738,7 @@ impl TaskControlBlock {
             root,
             exe_path,
             limits,
+            net_ns,
 
             // 信号
             sig_pending,
@@ -538,8 +763,8 @@ impl TaskControlBlock {
         task_ctrl_block.write_task_cx(kernel_stack_top);
 
         // 只有新进程进入 children；同线程组内的新线程不由 wait4 回收。
-        if !is_thread {
-            self.add_child(task_ctrl_block.clone());
+        if let Some(parent) = parent_for_child {
+            parent.add_child(task_ctrl_block.clone());
         }
         // 在线程组中添加线程
         task_ctrl_block.op_thread_group_mut(|tg| tg.add(task_ctrl_block.clone()));
@@ -547,7 +772,7 @@ impl TaskControlBlock {
         // 在任务管理器中添加线程号到线程的映射
         TASK_MANAGER.add(&task_ctrl_block);
 
-        task_ctrl_block
+        Ok(task_ctrl_block)
     }
 
     /// 载入可执行程序，主要修改地址空间、用户栈、异常上下文等数据
@@ -557,13 +782,17 @@ impl TaskControlBlock {
         self: &Arc<Self>,
         exe_path: String,
         elf_data: &[u8],
-        args: Vec<String>,
+        mut args: Vec<String>,
         envs: Vec<String>,
         linux_abi: bool,
     ) -> SysResult<usize> {
         // 简化模型：只有进程 leader 可以 exec，避免非 leader exec 后父子关系和 tgid 语义混乱。
         if !self.is_process_leader() {
             return Err(Errno::EINVAL);
+        }
+
+        if args.is_empty() {
+            args.push(String::new());
         }
 
         let (memory_set, _token, mut user_sp, entry_point, aux_vec) =
@@ -578,6 +807,7 @@ impl TaskControlBlock {
         /* ===== 修改用户栈数据 ===== */
         let (argv_base, envp_base, auxv_base, stack_top) = init_user_stack(
             &mut memory_set_guard,
+            exe_path.as_str(),
             args.as_slice(),
             envs.as_slice(),
             aux_vec,
@@ -659,8 +889,41 @@ impl TaskControlBlock {
     pub fn fsgid(&self) -> usize {
         self.fsgid.load(Ordering::Relaxed)
     }
+    pub fn supplementary_groups(&self) -> Vec<usize> {
+        self.supplementary_groups.lock().clone()
+    }
+    pub fn in_group(&self, gid: usize) -> bool {
+        self.fsgid() == gid || self.supplementary_groups.lock().contains(&gid)
+    }
+    pub fn nice(&self) -> i32 {
+        self.sched.nice()
+    }
+    pub fn sched_policy(&self) -> usize {
+        self.sched.policy()
+    }
+    pub fn sched_priority(&self) -> i32 {
+        self.sched.priority()
+    }
+    pub fn cpu_affinity_mask(&self) -> usize {
+        self.sched.cpu_affinity_mask()
+    }
+    pub fn cap_effective(&self) -> usize {
+        self.caps.effective()
+    }
+    pub fn cap_permitted(&self) -> usize {
+        self.caps.permitted()
+    }
+    pub fn cap_inheritable(&self) -> usize {
+        self.caps.inheritable()
+    }
+    pub fn has_cap(&self, cap: usize) -> bool {
+        self.caps.has_cap(cap)
+    }
     pub fn umask(&self) -> usize {
         self.umask.load(Ordering::Relaxed)
+    }
+    pub fn net_ns(&self) -> Arc<NetNamespace> {
+        self.net_ns.clone()
     }
     pub fn status(&self) -> TaskStatus {
         self.task_status.lock().clone()
@@ -760,10 +1023,19 @@ impl TaskControlBlock {
         self.sid.store(sid, Ordering::Relaxed);
     }
     pub fn set_uid_triplet(&self, uid: usize, euid: usize, suid: usize) {
+        let old_euid = self.euid();
         self.uid.store(uid, Ordering::Relaxed);
         self.euid.store(euid, Ordering::Relaxed);
         self.suid.store(suid, Ordering::Relaxed);
         self.fsuid.store(euid, Ordering::Relaxed);
+        if euid == 0 {
+            self.caps.set_effective(self.caps.permitted());
+        } else if old_euid == 0 {
+            self.caps.set_effective(0);
+            if uid != 0 && suid != 0 {
+                self.caps.set_permitted(0);
+            }
+        }
     }
     pub fn set_gid_triplet(&self, gid: usize, egid: usize, sgid: usize) {
         self.gid.store(gid, Ordering::Relaxed);
@@ -776,6 +1048,25 @@ impl TaskControlBlock {
     }
     pub fn set_fsgid(&self, gid: usize) {
         self.fsgid.store(gid, Ordering::Relaxed);
+    }
+    pub fn set_supplementary_groups(&self, groups: Vec<usize>) {
+        *self.supplementary_groups.lock() = groups;
+    }
+    pub fn set_nice(&self, nice: i32) {
+        self.sched.set_nice(nice);
+    }
+    pub fn set_sched(&self, policy: usize, priority: i32) {
+        self.sched
+            .set_sched(policy, priority, self.sched.reset_on_fork());
+    }
+    pub fn set_sched_with_reset_on_fork(&self, policy: usize, priority: i32, reset_on_fork: bool) {
+        self.sched.set_sched(policy, priority, reset_on_fork);
+    }
+    pub fn set_cpu_affinity_mask(&self, mask: usize) {
+        self.sched.set_cpu_affinity_mask(mask);
+    }
+    pub fn set_capabilities(&self, effective: usize, permitted: usize, inheritable: usize) {
+        self.caps.set(effective, permitted, inheritable);
     }
     pub fn set_umask(&self, mask: usize) -> usize {
         self.umask.swap(mask & 0o777, Ordering::Relaxed)
@@ -1236,6 +1527,26 @@ impl TaskControlBlock {
     pub fn set_fsize_limit(&self, cur: usize, max: usize) -> SysResult {
         self.limits.set_fsize_limit(cur, max)
     }
+    pub fn memlock_limit(&self) -> (usize, usize) {
+        self.limits.rlimit(RLIMIT_MEMLOCK).unwrap()
+    }
+    pub fn set_memlock_limit(&self, cur: usize, max: usize) -> SysResult {
+        self.limits.set_rlimit(RLIMIT_MEMLOCK, cur, max)
+    }
+    pub fn rlimit(&self, resource: usize) -> Option<(usize, usize)> {
+        if resource == RLIMIT_NOFILE {
+            Some(self.nofile_limit())
+        } else {
+            self.limits.rlimit(resource)
+        }
+    }
+    pub fn set_rlimit(&self, resource: usize, cur: usize, max: usize) -> SysResult {
+        if resource == RLIMIT_NOFILE {
+            self.set_nofile_limit(cur, max)
+        } else {
+            self.limits.set_rlimit(resource, cur, max)
+        }
+    }
 }
 
 impl TaskControlBlock {
@@ -1457,10 +1768,13 @@ pub fn task_group_exit(task: Arc<TaskControlBlock>, exit_code: i32) {
     // robust list 仍然依赖用户地址，必须在拆掉用户地址空间前处理。
     exit_robust_list(&leader);
 
-    // 回收进程级共享资源。
-    task.op_memory_set_write(|mem| {
-        mem.recycle_data_pages();
-    });
+    // CLONE_VM creates a separate process that shares the same mm. Exiting one
+    // owner must not tear down mappings still referenced by another task.
+    if Arc::strong_count(&task.memory_set) == 1 {
+        task.op_memory_set_write(|mem| {
+            mem.recycle_data_pages();
+        });
+    }
     task.fd_table.lock().clear();
 
     leader.set_exit_code(exit_code);
@@ -1537,6 +1851,7 @@ pub fn task_group_exit_by_signal(task: Arc<TaskControlBlock>, signal: i32) {
 // 将命令行参数和环境变量压入用户栈
 fn init_user_stack(
     memory_set: &mut MemorySet,
+    exe_path: &str,
     args_vec: &[String],
     envs_vec: &[String],
     mut auxv: Vec<AuxHeader>,
@@ -1615,6 +1930,13 @@ fn init_user_stack(
     // 字符串内容可以位于指针数组之上，argv/envp 数组保存实际地址。
     let envp = push_strings_to_stack(memory_set, envs_vec, user_sp)?;
     let argv = push_strings_to_stack(memory_set, args_vec, user_sp)?;
+    let execfn_addr = {
+        let addr = push_bytes_to_stack(memory_set, &[0], user_sp)?;
+        *user_sp = addr - exe_path.len();
+        memory_set.write_bytes_to_mapped_range(*user_sp, exe_path.as_bytes())?;
+        *user_sp = align_down(*user_sp);
+        *user_sp
+    };
 
     // —— 压入 AT_PLATFORM 字符串 ——
     #[cfg(target_arch = "riscv64")]
@@ -1652,7 +1974,7 @@ fn init_user_stack(
     });
     auxv.push(AuxHeader {
         aux_type: AT_EXECFN,
-        value: argv[0],
+        value: execfn_addr,
     });
     auxv.push(AuxHeader {
         aux_type: AT_NULL,
@@ -1786,10 +2108,10 @@ impl CloneFlags {
         self & !Self::EXIT_SIGNAL_MASK
     }
 
-    /// 当前实现没有完整的 vfork 父进程阻塞模型；非线程 vfork 子进程需要独立
-    /// 地址空间，避免 exec 替换掉父进程地址空间。
+    /// 当前实现没有完整的 vfork 父进程共享地址空间模型。非线程 vfork
+    /// 子进程使用独立地址空间，避免子进程 exec 替换掉父进程地址空间。
     pub fn share_user_vm(self) -> bool {
         self.contains(Self::CLONE_VM)
-            && !(self.contains(Self::CLONE_VFORK) && !self.contains(Self::CLONE_THREAD))
+            && (!self.contains(Self::CLONE_VFORK) || self.contains(Self::CLONE_THREAD))
     }
 }

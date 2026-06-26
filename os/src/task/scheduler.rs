@@ -1,6 +1,7 @@
 //! #### 任务调度队列
 //!
-//! 调度器维护 FIFO 就绪队列，并在主动让出/阻塞/退出时选择下一个任务。
+//! 调度器维护按调度策略和优先级分层的就绪队列，并在时钟中断、
+//! 主动让出、阻塞或退出时选择下一个任务。
 //! 当前架构层 `__switch` 接收下一个任务的内核栈指针，因此这里会完成最后一步切换。
 
 use super::processor::{PROCESSOR, current_task};
@@ -15,6 +16,34 @@ lazy_static! {
     pub static ref SCHEDULER: SpinNoIrqLock<Scheduler> = SpinNoIrqLock::new(Scheduler::new());
     static ref DEAD_TASKS: SpinNoIrqLock<Vec<Arc<TaskControlBlock>>> =
         SpinNoIrqLock::new(Vec::new());
+}
+
+const SCHED_FIFO: usize = 1;
+const SCHED_RR: usize = 2;
+const SCHED_IDLE: usize = 5;
+
+const RT_QUEUE_COUNT: usize = 100;
+const NORMAL_QUEUE_COUNT: usize = 40;
+
+#[derive(Clone, Copy)]
+enum ReadyQueue {
+    Rt(usize),
+    Normal(usize),
+    Idle,
+}
+
+fn ready_queue_for(task: &TaskControlBlock) -> ReadyQueue {
+    match task.sched_policy() {
+        SCHED_FIFO | SCHED_RR => {
+            let prio = task.sched_priority().clamp(1, 99) as usize;
+            ReadyQueue::Rt(prio)
+        }
+        SCHED_IDLE => ReadyQueue::Idle,
+        _ => {
+            let nice = task.nice().clamp(-20, 19);
+            ReadyQueue::Normal((nice + 20) as usize)
+        }
+    }
 }
 
 fn defer_drop_task(task: Arc<TaskControlBlock>) {
@@ -48,6 +77,16 @@ pub fn add_task(task: Arc<TaskControlBlock>) {
 /// 从就绪队列中取出队首任务。
 pub fn fetch_task() -> Option<Arc<TaskControlBlock>> {
     SCHEDULER.lock().fetch()
+}
+
+/// 任务调度属性变化后，若它已经在就绪队列中，则按新策略重新入队。
+pub fn requeue_ready_task(task: Arc<TaskControlBlock>) {
+    if !task.is_ready() {
+        return;
+    }
+    let mut scheduler = SCHEDULER.lock();
+    scheduler.remove(task.tid());
+    scheduler.add(task);
 }
 
 /// 阻塞任务。
@@ -122,31 +161,68 @@ pub fn switch_to_next_task() {
     crate::arch::idle();
 }
 
+fn switch_to_task(current: Arc<TaskControlBlock>, next_task: Arc<TaskControlBlock>) {
+    if Arc::ptr_eq(&current, &next_task) {
+        current.set_running();
+        return;
+    }
+
+    let current_task_ptr = Arc::as_ptr(&current) as usize;
+    let next_task_kernel_stack = next_task.kstack();
+    next_task.set_running();
+    PROCESSOR.lock().switch_to(next_task);
+    schedule_barrier();
+    unsafe {
+        __switch(next_task_kernel_stack, current_task_ptr);
+    }
+    schedule_barrier();
+    cleanup_dead_tasks();
+}
+
 /// 主动让出当前任务。
+///
+/// 先取下一个任务，再把当前任务放回就绪队列。这样用于轮询式等待时，
+/// 当前任务不会立刻凭借较高优先级抢回 CPU。
 #[unsafe(no_mangle)]
 #[inline(never)]
 pub fn yield_current_task() {
     let Some(task) = current_task() else {
         return;
     };
-    if let Some(next_task) = fetch_task() {
+
+    let mut next_task = fetch_task();
+    if next_task.is_none() {
+        crate::syscall::check_all_task_timers();
+        next_task = fetch_task();
+    }
+
+    if let Some(next_task) = next_task {
         if Arc::ptr_eq(&task, &next_task) {
             task.set_running();
             return;
         }
-        let current_task_ptr = Arc::as_ptr(&task) as usize;
         task.set_ready();
-        add_task(task);
+        add_task(task.clone());
+        switch_to_task(task, next_task);
+    }
+}
 
-        let next_task_kernel_stack = next_task.kstack();
-        next_task.set_running();
-        PROCESSOR.lock().switch_to(next_task);
-        schedule_barrier();
-        unsafe {
-            __switch(next_task_kernel_stack, current_task_ptr);
-        }
-        schedule_barrier();
-        cleanup_dead_tasks();
+/// 时间片抢占当前任务。
+///
+/// 时钟中断触发时先把当前任务放回所属优先级队列队尾，再选择下一个任务。
+/// 同一优先级内这会形成简单的 round-robin；不同优先级仍按 RT/nice/idle
+/// 的固定顺序调度。
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub fn preempt_current_task() {
+    let Some(task) = current_task() else {
+        return;
+    };
+
+    task.set_ready();
+    add_task(task.clone());
+    if let Some(next_task) = fetch_task() {
+        switch_to_task(task, next_task);
     }
 }
 
@@ -204,19 +280,23 @@ fn switch_to_next_task_after_exit() -> ! {
         panic!("Unreachable!");
     };
 
-    if let Some(next_task) = fetch_task() {
-        let next_task_kernel_stack = next_task.kstack();
-        let current_task_ptr = Arc::as_ptr(&current) as usize;
-        next_task.set_running();
-        PROCESSOR.lock().switch_to(next_task);
-        defer_drop_task(current);
-        schedule_barrier();
-        unsafe {
-            __switch(next_task_kernel_stack, current_task_ptr);
+    loop {
+        if let Some(next_task) = fetch_task() {
+            let next_task_kernel_stack = next_task.kstack();
+            let current_task_ptr = Arc::as_ptr(&current) as usize;
+            next_task.set_running();
+            PROCESSOR.lock().switch_to(next_task);
+            defer_drop_task(current);
+            schedule_barrier();
+            unsafe {
+                __switch(next_task_kernel_stack, current_task_ptr);
+            }
+            unreachable!("returned to an exited task");
         }
-    }
 
-    panic!("Unreachable!");
+        crate::syscall::check_all_task_timers();
+        core::hint::spin_loop();
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -246,9 +326,19 @@ pub fn exit_group_and_run_next(exit_code: i32) -> ! {
     switch_to_next_task_after_exit();
 }
 
-/// FIFO 任务调度器。
+/// 简单时间片轮转调度器。
+///
+/// - RT 队列：`SCHED_FIFO/SCHED_RR`，优先级 1..99，数值越大越先运行；
+/// - 普通队列：`SCHED_OTHER/BATCH`，按 nice -20..19 分 40 档，nice 越小越先运行；
+/// - Idle 队列：`SCHED_IDLE`，仅在没有 RT/普通任务时运行；
+/// - 同一优先级内使用 `push_back` + `pop_front`，时钟中断触发的 `preempt_current_task`
+///   会把当前任务放回队尾，从而形成简单 RR。
 pub struct Scheduler {
-    ready_queue: VecDeque<Arc<TaskControlBlock>>,
+    rt_queues: Vec<VecDeque<Arc<TaskControlBlock>>>,
+    normal_queues: Vec<VecDeque<Arc<TaskControlBlock>>>,
+    idle_queue: VecDeque<Arc<TaskControlBlock>>,
+    rt_bitmap: u128,
+    normal_bitmap: u64,
     blocked_queue: VecDeque<Arc<TaskControlBlock>>,
 }
 
@@ -256,34 +346,99 @@ impl Scheduler {
     /// 创建一个空调度器。
     pub fn new() -> Self {
         Self {
-            ready_queue: VecDeque::new(),
+            rt_queues: (0..RT_QUEUE_COUNT).map(|_| VecDeque::new()).collect(),
+            normal_queues: (0..NORMAL_QUEUE_COUNT).map(|_| VecDeque::new()).collect(),
+            idle_queue: VecDeque::new(),
+            rt_bitmap: 0,
+            normal_bitmap: 0,
             blocked_queue: VecDeque::new(),
         }
     }
 
     /// 添加任务到调度器就绪队列。
     pub fn add(&mut self, task: Arc<TaskControlBlock>) {
-        self.ready_queue.push_back(task);
+        match ready_queue_for(&task) {
+            ReadyQueue::Rt(idx) => {
+                self.rt_queues[idx].push_back(task);
+                self.rt_bitmap |= 1u128 << (idx - 1);
+            }
+            ReadyQueue::Normal(idx) => {
+                self.normal_queues[idx].push_back(task);
+                self.normal_bitmap |= 1u64 << idx;
+            }
+            ReadyQueue::Idle => self.idle_queue.push_back(task),
+        }
     }
 
-    /// 取出调度器就绪队列队首任务。
+    /// 取出最高优先级队列中的队首任务。
     pub fn fetch(&mut self) -> Option<Arc<TaskControlBlock>> {
-        self.ready_queue.pop_front()
+        while self.rt_bitmap != 0 {
+            let bit = 127 - self.rt_bitmap.leading_zeros() as usize;
+            let idx = bit + 1;
+            if idx < RT_QUEUE_COUNT {
+                if let Some(task) = self.rt_queues[idx].pop_front() {
+                    if self.rt_queues[idx].is_empty() {
+                        self.rt_bitmap &= !(1u128 << bit);
+                    }
+                    return Some(task);
+                }
+            }
+            self.rt_bitmap &= !(1u128 << bit);
+        }
+
+        while self.normal_bitmap != 0 {
+            let idx = self.normal_bitmap.trailing_zeros() as usize;
+            if idx < NORMAL_QUEUE_COUNT {
+                if let Some(task) = self.normal_queues[idx].pop_front() {
+                    if self.normal_queues[idx].is_empty() {
+                        self.normal_bitmap &= !(1u64 << idx);
+                    }
+                    return Some(task);
+                }
+            }
+            self.normal_bitmap &= !(1u64 << idx);
+        }
+
+        self.idle_queue.pop_front()
     }
 
     /// 是否没有可运行任务。
     pub fn is_ready_empty(&self) -> bool {
-        self.ready_queue.is_empty()
+        self.rt_bitmap == 0 && self.normal_bitmap == 0 && self.idle_queue.is_empty()
     }
 
     /// 从调度器就绪队列中移除任务。
     pub fn remove(&mut self, tid: usize) {
-        self.ready_queue.retain(|task| task.tid() != tid);
+        for idx in 1..RT_QUEUE_COUNT {
+            self.rt_queues[idx].retain(|task| task.tid() != tid);
+            if self.rt_queues[idx].is_empty() {
+                self.rt_bitmap &= !(1u128 << (idx - 1));
+            }
+        }
+        for idx in 0..NORMAL_QUEUE_COUNT {
+            self.normal_queues[idx].retain(|task| task.tid() != tid);
+            if self.normal_queues[idx].is_empty() {
+                self.normal_bitmap &= !(1u64 << idx);
+            }
+        }
+        self.idle_queue.retain(|task| task.tid() != tid);
     }
 
     /// 从调度器就绪队列中移除线程组。
     pub fn remove_thread_group(&mut self, tgid: usize) {
-        self.ready_queue.retain(|task| task.tgid() != tgid);
+        for idx in 1..RT_QUEUE_COUNT {
+            self.rt_queues[idx].retain(|task| task.tgid() != tgid);
+            if self.rt_queues[idx].is_empty() {
+                self.rt_bitmap &= !(1u128 << (idx - 1));
+            }
+        }
+        for idx in 0..NORMAL_QUEUE_COUNT {
+            self.normal_queues[idx].retain(|task| task.tgid() != tgid);
+            if self.normal_queues[idx].is_empty() {
+                self.normal_bitmap &= !(1u64 << idx);
+            }
+        }
+        self.idle_queue.retain(|task| task.tgid() != tgid);
     }
 
     /// 阻塞任务。

@@ -180,6 +180,12 @@ fn generate_task_stat(pid: Option<usize>) -> SysResult<String> {
     let ticks = task.elapsed_ticks();
     Ok(alloc::format!(
         "{} ({}) {} {} 0 0 0 0 0 0 0 0 0 {} {}{}\n",
-        pid, comm, state, ppid, ticks, ticks, " 0".repeat(39)
+        pid,
+        comm,
+        state,
+        ppid,
+        ticks,
+        ticks,
+        " 0".repeat(39)
     ))
 }

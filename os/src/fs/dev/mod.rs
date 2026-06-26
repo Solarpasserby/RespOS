@@ -5,6 +5,7 @@
 //! - `null`  — `/dev/null`，丢弃写入，读取始终返回 EOF
 //! - `zero`  — `/dev/zero`，读取返回零字节，写入丢弃
 
+mod cpu_dma_latency;
 mod loop_device;
 mod null;
 mod random;
@@ -24,10 +25,12 @@ const LOOP_CONTROL_INO: u64 = 7;
 const LOOP0_INO: u64 = 8;
 const RANDOM_INO: u64 = 9;
 const URANDOM_INO: u64 = 10;
+const CPU_DMA_LATENCY_INO: u64 = 11;
 const NULL_RDEV: u64 = (1 << 8) | 3;
 const ZERO_RDEV: u64 = (1 << 8) | 5;
 const RANDOM_RDEV: u64 = (1 << 8) | 8;
 const URANDOM_RDEV: u64 = (1 << 8) | 9;
+const CPU_DMA_LATENCY_RDEV: u64 = (10 << 8) | 62;
 const RTC_RDEV: u64 = (254 << 8) | 0;
 const LOOP_CONTROL_RDEV: u64 = (10 << 8) | 237;
 const LOOP0_RDEV: u64 = 7 << 8;
@@ -38,6 +41,7 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::any::Any;
+use cpu_dma_latency::CpuDmaLatencyInode;
 pub use loop_device::{LoopControlInode, LoopInode};
 use null::NullInode;
 use random::RandomInode;
@@ -76,6 +80,7 @@ impl InodeOp for DevDirInode {
             "zero" => Ok(Arc::new(ZeroInode)),
             "random" => Ok(Arc::new(RandomInode::random())),
             "urandom" => Ok(Arc::new(RandomInode::urandom())),
+            "cpu_dma_latency" => Ok(Arc::new(CpuDmaLatencyInode)),
             "shm" => Ok(shm_dir()),
             "misc" => Ok(Arc::new(MiscDirInode)),
             "loop-control" => Ok(Arc::new(LoopControlInode)),
@@ -92,15 +97,21 @@ impl InodeOp for DevDirInode {
             entry(ZERO_INO, InodeType::CharDevice, 4, b"zero\0"),
             entry(RANDOM_INO, InodeType::CharDevice, 5, b"random\0"),
             entry(URANDOM_INO, InodeType::CharDevice, 6, b"urandom\0"),
-            entry(SHM_DIR_INO, InodeType::Directory, 7, b"shm\0"),
-            entry(MISC_DIR_INO, InodeType::Directory, 8, b"misc\0"),
+            entry(
+                CPU_DMA_LATENCY_INO,
+                InodeType::CharDevice,
+                7,
+                b"cpu_dma_latency\0",
+            ),
+            entry(SHM_DIR_INO, InodeType::Directory, 8, b"shm\0"),
+            entry(MISC_DIR_INO, InodeType::Directory, 9, b"misc\0"),
             entry(
                 LOOP_CONTROL_INO,
                 InodeType::CharDevice,
-                9,
+                10,
                 b"loop-control\0",
             ),
-            entry(LOOP0_INO, InodeType::BlockDevice, 10, b"loop0\0"),
+            entry(LOOP0_INO, InodeType::BlockDevice, 11, b"loop0\0"),
         ])
     }
 
@@ -204,7 +215,7 @@ impl SuperBlockOp for DevSuperBlock {
             f_blocks: 0,
             f_bfree: 0,
             f_bavail: 0,
-            f_files: 10,
+            f_files: 11,
             f_ffree: 0,
             f_namelen: 255,
             f_frsize: crate::config::PAGE_SIZE as i64,

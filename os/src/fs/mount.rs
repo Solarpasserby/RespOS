@@ -5,6 +5,7 @@
 //! 核心数据结构参照 Linux 的 `struct vfsmount` / `struct mount` / mount tree。
 
 use super::Path;
+use super::dentry_cache::remove_dentry_cache_tree;
 use super::namei::{
     AT_FDCWD, filename_lookup, filename_lookup_no_follow_final_mount,
     filename_lookup_no_follow_final_symlink,
@@ -26,11 +27,23 @@ lazy_static! {
 }
 
 pub const MS_RDONLY: i32 = 1;
-const MS_REMOUNT: usize = 32;
-const MS_BIND: usize = 4096;
-const MS_MOVE: usize = 8192;
-const MS_PRIVATE: usize = 1 << 18;
+pub const MS_NOSUID: i32 = 2;
+pub const MS_NODEV: i32 = 4;
+pub const MS_NOEXEC: i32 = 8;
+pub const MS_REMOUNT: i32 = 32;
+pub const MS_NOSYMFOLLOW: i32 = 256;
+pub const MS_NOATIME: i32 = 1024;
+pub const MS_NODIRATIME: i32 = 2048;
+pub const MS_BIND: i32 = 4096;
+pub const MS_MOVE: i32 = 8192;
+pub const MS_PRIVATE: i32 = 1 << 18;
+pub const MS_STRICTATIME: i32 = 1 << 24;
+const ST_NOSYMFOLLOW: i32 = 0x2000;
 static MOUNT_BACKING_ID: AtomicUsize = AtomicUsize::new(0);
+
+fn is_supported_block_fstype(fstype: &str) -> bool {
+    matches!(fstype, "ext2" | "ext3" | "ext4" | "vfat")
+}
 
 /// 代表一个被挂载的文件系统实例（类比 Linux `struct vfsmount`）。
 pub struct VfsMount {
@@ -92,11 +105,24 @@ impl VfsMount {
     }
 
     pub fn is_readonly(&self) -> bool {
-        self.flags.load(Ordering::Relaxed) & MS_RDONLY != 0
+        self.has_flag(MS_RDONLY)
+    }
+
+    pub fn has_flag(&self, flag: i32) -> bool {
+        self.flags.load(Ordering::Relaxed) & flag != 0
     }
 
     pub fn flags(&self) -> i32 {
         self.flags.load(Ordering::Relaxed)
+    }
+
+    pub fn statfs_flags(&self) -> i32 {
+        let flags = self.flags();
+        if flags & MS_NOSYMFOLLOW != 0 {
+            flags | ST_NOSYMFOLLOW
+        } else {
+            flags
+        }
     }
 
     fn set_flags(&self, flags: i32) {
@@ -242,18 +268,22 @@ pub fn do_mount(_source: &str, target: &str, fstype: &str, flags: usize) -> SysR
         return Err(Errno::ENOTDIR);
     }
 
-    if flags & MS_REMOUNT != 0 {
+    if flags & MS_REMOUNT as usize != 0 {
         let mount = get_mount_by_dentry(&target_path.dentry).ok_or(Errno::EINVAL)?;
-        mount.vfs_mount.set_flags((flags & !(MS_REMOUNT)) as i32);
+        if flags & MS_RDONLY as usize != 0 {
+            return Err(Errno::EBUSY);
+        }
+        mount.vfs_mount.set_flags(flags as i32);
         return Ok(0);
     }
 
-    if flags & MS_PRIVATE != 0 {
+    if flags & MS_PRIVATE as usize != 0 {
         return Ok(0);
     }
 
-    if flags & MS_MOVE != 0 {
+    if flags & MS_MOVE as usize != 0 {
         let source_mount = lookup_mount_target(_source)?;
+        let source_mountpoint_path = source_mount.mountpoint.abs_path.clone();
         let parent_mount = get_mount_by_vfsmount(&target_path.mnt).ok_or(Errno::EINVAL)?;
         if get_mount_by_dentry(&target_path.dentry).is_some() {
             return Err(Errno::EBUSY);
@@ -267,6 +297,7 @@ pub fn do_mount(_source: &str, target: &str, fstype: &str, flags: usize) -> SysR
             backing_root: source_mount.backing_root.clone(),
         });
         remove_mount_tree_without_cleanup(&source_mount);
+        remove_dentry_cache_tree(source_mountpoint_path.as_str());
         add_mount(moved_mount);
         return Ok(0);
     }
@@ -275,7 +306,7 @@ pub fn do_mount(_source: &str, target: &str, fstype: &str, flags: usize) -> SysR
         return Err(Errno::EBUSY);
     }
 
-    if flags & MS_BIND != 0 {
+    if flags & MS_BIND as usize != 0 {
         let source_path = filename_lookup(AT_FDCWD, _source, 0)?;
         let vfs_mount = VfsMount::new(
             source_path.dentry.clone(),
@@ -291,8 +322,17 @@ pub fn do_mount(_source: &str, target: &str, fstype: &str, flags: usize) -> SysR
         return Ok(0);
     }
 
+    if !is_supported_block_fstype(fstype) {
+        return Err(Errno::ENODEV);
+    }
+
+    let source_path = filename_lookup(AT_FDCWD, _source, 0)?;
+    if source_path.dentry.get_inode().node_type() != InodeType::BlockDevice {
+        return Err(Errno::ENOTBLK);
+    }
+
     match fstype {
-        "ext2" | "ext3" | "ext4" | "vfat" => {
+        fstype if is_supported_block_fstype(fstype) => {
             info!("[kernel] mount: {} on {} type {}", _source, target, fstype);
             let ext4_fs = crate::fs::ext4::super_block();
             let backing_root = create_mount_backing_root(&ext4_fs)?;
@@ -306,7 +346,7 @@ pub fn do_mount(_source: &str, target: &str, fstype: &str, flags: usize) -> SysR
             ));
             Ok(0)
         }
-        _ => Err(Errno::ENODEV),
+        _ => unreachable!(),
     }
 }
 

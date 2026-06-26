@@ -46,6 +46,12 @@ impl FutexQueues {
     pub fn bucket_by_idx(&mut self, idx: usize) -> &mut VecDeque<FutexQ> {
         &mut self.buckets[idx]
     }
+
+    pub fn remove_tid(&mut self, tid: usize) {
+        for bucket in self.buckets.iter_mut() {
+            bucket.retain(|q| q.tid != tid);
+        }
+    }
 }
 
 fn futex_hash(uaddr: usize) -> usize {

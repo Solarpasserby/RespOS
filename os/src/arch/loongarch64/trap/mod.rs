@@ -8,7 +8,7 @@ use crate::signal::{SiField, Sig, SigInfo};
 use crate::syscall::*;
 use crate::task::{
     current_task, exit_and_run_next, exit_by_signal_and_run_next, handle_signals,
-    yield_current_task,
+    preempt_current_task,
 };
 use core::arch::global_asm;
 
@@ -120,7 +120,7 @@ pub fn trap_handler(cx: &mut TrapContext) {
             clear_timer_interrupt();
             set_next_ti_trigger();
             check_all_task_timers();
-            yield_current_task();
+            preempt_current_task();
         }
         estat::Trap::Exception(estat::Exception::Syscall) => {
             handle_user_syscall(cx);

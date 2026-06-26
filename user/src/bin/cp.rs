@@ -6,7 +6,10 @@ extern crate user_lib;
 extern crate alloc;
 
 use alloc::string::String;
-use user_lib::{O_CREATE, O_RDONLY, O_TRUNC, O_WRONLY, close, open, read, unlink, write};
+use user_lib::{
+    O_CREATE, O_RDONLY, O_TRUNC, O_WRONLY, Stat, close, copy_file_range, fstat, open, read, unlink,
+    write,
+};
 
 fn basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
@@ -50,7 +53,25 @@ pub fn main(argc: usize, argv: &[&str]) -> i32 {
 
     let src_fd = src_fd as usize;
     let dst_fd = dst_fd as usize;
-    let mut buf = [0u8; 1024];
+    let mut stat = Stat::default();
+    if fstat(src_fd, &mut stat) == 0 {
+        let mut copied = 0usize;
+        let total = stat.st_size as usize;
+        while copied < total {
+            let ret = copy_file_range(src_fd, dst_fd, total - copied);
+            if ret <= 0 {
+                break;
+            }
+            copied += ret as usize;
+        }
+        if copied == total {
+            let src_ret = close(src_fd);
+            let dst_ret = close(dst_fd);
+            return if src_ret < 0 || dst_ret < 0 { 1 } else { 0 };
+        }
+    }
+
+    let mut buf = [0u8; 32 * 1024];
     loop {
         let n = read(src_fd, &mut buf);
         if n < 0 {

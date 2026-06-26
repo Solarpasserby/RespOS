@@ -7,7 +7,7 @@ use crate::fs::mount::{do_mount, do_umount2};
 use crate::fs::vfs::{InodeOp, InodeType};
 use crate::fs::{
     AT_EMPTY_PATH, AT_FDCWD, AT_NO_AUTOMOUNT, AT_SYMLINK_NOFOLLOW, FdEntry, File, FileOp, KStat,
-    OpenFlags, Path, Pipe, Stat, Statfs64, check_dir_search_permission, filename_create,
+    OpenFlags, Path, Pipe, SpecialFd, Stat, Statfs64, check_dir_search_permission, filename_create,
     filename_link, filename_link_tmpfile, filename_lookup, filename_lookup_no_follow_final_symlink,
     filename_rename, filename_symlink, filename_unlink, init_fdset, make_pipe, open_named_fifo,
     path_open,
@@ -927,6 +927,9 @@ pub fn sys_splice(
     if !in_is_pipe && !out_is_pipe {
         return Err(Errno::EINVAL);
     }
+    if !input.splice_supported() || !output.splice_supported() {
+        return Err(Errno::EINVAL);
+    }
     if in_is_pipe && !off_in.is_null() {
         return Err(Errno::ESPIPE);
     }
@@ -1107,13 +1110,33 @@ pub fn sys_vmsplice(fd: usize, iov: *const IoVec, iovcnt: usize, flags: usize) -
 pub fn sys_openat(dirfd: isize, path: *const u8, flags: usize, mode: usize) -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
     let path = copy_cstr_from_user(path)?;
+    let open_flags = OpenFlags::from(flags);
+    if dirfd == AT_FDCWD {
+        if let Some(fd_text) = path.strip_prefix("/proc/self/fd/") {
+            if !fd_text.is_empty() && !fd_text.contains('/') {
+                let fd = fd_text.parse::<usize>().map_err(|_| Errno::ENOENT)?;
+                let old_entry = task.get_fd_entry(fd)?;
+                if let Some(special) = old_entry.file.as_any().downcast_ref::<SpecialFd>() {
+                    let reopened = special.reopen(open_flags).ok_or(Errno::EACCES)?;
+                    let file: alloc::sync::Arc<dyn FileOp> = alloc::sync::Arc::new(reopened);
+                    if open_flags.contains(OpenFlags::O_TRUNC)
+                        && open_flags.intersects(OpenFlags::O_WRONLY | OpenFlags::O_RDWR)
+                    {
+                        file.truncate(0)?;
+                    }
+                    let new_fd = task.alloc_fd(FdEntry::new(file, open_flags))?;
+                    return Ok(new_fd);
+                }
+            }
+        }
+    }
     let file = path_open(dirfd, path.as_str(), flags, mode)?;
     let file: alloc::sync::Arc<dyn FileOp> = if file.inode().node_type() == InodeType::Fifo {
-        open_named_fifo(file.path().abs_path().as_str(), OpenFlags::from(flags))?
+        open_named_fifo(file.path().abs_path().as_str(), open_flags)?
     } else {
         file
     };
-    let fd = task.alloc_fd(FdEntry::new(file, flags.into()))?;
+    let fd = task.alloc_fd(FdEntry::new(file, open_flags))?;
     Ok(fd)
 }
 
@@ -1999,7 +2022,6 @@ pub fn sys_ftruncate(fd: usize, length: isize) -> SysResult<usize> {
     if !file.writable() {
         return Err(Errno::EINVAL);
     }
-    let file = file.as_any().downcast_ref::<File>().ok_or(Errno::EINVAL)?;
     file.truncate(length as usize)
 }
 
@@ -2030,11 +2052,16 @@ pub fn sys_truncate(path: *const u8, length: isize) -> SysResult<usize> {
 
 pub fn sys_fallocate(fd: usize, mode: usize, offset: isize, len: isize) -> SysResult<usize> {
     const FALLOC_FL_KEEP_SIZE: usize = 0x01;
+    const FALLOC_FL_PUNCH_HOLE: usize = 0x02;
+    const FALLOC_ALLOWED_FLAGS: usize = FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE;
 
     if offset < 0 || len <= 0 {
         return Err(Errno::EINVAL);
     }
-    if mode & !FALLOC_FL_KEEP_SIZE != 0 {
+    if mode & !FALLOC_ALLOWED_FLAGS != 0 {
+        return Err(Errno::EOPNOTSUPP);
+    }
+    if mode & FALLOC_FL_PUNCH_HOLE != 0 && mode & FALLOC_FL_KEEP_SIZE == 0 {
         return Err(Errno::EOPNOTSUPP);
     }
 
@@ -2046,7 +2073,9 @@ pub fn sys_fallocate(fd: usize, mode: usize, offset: isize, len: isize) -> SysRe
     if !file.writable() {
         return Err(Errno::EBADF);
     }
-    let file = file.as_any().downcast_ref::<File>().ok_or(Errno::EINVAL)?;
+    if mode & FALLOC_FL_PUNCH_HOLE != 0 {
+        return file.punch_hole(offset as usize, len as usize);
+    }
     if mode & FALLOC_FL_KEEP_SIZE == 0 && file.get_stat()?.size < end {
         file.truncate(end)?;
     }
@@ -2139,7 +2168,7 @@ fn access_mode_allowed(stat: &KStat, mode: usize, use_effective_ids: bool) -> bo
     } else {
         task.uid()
     } as u32;
-    let gid = if use_effective_ids {
+    let primary_gid = if use_effective_ids {
         task.egid()
     } else {
         task.gid()
@@ -2155,7 +2184,8 @@ fn access_mode_allowed(stat: &KStat, mode: usize, use_effective_ids: bool) -> bo
 
     let granted = if uid == stat.uid {
         (perm >> 6) & 0o7
-    } else if gid == stat.gid {
+    } else if primary_gid == stat.gid || task.supplementary_groups().contains(&(stat.gid as usize))
+    {
         (perm >> 3) & 0o7
     } else {
         perm & 0o7
@@ -2177,14 +2207,18 @@ fn access_mode_allowed(stat: &KStat, mode: usize, use_effective_ids: bool) -> bo
 pub fn sys_statfs(path: *const u8, buf: *mut Statfs64) -> SysResult<usize> {
     let path = copy_cstr_from_user(path)?;
     let resolved = filename_lookup(AT_FDCWD, path.as_str(), 0)?;
-    let statfs = resolved.mnt.fs.statfs()?;
+    let mut statfs = resolved.mnt.fs.statfs()?;
+    statfs.f_flags = resolved.mnt.statfs_flags() as i64;
     copy_to_user(buf, &statfs as *const Statfs64, 1)?;
     Ok(0)
 }
 
 fn statfs_for_fileop(file: &Arc<dyn FileOp>) -> SysResult<Statfs64> {
     if let Some(file) = file.as_any().downcast_ref::<File>() {
-        return file.path().mnt.fs.statfs();
+        let path = file.path();
+        let mut statfs = path.mnt.fs.statfs()?;
+        statfs.f_flags = path.mnt.statfs_flags() as i64;
+        return Ok(statfs);
     }
 
     let stat = file.get_stat()?;
@@ -2428,6 +2462,8 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SysResult<usize> {
     const F_DUPFD_CLOEXEC: usize = 1030;
     const F_SETPIPE_SZ: usize = 1031;
     const F_GETPIPE_SZ: usize = 1032;
+    const F_ADD_SEALS: usize = 1033;
+    const F_GET_SEALS: usize = 1034;
     const FD_CLOEXEC: usize = 1;
 
     let task = current_task().expect("[kernel] current task is None.");
@@ -2486,6 +2522,22 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SysResult<usize> {
         F_SETPIPE_SZ => {
             let pipe = pipe_ref(&fd_entry.file).ok_or(Errno::EBADF)?;
             pipe.set_capacity(arg)
+        }
+        F_GET_SEALS => {
+            let memfd = fd_entry
+                .file
+                .as_any()
+                .downcast_ref::<SpecialFd>()
+                .ok_or(Errno::EINVAL)?;
+            Ok(memfd.seals())
+        }
+        F_ADD_SEALS => {
+            let memfd = fd_entry
+                .file
+                .as_any()
+                .downcast_ref::<SpecialFd>()
+                .ok_or(Errno::EINVAL)?;
+            memfd.add_seals(arg)
         }
         F_GETLK => {
             let flock = arg as *mut LinuxFlock;
@@ -2851,6 +2903,12 @@ pub fn sys_mount(
     flags: usize,
     _data: *const u8,
 ) -> SysResult<usize> {
+    if current_task().ok_or(Errno::ESRCH)?.euid() != 0 {
+        return Err(Errno::EPERM);
+    }
+    if source.is_null() || fstype.is_null() {
+        return Err(Errno::EINVAL);
+    }
     let _source_str = copy_cstr_from_user(source)?;
     let target_str = copy_cstr_from_user(target)?;
     let fstype_str = copy_cstr_from_user(fstype)?;
@@ -2864,6 +2922,9 @@ pub fn sys_mount(
 
 /// 系统调用 sys-umount2
 pub fn sys_umount2(target: *const u8, flags: usize) -> SysResult<usize> {
+    if current_task().ok_or(Errno::ESRCH)?.euid() != 0 {
+        return Err(Errno::EPERM);
+    }
     let target = copy_cstr_from_user(target)?;
     do_umount2(target.as_str(), flags)
 }

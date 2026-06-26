@@ -11,6 +11,7 @@ use core::any::Any;
 
 const O_NONBLOCK: usize = OpenFlags::O_NONBLOCK.bits() as usize;
 const O_CLOEXEC: usize = OpenFlags::O_CLOEXEC.bits() as usize;
+const EFD_SEMAPHORE: usize = 1;
 const TFD_TIMER_ABSTIME: usize = 1;
 const TFD_TIMER_CANCEL_ON_SET: usize = 1 << 1;
 const TFD_SETTIME_FLAGS: usize = TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET;
@@ -56,6 +57,103 @@ struct TimerFdState {
     interval_ms: usize,
     deadline_ms: usize,
     consumed: u64,
+}
+
+pub struct EventFd {
+    flags: OpenFlags,
+    semaphore: bool,
+    counter: SpinLock<u64>,
+}
+
+impl EventFd {
+    fn new(initval: usize, flags: OpenFlags, semaphore: bool) -> Self {
+        Self {
+            flags,
+            semaphore,
+            counter: SpinLock::new(initval as u64),
+        }
+    }
+}
+
+impl FileOp for EventFd {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn read<'a>(&'a self, buf: &'a mut [u8]) -> SysResult<usize> {
+        if buf.len() < core::mem::size_of::<u64>() {
+            return Err(Errno::EINVAL);
+        }
+        let task = current_task().expect("[kernel] current task is None.");
+        loop {
+            let mut counter = self.counter.lock();
+            if *counter != 0 {
+                let value = if self.semaphore { 1 } else { *counter };
+                *counter -= value;
+                buf[..8].copy_from_slice(&value.to_ne_bytes());
+                return Ok(8);
+            }
+            drop(counter);
+            if self.flags.contains(OpenFlags::O_NONBLOCK) {
+                return Err(Errno::EAGAIN);
+            }
+            task.set_interruptible(true);
+            if task.check_signal_interrupt() || task.is_interrupted() {
+                task.clear_interrupted();
+                task.set_interruptible(false);
+                return Err(Errno::EINTR);
+            }
+            yield_current_task();
+            task.set_interruptible(false);
+        }
+    }
+
+    fn write<'a>(&'a self, buf: &'a [u8]) -> SysResult<usize> {
+        if buf.len() < core::mem::size_of::<u64>() {
+            return Err(Errno::EINVAL);
+        }
+        let mut raw = [0u8; 8];
+        raw.copy_from_slice(&buf[..8]);
+        let value = u64::from_ne_bytes(raw);
+        if value == u64::MAX {
+            return Err(Errno::EINVAL);
+        }
+        let mut counter = self.counter.lock();
+        *counter = counter.checked_add(value).ok_or(Errno::EAGAIN)?;
+        Ok(8)
+    }
+
+    fn can_seek(&self) -> SysResult {
+        Err(Errno::ESPIPE)
+    }
+
+    fn seek(&self, _offset: isize) -> SysResult<usize> {
+        Err(Errno::ESPIPE)
+    }
+
+    fn get_offset(&self) -> usize {
+        0
+    }
+
+    fn get_flags(&self) -> OpenFlags {
+        self.flags
+    }
+
+    fn get_stat(&self) -> SysResult<KStat> {
+        Ok(KStat::minimal(0, InodeType::Unknown))
+    }
+
+    fn readable(&self) -> bool {
+        true
+    }
+
+    fn writable(&self) -> bool {
+        true
+    }
+
+    fn read_ready(&self) -> bool {
+        *self.counter.lock() != 0
+    }
 }
 
 pub struct TimerFd {
@@ -221,9 +319,11 @@ fn timerfd_ref(fd: usize) -> SysResult<Arc<dyn FileOp>> {
     Ok(entry.file)
 }
 
-pub fn sys_eventfd2(_initval: usize, flags: usize) -> SysResult<usize> {
-    let flags = flags_from_o_flags(flags, O_NONBLOCK | O_CLOEXEC)?;
-    alloc_special_fd(flags)
+pub fn sys_eventfd2(initval: usize, flags: usize) -> SysResult<usize> {
+    let fd_flags = flags_from_o_flags(flags, EFD_SEMAPHORE | O_NONBLOCK | O_CLOEXEC)?;
+    let task = current_task().expect("[kernel] current task is None.");
+    let file = Arc::new(EventFd::new(initval, fd_flags, flags & EFD_SEMAPHORE != 0));
+    task.alloc_fd(FdEntry::new(file, fd_flags))
 }
 
 pub fn sys_epoll_create1(flags: usize) -> SysResult<usize> {
@@ -410,14 +510,21 @@ pub fn sys_open_tree(_dfd: isize, path: *const u8, flags: usize) -> SysResult<us
 }
 
 pub fn sys_memfd_create(name: *const u8, flags: usize) -> SysResult<usize> {
+    const MEMFD_NAME_MAX: usize = 249;
     if flags & !MFD_ALLOWED_FLAGS != 0 {
         return Err(Errno::EINVAL);
     }
-    let _ = copy_cstr_from_user(name)?;
-    alloc_special_fd_with_type(
-        fd_flags(false, flags & MFD_CLOEXEC != 0),
-        InodeType::Regular,
-    )
+    let name = copy_cstr_from_user(name)?;
+    if name.len() > MEMFD_NAME_MAX {
+        return Err(Errno::EINVAL);
+    }
+    let task = current_task().expect("[kernel] current task is None.");
+    let fd_flags = fd_flags(false, flags & MFD_CLOEXEC != 0);
+    let file = Arc::new(SpecialFd::new_memfd(
+        fd_flags,
+        flags & MFD_ALLOW_SEALING != 0,
+    ));
+    task.alloc_fd(FdEntry::new(file, fd_flags))
 }
 
 pub fn sys_memfd_secret(flags: usize) -> SysResult<usize> {
