@@ -8,8 +8,8 @@ extern crate alloc;
 
 use alloc::string::String;
 use user_lib::{
-    O_CREATE, O_RDONLY, O_TRUNC, O_WRONLY, chdir, close, exec, execve, exit, fork, mkdir, open,
-    poweroff, read, symlink, time_get, unlink, waitpid, write,
+    O_CREATE, O_RDONLY, O_TRUNC, O_WRONLY, chdir, chmod, close, exec, execve, exit, fork, mkdir,
+    open, poweroff, read, symlink, time_get, unlink, waitpid, write,
 };
 
 const BUSYBOX_PATH: &str = "/musl/busybox\0";
@@ -120,7 +120,19 @@ fn ensure_executable_file(path: &str, content: &[u8]) {
 }
 
 fn ensure_noop_mkfs(path: &str) {
-    ensure_executable_file(path, b"#!/bin/sh\nexit 0\n");
+    ensure_executable_file(path, b"RESPOS_NOOP_EXEC\n");
+}
+
+fn prepare_noop_mkfs_in(prefix: &str) {
+    for name in ["mkfs.ext2", "mkfs.ext3", "mkfs.ext4", "mkfs.vfat"] {
+        let mut path = String::from(prefix);
+        if !path.ends_with('/') {
+            path.push('/');
+        }
+        path.push_str(name);
+        path.push('\0');
+        ensure_noop_mkfs(path.as_str());
+    }
 }
 
 fn prepare_ltp_common_files() {
@@ -179,6 +191,10 @@ fn prepare_bin_shell(shell_path: &str) {
     ] {
         ensure_noop_mkfs(mkfs);
     }
+    prepare_noop_mkfs_in("/musl");
+    prepare_noop_mkfs_in("/musl/ltp/testcases/bin");
+    prepare_noop_mkfs_in("/glibc");
+    prepare_noop_mkfs_in("/glibc/ltp/testcases/bin");
 }
 
 fn _run_basic_musl() {
@@ -467,6 +483,16 @@ fn _run_iozone_glibc() {
 fn prepare_loader_dirs() {
     let _ = mkdir("/lib\0", 0o755);
     let _ = mkdir("/lib64\0", 0o755);
+    for path in [
+        "/lib\0",
+        "/lib64\0",
+        "/musl\0",
+        "/musl/lib\0",
+        "/glibc\0",
+        "/glibc/lib\0",
+    ] {
+        let _ = chmod(path, 0o755);
+    }
 }
 
 fn _run_lmbench_musl() {

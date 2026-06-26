@@ -2108,9 +2108,10 @@ impl CloneFlags {
         self & !Self::EXIT_SIGNAL_MASK
     }
 
-    /// 当前实现没有完整的 vfork 父进程阻塞模型；非线程 vfork 子进程需要独立
-    /// 地址空间，避免 exec 替换掉父进程地址空间。
+    /// 当前实现没有完整的 vfork 父进程共享地址空间模型。非线程 vfork
+    /// 子进程使用独立地址空间，避免子进程 exec 替换掉父进程地址空间。
     pub fn share_user_vm(self) -> bool {
         self.contains(Self::CLONE_VM)
+            && (!self.contains(Self::CLONE_VFORK) || self.contains(Self::CLONE_THREAD))
     }
 }

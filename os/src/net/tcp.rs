@@ -404,6 +404,10 @@ impl TcpSocket {
     /// 绑定本地地址和端口。
     pub fn bind(&self, mut local_addr: SocketAddr) -> SysResult {
         self.update_state(STATE_CLOSED, STATE_CLOSED, || {
+            let old_addr = unsafe { self.local_addr.get().read() };
+            if old_addr.port != 0 {
+                return Err(Errno::EINVAL);
+            }
             if local_addr.port() == 0 {
                 local_addr.set_port(get_ephemeral_port());
             }

@@ -17,7 +17,7 @@ use crate::task::{
 };
 use crate::trap::PageFaultCause;
 use alloc::collections::BTreeMap;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use bitflags::bitflags;
 use lazy_static::lazy_static;
@@ -43,6 +43,18 @@ lazy_static! {
     /// 由于内核空间被所有用户空间共享，所以使用 `Arc` 来实现共享，使用 `Mutex` 来实现内部可变性
     pub static ref KERNEL_SPACE: Arc<Mutex<MemorySet>> =
         Arc::new(Mutex::new(MemorySet::new_kernel()));
+    static ref SHARED_FILE_PAGES: Mutex<BTreeMap<SharedFilePageKey, Weak<FrameTracker>>> =
+        Mutex::new(BTreeMap::new());
+}
+
+const ET_DYN: u16 = 3;
+const PIE_LOAD_OFFSET: usize = 0x40_0000;
+
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+struct SharedFilePageKey {
+    dev: u64,
+    ino: u64,
+    page_index: usize,
 }
 
 const KERNEL_STACK_EAGER_SIZE: usize = KERNEL_STACK_SIZE;
@@ -117,6 +129,41 @@ fn write_file_at(file: Arc<dyn FileOp>, offset: usize, buf: &[u8]) -> SysResult<
             Err(err)
         }
     }
+}
+
+fn shared_file_frame(backing: &FileBacking, page_offset: usize) -> SysResult<Arc<FrameTracker>> {
+    let stat = backing.file.get_stat()?;
+    let file_offset = backing.offset.checked_add(page_offset).ok_or(Errno::EIO)?;
+    let key = SharedFilePageKey {
+        dev: stat.dev,
+        ino: stat.ino,
+        page_index: file_offset / PAGE_SIZE,
+    };
+
+    if let Some(frame) = SHARED_FILE_PAGES
+        .lock()
+        .get(&key)
+        .and_then(|weak| weak.upgrade())
+    {
+        return Ok(frame);
+    }
+
+    let frame = Arc::new(frame_alloc().ok_or(Errno::ENOMEM)?);
+    if page_offset < backing.len {
+        let read_len = (backing.len - page_offset).min(PAGE_SIZE);
+        read_file_at(
+            backing.file.clone(),
+            file_offset,
+            &mut frame.ppn().get_bytes_array()[..read_len],
+        )?;
+    }
+
+    let mut pages = SHARED_FILE_PAGES.lock();
+    if let Some(existing) = pages.get(&key).and_then(|weak| weak.upgrade()) {
+        return Ok(existing);
+    }
+    pages.insert(key, Arc::downgrade(&frame));
+    Ok(frame)
 }
 
 /// 地址空间
@@ -629,7 +676,7 @@ impl MemorySet {
                 ));
             }
             MmapBacking::SharedFile { file, offset, len } => {
-                let area = MapArea::new_file_backed(
+                let mut area = MapArea::new_file_backed(
                     VirtAddr::from(placement.start),
                     VirtAddr::from(placement.end),
                     placement.map_perm,
@@ -639,8 +686,9 @@ impl MemorySet {
                     offset,
                     len,
                 );
+                area.map(&mut self.page_table)?;
                 area.notify_mmap_open();
-                self.push_map_area_lazy(area);
+                self.areas.push(area);
             }
         }
 
@@ -1366,7 +1414,17 @@ impl MemorySet {
         assert_eq!(magic, [0x7f, 0x45, 0x4c, 0x46], "invalid elf!");
         let ph_count = elf_header.pt2.ph_count();
         let ph_entsize = elf_header.pt2.ph_entry_size() as usize;
-        let app_entry_point = elf_header.pt2.entry_point() as usize;
+        let has_interp = (0..ph_count).any(|i| {
+            elf.program_header(i).ok().and_then(|ph| ph.get_type().ok())
+                == Some(xmas_elf::program::Type::Interp)
+        });
+        let elf_type = u16::from_le_bytes([elf_data[16], elf_data[17]]);
+        let load_bias = if elf_type == ET_DYN && has_interp {
+            PIE_LOAD_OFFSET
+        } else {
+            0
+        };
+        let app_entry_point = elf_header.pt2.entry_point() as usize + load_bias;
         let mut entry_point = app_entry_point;
 
         let mut max_vpn_end = VirtPageNum(0);
@@ -1380,8 +1438,9 @@ impl MemorySet {
             let ph_type = ph.get_type().unwrap();
 
             if ph_type == xmas_elf::program::Type::Load {
-                let start_va = VirtAddr::from(ph.virtual_addr() as usize);
-                let end_va = VirtAddr::from((ph.virtual_addr() + ph.mem_size()) as usize);
+                let start_va = VirtAddr::from(ph.virtual_addr() as usize + load_bias);
+                let end_va =
+                    VirtAddr::from(ph.virtual_addr() as usize + load_bias + ph.mem_size() as usize);
                 if first_load {
                     // 第一个 LOAD 段的起始地址减去 ELF 头中的 ph_offset 即为程序头表虚拟地址
                     ph_va = start_va.0 + elf_header.pt2.ph_offset() as usize;
@@ -2106,7 +2165,13 @@ impl MapArea {
     /// 传入页表的可变借用，以修改传入页表的内容
     pub fn map(&mut self, page_table: &mut PageTable) -> SysResult {
         for vpn in self.vpn_range {
-            self.map_one(page_table, vpn)?;
+            if let Err(err) = self.map_one(page_table, vpn) {
+                let cleanup_end = VirtPageNum(vpn.0 + 1);
+                for cleanup_vpn in VPNRange::new(self.vpn_range.get_start(), cleanup_end) {
+                    self.unmap_one(page_table, cleanup_vpn);
+                }
+                return Err(err);
+            }
         }
         Ok(())
     }
@@ -2166,28 +2231,41 @@ impl MapArea {
             }
             // 随机映射，物理页号和虚拟页号无关，用于用户程序，分配页帧统一管理
             MapType::Framed => {
-                let frame = frame_alloc().ok_or(Errno::ENOMEM)?;
-                ppn = frame.ppn();
-                if let Some(backing) = &self.file_backing {
-                    let page_offset = (vpn - self.vpn_range.get_start()) * PAGE_SIZE;
-                    if page_offset < backing.len {
-                        let file_offset =
-                            backing.offset.checked_add(page_offset).ok_or(Errno::EIO)?;
-                        let read_len = (backing.len - page_offset).min(PAGE_SIZE);
-                        read_file_at(
-                            backing.file.clone(),
-                            file_offset,
-                            &mut ppn.get_bytes_array()[..read_len],
-                        )?;
+                let page_offset = (vpn - self.vpn_range.get_start()) * PAGE_SIZE;
+                let frame = if self.shared {
+                    if let Some(backing) = &self.file_backing {
+                        shared_file_frame(backing, page_offset)?
                     } else {
-                        return Err(Errno::EIO);
+                        Arc::new(frame_alloc().ok_or(Errno::ENOMEM)?)
                     }
-                }
-                self.data_frames.insert(vpn, Arc::new(frame));
+                } else {
+                    let frame = frame_alloc().ok_or(Errno::ENOMEM)?;
+                    let frame_ppn = frame.ppn();
+                    if let Some(backing) = &self.file_backing {
+                        if page_offset < backing.len {
+                            let file_offset =
+                                backing.offset.checked_add(page_offset).ok_or(Errno::EIO)?;
+                            let read_len = (backing.len - page_offset).min(PAGE_SIZE);
+                            read_file_at(
+                                backing.file.clone(),
+                                file_offset,
+                                &mut frame_ppn.get_bytes_array()[..read_len],
+                            )?;
+                        }
+                    }
+                    Arc::new(frame)
+                };
+                ppn = frame.ppn();
+                self.data_frames.insert(vpn, frame);
             }
         }
         let pte_flags = PTEFlags::from(self.map_perm);
-        page_table.map(vpn, ppn, pte_flags)?;
+        if let Err(err) = page_table.map(vpn, ppn, pte_flags) {
+            if self.map_type == MapType::Framed {
+                self.data_frames.remove(&vpn);
+            }
+            return Err(err);
+        }
         Ok(())
     }
 

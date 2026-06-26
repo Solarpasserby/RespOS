@@ -1,9 +1,9 @@
-use alloc::{sync::Arc, vec, vec::Vec};
+use alloc::{string::String, sync::Arc, vec, vec::Vec};
 use core::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
 use crate::{
-    fs::{FdEntry, FileOp},
-    mm::{check_user_writable, copy_from_user, copy_to_user},
+    fs::{FdEntry, FileOp, OpenFlags, filename_create, vfs::InodeType},
+    mm::{check_user_readable, check_user_writable, copy_from_user, copy_to_user},
     net::socket::{self, SOCK_CLOEXEC, SOCK_NONBLOCK, Socket, SocketDomain, SocketKind},
     task::current_task,
 };
@@ -11,7 +11,10 @@ use crate::{
 use super::{Errno, SysResult};
 
 const AF_INET: u16 = 2;
-const AF_UNIX: usize = 1;
+const AF_UNIX: u16 = 1;
+const AF_INET6: u16 = 10;
+const AT_FDCWD: isize = -100;
+const SOCKADDR_UN_PATH_LEN: usize = 108;
 const SOCK_TYPE_MASK: usize = 0xf;
 const SOL_SOCKET: usize = 1;
 const SO_REUSEADDR: usize = 2;
@@ -32,6 +35,7 @@ const IPPROTO_TCP: usize = 6;
 const IPPROTO_UDP: usize = 17;
 const IP_TTL: usize = 2;
 const IP_RECVERR: usize = 11;
+const IPPROTO_SCTP: usize = 132;
 const TCP_NODELAY: usize = 1;
 const TCP_MAXSEG: usize = 2;
 const TCP_DEFAULT_MAXSEG: i32 = 1448;
@@ -77,6 +81,21 @@ struct SockAddrIn {
     sin_zero: [u8; 8],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SockAddrIn6 {
+    sin6_family: u16,
+    sin6_port: u16,
+    sin6_flowinfo: u32,
+    sin6_addr: [u8; 16],
+    sin6_scope_id: u32,
+}
+
+struct SockAddrUn {
+    key: String,
+    pathname: Option<String>,
+}
+
 impl SockAddrIn {
     fn from_socket_addr(addr: &SocketAddr) -> Self {
         let (ip, port) = match addr {
@@ -104,9 +123,33 @@ impl SockAddrIn {
     }
 }
 
+impl SockAddrIn6 {
+    fn from_socket_addr(addr: &SocketAddr) -> Self {
+        let ip = match addr {
+            SocketAddr::V4(v4) if v4.ip().is_unspecified() => [0; 16],
+            _ => {
+                let mut loopback = [0; 16];
+                loopback[15] = 1;
+                loopback
+            }
+        };
+        Self {
+            sin6_family: AF_INET6,
+            sin6_port: addr.port().to_be(),
+            sin6_flowinfo: 0,
+            sin6_addr: ip,
+            sin6_scope_id: 0,
+        }
+    }
+}
+
 fn socket_from_fd(fd: usize) -> SysResult<Arc<dyn FileOp>> {
     let task = current_task().ok_or(Errno::ESRCH)?;
-    let file = task.get_fd_entry(fd)?.file;
+    let fd_entry = task.get_fd_entry(fd)?;
+    if fd_entry.flags.contains(OpenFlags::O_PATH) {
+        return Err(Errno::EBADF);
+    }
+    let file = fd_entry.file;
     if file.as_any().downcast_ref::<Socket>().is_none() {
         return Err(Errno::ENOTSOCK);
     }
@@ -146,16 +189,54 @@ fn read_sockaddr(addr: usize, len: usize) -> SysResult<SocketAddr> {
     Ok(sockaddr.to_socket_addr())
 }
 
+fn read_sockaddr_for_domain(
+    domain: &SocketDomain,
+    addr: usize,
+    len: usize,
+) -> SysResult<SocketAddr> {
+    if *domain != SocketDomain::AF_INET6 {
+        return read_sockaddr(addr, len);
+    }
+    if addr == 0 {
+        return Err(Errno::EFAULT);
+    }
+    if len < core::mem::size_of::<SockAddrIn6>() {
+        return Err(Errno::EINVAL);
+    }
+    let mut sockaddr = SockAddrIn6 {
+        sin6_family: 0,
+        sin6_port: 0,
+        sin6_flowinfo: 0,
+        sin6_addr: [0; 16],
+        sin6_scope_id: 0,
+    };
+    copy_from_user(
+        &mut sockaddr as *mut SockAddrIn6,
+        addr as *const SockAddrIn6,
+        1,
+    )?;
+    if sockaddr.sin6_family != AF_INET6 {
+        return Err(Errno::EAFNOSUPPORT);
+    }
+    let mut loopback = [0; 16];
+    loopback[15] = 1;
+    let ip = match sockaddr.sin6_addr {
+        addr if addr == [0; 16] => Ipv4Addr::UNSPECIFIED,
+        addr if addr == loopback => Ipv4Addr::LOCALHOST,
+        _ => return Err(Errno::EADDRNOTAVAIL),
+    };
+    Ok(SocketAddr::V4(SocketAddrV4::new(
+        ip,
+        u16::from_be(sockaddr.sin6_port),
+    )))
+}
+
 fn write_sockaddr(addr: usize, addrlen_ptr: usize, sockaddr: SocketAddr) -> SysResult {
     if addr == 0 {
         return Ok(());
     }
-    if addrlen_ptr == 0 {
-        return Err(Errno::EFAULT);
-    }
+    let user_len = read_sockaddr_output_len(addrlen_ptr)?;
     let actual_len = core::mem::size_of::<SockAddrIn>() as u32;
-    let mut user_len = 0u32;
-    copy_from_user(&mut user_len as *mut u32, addrlen_ptr as *const u32, 1)?;
     let raw = SockAddrIn::from_socket_addr(&sockaddr);
     let write_len = core::cmp::min(user_len as usize, core::mem::size_of::<SockAddrIn>());
     if write_len > 0 {
@@ -168,6 +249,146 @@ fn write_sockaddr(addr: usize, addrlen_ptr: usize, sockaddr: SocketAddr) -> SysR
     }
     copy_to_user(addrlen_ptr as *mut u32, &actual_len as *const u32, 1)?;
     Ok(())
+}
+
+fn write_sockaddr_for_domain(
+    domain: &SocketDomain,
+    addr: usize,
+    addrlen_ptr: usize,
+    sockaddr: SocketAddr,
+) -> SysResult {
+    if *domain != SocketDomain::AF_INET6 {
+        return write_sockaddr(addr, addrlen_ptr, sockaddr);
+    }
+    if addr == 0 {
+        return Ok(());
+    }
+    let user_len = read_sockaddr_output_len(addrlen_ptr)?;
+    let actual_len = core::mem::size_of::<SockAddrIn6>() as u32;
+    let raw = SockAddrIn6::from_socket_addr(&sockaddr);
+    let write_len = core::cmp::min(user_len as usize, core::mem::size_of::<SockAddrIn6>());
+    if write_len > 0 {
+        check_user_writable(addr as *mut u8, write_len)?;
+        copy_to_user(
+            addr as *mut u8,
+            &raw as *const SockAddrIn6 as *const u8,
+            write_len,
+        )?;
+    }
+    copy_to_user(addrlen_ptr as *mut u32, &actual_len as *const u32, 1)?;
+    Ok(())
+}
+
+fn read_sockaddr_output_len(addrlen_ptr: usize) -> SysResult<u32> {
+    if addrlen_ptr < core::mem::size_of::<u32>() {
+        return Err(Errno::EFAULT);
+    }
+    check_user_readable(addrlen_ptr as *const u32, 1)?;
+    let mut user_len = 0u32;
+    copy_from_user(&mut user_len as *mut u32, addrlen_ptr as *const u32, 1)?;
+    if user_len as usize > 4096 {
+        return Err(Errno::EINVAL);
+    }
+    Ok(user_len)
+}
+
+fn read_sockaddr_un(addr: usize, addrlen: usize) -> SysResult<SockAddrUn> {
+    let min_len = core::mem::size_of::<u16>();
+    if addr == 0 {
+        return Err(Errno::EFAULT);
+    }
+    if addrlen < min_len {
+        return Err(Errno::EINVAL);
+    }
+    let copy_len = core::cmp::min(addrlen, min_len + SOCKADDR_UN_PATH_LEN);
+    let mut raw = vec![0u8; copy_len];
+    copy_from_user(raw.as_mut_ptr(), addr as *const u8, copy_len)?;
+
+    let family = u16::from_ne_bytes([raw[0], raw[1]]);
+    if family != AF_UNIX {
+        return Err(Errno::EAFNOSUPPORT);
+    }
+
+    let path_bytes = &raw[min_len..];
+    if path_bytes.is_empty() {
+        return Err(Errno::EINVAL);
+    }
+    if path_bytes[0] == 0 {
+        let key = core::str::from_utf8(path_bytes)
+            .map(String::from)
+            .map_err(|_| Errno::EINVAL)?;
+        return Ok(SockAddrUn {
+            key,
+            pathname: None,
+        });
+    }
+
+    let end = path_bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(path_bytes.len());
+    let path = core::str::from_utf8(&path_bytes[..end])
+        .map(String::from)
+        .map_err(|_| Errno::EINVAL)?;
+    Ok(SockAddrUn {
+        key: path.clone(),
+        pathname: Some(path),
+    })
+}
+
+fn create_unix_socket_node(path: &str) -> SysResult {
+    filename_create(AT_FDCWD, path, InodeType::Socket, 0o777).map_err(|err| {
+        if err == Errno::EEXIST {
+            Errno::EADDRINUSE
+        } else {
+            err
+        }
+    })
+}
+
+fn write_sockaddr_un(addr: usize, addrlen_ptr: usize, key: Option<&str>) -> SysResult {
+    if addr == 0 {
+        return Ok(());
+    }
+    let user_len = read_sockaddr_output_len(addrlen_ptr)? as usize;
+    let key_bytes = key.unwrap_or("").as_bytes();
+    let actual_len = core::mem::size_of::<u16>() + key_bytes.len().min(SOCKADDR_UN_PATH_LEN);
+    let write_len = core::cmp::min(user_len, actual_len);
+    if write_len > 0 {
+        check_user_writable(addr as *mut u8, write_len)?;
+        let family = AF_UNIX.to_ne_bytes();
+        let family_len = core::cmp::min(write_len, family.len());
+        copy_to_user(addr as *mut u8, family.as_ptr(), family_len)?;
+        if write_len > family.len() {
+            copy_to_user(
+                (addr + family.len()) as *mut u8,
+                key_bytes.as_ptr(),
+                write_len - family.len(),
+            )?;
+        }
+    }
+    let actual_len_u32 = actual_len as u32;
+    copy_to_user(addrlen_ptr as *mut u32, &actual_len_u32 as *const u32, 1)?;
+    Ok(())
+}
+
+fn is_local_ipv4(addr: &SocketAddr) -> bool {
+    match addr {
+        SocketAddr::V4(v4) => {
+            let ip = v4.ip();
+            ip.is_unspecified() || ip.octets()[0] == 127
+        }
+        SocketAddr::V6(_) => false,
+    }
+}
+
+fn normalize_connect_addr(addr: SocketAddr) -> SocketAddr {
+    match addr {
+        SocketAddr::V4(v4) if v4.ip().is_unspecified() => {
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, v4.port()))
+        }
+        _ => addr,
+    }
 }
 
 fn write_sockaddr_value(addr: usize, addrlen: usize, sockaddr: SocketAddr) -> SysResult<u32> {
@@ -205,7 +426,7 @@ fn read_msghdr(msg: usize) -> SysResult<MsgHdr> {
     };
     copy_from_user(&mut hdr as *mut MsgHdr, msg as *const MsgHdr, 1)?;
     if hdr.msg_iovlen > IOV_MAX {
-        return Err(Errno::EINVAL);
+        return Err(Errno::EMSGSIZE);
     }
     Ok(hdr)
 }
@@ -239,7 +460,7 @@ fn read_mmsghdr(msg: usize, idx: usize) -> SysResult<MMsgHdr> {
         1,
     )?;
     if hdr.msg_hdr.msg_iovlen > IOV_MAX {
-        return Err(Errno::EINVAL);
+        return Err(Errno::EMSGSIZE);
     }
     Ok(hdr)
 }
@@ -383,10 +604,21 @@ fn parse_socket(
     let domain = socket::parse_domain(domain)?;
     let kind = socket::parse_kind(socket_type)?;
     match (&domain, kind, protocol) {
-        (SocketDomain::AF_INET, SocketKind::SOCK_STREAM, 0 | IPPROTO_TCP) => {}
-        (SocketDomain::AF_INET, SocketKind::SOCK_DGRAM, 0 | IPPROTO_UDP) => {}
-        (SocketDomain::AF_UNIX, SocketKind::SOCK_STREAM | SocketKind::SOCK_DGRAM, 0) => {}
-        (SocketDomain::AF_INET6, _, _) => return Err(Errno::EAFNOSUPPORT),
+        (
+            SocketDomain::AF_INET | SocketDomain::AF_INET6,
+            SocketKind::SOCK_STREAM,
+            0 | IPPROTO_TCP | IPPROTO_SCTP,
+        ) => {}
+        (
+            SocketDomain::AF_INET | SocketDomain::AF_INET6,
+            SocketKind::SOCK_DGRAM,
+            0 | IPPROTO_UDP,
+        ) => {}
+        (
+            SocketDomain::AF_UNIX,
+            SocketKind::SOCK_STREAM | SocketKind::SOCK_DGRAM | SocketKind::SOCK_SEQPACKET,
+            0,
+        ) => {}
         (_, SocketKind::SOCK_RAW, _) => return Err(Errno::EPROTONOSUPPORT),
         _ => return Err(Errno::EPROTONOSUPPORT),
     }
@@ -411,17 +643,21 @@ pub fn sys_socketpair(
     protocol: usize,
     sv: *mut i32,
 ) -> SysResult<usize> {
-    if domain != AF_UNIX {
-        return if domain == AF_INET as usize {
-            Err(Errno::EOPNOTSUPP)
-        } else {
-            Err(Errno::EAFNOSUPPORT)
+    let kind = socket::parse_kind(socket_type & SOCK_TYPE_MASK)?;
+    if domain != AF_UNIX as usize {
+        if domain != AF_INET as usize {
+            return Err(Errno::EAFNOSUPPORT);
+        }
+        return match (kind, protocol) {
+            (SocketKind::SOCK_DGRAM, IPPROTO_UDP) | (SocketKind::SOCK_STREAM, IPPROTO_TCP) => {
+                Err(Errno::EOPNOTSUPP)
+            }
+            _ => Err(Errno::EPROTONOSUPPORT),
         };
     }
     if protocol != 0 {
         return Err(Errno::EPROTONOSUPPORT);
     }
-    let kind = socket::parse_kind(socket_type & SOCK_TYPE_MASK)?;
     let (left, right) = Socket::new_unix_pair(kind)?;
     let nonblock = socket_type & SOCK_NONBLOCK != 0;
     let cloexec = socket_type & SOCK_CLOEXEC != 0;
@@ -456,9 +692,21 @@ pub fn sys_socketpair(
 pub fn sys_bind(socketfd: usize, socketaddr: usize, socketlen: usize) -> SysResult<usize> {
     with_socket(socketfd, |sock| {
         if sock.domain == SocketDomain::AF_UNIX {
+            let addr = read_sockaddr_un(socketaddr, socketlen)?;
+            sock.ensure_unix_unbound()?;
+            if let Some(path) = addr.pathname.as_ref() {
+                create_unix_socket_node(path.as_str())?;
+            }
+            sock.bind_unix_path(addr.key.as_str())?;
             return Ok(0);
         }
-        let addr = read_sockaddr(socketaddr, socketlen)?;
+        let addr = read_sockaddr_for_domain(&sock.domain, socketaddr, socketlen)?;
+        if !is_local_ipv4(&addr) {
+            return Err(Errno::EADDRNOTAVAIL);
+        }
+        if addr.port() < 1024 && current_task().ok_or(Errno::ESRCH)?.fsuid() != 0 {
+            return Err(Errno::EACCES);
+        }
         sock.bind(addr)?;
         Ok(0)
     })
@@ -490,8 +738,15 @@ pub fn sys_accept4(socketfd: usize, addr: usize, addrlen: usize, flags: usize) -
         new_sock.set_close_on_exec(true);
     }
     let fd_flags = new_sock.get_flags();
+    let is_unix = new_sock.domain == SocketDomain::AF_UNIX;
+    let domain = new_sock.domain.clone();
     let new_fd = task.alloc_fd(FdEntry::new(Arc::new(new_sock), fd_flags))?;
-    if let Err(err) = write_sockaddr(addr, addrlen, remote_addr) {
+    let write_addr_result = if is_unix {
+        write_sockaddr_un(addr, addrlen, None)
+    } else {
+        write_sockaddr_for_domain(&domain, addr, addrlen, remote_addr)
+    };
+    if let Err(err) = write_addr_result {
         let _ = task.close(new_fd);
         return Err(err);
     }
@@ -501,15 +756,11 @@ pub fn sys_accept4(socketfd: usize, addr: usize, addrlen: usize, flags: usize) -
 pub fn sys_connect(socketfd: usize, addr: usize, addrlen: usize) -> SysResult<usize> {
     with_socket(socketfd, |sock| {
         if sock.domain == SocketDomain::AF_UNIX {
-            if addr == 0 {
-                return Err(Errno::EFAULT);
-            }
-            if addrlen < core::mem::size_of::<u16>() {
-                return Err(Errno::EINVAL);
-            }
-            return Err(Errno::ENOENT);
+            let addr = read_sockaddr_un(addr, addrlen)?;
+            sock.connect_unix_path(addr.key.as_str())?;
+            return Ok(0);
         }
-        let remote = read_sockaddr(addr, addrlen)?;
+        let remote = normalize_connect_addr(read_sockaddr_for_domain(&sock.domain, addr, addrlen)?);
         sock.connect(remote)?;
         Ok(0)
     })
@@ -520,8 +771,13 @@ pub fn sys_getsockname(socketfd: usize, addr: usize, addrlen: usize) -> SysResul
         return Err(Errno::EFAULT);
     }
     with_socket(socketfd, |sock| {
+        if sock.domain == SocketDomain::AF_UNIX {
+            let key = sock.get_bound_unix_key()?;
+            write_sockaddr_un(addr, addrlen, Some(key.as_str()))?;
+            return Ok(0);
+        }
         let bound = sock.get_bound_address()?;
-        write_sockaddr(addr, addrlen, bound)?;
+        write_sockaddr_for_domain(&sock.domain, addr, addrlen, bound)?;
         Ok(0)
     })
 }
@@ -532,7 +788,7 @@ pub fn sys_getpeername(socketfd: usize, addr: usize, addrlen: usize) -> SysResul
     }
     with_socket(socketfd, |sock| {
         let peer = sock.get_remote_addr()?;
-        write_sockaddr(addr, addrlen, peer)?;
+        write_sockaddr_for_domain(&sock.domain, addr, addrlen, peer)?;
         Ok(0)
     })
 }
@@ -549,7 +805,7 @@ pub fn sys_sendto(
     copy_from_user(kernel_buf.as_mut_ptr(), buf, len)?;
     with_socket(fd, |sock| {
         if dest_addr != 0 {
-            let remote = read_sockaddr(dest_addr, addrlen)?;
+            let remote = read_sockaddr_for_domain(&sock.domain, dest_addr, addrlen)?;
             sock.send_to(&kernel_buf, remote)
         } else {
             sock.write(&kernel_buf)
@@ -566,9 +822,12 @@ pub fn sys_recvfrom(
     addrlen: usize,
 ) -> SysResult<usize> {
     let mut kernel_buf: Vec<u8> = vec![0; len];
-    let (n, from_addr) = with_socket(fd, |sock| sock.recv_from(&mut kernel_buf))?;
+    let (n, from_addr, domain) = with_socket(fd, |sock| {
+        let (n, from_addr) = sock.recv_from(&mut kernel_buf)?;
+        Ok((n, from_addr, sock.domain.clone()))
+    })?;
     copy_to_user(buf, kernel_buf.as_ptr(), n.min(len))?;
-    write_sockaddr(src_addr, addrlen, from_addr)?;
+    write_sockaddr_for_domain(&domain, src_addr, addrlen, from_addr)?;
     Ok(n.min(len))
 }
 
@@ -585,7 +844,8 @@ fn sys_sendmsg_from_hdr(fd: usize, hdr: &MsgHdr, flags: usize) -> SysResult<usiz
     let data = collect_iov_bytes(&iovs)?;
     with_socket(fd, |sock| {
         if hdr.msg_name != 0 {
-            let remote = read_sockaddr(hdr.msg_name, hdr.msg_namelen as usize)?;
+            let remote =
+                read_sockaddr_for_domain(&sock.domain, hdr.msg_name, hdr.msg_namelen as usize)?;
             sock.send_to(&data, remote)
         } else {
             sock.write(&data)
@@ -601,8 +861,14 @@ pub fn sys_recvmsg(fd: usize, msg: usize, flags: usize) -> SysResult<usize> {
 }
 
 fn sys_recvmsg_into_hdr(fd: usize, hdr: &mut MsgHdr, flags: usize) -> SysResult<usize> {
-    if flags & (MSG_OOB | MSG_ERRQUEUE) != 0 {
-        return Err(Errno::EOPNOTSUPP);
+    if hdr.msg_namelen as usize > 4096 {
+        return Err(Errno::EINVAL);
+    }
+    if flags & MSG_OOB != 0 {
+        return Err(Errno::EINVAL);
+    }
+    if flags & MSG_ERRQUEUE != 0 {
+        return Err(Errno::EAGAIN);
     }
     let iovs = read_iovecs(hdr.msg_iov, hdr.msg_iovlen)?;
     let total = iovs.iter().try_fold(0usize, |acc, item| {
@@ -785,7 +1051,9 @@ pub fn sys_getsockopt(
                 write_sockopt(optval, optlen, &value)
             }
             (IPPROTO_TCP, TCP_MAXSEG) => write_sockopt(optval, optlen, &TCP_DEFAULT_MAXSEG),
-            (SOL_SOCKET, _) | (IPPROTO_IP, _) | (IPPROTO_TCP, _) => Err(Errno::ENOPROTOOPT),
+            (SOL_SOCKET, _) | (IPPROTO_IP, _) | (IPPROTO_TCP, _) | (IPPROTO_SCTP, _) => {
+                Err(Errno::ENOPROTOOPT)
+            }
             _ => Err(Errno::EOPNOTSUPP),
         }?;
         Ok(0)

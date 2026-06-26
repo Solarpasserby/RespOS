@@ -31,6 +31,8 @@ pub enum Errno {
     EACCES = 13,
     /// 用户地址无效，或者无法访问用户传入的指针。
     EFAULT = 14,
+    /// 块设备操作传入的对象不是块设备。
+    ENOTBLK = 15,
     /// 设备或资源正忙。
     EBUSY = 16,
     /// 文件已经存在。
@@ -146,6 +148,7 @@ impl Errno {
             Errno::ENOMEM => "Cannot allocate memory",
             Errno::EACCES => "Permission denied",
             Errno::EFAULT => "Bad address",
+            Errno::ENOTBLK => "Block device required",
             Errno::EBUSY => "Device or resource busy",
             Errno::EEXIST => "File exists",
             Errno::EXDEV => "Cross-device link",

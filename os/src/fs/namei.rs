@@ -2,7 +2,9 @@
 
 use super::Path;
 use super::dentry_cache::{insert_dentry_cache, lookup_dentry_cache, remove_dentry_cache_tree};
-use super::mount::{VfsMount, get_mount_by_dentry, get_mount_by_vfsmount, root_path};
+use super::mount::{
+    MS_NODEV, MS_NOSYMFOLLOW, VfsMount, get_mount_by_dentry, get_mount_by_vfsmount, root_path,
+};
 use super::vfs::{Dentry, InodeType};
 use super::{File, OpenFlags, TmpFileMeta};
 use crate::fs::ext4::Ext4Inode;
@@ -304,6 +306,22 @@ fn check_mount_writable(mnt: &Arc<VfsMount>) -> SysResult {
     }
 }
 
+fn check_mount_device_allowed(
+    mnt: &Arc<VfsMount>,
+    inode: &Arc<dyn super::vfs::InodeOp>,
+) -> SysResult {
+    if mnt.has_flag(MS_NODEV)
+        && matches!(
+            inode.node_type(),
+            InodeType::CharDevice | InodeType::BlockDevice
+        )
+    {
+        Err(Errno::EACCES)
+    } else {
+        Ok(())
+    }
+}
+
 fn init_created_owner(
     parent: &Arc<Dentry>,
     inode: &Arc<dyn super::vfs::InodeOp>,
@@ -426,6 +444,7 @@ pub fn open_last_lookups(nd: &mut Nameidata, flags: usize, mode: usize) -> SysRe
                 {
                     return Err(Errno::ENOTDIR);
                 }
+                check_mount_device_allowed(&nd.mnt, &inode)?;
                 check_open_permission(&dentry, flags)?;
                 // TODO: 此处默认 dentry 不是负目录项，在引入缓存后需修改
                 dentry
@@ -499,6 +518,7 @@ pub fn path_open(dirfd: isize, path: &str, flags: usize, mode: usize) -> SysResu
         {
             return Err(Errno::ENOTDIR);
         }
+        check_mount_device_allowed(&path.mnt, &inode)?;
         check_open_permission(&path.dentry, open_flags)?;
         return Ok(Arc::new(File::new(path, inode, open_flags)));
     }
@@ -710,6 +730,9 @@ fn resolve_path_from(
 
         // 中间 symlink 一定要展开；最后一级是否展开由 follow_final_symlink 决定。
         if inode.node_type() == InodeType::SymLink && (!is_last || follow_final_symlink) {
+            if child_path.mnt.has_flag(MS_NOSYMFOLLOW) {
+                return Err(Errno::ELOOP);
+            }
             let target = inode.read_link(&child_path.abs_path())?;
             // target 替换当前 symlink，其余未解析 segment 继续拼到 target 后面。
             let next_path = join_symlink_target(&target, &nd.path_segments[nd.depth + 1..]);
@@ -1064,6 +1087,9 @@ pub fn link_path_walk(nd: &mut Nameidata) -> SysResult {
                 let child_path = Path::new(nd.mnt.clone(), child_dentry.clone());
                 let inode = child_dentry.get_inode();
                 if inode.node_type() == InodeType::SymLink {
+                    if child_path.mnt.has_flag(MS_NOSYMFOLLOW) {
+                        return Err(Errno::ELOOP);
+                    }
                     if symlink_follows >= MAX_SYMLINK_FOLLOWS {
                         return Err(Errno::ELOOP);
                     }

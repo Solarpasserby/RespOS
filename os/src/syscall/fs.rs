@@ -2204,14 +2204,18 @@ fn access_mode_allowed(stat: &KStat, mode: usize, use_effective_ids: bool) -> bo
 pub fn sys_statfs(path: *const u8, buf: *mut Statfs64) -> SysResult<usize> {
     let path = copy_cstr_from_user(path)?;
     let resolved = filename_lookup(AT_FDCWD, path.as_str(), 0)?;
-    let statfs = resolved.mnt.fs.statfs()?;
+    let mut statfs = resolved.mnt.fs.statfs()?;
+    statfs.f_flags = resolved.mnt.statfs_flags() as i64;
     copy_to_user(buf, &statfs as *const Statfs64, 1)?;
     Ok(0)
 }
 
 fn statfs_for_fileop(file: &Arc<dyn FileOp>) -> SysResult<Statfs64> {
     if let Some(file) = file.as_any().downcast_ref::<File>() {
-        return file.path().mnt.fs.statfs();
+        let path = file.path();
+        let mut statfs = path.mnt.fs.statfs()?;
+        statfs.f_flags = path.mnt.statfs_flags() as i64;
+        return Ok(statfs);
     }
 
     let stat = file.get_stat()?;
@@ -2896,6 +2900,12 @@ pub fn sys_mount(
     flags: usize,
     _data: *const u8,
 ) -> SysResult<usize> {
+    if current_task().ok_or(Errno::ESRCH)?.euid() != 0 {
+        return Err(Errno::EPERM);
+    }
+    if source.is_null() || fstype.is_null() {
+        return Err(Errno::EINVAL);
+    }
     let _source_str = copy_cstr_from_user(source)?;
     let target_str = copy_cstr_from_user(target)?;
     let fstype_str = copy_cstr_from_user(fstype)?;
@@ -2909,6 +2919,9 @@ pub fn sys_mount(
 
 /// 系统调用 sys-umount2
 pub fn sys_umount2(target: *const u8, flags: usize) -> SysResult<usize> {
+    if current_task().ok_or(Errno::ESRCH)?.euid() != 0 {
+        return Err(Errno::EPERM);
+    }
     let target = copy_cstr_from_user(target)?;
     do_umount2(target.as_str(), flags)
 }

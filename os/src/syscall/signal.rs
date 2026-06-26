@@ -14,6 +14,7 @@ use alloc::vec::Vec;
 struct UserSigAction {
     handler: usize,
     flags: usize,
+    restorer: usize,
     mask: SigSet,
 }
 
@@ -25,7 +26,7 @@ fn sigaction_from_user(action: UserSigAction) -> SigAction {
     SigAction {
         sa_handler: action.handler,
         flags: crate::signal::sig_handler::SigActionFlag::from_bits_truncate(action.flags as u32),
-        restorer: 0,
+        restorer: action.restorer,
         mask: action.mask,
     }
 }
@@ -40,6 +41,7 @@ fn sigaction_to_user(action: SigAction) -> UserSigAction {
     UserSigAction {
         handler: action.sa_handler,
         flags: action.flags.bits() as usize,
+        restorer: action.restorer,
         mask: action.mask,
     }
 }

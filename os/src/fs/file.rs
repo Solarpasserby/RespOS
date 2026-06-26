@@ -2,6 +2,7 @@
 
 use super::vfs::{InodeOp, InodeType, LinuxDirent64};
 use crate::fs::ext4::Ext4Inode;
+use crate::fs::mount::{MS_NOATIME, MS_NODIRATIME};
 use crate::fs::page_cache::PageCache;
 use crate::fs::{KStat, Path};
 use crate::syscall::{Errno, SysResult};
@@ -32,6 +33,7 @@ struct FileInner {
     page_cache: Option<Arc<PageCache>>,
     write_back: bool,
     tmpfile_meta: Option<TmpFileMeta>,
+    atime_override: Option<TimeSpec>,
 }
 
 /// 文件操作 trait
@@ -130,6 +132,7 @@ impl File {
                 page_cache,
                 write_back,
                 tmpfile_meta: None,
+                atime_override: None,
             }),
         }
     }
@@ -150,6 +153,7 @@ impl File {
                 page_cache,
                 write_back: false,
                 tmpfile_meta: Some(meta),
+                atime_override: None,
             }),
         }
     }
@@ -187,6 +191,9 @@ impl File {
     pub fn readdir(&self) -> SysResult<Vec<LinuxDirent64>> {
         let path = self.path();
         let mut entries = self.inode.readdir(&path.abs_path())?;
+        if let Some(atime) = self.touch_atime_if_needed(&path, InodeType::Directory)? {
+            self.inner.lock().atime_override = Some(atime);
+        }
 
         if Arc::ptr_eq(&path.dentry, &path.mnt.root) {
             if let Some(mount) = crate::fs::mount::get_mount_by_vfsmount(&path.mnt) {
@@ -252,12 +259,19 @@ impl File {
         let inner = self.inner.lock();
         let visible_path = inner.path.abs_path();
         let path = self.storage_path(&visible_path);
-        if let Some(ref pc) = inner.page_cache {
+        let file_path = inner.path.clone();
+        let ty = self.inode.node_type();
+        let n = if let Some(ref pc) = inner.page_cache {
             let lower = inner.write_back.then_some((&self.inode, path.as_str()));
             pc.read_at(offset, buf, lower)
         } else {
             self.inode.read_at(&path, offset, buf)
+        }?;
+        drop(inner);
+        if let Some(atime) = self.touch_atime_if_needed(&file_path, ty)? {
+            self.inner.lock().atime_override = Some(atime);
         }
+        Ok(n)
     }
 
     pub fn write_at_offset(&self, offset: usize, buf: &[u8]) -> SysResult<usize> {
@@ -283,6 +297,34 @@ impl File {
             self.inode.write_at(&path, offset, buf)
         }
     }
+
+    fn touch_atime_if_needed(
+        &self,
+        path: &Arc<Path>,
+        ty: InodeType,
+    ) -> SysResult<Option<TimeSpec>> {
+        if path.mnt.has_flag(MS_NOATIME)
+            || (ty == InodeType::Directory && path.mnt.has_flag(MS_NODIRATIME))
+        {
+            return Ok(None);
+        }
+
+        let ms = get_time_ms();
+        let mut now = TimeSpec {
+            sec: (ms / 1000) as isize,
+            nsec: ((ms % 1000) * 1_000_000) as isize,
+        };
+        let visible_path = path.abs_path();
+        let storage_path = self.storage_path(&visible_path);
+        if let Ok(stat) = self.inode.stat(storage_path.as_str()) {
+            if now.sec <= stat.atime.sec {
+                now.sec = stat.atime.sec + 1;
+                now.nsec = 0;
+            }
+        }
+        let _ = self.inode.set_times(storage_path.as_str(), Some(now), None);
+        Ok(Some(now))
+    }
 }
 
 impl Drop for File {
@@ -304,6 +346,8 @@ impl FileOp for File {
         let visible_path = inner.path.abs_path();
         let path = self.storage_path(&visible_path);
         let offset = inner.offset;
+        let file_path = inner.path.clone();
+        let ty = self.inode.node_type();
         let n = if let Some(ref pc) = inner.page_cache {
             let lower = inner.write_back.then_some((&self.inode, path.as_str()));
             pc.read_at(offset, buf, lower)?
@@ -311,6 +355,10 @@ impl FileOp for File {
             self.inode.read_at(&path, offset, buf)?
         };
         inner.offset += n;
+        drop(inner);
+        if let Some(atime) = self.touch_atime_if_needed(&file_path, ty)? {
+            self.inner.lock().atime_override = Some(atime);
+        }
         Ok(n)
     }
 
@@ -400,9 +448,16 @@ impl FileOp for File {
                 stat.gid = meta.gid;
                 stat.nlink = 0;
             }
+            if let Some(atime) = inner.atime_override {
+                stat.atime = atime;
+            }
             return Ok(stat);
         }
-        self.inode.stat(&path)
+        let mut stat = self.inode.stat(&path)?;
+        if let Some(atime) = inner.atime_override {
+            stat.atime = atime;
+        }
+        Ok(stat)
     }
 
     fn readable(&self) -> bool {

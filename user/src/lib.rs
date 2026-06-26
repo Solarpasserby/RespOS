@@ -150,6 +150,9 @@ pub fn read(fd: usize, buf: &mut [u8]) -> isize {
 pub fn write(fd: usize, buf: &[u8]) -> isize {
     sys_write(fd, buf)
 }
+pub fn copy_file_range(fd_in: usize, fd_out: usize, len: usize) -> isize {
+    sys_copy_file_range(fd_in, fd_out, len)
+}
 pub fn getcwd(buf: &mut [u8]) -> isize {
     sys_getcwd(buf)
 }
@@ -173,6 +176,9 @@ pub fn symlink(target: &str, linkpath: &str) -> isize {
 }
 pub fn chdir(path: &str) -> isize {
     sys_chdir(path)
+}
+pub fn chmod(path: &str, mode: usize) -> isize {
+    sys_fchmodat(AT_FDCWD, path, mode, 0)
 }
 pub fn open(path: &str, flags: usize, mode: usize) -> isize {
     sys_openat(AT_FDCWD, path, flags, mode)

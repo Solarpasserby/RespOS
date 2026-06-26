@@ -4,11 +4,12 @@
 //! 从而可以通过标准文件描述符接口（read/write/poll）操作。
 //! 内部根据 `SocketKind` 分派到 `TcpSocket` 或 `UdpSocket`。
 
-use alloc::{collections::VecDeque, sync::Arc};
+use alloc::{collections::VecDeque, string::String, sync::Arc, vec::Vec};
 use core::{
     net::SocketAddr,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
+use lazy_static::lazy_static;
 use spin::Mutex;
 
 use crate::{
@@ -16,7 +17,7 @@ use crate::{
     fs::{FileOp, KStat, OpenFlags},
     mutex::SpinLock,
     syscall::{Errno, SysResult},
-    task::yield_current_task,
+    task::{current_task, yield_current_task},
 };
 
 use super::{
@@ -27,6 +28,11 @@ use super::{
 };
 
 const UNIX_SOCKET_BUFFER_LIMIT: usize = 64 * 1024;
+const UNIX_LISTEN_QUEUE_LIMIT: usize = 128;
+
+lazy_static! {
+    static ref UNIX_LISTENERS: Mutex<Vec<(String, Arc<UnixListener>)>> = Mutex::new(Vec::new());
+}
 
 // ——— 类型枚举 ———
 
@@ -34,11 +40,11 @@ const UNIX_SOCKET_BUFFER_LIMIT: usize = 64 * 1024;
 #[allow(non_camel_case_types)]
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum SocketDomain {
-    /// UNIX 域套接字（暂不支持完整语义）。
+    /// UNIX 域套接字。
     AF_UNIX = 1,
     /// IPv4 套接字。
     AF_INET = 2,
-    /// IPv6 套接字（暂未实现）。
+    /// IPv6 套接字（当前复用 loopback TCP/UDP 传输）。
     AF_INET6 = 10,
 }
 
@@ -52,6 +58,8 @@ pub enum SocketKind {
     SOCK_DGRAM = 2,
     /// 原始套接字（暂不支持）。
     SOCK_RAW = 3,
+    /// UNIX seqpacket 在本地队列中按保序流处理。
+    SOCK_SEQPACKET = 5,
 }
 
 // ——— SocketInner ———
@@ -66,7 +74,21 @@ enum SocketInner {
 struct UnixSocket {
     rx: Arc<SpinLock<VecDeque<u8>>>,
     peer_rx: SpinLock<Option<Arc<SpinLock<VecDeque<u8>>>>>,
+    bound_key: Mutex<Option<String>>,
+    listener: SpinLock<Option<Arc<UnixListener>>>,
     nonblock: AtomicBool,
+}
+
+struct UnixListener {
+    pending: SpinLock<VecDeque<UnixSocket>>,
+}
+
+impl UnixListener {
+    fn new() -> Self {
+        Self {
+            pending: SpinLock::new(VecDeque::new()),
+        }
+    }
 }
 
 impl UnixSocket {
@@ -74,6 +96,8 @@ impl UnixSocket {
         Self {
             rx: Arc::new(SpinLock::new(VecDeque::new())),
             peer_rx: SpinLock::new(None),
+            bound_key: Mutex::new(None),
+            listener: SpinLock::new(None),
             nonblock: AtomicBool::new(false),
         }
     }
@@ -90,8 +114,47 @@ impl UnixSocket {
         self.nonblock.store(nonblock, Ordering::Release);
     }
 
+    fn bind_path(&self, key: &str) -> SysResult {
+        let mut bound_key = self.bound_key.lock();
+        if bound_key.is_some() {
+            return Err(Errno::EINVAL);
+        }
+        *bound_key = Some(String::from(key));
+        Ok(())
+    }
+
+    fn ensure_unbound(&self) -> SysResult {
+        if self.bound_key.lock().is_some() {
+            return Err(Errno::EINVAL);
+        }
+        Ok(())
+    }
+
     fn is_nonblocking(&self) -> bool {
         self.nonblock.load(Ordering::Acquire)
+    }
+
+    fn wait_interruptible(&self) -> SysResult {
+        if self.is_nonblocking() {
+            return Err(Errno::EAGAIN);
+        }
+        let task = current_task().ok_or(Errno::ESRCH)?;
+        task.set_interruptible(true);
+        task.check_real_timer();
+        if task.check_signal_interrupt() || task.is_interrupted() {
+            task.clear_interrupted();
+            task.set_interruptible(false);
+            return Err(Errno::EINTR);
+        }
+        yield_current_task();
+        task.check_real_timer();
+        if task.check_signal_interrupt() || task.is_interrupted() {
+            task.clear_interrupted();
+            task.set_interruptible(false);
+            return Err(Errno::EINTR);
+        }
+        task.set_interruptible(false);
+        Ok(())
     }
 
     fn read(&self, buf: &mut [u8]) -> SysResult<usize> {
@@ -115,10 +178,7 @@ impl UnixSocket {
                 return Ok(read_len);
             }
             drop(rx);
-            if self.is_nonblocking() {
-                return Err(Errno::EAGAIN);
-            }
-            yield_current_task();
+            self.wait_interruptible()?;
         }
     }
 
@@ -136,10 +196,7 @@ impl UnixSocket {
                 return Ok(write_len);
             }
             drop(rx);
-            if self.is_nonblocking() {
-                return Err(Errno::EAGAIN);
-            }
-            yield_current_task();
+            self.wait_interruptible()?;
         }
     }
 
@@ -152,6 +209,71 @@ impl UnixSocket {
             .lock()
             .as_ref()
             .is_some_and(|rx| rx.lock().len() < UNIX_SOCKET_BUFFER_LIMIT)
+    }
+
+    fn listen(&self) -> SysResult {
+        let key = self.bound_key.lock().clone().ok_or(Errno::EINVAL)?;
+        let mut registry = UNIX_LISTENERS.lock();
+        if registry.iter().any(|(item_key, _)| item_key == &key) {
+            return Err(Errno::EADDRINUSE);
+        }
+        let listener = Arc::new(UnixListener::new());
+        *self.listener.lock() = Some(listener.clone());
+        registry.push((key, listener));
+        Ok(())
+    }
+
+    fn connect_path(&self, key: &str) -> SysResult {
+        if self.peer_rx.lock().is_some() {
+            return Err(Errno::EISCONN);
+        }
+        let listener = UNIX_LISTENERS
+            .lock()
+            .iter()
+            .find(|(item_key, _)| item_key == key)
+            .map(|(_, listener)| listener.clone())
+            .ok_or(Errno::ENOENT)?;
+
+        let server = UnixSocket::new();
+        *server.peer_rx.lock() = Some(self.rx.clone());
+        *self.peer_rx.lock() = Some(server.rx.clone());
+
+        let mut pending = listener.pending.lock();
+        if pending.len() >= UNIX_LISTEN_QUEUE_LIMIT {
+            *self.peer_rx.lock() = None;
+            return Err(Errno::EAGAIN);
+        }
+        pending.push_back(server);
+        Ok(())
+    }
+
+    fn accept(&self) -> SysResult<UnixSocket> {
+        let listener = self.listener.lock().clone().ok_or(Errno::EINVAL)?;
+        loop {
+            if let Some(socket) = listener.pending.lock().pop_front() {
+                return Ok(socket);
+            }
+            self.wait_interruptible()?;
+        }
+    }
+
+    fn bound_key(&self) -> Option<String> {
+        self.bound_key.lock().clone()
+    }
+
+    fn close(&self) {
+        let Some(listener) = self.listener.lock().take() else {
+            return;
+        };
+        UNIX_LISTENERS
+            .lock()
+            .retain(|(_, item)| !Arc::ptr_eq(item, &listener));
+    }
+}
+
+impl Drop for UnixSocket {
+    fn drop(&mut self) {
+        self.close();
     }
 }
 
@@ -197,13 +319,19 @@ impl Socket {
         _protocol: usize,
     ) -> Result<Self, Errno> {
         let inner = match (&domain, socket_type) {
-            (SocketDomain::AF_UNIX, SocketKind::SOCK_STREAM | SocketKind::SOCK_DGRAM) => {
-                SocketInner::Unix(UnixSocket::new())
+            (
+                SocketDomain::AF_UNIX,
+                SocketKind::SOCK_STREAM | SocketKind::SOCK_DGRAM | SocketKind::SOCK_SEQPACKET,
+            ) => SocketInner::Unix(UnixSocket::new()),
+            (SocketDomain::AF_INET | SocketDomain::AF_INET6, SocketKind::SOCK_STREAM) => {
+                SocketInner::Tcp(TcpSocket::new())
             }
-            (SocketDomain::AF_INET, SocketKind::SOCK_STREAM) => SocketInner::Tcp(TcpSocket::new()),
-            (SocketDomain::AF_INET, SocketKind::SOCK_DGRAM) => SocketInner::Udp(UdpSocket::new()),
-            (SocketDomain::AF_INET6, _) => return Err(Errno::EAFNOSUPPORT),
-            (_, SocketKind::SOCK_RAW) => return Err(Errno::EPROTONOSUPPORT),
+            (SocketDomain::AF_INET | SocketDomain::AF_INET6, SocketKind::SOCK_DGRAM) => {
+                SocketInner::Udp(UdpSocket::new())
+            }
+            (_, SocketKind::SOCK_RAW | SocketKind::SOCK_SEQPACKET) => {
+                return Err(Errno::EPROTONOSUPPORT);
+            }
         };
         Ok(Socket {
             domain,
@@ -221,7 +349,7 @@ impl Socket {
     pub fn new_unix_pair(socket_type: SocketKind) -> Result<(Self, Self), Errno> {
         if !matches!(
             socket_type,
-            SocketKind::SOCK_STREAM | SocketKind::SOCK_DGRAM
+            SocketKind::SOCK_STREAM | SocketKind::SOCK_DGRAM | SocketKind::SOCK_SEQPACKET
         ) {
             return Err(Errno::EINVAL);
         }
@@ -342,6 +470,13 @@ impl Socket {
         }
     }
 
+    pub fn get_bound_unix_key(&self) -> SysResult<String> {
+        match &self.inner {
+            SocketInner::Unix(unix) => unix.bound_key().ok_or(Errno::EINVAL),
+            SocketInner::Tcp(_) | SocketInner::Udp(_) => Err(Errno::EAFNOSUPPORT),
+        }
+    }
+
     /// 获取对端地址（getpeername）。
     pub fn get_remote_addr(&self) -> Result<SocketAddr, Errno> {
         match &self.inner {
@@ -363,20 +498,41 @@ impl Socket {
         }
     }
 
+    pub fn bind_unix_path(&self, path: &str) -> SysResult {
+        match &self.inner {
+            SocketInner::Unix(unix) => unix.bind_path(path),
+            SocketInner::Tcp(_) | SocketInner::Udp(_) => Err(Errno::EAFNOSUPPORT),
+        }
+    }
+
+    pub fn ensure_unix_unbound(&self) -> SysResult {
+        match &self.inner {
+            SocketInner::Unix(unix) => unix.ensure_unbound(),
+            SocketInner::Tcp(_) | SocketInner::Udp(_) => Err(Errno::EAFNOSUPPORT),
+        }
+    }
+
     /// 开始监听（仅 TCP）。
     pub fn listen(&self) -> SysResult {
-        if !matches!(self.kind, SocketKind::SOCK_STREAM) {
+        if !matches!(
+            self.kind,
+            SocketKind::SOCK_STREAM | SocketKind::SOCK_SEQPACKET
+        ) {
             return Err(Errno::EOPNOTSUPP);
         }
         match &self.inner {
             SocketInner::Tcp(tcp) => tcp.listen(),
-            SocketInner::Udp(_) | SocketInner::Unix(_) => Err(Errno::EOPNOTSUPP),
+            SocketInner::Unix(unix) => unix.listen(),
+            SocketInner::Udp(_) => Err(Errno::EOPNOTSUPP),
         }
     }
 
     /// 接受入站连接（仅 TCP），返回新的已连接 Socket 和对端地址。
     pub fn accept(&self) -> Result<(Self, SocketAddr), Errno> {
-        if !matches!(self.kind, SocketKind::SOCK_STREAM) {
+        if !matches!(
+            self.kind,
+            SocketKind::SOCK_STREAM | SocketKind::SOCK_SEQPACKET
+        ) {
             return Err(Errno::EOPNOTSUPP);
         }
         match &self.inner {
@@ -401,7 +557,21 @@ impl Socket {
                     from_ipendpoint_to_socketaddr(remote_addr),
                 ))
             }
-            SocketInner::Udp(_) | SocketInner::Unix(_) => Err(Errno::EOPNOTSUPP),
+            SocketInner::Unix(unix) => Ok((
+                Socket {
+                    domain: self.domain.clone(),
+                    kind: self.kind,
+                    inner: SocketInner::Unix(unix.accept()?),
+                    nonblock: AtomicBool::new(false),
+                    cloexec: AtomicBool::new(false),
+                    send_buf_size: AtomicU64::new(64 * 1024),
+                    recv_buf_size: AtomicU64::new(64 * 1024),
+                    recvtimeout: Mutex::new(None),
+                    sendtimeout: Mutex::new(None),
+                },
+                from_ipendpoint_to_socketaddr(UNSPECIFIED_ENDPOINT),
+            )),
+            SocketInner::Udp(_) => Err(Errno::EOPNOTSUPP),
         }
     }
 
@@ -411,6 +581,13 @@ impl Socket {
             SocketInner::Tcp(tcp) => tcp.connect(addr),
             SocketInner::Udp(udp) => udp.connect(addr),
             SocketInner::Unix(_) => Err(Errno::ENOENT),
+        }
+    }
+
+    pub fn connect_unix_path(&self, key: &str) -> SysResult {
+        match &self.inner {
+            SocketInner::Unix(unix) => unix.connect_path(key),
+            SocketInner::Tcp(_) | SocketInner::Udp(_) => Err(Errno::EAFNOSUPPORT),
         }
     }
 
@@ -479,6 +656,11 @@ impl Socket {
             SocketInner::Unix(unix) => {
                 if isread {
                     unix.read_ready()
+                        || unix
+                            .listener
+                            .lock()
+                            .as_ref()
+                            .is_some_and(|listener| !listener.pending.lock().is_empty())
                 } else {
                     unix.write_ready()
                 }
@@ -584,6 +766,7 @@ pub fn parse_kind(kind: usize) -> Result<SocketKind, Errno> {
         1 => Ok(SocketKind::SOCK_STREAM),
         2 => Ok(SocketKind::SOCK_DGRAM),
         3 => Ok(SocketKind::SOCK_RAW),
+        5 => Ok(SocketKind::SOCK_SEQPACKET),
         _ => Err(Errno::EINVAL),
     }
 }
