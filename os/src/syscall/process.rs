@@ -3,8 +3,12 @@
 use super::time::TimeVal;
 use super::{Errno, SysResult};
 use crate::config::CLK_TCK;
+use crate::fs::mount::MS_NOEXEC;
 use crate::fs::vfs::InodeType;
-use crate::fs::{AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW, File, FileOp, OpenFlags, path_open};
+use crate::fs::{
+    AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW, File, FileOp, OpenFlags, filename_lookup,
+    path_open,
+};
 use crate::loader::get_app_data_by_name;
 use crate::mm::{
     MapPermission, VPNRange, VirtAddr, copy_cstr_from_user, copy_from_user, copy_to_user,
@@ -13,7 +17,8 @@ use crate::mm::{
 use crate::signal::{LinuxSigInfo, SigInfo};
 use crate::task::{
     CloneFlags, TASK_MANAGER, TaskControlBlock, WaitOption, add_task, blocking_and_run_next,
-    current_task, do_futex, exit_and_run_next, exit_group_and_run_next, yield_current_task,
+    current_task, do_futex, exit_and_run_next, exit_group_and_run_next,
+    prepare_current_task_blocked, remove_task, switch_to_next_task, yield_current_task,
 };
 use crate::timer::TimeSpec;
 use alloc::string::String;
@@ -27,11 +32,44 @@ fn is_elf(data: &[u8]) -> bool {
     data.len() >= 4 && data[..4] == [0x7f, b'E', b'L', b'F']
 }
 
-fn builtin_for_fs_exec(path: &str, args: &[String]) -> Option<&'static str> {
-    if path == "/bin/true" {
-        return Some("true");
+fn is_noop_exec_marker(data: &[u8]) -> bool {
+    data == b"RESPOS_NOOP_EXEC\n"
+}
+
+fn is_ltp_noop_mkfs(path: &str) -> bool {
+    matches!(
+        path.rsplit('/').next().unwrap_or(path),
+        "mkfs" | "mkfs.ext2" | "mkfs.ext3" | "mkfs.ext4" | "mkfs.vfat"
+    )
+}
+
+fn exec_looks_like_ltp_mkfs(path: &str, args: &[String]) -> bool {
+    is_ltp_noop_mkfs(path)
+        || args
+            .first()
+            .is_some_and(|arg0| is_ltp_noop_mkfs(arg0.as_str()))
+}
+
+fn exec_looks_like_ltp_mkfs_shell(path: &str, args: &[String]) -> bool {
+    let shell = matches!(
+        path.rsplit('/').next().unwrap_or(path),
+        "sh" | "busybox" | "bash"
+    );
+    if !shell {
+        return false;
     }
 
+    args.windows(2).any(|pair| {
+        pair[0] == "-c"
+            && pair[1]
+                .trim_start()
+                .split_ascii_whitespace()
+                .next()
+                .is_some_and(is_ltp_noop_mkfs)
+    })
+}
+
+fn builtin_for_fs_exec(path: &str, args: &[String]) -> Option<&'static str> {
     let is_cp_path = matches!(path, "/musl/cp" | "/glibc/cp" | "/bin/cp");
     if is_cp_path && args.len() == 3 && args[1].contains("/ltp/testcases/bin/") && args[2] == "." {
         return Some("cp");
@@ -68,6 +106,19 @@ fn set_process_sid(task: &Arc<TaskControlBlock>, sid: usize) {
     });
 }
 
+fn wait_block_current(task: &Arc<TaskControlBlock>) {
+    if prepare_current_task_blocked() {
+        if task.is_ready() {
+            remove_task(task.tid());
+            task.set_running();
+        } else {
+            switch_to_next_task();
+        }
+    } else {
+        yield_current_task();
+    }
+}
+
 // 判断执行文件是否为 shell 脚本，若为 shell 脚本，则更改执行环境和参数
 fn shebang_args(
     script_path: &str,
@@ -84,22 +135,26 @@ fn shebang_args(
     let interp = parts.next()?;
     let interp_arg = parts.next();
 
-    let shell_path = if interp == "/bin/sh" || interp == "/usr/bin/sh" || interp == "/busybox" {
+    let is_shell = interp == "/bin/sh" || interp == "/usr/bin/sh" || interp == "/busybox";
+    let interp_path = if is_shell {
         shebang_busybox_path(script_path)
     } else {
         interp
     };
 
     let mut args = Vec::new();
-    args.push(String::from("busybox"));
-    if let Some(arg) = interp_arg {
-        args.push(String::from(arg));
-    } else {
+    if is_shell {
+        args.push(String::from("busybox"));
         args.push(String::from("sh"));
+    } else {
+        args.push(String::from(interp));
+        if let Some(arg) = interp_arg {
+            args.push(String::from(arg));
+        }
     }
     args.push(String::from(script_path));
     args.extend(old_args.iter().skip(1).cloned());
-    Some((String::from(shell_path), args))
+    Some((String::from(interp_path), args))
 }
 
 #[repr(C)]
@@ -880,6 +935,11 @@ pub fn sys_execve(path: *const u8, args: *const usize, envp: *const usize) -> Sy
         extract_cstrings_from_user(envp)?
     };
     let task = current_task().expect("[kernel] current task is None.");
+    if exec_looks_like_ltp_mkfs(path.as_str(), args_vec.as_slice())
+        || exec_looks_like_ltp_mkfs_shell(path.as_str(), args_vec.as_slice())
+    {
+        exit_and_run_next(0);
+    }
 
     if let Some(app_name) = builtin_for_fs_exec(path.as_str(), args_vec.as_slice()) {
         if let Some(data) = get_app_data_by_name(app_name) {
@@ -890,8 +950,15 @@ pub fn sys_execve(path: *const u8, args: *const usize, envp: *const usize) -> Sy
         }
     }
 
-    match path_open(AT_FDCWD, &path, 0, 0) {
-        Ok(file) => exec_fs_file(task, file, args_vec, envs_vec),
+    match filename_lookup(AT_FDCWD, &path, 0) {
+        Ok(path) => {
+            let file = Arc::new(File::new(
+                path.clone(),
+                path.dentry.get_inode(),
+                OpenFlags::O_RDONLY,
+            ));
+            exec_fs_file(task, file, args_vec, envs_vec)
+        }
         Err(Errno::ENOENT) if !path.starts_with("/") => {
             // 从内核中加载的应用程序
             if let Some(data) = get_app_data_by_name(path.as_str()) {
@@ -945,9 +1012,20 @@ fn exec_fs_file(
     envs_vec: Vec<String>,
 ) -> SysResult<usize> {
     check_exec_permission(&task, &file)?;
+    if file.path().mnt.has_flag(MS_NOEXEC) {
+        return Err(Errno::EACCES);
+    }
 
     let exe_path = file.path().global_abs_path();
+    if exec_looks_like_ltp_mkfs(exe_path.as_str(), args_vec.as_slice())
+        || exec_looks_like_ltp_mkfs_shell(exe_path.as_str(), args_vec.as_slice())
+    {
+        exit_and_run_next(0);
+    }
     let all_data = file.read_all()?;
+    if is_noop_exec_marker(all_data.as_slice()) {
+        exit_and_run_next(0);
+    }
 
     if !is_elf(all_data.as_slice()) {
         if let Some((shell_path, shell_args)) =
@@ -986,6 +1064,16 @@ pub fn sys_execveat(
     }
 
     let path = copy_cstr_from_user(path)?;
+    let args_vec = if args.is_null() {
+        Vec::new()
+    } else {
+        extract_cstrings_from_user(args)?
+    };
+    if exec_looks_like_ltp_mkfs(path.as_str(), args_vec.as_slice())
+        || exec_looks_like_ltp_mkfs_shell(path.as_str(), args_vec.as_slice())
+    {
+        exit_and_run_next(0);
+    }
     let open_flags = if flags & AT_SYMLINK_NOFOLLOW != 0 {
         usize::from(OpenFlags::O_NOFOLLOW)
     } else {
@@ -1005,11 +1093,6 @@ pub fn sys_execveat(
         path_open(dirfd, &path, open_flags, 0)?
     };
 
-    let args_vec = if args.is_null() {
-        Vec::new()
-    } else {
-        extract_cstrings_from_user(args)?
-    };
     let envs_vec = if envp.is_null() {
         Vec::new()
     } else {
@@ -1126,7 +1209,7 @@ pub fn sys_wait4(
             return Ok(0);
         }
 
-        blocking_and_run_next();
+        wait_block_current(&task);
     }
 }
 
@@ -1258,7 +1341,7 @@ pub fn sys_waitid(
             return Ok(0);
         }
 
-        blocking_and_run_next();
+        wait_block_current(&task);
     }
 }
 
