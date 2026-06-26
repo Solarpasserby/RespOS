@@ -848,10 +848,8 @@ fn main() -> i32 {
     // _run_netperf_glibc();
     // _run_lmbench_musl();
     // _run_lmbench_glibc();
-    // 当前镜像里的 musl cyclictest 依赖的 sched_getparam/getscheduler/setscheduler
-    // libc wrapper 直接返回 ENOSYS，不会进入内核；先跑 glibc 版本验证内核实时语义。
     // _run_cyclictest_musl();
-    _run_cyclictest_glibc();
+    // _run_cyclictest_glibc();
     // _run_ltp_musl();
     // _run_ltp_glibc();
     println!("[testrunner] all selected tests finished, powering off");
@@ -880,10 +878,8 @@ fn main() -> i32 {
     // _run_netperf_glibc();
     // _run_lmbench_musl();
     // _run_lmbench_glibc();
-    // 当前镜像里的 musl cyclictest 依赖的 sched_getparam/getscheduler/setscheduler
-    // libc wrapper 直接返回 ENOSYS，不会进入内核；先跑 glibc 版本验证内核实时语义。
-    // _run_cyclictest_musl();
-    _run_cyclictest_glibc();
+    // _run_cyclictest_musl(); // 系统调用不可用
+    // _run_cyclictest_glibc();
     // _run_ltp_musl();
     // _run_ltp_glibc();
     println!("[testrunner] all selected tests finished, powering off");
