@@ -90,6 +90,10 @@ impl FileOp for SpecialFd {
         self
     }
 
+    fn splice_supported(&self) -> bool {
+        self.data.is_some()
+    }
+
     fn read<'a>(&'a self, buf: &'a mut [u8]) -> SysResult<usize> {
         let data = self.data.as_ref().ok_or(Errno::EINVAL)?.lock();
         let mut offset = self.offset.lock();

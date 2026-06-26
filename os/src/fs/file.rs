@@ -76,6 +76,9 @@ pub trait FileOp: Any + Send + Sync {
     fn is_tty(&self) -> bool {
         false
     }
+    fn splice_supported(&self) -> bool {
+        false
+    }
     /// 将文件缓冲数据刷入存储介质。当前文件系统在内存中，默认无操作。
     fn fsync(&self) -> SysResult<usize> {
         Ok(0)
@@ -339,6 +342,10 @@ impl Drop for File {
 impl FileOp for File {
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn splice_supported(&self) -> bool {
+        true
     }
 
     fn read<'a>(&'a self, buf: &'a mut [u8]) -> SysResult<usize> {

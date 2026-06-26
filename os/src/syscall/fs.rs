@@ -927,6 +927,9 @@ pub fn sys_splice(
     if !in_is_pipe && !out_is_pipe {
         return Err(Errno::EINVAL);
     }
+    if !input.splice_supported() || !output.splice_supported() {
+        return Err(Errno::EINVAL);
+    }
     if in_is_pipe && !off_in.is_null() {
         return Err(Errno::ESPIPE);
     }

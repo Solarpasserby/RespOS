@@ -189,7 +189,14 @@ pub fn yield_current_task() {
     let Some(task) = current_task() else {
         return;
     };
-    if let Some(next_task) = fetch_task() {
+
+    let mut next_task = fetch_task();
+    if next_task.is_none() {
+        crate::syscall::check_all_task_timers();
+        next_task = fetch_task();
+    }
+
+    if let Some(next_task) = next_task {
         if Arc::ptr_eq(&task, &next_task) {
             task.set_running();
             return;
