@@ -18,7 +18,8 @@ use crate::signal::{LinuxSigInfo, SigInfo};
 use crate::task::{
     CloneFlags, TASK_MANAGER, TaskControlBlock, WaitOption, add_task, blocking_and_run_next,
     current_task, do_futex, exit_and_run_next, exit_group_and_run_next,
-    prepare_current_task_blocked, remove_task, switch_to_next_task, yield_current_task,
+    prepare_current_task_blocked, remove_task, requeue_ready_task, switch_to_next_task,
+    yield_current_task,
 };
 use crate::timer::TimeSpec;
 use alloc::string::String;
@@ -197,6 +198,8 @@ pub struct SchedAttr {
     pub sched_deadline: u64,
     pub sched_period: u64,
 }
+
+const SCHED_ATTR_MIN_SIZE: usize = 24;
 
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
@@ -426,6 +429,7 @@ pub fn sys_sched_setscheduler(pid: isize, policy: usize, param: *const i32) -> S
     check_sched_param(policy, priority)?;
     check_sched_permission(&target, policy, priority)?;
     target.set_sched_with_reset_on_fork(policy, priority, reset_on_fork);
+    requeue_ready_task(target);
     Ok(0)
 }
 
@@ -440,6 +444,7 @@ pub fn sys_sched_setparam(pid: isize, param: *const i32) -> SysResult<usize> {
     check_sched_param(policy, priority)?;
     check_sched_permission(&target, policy, priority)?;
     target.set_sched(policy, priority);
+    requeue_ready_task(target);
     Ok(0)
 }
 
@@ -494,9 +499,19 @@ pub fn sys_sched_setattr(pid: isize, attr: *const SchedAttr, flags: u32) -> SysR
     }
     let target = sched_task(pid)?;
     let mut sched_attr = SchedAttr::default();
-    copy_from_user(&mut sched_attr as *mut SchedAttr, attr, 1)?;
+    let mut attr_size = 0u32;
+    copy_from_user(&mut attr_size as *mut u32, attr as *const u32, 1)?;
+    if (attr_size as usize) < SCHED_ATTR_MIN_SIZE {
+        return Err(Errno::EINVAL);
+    }
+    let copy_size = (attr_size as usize).min(core::mem::size_of::<SchedAttr>());
+    copy_from_user(
+        &mut sched_attr as *mut SchedAttr as *mut u8,
+        attr as *const u8,
+        copy_size,
+    )?;
     let attr_size = sched_attr.size as usize;
-    if attr_size < core::mem::size_of::<SchedAttr>() {
+    if attr_size < SCHED_ATTR_MIN_SIZE {
         return Err(Errno::EINVAL);
     }
     if sched_attr.sched_flags & !(SCHED_RESET_ON_FORK as u64) != 0 {
@@ -526,6 +541,7 @@ pub fn sys_sched_setattr(pid: isize, attr: *const SchedAttr, flags: u32) -> SysR
     if is_regular_sched_policy(policy) {
         target.set_nice(sched_attr.sched_nice);
     }
+    requeue_ready_task(target);
     Ok(0)
 }
 
@@ -535,7 +551,7 @@ pub fn sys_sched_getattr(
     size: u32,
     flags: u32,
 ) -> SysResult<usize> {
-    if attr.is_null() || flags != 0 || (size as usize) < core::mem::size_of::<SchedAttr>() {
+    if attr.is_null() || flags != 0 || (size as usize) < SCHED_ATTR_MIN_SIZE {
         return Err(Errno::EINVAL);
     }
     let target = sched_task(pid)?;
@@ -553,7 +569,12 @@ pub fn sys_sched_getattr(
         sched_deadline: 0,
         sched_period: 0,
     };
-    copy_to_user(attr, &sched_attr as *const SchedAttr, 1)?;
+    let copy_size = (size as usize).min(core::mem::size_of::<SchedAttr>());
+    copy_to_user(
+        attr as *mut u8,
+        &sched_attr as *const SchedAttr as *const u8,
+        copy_size,
+    )?;
     Ok(0)
 }
 
@@ -1427,6 +1448,7 @@ pub fn sys_setpriority(which: usize, who: usize, prio: isize) -> SysResult<usize
         target.op_thread_group(|tg| {
             for member in tg.iter() {
                 member.set_nice(nice);
+                requeue_ready_task(member.clone());
             }
         });
     }

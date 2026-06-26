@@ -10,7 +10,7 @@ mod context;
 use super::timer::set_next_ti_trigger;
 use crate::signal::{SiField, Sig, SigInfo};
 use crate::syscall::*;
-use crate::task::{current_task, exit_and_run_next, handle_signals, yield_current_task};
+use crate::task::{current_task, exit_and_run_next, handle_signals, preempt_current_task};
 use core::arch::global_asm;
 use riscv::register::{
     mtvec::TrapMode,
@@ -133,7 +133,7 @@ pub fn trap_handler(cx: &mut TrapContext) {
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
             set_next_ti_trigger();
             check_all_task_timers();
-            yield_current_task();
+            preempt_current_task();
         }
         _ => {
             panic!(

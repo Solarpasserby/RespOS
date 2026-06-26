@@ -25,6 +25,7 @@ const LTP_SCRIPT: &str = "ltp_testcode.sh\0";
 const IOZONE_SCRIPT: &str = "iozone_testcode.sh\0";
 const NETPERF_SCRIPT: &str = "netperf_testcode.sh\0";
 const IPERF_SCRIPT: &str = "iperf_testcode.sh\0";
+const CYCLICTEST_SCRIPT: &str = "cyclictest_testcode.sh\0";
 
 const RV_MUSL_LOADER: &str = "/lib/ld-musl-riscv64.so.1\0";
 const RV_MUSL_SF_LOADER: &str = "/lib/ld-musl-riscv64-sf.so.1\0";
@@ -177,6 +178,7 @@ fn prepare_bin_shell(shell_path: &str) {
         "/bin/sh\0",
         "/bin/cp\0",
         "/bin/grep\0",
+        "/bin/sleep\0",
         "/bin/true\0",
         "/bin/false\0",
     ] {
@@ -449,6 +451,7 @@ fn cleanup_benchmark_state() {
     let _ = unlink("/bin/cp\0");
     let _ = unlink("/bin/false\0");
     let _ = unlink("/bin/sh\0");
+    let _ = unlink("/bin/sleep\0");
     let _ = unlink("/bin/true\0");
     let _ = unlink("/musl/cp\0");
     let _ = unlink("/musl/hello\0");
@@ -592,6 +595,33 @@ fn _run_iperf_glibc() {
     prepare_benchmark_dirs();
     prepare_bin_shell(GLIBC_BUSYBOX_PATH);
     run_shell_script("/glibc/\0", GLIBC_BUSYBOX_PATH, IPERF_SCRIPT);
+}
+
+fn _run_cyclictest_musl() {
+    cleanup_benchmark_state();
+    prepare_benchmark_dirs();
+    prepare_musl_loader_links();
+    prepare_bin_shell(BUSYBOX_PATH);
+    let envp: &[*const u8] = &[
+        "LD_LIBRARY_PATH=/musl/lib:/musl\0".as_ptr(),
+        core::ptr::null(),
+    ];
+    run_shell_script_with_env("/musl/\0", BUSYBOX_PATH, CYCLICTEST_SCRIPT, envp);
+    cleanup_benchmark_state();
+}
+
+fn _run_cyclictest_glibc() {
+    cleanup_benchmark_state();
+    prepare_benchmark_dirs();
+    prepare_glibc_loader_links();
+    prepare_bin_shell(GLIBC_BUSYBOX_PATH);
+    let envp: &[*const u8] = &[
+        "LD_LIBRARY_PATH=/glibc/lib:/glibc\0".as_ptr(),
+        core::ptr::null(),
+    ];
+
+    run_shell_script_with_env("/glibc/\0", GLIBC_BUSYBOX_PATH, CYCLICTEST_SCRIPT, envp);
+    cleanup_benchmark_state();
 }
 
 // ==== LTP 测例 ==== //
@@ -818,8 +848,12 @@ fn main() -> i32 {
     // _run_netperf_glibc();
     // _run_lmbench_musl();
     // _run_lmbench_glibc();
-    _run_ltp_musl();
-    _run_ltp_glibc();
+    // 当前镜像里的 musl cyclictest 依赖的 sched_getparam/getscheduler/setscheduler
+    // libc wrapper 直接返回 ENOSYS，不会进入内核；先跑 glibc 版本验证内核实时语义。
+    // _run_cyclictest_musl();
+    _run_cyclictest_glibc();
+    // _run_ltp_musl();
+    // _run_ltp_glibc();
     println!("[testrunner] all selected tests finished, powering off");
     poweroff();
     0
@@ -846,8 +880,12 @@ fn main() -> i32 {
     // _run_netperf_glibc();
     // _run_lmbench_musl();
     // _run_lmbench_glibc();
-    _run_ltp_musl();
-    _run_ltp_glibc();
+    // 当前镜像里的 musl cyclictest 依赖的 sched_getparam/getscheduler/setscheduler
+    // libc wrapper 直接返回 ENOSYS，不会进入内核；先跑 glibc 版本验证内核实时语义。
+    // _run_cyclictest_musl();
+    _run_cyclictest_glibc();
+    // _run_ltp_musl();
+    // _run_ltp_glibc();
     println!("[testrunner] all selected tests finished, powering off");
     poweroff();
     0

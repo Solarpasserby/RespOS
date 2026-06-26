@@ -2,7 +2,7 @@
 
 use super::{Errno, SysResult};
 use crate::config::{MMAP_MIN_ADDR, PAGE_SIZE};
-use crate::mm::{MapPermission, MmapBacking, VPNRange, VirtAddr, mmap_file_backing};
+use crate::mm::{MapPermission, MmapBacking, VPNRange, VirtAddr, copy_to_user, mmap_file_backing};
 use crate::task::current_task;
 use bitflags::bitflags;
 
@@ -284,6 +284,33 @@ pub fn sys_munlock(addr: usize, len: usize) -> SysResult<usize> {
             }
         })?;
     task.op_memory_set_write(|memory_set| memory_set.set_locked_range(vpn_range, false))?;
+    Ok(0)
+}
+
+pub fn sys_get_mempolicy(
+    mode: *mut i32,
+    nodemask: *mut usize,
+    maxnode: usize,
+    _addr: usize,
+    flags: usize,
+) -> SysResult<usize> {
+    const MPOL_F_NODE: usize = 1;
+    const MPOL_F_ADDR: usize = 2;
+
+    if flags & !(MPOL_F_NODE | MPOL_F_ADDR) != 0 {
+        return Err(Errno::EINVAL);
+    }
+    if !mode.is_null() {
+        let default_policy = 0i32;
+        copy_to_user(mode, &default_policy as *const i32, 1)?;
+    }
+    if !nodemask.is_null() && maxnode > 0 {
+        let zero = 0usize;
+        let words = maxnode.div_ceil(usize::BITS as usize);
+        for idx in 0..words {
+            copy_to_user(unsafe { nodemask.add(idx) }, &zero as *const usize, 1)?;
+        }
+    }
     Ok(0)
 }
 

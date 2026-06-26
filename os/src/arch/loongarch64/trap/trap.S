@@ -115,6 +115,11 @@ __trap_from_user:
 __restore:
     # 恢复 PRMD 和 ERA
     ld.d        $t0, $sp, 256
+    # 返回用户态时必须保持 PPLV=3 且 PIE=1。压力场景下如果沿用
+    # 某次 trap 保存下来的 PIE=0，用户态 CPU-bound 任务不会再被
+    # timer interrupt 抢占。显式覆盖 PRMD[2:0]，避免保留异常低位。
+    ori         $t1, $zero, 0x7
+    bstrins.d   $t0, $t1, 2, 0
     csrwr       $t0, 0x1           # PRMD
     ld.d        $t0, $sp, 264
     csrwr       $t0, 0x6           # ERA

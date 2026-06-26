@@ -185,6 +185,7 @@ const SYSCALL_MLOCK: usize = 228;
 const SYSCALL_MUNLOCK: usize = 229;
 const SYSCALL_MREMAP: usize = 216;
 const SYSCALL_MADVISE: usize = 233;
+const SYSCALL_GET_MEMPOLICY: usize = 236;
 const SYSCALL_PERF_EVENT_OPEN: usize = 241;
 const SYSCALL_ACCEPT4: usize = 242;
 const SYSCALL_RECVMMSG: usize = 243;
@@ -242,10 +243,11 @@ use special_fd::*;
 use system::*;
 use time::*;
 
-pub use time::check_posix_timers;
+pub use time::{check_nanosleep_timeouts, check_posix_timers};
 
 pub fn check_all_task_timers() {
     crate::task::check_futex_timeouts();
+    check_nanosleep_timeouts();
     crate::task::TASK_MANAGER.for_each(|task| {
         task.check_real_timer();
         check_posix_timers(task);
@@ -662,6 +664,13 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
             args[5] as i32,
         ),
         SYSCALL_MADVISE => sys_madvise(args[0], args[1], args[2] as i32),
+        SYSCALL_GET_MEMPOLICY => sys_get_mempolicy(
+            args[0] as *mut i32,
+            args[1] as *mut usize,
+            args[2],
+            args[3],
+            args[4],
+        ),
         SYSCALL_WAIT4 => sys_wait4(
             args[0] as isize,
             args[1] as *mut i32,
