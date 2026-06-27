@@ -28,8 +28,8 @@ pub use scheduler::{
     WaitOption, add_task, block_task, blocking_and_run_next, exit_and_run_next,
     exit_by_signal_and_run_next, exit_group_and_run_next, fetch_task, preempt_current_task,
     prepare_current_task_blocked, remove_task, remove_thread_group, requeue_ready_task,
-    stop_current_and_run_next, switch_to_next_task, wakeup_stopped_task, wakeup_task,
-    yield_current_task,
+    scheduler_health_counts, stop_current_and_run_next, switch_to_next_task, wakeup_stopped_task,
+    wakeup_task, yield_current_task,
 };
 pub use task::TaskStatus;
 pub use task::{CloneFlags, TaskControlBlock, check_active_itimers};

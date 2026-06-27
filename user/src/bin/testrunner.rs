@@ -706,6 +706,124 @@ fn print_ltp_case_time(group_name: &str, name: &str, ret: i32, elapsed_ms: isize
     );
 }
 
+#[derive(Clone, Copy)]
+struct LtpHealth {
+    free_kb: usize,
+    cached_kb: usize,
+    heap_kb: usize,
+    tasks: usize,
+    ready: usize,
+    blocked: usize,
+    deferred: usize,
+}
+
+fn read_ltp_health() -> Option<LtpHealth> {
+    let fd = open("/proc/respos_health\0", O_RDONLY, 0);
+    if fd < 0 {
+        return None;
+    }
+    let mut buf = [0u8; 256];
+    let len = read(fd as usize, &mut buf);
+    close(fd as usize);
+    if len <= 0 {
+        return None;
+    }
+    let text = core::str::from_utf8(&buf[..len as usize]).ok()?;
+    let mut values = [None; 7];
+    for field in text.split_ascii_whitespace() {
+        let Some((key, value)) = field.split_once('=') else {
+            continue;
+        };
+        let slot = match key {
+            "free_kb" => 0,
+            "cached_kb" => 1,
+            "heap_kb" => 2,
+            "tasks" => 3,
+            "ready" => 4,
+            "blocked" => 5,
+            "deferred" => 6,
+            _ => continue,
+        };
+        values[slot] = value.parse::<usize>().ok();
+    }
+    Some(LtpHealth {
+        free_kb: values[0]?,
+        cached_kb: values[1]?,
+        heap_kb: values[2]?,
+        tasks: values[3]?,
+        ready: values[4]?,
+        blocked: values[5]?,
+        deferred: values[6]?,
+    })
+}
+
+fn ltp_health_anomaly(before: LtpHealth, after: LtpHealth) -> bool {
+    let free_drop = before.free_kb.saturating_sub(after.free_kb);
+    let cache_growth = after.cached_kb.saturating_sub(before.cached_kb);
+    let unexplained_drop = free_drop.saturating_sub(cache_growth);
+    unexplained_drop > 2048
+        || after.heap_kb > before.heap_kb.saturating_add(2048)
+        || after.tasks > before.tasks
+        || after.ready > before.ready
+        || after.blocked > before.blocked
+        || after.deferred > before.deferred
+}
+
+fn record_ltp_health(
+    previous: &mut Option<LtpHealth>,
+    sequence: usize,
+    group: &str,
+    case_name: &str,
+    reason: &str,
+    force: bool,
+) {
+    let Some(current) = read_ltp_health() else {
+        if previous.is_none() {
+            println!("LTP HEALTH unavailable group={} case={}", group, case_name);
+        }
+        return;
+    };
+    let anomaly = previous.is_some_and(|old| ltp_health_anomaly(old, current));
+    if force || anomaly || sequence % 25 == 0 {
+        if let Some(old) = *previous {
+            println!(
+                "LTP HEALTH reason={} group={} seq={} case={} free_kb={} free_delta={} cached_kb={} cache_delta={} heap_kb={} heap_delta={} tasks={} task_delta={} ready={} blocked={} deferred={}",
+                if anomaly { "anomaly" } else { reason },
+                group,
+                sequence,
+                case_name,
+                current.free_kb,
+                current.free_kb as isize - old.free_kb as isize,
+                current.cached_kb,
+                current.cached_kb as isize - old.cached_kb as isize,
+                current.heap_kb,
+                current.heap_kb as isize - old.heap_kb as isize,
+                current.tasks,
+                current.tasks as isize - old.tasks as isize,
+                current.ready,
+                current.blocked,
+                current.deferred,
+            );
+        } else {
+            println!(
+                "LTP HEALTH reason={} group={} seq={} case={} free_kb={} cached_kb={} heap_kb={} tasks={} ready={} blocked={} deferred={}",
+                reason,
+                group,
+                sequence,
+                case_name,
+                current.free_kb,
+                current.cached_kb,
+                current.heap_kb,
+                current.tasks,
+                current.ready,
+                current.blocked,
+                current.deferred,
+            );
+        }
+    }
+    *previous = Some(current);
+}
+
 fn run_ltp_selected(
     workdir: &str,
     group_name: &str,
@@ -725,6 +843,9 @@ fn run_ltp_selected(
     let mut pass: i32 = 0;
     let mut fail: i32 = 0;
     let mut skip: i32 = 0;
+    let mut health = None;
+    let mut case_sequence = 0usize;
+    record_ltp_health(&mut health, 0, group_name, "-", "baseline", true);
 
     for (phase_idx, phase) in LTP_OSCOMP.iter().enumerate() {
         let phase_num = phase_idx + 1;
@@ -734,6 +855,14 @@ fn run_ltp_selected(
             LTP_OSCOMP.len(),
             phase.name
         );
+        record_ltp_health(
+            &mut health,
+            case_sequence,
+            group_name,
+            phase.name,
+            "phase",
+            true,
+        );
 
         for name in phase.cases.iter() {
             let name_str = *name;
@@ -742,6 +871,7 @@ fn run_ltp_selected(
                 continue;
             }
 
+            case_sequence += 1;
             // LTP 测例可能切换到临时目录。正常情况下 fork 后父子进程的
             // 工作目录状态相互独立；这里仍在每个测例前恢复工作目录，
             // 避免异常退出或不完整的 CLONE_FS 语义影响后续测例。
@@ -805,7 +935,19 @@ fn run_ltp_selected(
                 let elapsed_ms = ltp_elapsed_ms(start_ms);
                 println!("FAIL LTP CASE {} : 1", name_str);
                 print_ltp_case_time(group_name, name_str, 1, elapsed_ms);
+                println!(
+                    "LTP CASE DIAG group={} case={} stage=fork pid={} elapsed_ms={}",
+                    group_name, name_str, pid, elapsed_ms
+                );
                 fail += 1;
+                record_ltp_health(
+                    &mut health,
+                    case_sequence,
+                    group_name,
+                    name_str,
+                    "fork-failed",
+                    true,
+                );
                 continue;
             }
 
@@ -815,11 +957,29 @@ fn run_ltp_selected(
             if waited < 0 {
                 println!("FAIL LTP CASE {} : 1", name_str);
                 print_ltp_case_time(group_name, name_str, 1, elapsed_ms);
+                println!(
+                    "LTP CASE DIAG group={} case={} stage=wait pid={} waited={} raw_status={} elapsed_ms={}",
+                    group_name, name_str, pid, waited, ec, elapsed_ms
+                );
                 fail += 1;
+                record_ltp_health(
+                    &mut health,
+                    case_sequence,
+                    group_name,
+                    name_str,
+                    "wait-failed",
+                    true,
+                );
             } else {
                 let ret = ltp_script_exit_code(ec);
                 println!("FAIL LTP CASE {} : {}", name_str, ret);
                 print_ltp_case_time(group_name, name_str, ret, elapsed_ms);
+                if ret != 0 && ret != 32 {
+                    println!(
+                        "LTP CASE DIAG group={} case={} stage=exit pid={} waited={} raw_status={} ret={} elapsed_ms={}",
+                        group_name, name_str, pid, waited, ec, ret, elapsed_ms
+                    );
+                }
                 if ret == 0 {
                     pass += 1;
                 } else if ret == 32 {
@@ -827,6 +987,18 @@ fn run_ltp_selected(
                 } else {
                     fail += 1;
                 }
+                record_ltp_health(
+                    &mut health,
+                    case_sequence,
+                    group_name,
+                    name_str,
+                    if ret == 0 || ret == 32 {
+                        "periodic"
+                    } else {
+                        "case-failed"
+                    },
+                    ret != 0 && ret != 32,
+                );
             }
         }
     }

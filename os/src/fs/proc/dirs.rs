@@ -4,6 +4,7 @@ use super::super::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
 use super::super::{File, KStat};
 use super::cpuinfo::CpuinfoInode;
 use super::exe::ProcExeInode;
+use super::health::HealthInode;
 use super::maps::{MapsInode, PagemapInode, StatusInode};
 use super::meminfo::MeminfoInode;
 use super::mounts::MountsInode;
@@ -60,6 +61,7 @@ const PROC_SYS_NET_IPV4_CONF_DEFAULT_INO: u64 = 31;
 const PROC_SYS_NET_IPV4_CONF_LO_TAG_INO: u64 = 32;
 const PROC_SYS_NET_IPV4_CONF_DEFAULT_TAG_INO: u64 = 33;
 const PROC_SYS_KERNEL_SCHED_RR_TIMESLICE_MS_INO: u64 = 34;
+const PROC_HEALTH_INO: u64 = 35;
 const PROC_PID_DIR_INO_BASE: u64 = 0x10000;
 const PROC_PID_STAT_INO_BASE: u64 = 0x20000;
 const PROC_DEV: u64 = 0x100;
@@ -107,6 +109,8 @@ impl InodeOp for ProcDirInode {
             Ok(Arc::new(ProcSelfInode))
         } else if name == "meminfo" {
             Ok(Arc::new(MeminfoInode))
+        } else if name == "respos_health" {
+            Ok(Arc::new(HealthInode))
         } else if name == "mounts" {
             Ok(Arc::new(MountsInode))
         } else if name == "stat" {
@@ -145,6 +149,7 @@ impl InodeOp for ProcDirInode {
             entry(PROC_VERSION_INO, InodeType::Regular, 8, b"version\0"),
             entry(PROC_SYS_INO, InodeType::Directory, 9, b"sys\0"),
             entry(PROC_CONFIG_GZ_INO, InodeType::Regular, 10, b"config.gz\0"),
+            entry(PROC_HEALTH_INO, InodeType::Regular, 11, b"respos_health\0"),
         ];
         let pids = core::cell::RefCell::new(Vec::new());
         TASK_MANAGER.for_each(|task| {
@@ -153,7 +158,7 @@ impl InodeOp for ProcDirInode {
                 pids.borrow_mut().push(task.tid());
             }
         });
-        let mut off: i64 = 11;
+        let mut off: i64 = 12;
         for pid in pids.into_inner() {
             let name = alloc::format!("{}\0", pid).into_bytes();
             entries.push(entry(
@@ -1851,6 +1856,10 @@ pub(super) fn proc_self_exe_ino() -> u64 {
 
 pub(super) fn proc_meminfo_ino() -> u64 {
     PROC_MEMINFO_INO
+}
+
+pub(super) fn proc_health_ino() -> u64 {
+    PROC_HEALTH_INO
 }
 
 pub(super) fn proc_mounts_ino() -> u64 {

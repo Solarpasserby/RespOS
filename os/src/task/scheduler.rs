@@ -516,6 +516,15 @@ pub fn wakeup_task(tid: usize) {
     }
 }
 
+pub fn scheduler_health_counts() -> (usize, usize, usize) {
+    let (ready, blocked) = {
+        let scheduler = SCHEDULER.lock();
+        (scheduler.task_index.len(), scheduler.blocked_tasks.len())
+    };
+    let deferred = DEAD_TASKS.lock().len();
+    (ready, blocked, deferred)
+}
+
 bitflags! {
     pub struct WaitOption: i32 {
         /// 这个选项用于非阻塞挂起。当与 wait 或 waitpid 一起使用时，如果没有任何子进程状态改变，
