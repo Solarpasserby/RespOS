@@ -422,6 +422,7 @@ impl Scheduler {
             }
         }
         self.idle_queue.retain(|task| task.tid() != tid);
+        self.blocked_queue.retain(|task| task.tid() != tid);
     }
 
     /// 从调度器就绪队列中移除线程组。
@@ -439,6 +440,7 @@ impl Scheduler {
             }
         }
         self.idle_queue.retain(|task| task.tgid() != tgid);
+        self.blocked_queue.retain(|task| task.tgid() != tgid);
     }
 
     /// 阻塞任务。

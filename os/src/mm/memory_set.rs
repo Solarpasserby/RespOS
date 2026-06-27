@@ -16,7 +16,7 @@ use crate::task::{
     AT_UID, AuxHeader,
 };
 use crate::trap::PageFaultCause;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use bitflags::bitflags;
@@ -180,6 +180,12 @@ pub struct MemorySet {
     areas: Vec<MapArea>,
 }
 
+impl Drop for MemorySet {
+    fn drop(&mut self) {
+        self.recycle_data_pages();
+    }
+}
+
 struct MmapRequest {
     addr: Option<usize>,
     map_len: usize,
@@ -261,17 +267,26 @@ impl MemorySet {
     /// 将一段空的逻辑段加入地址空间，在内部完成映射关系的建立
     fn push_empty_map_area(
         &mut self,
-        mut map_area: MapArea,
+        map_area: MapArea,
         data: Option<&[u8]>,
         data_offset: usize,
     ) {
-        map_area
-            .map(&mut self.page_table)
+        self.try_push_empty_map_area(map_area, data, data_offset)
             .expect("failed to map area");
+    }
+
+    fn try_push_empty_map_area(
+        &mut self,
+        mut map_area: MapArea,
+        data: Option<&[u8]>,
+        data_offset: usize,
+    ) -> SysResult {
+        map_area.map(&mut self.page_table)?;
         if let Some(data) = data {
             map_area.copy_data(&self.page_table, data, data_offset);
         }
         self.areas.push(map_area); // 转移所有权
+        Ok(())
     }
     /// 惰性添加逻辑段——只记录虚拟地址范围，不分配物理页不建立映射
     fn push_map_area_lazy(&mut self, map_area: MapArea) {
@@ -344,6 +359,19 @@ impl MemorySet {
             Some(TRAMPOLINE_CODE),
             0,
         );
+    }
+
+    pub fn try_map_trampoline(&mut self) -> SysResult {
+        self.try_push_empty_map_area(
+            MapArea::new(
+                VirtAddr::from(TRAMPOLINE),
+                VirtAddr::from(TRAMPOLINE + PAGE_SIZE),
+                MapType::Framed,
+                MapPermission::READ | MapPermission::EXECUTE | MapPermission::USER,
+            ),
+            Some(TRAMPOLINE_CODE),
+            0,
+        )
     }
 
     /// 惰性插入逻辑段，只预留虚拟地址空间，不分配物理页（由 page fault handler 按需分配）
@@ -1171,14 +1199,14 @@ impl MemorySet {
 
     /// 回收内部地址空间
     pub fn recycle_data_pages(&mut self) {
-        for area in self.areas.iter() {
+        for area in self.areas.iter_mut() {
             area.notify_mmap_close();
+            area.unmap(&mut self.page_table);
         }
         self.areas.clear();
-        // LoongArch 当前所有用户进程共用 ASID 0。release 下如果在退出
-        // 后立即回收页表页帧，后续短进程复用这些页帧时可能与残留的
-        // 地址转换状态撞车，表现为 wait4 返回后卡死。
-        #[cfg(target_arch = "loongarch64")]
+        // 退出路径可能仍短暂运行在当前用户页表上，页表页帧不能立刻
+        // 归还给通用分配器。各架构的 retire_owned_frames() 会把页表帧
+        // 放入有限隔离队列，过一段时间再释放。
         self.page_table.retire_owned_frames();
     }
 }
@@ -1289,16 +1317,24 @@ impl MemorySet {
     ///
     /// 内部完成对elf文件的解析，当前内核对堆栈地址的处理能力不完善
     pub fn from_elf_data(elf_data: &[u8]) -> (Self, usize, usize, usize, Vec<AuxHeader>) {
+        Self::try_from_elf_data(elf_data).expect("failed to load elf data")
+    }
+
+    pub fn try_from_elf_data(
+        elf_data: &[u8],
+    ) -> SysResult<(Self, usize, usize, usize, Vec<AuxHeader>)> {
         let mut memory_set =
-            Self::from_kernel_page_table().expect("failed to allocate initial user page table");
+            Self::from_kernel_page_table().map_err(|_| Errno::ENOMEM)?;
 
         // 在用户空间映射 sigreturn 跳板页
-        memory_set.map_trampoline();
+        memory_set.try_map_trampoline()?;
         // 由于传入的是 elf 格式的数据，所以需要读取文件头来得到各段的地址，之后再做分配映射
-        let elf = xmas_elf::ElfFile::new(elf_data).unwrap();
+        let elf = xmas_elf::ElfFile::new(elf_data).map_err(|_| Errno::ENOEXEC)?;
         let elf_header = elf.header;
         let magic = elf_header.pt1.magic;
-        assert_eq!(magic, [0x7f, 0x45, 0x4c, 0x46], "invalid elf!");
+        if magic != [0x7f, 0x45, 0x4c, 0x46] || elf_data.len() < 18 {
+            return Err(Errno::ENOEXEC);
+        }
         let ph_count = elf_header.pt2.ph_count();
         let ph_entsize = elf_header.pt2.ph_entry_size() as usize;
         let has_interp = (0..ph_count).any(|i| {
@@ -1321,10 +1357,13 @@ impl MemorySet {
         let mut interp_path: Option<alloc::string::String> = None;
 
         for i in 0..ph_count {
-            let ph = elf.program_header(i).unwrap();
-            let ph_type = ph.get_type().unwrap();
+            let ph = elf.program_header(i).map_err(|_| Errno::ENOEXEC)?;
+            let ph_type = ph.get_type().map_err(|_| Errno::ENOEXEC)?;
 
             if ph_type == xmas_elf::program::Type::Load {
+                if ph.file_size() > ph.mem_size() {
+                    return Err(Errno::ENOEXEC);
+                }
                 let start_va = VirtAddr::from(ph.virtual_addr() as usize + load_bias);
                 let end_va =
                     VirtAddr::from(ph.virtual_addr() as usize + load_bias + ph.mem_size() as usize);
@@ -1349,18 +1388,26 @@ impl MemorySet {
                 let map_area = MapArea::new(start_va, end_va, MapType::Framed, map_perm);
                 max_vpn_end = max_vpn_end.max(map_area.vpn_range.get_end());
                 let data_offset = start_va.0 & (PAGE_SIZE - 1);
-                memory_set.push_empty_map_area(
+                let file_start = ph.offset() as usize;
+                let file_end = file_start
+                    .checked_add(ph.file_size() as usize)
+                    .ok_or(Errno::ENOEXEC)?;
+                let file_data = elf.input.get(file_start..file_end).ok_or(Errno::ENOEXEC)?;
+                memory_set.try_push_empty_map_area(
                     map_area,
-                    Some(&elf.input[ph.offset() as usize..(ph.offset() + ph.file_size()) as usize]),
+                    Some(file_data),
                     data_offset,
-                );
+                )?;
             }
 
             if ph_type == xmas_elf::program::Type::Interp {
                 need_dl = true;
                 let start = ph.offset() as usize;
-                let end = start + ph.file_size() as usize;
-                if let Ok(s) = core::str::from_utf8(&elf.input[start..end]) {
+                let end = start
+                    .checked_add(ph.file_size() as usize)
+                    .ok_or(Errno::ENOEXEC)?;
+                let interp_data = elf.input.get(start..end).ok_or(Errno::ENOEXEC)?;
+                if let Ok(s) = core::str::from_utf8(interp_data) {
                     interp_path = Some(alloc::string::String::from(s.trim_end_matches('\0')));
                 }
             }
@@ -1384,14 +1431,20 @@ impl MemorySet {
                 .or_else(|| crate::loader::get_app_data_by_name(interp));
 
             if let Some(interp_data) = interp_data {
-                let interp_elf = xmas_elf::ElfFile::new(interp_data).unwrap();
+                let interp_elf =
+                    xmas_elf::ElfFile::new(interp_data).map_err(|_| Errno::ENOEXEC)?;
                 let interp_head = interp_elf.header;
                 let interp_ph_count = interp_head.pt2.ph_count();
                 entry_point = interp_head.pt2.entry_point() as usize + DL_INTERP_OFFSET;
 
                 for i in 0..interp_ph_count {
-                    let ph = interp_elf.program_header(i).unwrap();
-                    if ph.get_type().unwrap() == xmas_elf::program::Type::Load {
+                    let ph = interp_elf.program_header(i).map_err(|_| Errno::ENOEXEC)?;
+                    if ph.get_type().map_err(|_| Errno::ENOEXEC)?
+                        == xmas_elf::program::Type::Load
+                    {
+                        if ph.file_size() > ph.mem_size() {
+                            return Err(Errno::ENOEXEC);
+                        }
                         let start_va =
                             VirtAddr::from(ph.virtual_addr() as usize + DL_INTERP_OFFSET);
                         let end_va = VirtAddr::from(
@@ -1411,14 +1464,18 @@ impl MemorySet {
                         let map_area = MapArea::new(start_va, end_va, MapType::Framed, map_perm);
                         max_vpn_end = max_vpn_end.max(map_area.vpn_range.get_end());
                         let data_offset = start_va.0 & (PAGE_SIZE - 1);
-                        memory_set.push_empty_map_area(
+                        let file_start = ph.offset() as usize;
+                        let file_end = file_start
+                            .checked_add(ph.file_size() as usize)
+                            .ok_or(Errno::ENOEXEC)?;
+                        let file_data = interp_data
+                            .get(file_start..file_end)
+                            .ok_or(Errno::ENOEXEC)?;
+                        memory_set.try_push_empty_map_area(
                             map_area,
-                            Some(
-                                &interp_data
-                                    [ph.offset() as usize..(ph.offset() + ph.file_size()) as usize],
-                            ),
+                            Some(file_data),
                             data_offset,
-                        );
+                        )?;
                     }
                 }
 
@@ -1492,7 +1549,7 @@ impl MemorySet {
         user_stack_bottom += PAGE_SIZE; // 上移栈底，将空白页作为守护页，当栈溢出时将访问守护页而发生段错误
         let user_stack_top = user_stack_bottom + USER_STACK_SIZE;
         // 映射栈段
-        memory_set.push_empty_map_area(
+        memory_set.try_push_empty_map_area(
             MapArea::new(
                 VirtAddr::from(user_stack_bottom),
                 VirtAddr::from(user_stack_top),
@@ -1501,7 +1558,7 @@ impl MemorySet {
             ),
             None,
             0,
-        );
+        )?;
         // 映射堆段，初始不分配堆内存
         let heap_bottom = user_stack_top + PAGE_SIZE;
         memory_set.heap_bottom = heap_bottom;
@@ -1515,13 +1572,13 @@ impl MemorySet {
         // 不再映射异常上下文到用户空间，发生异常时，切换到内核将用户上下文存入内核栈
 
         let token = memory_set.page_table.token();
-        (
+        Ok((
             memory_set, // 用户程序地址空间
             token,
             user_stack_top, // 用户程序栈顶地址
             entry_point,    // 用户程序入口地址（动态链接时指向 ld-linux）
             aux_vec,        // auxiliary vector
-        )
+        ))
     }
 
     /// 基于已有用户地址空间创建新地址空间（用于 fork）
@@ -1536,6 +1593,7 @@ impl MemorySet {
         memory_set.heap_bottom = user_space.heap_bottom;
         memory_set.mmap_start = user_space.mmap_start;
 
+        let mut copied_vpns = BTreeSet::new();
         for area in user_space.areas.iter_mut() {
             let mut new_area = MapArea::from_another(area);
             let is_writable = area.map_perm.contains(MapPermission::WRITE);
@@ -1549,6 +1607,12 @@ impl MemorySet {
                     // 子进程也跳过，各自在访问时按需分配
                     continue;
                 }
+                if !copied_vpns.insert(vpn) {
+                    // mmap/mremap/fork 压力下若父地址空间残留了重叠 area，
+                    // 同一 VPN 的真实 PTE 仍然只有一个。fork 复制时按父页表的
+                    // 首次可见映射复制，避免对子页表二次 map() 返回 EEXIST。
+                    continue;
+                }
 
                 let shared_frame = area.data_frames.get(&vpn).unwrap().clone();
                 let ppn = shared_frame.ppn();
@@ -1557,18 +1621,20 @@ impl MemorySet {
                     let child_flags = PTEFlags::from_bits(area.map_perm.bits).unwrap();
                     memory_set.page_table.map(vpn, ppn, child_flags)?;
                 } else if is_writable {
-                    // COW 共享：标记父进程 PTE 为只读 + COW
+                    // COW 共享：先建立子进程 PTE，成功后再修改父进程 PTE。
+                    // 这样 fork 中途因 ENOMEM 等错误失败时，不会把父地址空间
+                    // 留在半 COW 状态。
                     let parent_pte = user_space.page_table.translate(vpn).unwrap();
                     let mut flags = parent_pte.flags();
                     flags.remove(PTEFlags::WRITE | PTEFlags::DIRTY);
-                    user_space.page_table.modify_pte(vpn, flags);
-                    user_space.page_table.make_pte_cow(vpn);
 
-                    // 子进程 PTE 同样为只读 + COW
                     let mut child_flags = PTEFlags::from_bits(area.map_perm.bits).unwrap();
                     child_flags.remove(PTEFlags::WRITE | PTEFlags::DIRTY);
                     memory_set.page_table.map(vpn, ppn, child_flags)?;
                     memory_set.page_table.make_pte_cow(vpn);
+
+                    user_space.page_table.modify_pte(vpn, flags);
+                    user_space.page_table.make_pte_cow(vpn);
                 } else {
                     // 只读页直接共享，无需 COW
                     let child_flags = PTEFlags::from_bits(area.map_perm.bits).unwrap();
@@ -2029,7 +2095,13 @@ impl MapArea {
     /// 传入页表的可变借用，以修改传入页表的内容
     pub fn map(&mut self, page_table: &mut PageTable) -> SysResult {
         for vpn in self.vpn_range {
-            self.map_one(page_table, vpn)?;
+            if let Err(err) = self.map_one(page_table, vpn) {
+                let cleanup_end = VirtPageNum(vpn.0 + 1);
+                for cleanup_vpn in VPNRange::new(self.vpn_range.get_start(), cleanup_end) {
+                    self.unmap_one(page_table, cleanup_vpn);
+                }
+                return Err(err);
+            }
         }
         Ok(())
     }
@@ -2118,7 +2190,12 @@ impl MapArea {
             }
         }
         let pte_flags = PTEFlags::from(self.map_perm);
-        page_table.map(vpn, ppn, pte_flags)?;
+        if let Err(err) = page_table.map(vpn, ppn, pte_flags) {
+            if self.map_type == MapType::Framed {
+                self.data_frames.remove(&vpn);
+            }
+            return Err(err);
+        }
         Ok(())
     }
 

@@ -71,15 +71,17 @@ impl InodeOp for MeminfoInode {
 fn generate_meminfo() -> String {
     let free_frames = crate::mm::free_frame_count();
     let page_size = crate::config::PAGE_SIZE;
+    let cached_pages = crate::fs::page_cache_page_count();
     let mem_total = crate::config::MEMORY_END - crate::config::MEMORY_START;
     let mem_free = free_frames * page_size;
+    let mem_cached = cached_pages * page_size;
     let heap_used = crate::mm::heap_allocated();
 
     let mut result = String::new();
     let _ = writeln!(result, "MemTotal:       {:8} kB", mem_total / 1024);
     let _ = writeln!(result, "MemFree:        {:8} kB", mem_free / 1024);
     let _ = writeln!(result, "MemAvailable:   {:8} kB", mem_free / 1024);
-    let _ = writeln!(result, "Cached:         {:8} kB", 0);
+    let _ = writeln!(result, "Cached:         {:8} kB", mem_cached / 1024);
     let _ = writeln!(result, "KernelHeap:     {:8} kB", heap_used / 1024);
     result
 }

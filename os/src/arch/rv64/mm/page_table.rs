@@ -6,9 +6,53 @@ use crate::mm::{
     VirtPageNum, frame_alloc,
 };
 use crate::syscall::{Errno, SysResult};
+use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::{vec, vec::Vec};
 use bitflags::*;
+use lazy_static::lazy_static;
+use spin::Mutex;
+
+const PAGE_TABLE_FRAME_QUARANTINE_LIMIT: usize = 128;
+
+lazy_static! {
+    static ref PAGE_TABLE_FRAME_QUARANTINE: Mutex<PageTableFrameQuarantine> =
+        Mutex::new(PageTableFrameQuarantine::new());
+}
+
+struct PageTableFrameQuarantine {
+    page_count: usize,
+    retired: VecDeque<Vec<FrameTracker>>,
+}
+
+impl PageTableFrameQuarantine {
+    fn new() -> Self {
+        Self {
+            page_count: 0,
+            retired: VecDeque::new(),
+        }
+    }
+
+    fn retire(&mut self, frames: Vec<FrameTracker>) -> Vec<Vec<FrameTracker>> {
+        if frames.is_empty() {
+            return Vec::new();
+        }
+
+        self.page_count += frames.len();
+        self.retired.push_back(frames);
+
+        let mut expired = Vec::new();
+        while self.page_count > PAGE_TABLE_FRAME_QUARANTINE_LIMIT {
+            let Some(frames) = self.retired.pop_front() else {
+                self.page_count = 0;
+                break;
+            };
+            self.page_count -= frames.len();
+            expired.push(frames);
+        }
+        expired
+    }
+}
 
 /// 页表
 ///
@@ -54,6 +98,20 @@ impl PageTable {
     pub fn token(&self) -> usize {
         (8usize << 60) | self.root_ppn.0
     }
+
+    /// 延迟回收当前页表持有的页表页帧。
+    ///
+    /// 进程退出时内核仍可能暂时运行在该进程的 satp 上，不能立刻释放根页表。
+    /// 将页表帧放入有限隔离队列，超过上限后再释放最旧的一批，既避免
+    /// 退出路径上复用仍可能被硬件观察到的页表帧，也防止长时间 LTP 压力下
+    /// 页表帧无限累积。
+    pub fn retire_owned_frames(&mut self) {
+        let expired = PAGE_TABLE_FRAME_QUARANTINE
+            .lock()
+            .retire(core::mem::take(&mut self.frames));
+        drop(expired);
+    }
+
     /// 转译虚拟页号为对应页表项
     pub fn translate(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
         self.find_pte(vpn).map(|pte| *pte)

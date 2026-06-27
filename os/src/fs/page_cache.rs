@@ -21,6 +21,10 @@ static NEXT_PAGE_CACHE_ID: AtomicUsize = AtomicUsize::new(1);
 static NEXT_LRU_GENERATION: AtomicUsize = AtomicUsize::new(1);
 static PAGE_CACHE_PAGE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+pub fn page_cache_page_count() -> usize {
+    PAGE_CACHE_PAGE_COUNT.load(Ordering::Relaxed)
+}
+
 #[derive(Clone, Copy)]
 struct LruEntry {
     cache_id: usize,

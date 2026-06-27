@@ -795,8 +795,18 @@ impl TaskControlBlock {
             args.push(String::new());
         }
 
-        let (memory_set, _token, mut user_sp, entry_point, aux_vec) =
-            MemorySet::from_elf_data(elf_data);
+        let (mut memory_set, _token, mut user_sp, entry_point, aux_vec) =
+            MemorySet::try_from_elf_data(elf_data)?;
+
+        /* ===== 修改用户栈数据 ===== */
+        let (argv_base, envp_base, auxv_base, stack_top) = init_user_stack(
+            &mut memory_set,
+            exe_path.as_str(),
+            args.as_slice(),
+            envs.as_slice(),
+            aux_vec,
+            &mut user_sp,
+        )?;
 
         /* ===== 修改地址空间 ===== */
         let mut memory_set_guard = self.memory_set.write();
@@ -804,15 +814,6 @@ impl TaskControlBlock {
         // 刷新页表，由于应用程序通过异常进入，在异常返回时不会刷新页表
         // 为了程序返回后看到的地址空间为自身而非父任务的地址空间，需要主动刷新页表
         memory_set_guard.activate();
-        /* ===== 修改用户栈数据 ===== */
-        let (argv_base, envp_base, auxv_base, stack_top) = init_user_stack(
-            &mut memory_set_guard,
-            exe_path.as_str(),
-            args.as_slice(),
-            envs.as_slice(),
-            aux_vec,
-            &mut user_sp,
-        )?;
         drop(old_memory_set);
         drop(memory_set_guard);
 
@@ -1709,6 +1710,23 @@ fn handle_robust_entry(
     let _ = crate::task::futex::futex_wake(futex_addr, 1, false);
 }
 
+fn reparent_children_to_init(task: &Arc<TaskControlBlock>) {
+    let children = task.op_children_mut(core::mem::take);
+    for (_, child) in children {
+        let exited = child.is_exited();
+        let sigchld_code = if child.wait_status() & 0x7f != 0 {
+            SigInfo::CLD_KILLED
+        } else {
+            SigInfo::CLD_EXITED
+        };
+        child.set_parent(&INITPROC);
+        INITPROC.add_child(child.clone());
+        if exited {
+            child.notify_parent_sigchld(sigchld_code);
+        }
+    }
+}
+
 /// 线程退出 - 对外接口
 ///
 /// - 设置当前线程退出状态
@@ -1759,11 +1777,7 @@ pub fn task_group_exit(task: Arc<TaskControlBlock>, exit_code: i32) {
     leader.op_thread_group_mut(|tg| tg.remove(&leader.tid()));
 
     // 修改孩子进程的父亲——托孤。children 是进程级资源，只处理一次。
-    let children = task.op_children_mut(core::mem::take);
-    for (_, child) in children {
-        child.set_parent(&INITPROC);
-        INITPROC.add_child(child);
-    }
+    reparent_children_to_init(&task);
 
     // robust list 仍然依赖用户地址，必须在拆掉用户地址空间前处理。
     exit_robust_list(&leader);
@@ -1816,11 +1830,7 @@ pub fn task_group_exit_by_signal(task: Arc<TaskControlBlock>, signal: i32) {
 
     leader.op_thread_group_mut(|tg| tg.remove(&leader.tid()));
 
-    let children = task.op_children_mut(core::mem::take);
-    for (_, child) in children {
-        child.set_parent(&INITPROC);
-        INITPROC.add_child(child);
-    }
+    reparent_children_to_init(&task);
 
     exit_robust_list(&leader);
 

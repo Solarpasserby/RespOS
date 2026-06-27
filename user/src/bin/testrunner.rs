@@ -903,8 +903,8 @@ fn main() -> i32 {
     // _run_lmbench_glibc();
     // _run_cyclictest_musl();
     // _run_cyclictest_glibc();
-    _run_ltp_musl();
     _run_ltp_glibc();
+    _run_ltp_musl();
     println!("[testrunner] all selected tests finished, powering off");
     poweroff();
     0
@@ -933,8 +933,8 @@ fn main() -> i32 {
     // _run_lmbench_glibc();
     // _run_cyclictest_musl(); // 系统调用不可用
     // _run_cyclictest_glibc();
-    // _run_ltp_musl();
-    // _run_ltp_glibc();
+    _run_ltp_musl();
+    _run_ltp_glibc();
     println!("[testrunner] all selected tests finished, powering off");
     poweroff();
     0

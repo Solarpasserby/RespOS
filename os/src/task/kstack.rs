@@ -62,8 +62,9 @@ impl KernelStackAllocator {
 ///
 /// 功能：为用户进程提供的需要内核功能服务场景下的数据缓存，主要体现为异常处理
 ///
-/// 虽然设计上该内核栈本身不存储数据（存储于内核空间 [`KERNEL_SPACE`]）
-/// 但是在内核栈生命周期结束后，其对应内核空间的内存也会被释放，体现了 RAII 的思想
+/// 虽然设计上该内核栈本身不存储数据（存储于内核空间 [`KERNEL_SPACE`]），
+/// 但内核栈 slot 会在任务退出后回收并复用。对应映射保留在全局内核页表中，
+/// 避免短进程压力下频繁拆建内核页表。
 #[repr(C)]
 pub struct KernelStack {
     // `__switch` 会通过 TaskControlBlock 的起始地址直接写回这个字段。
@@ -124,16 +125,9 @@ impl Drop for KernelStack {
         if *self.top.get_mut() == 0 {
             return;
         }
-        #[cfg(target_arch = "loongarch64")]
-        {
-            // LoongArch release 下在调度返回路径析构任务并同步反映射内核栈，
-            // 会扰动全局内核页表并导致短进程退出后卡死。栈 slot 会被复用，
-            // 对应映射保留在 KERNEL_SPACE 中，下一次分配同一 slot 时直接复用。
-        }
-        #[cfg(not(target_arch = "loongarch64"))]
-        KERNEL_SPACE
-            .lock()
-            .remove_stack_area(get_kernel_stack_top_edge(self.slot));
+        // 在调度返回路径析构任务并同步反映射内核栈，会频繁扰动全局内核页表。
+        // 栈 slot 本身会被复用；保留映射后，下次分配同一 slot 时
+        // `insert_stack_area()` 会直接命中已有区域并返回。
         KERNEL_STACK_ALLOCATOR.lock().dealloc(self.slot);
     }
 }

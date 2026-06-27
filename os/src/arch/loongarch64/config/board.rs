@@ -14,7 +14,7 @@ pub const USER_CLOCK_FREQ: usize = 100_000_000;
 pub const ACCOUNTING_CLOCK_FREQ: usize = HARDWARE_CLOCK_FREQ;
 // QEMU loongarch64 virt with `-m 128M` maps RAM in low memory.
 pub const MEMORY_START: usize = 0;
-pub const MEMORY_END: usize = 0x0800_0000;
+pub const MEMORY_END: usize = 0x1000_0000;
 
 pub const PCI_ECAM_BASE: usize = 0x2000_0000;
 pub const PCI_ECAM_SIZE: usize = 0x1000_0000;
