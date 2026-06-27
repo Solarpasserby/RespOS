@@ -253,8 +253,8 @@ pub fn check_all_task_timers() {
     check_timerfd_expirations();
     crate::task::TASK_MANAGER.for_each(|task| {
         task.check_real_timer();
-        check_posix_timers(task);
     });
+    check_posix_timers();
 }
 
 fn merge_offset_arg(low: usize, high: usize) -> isize {

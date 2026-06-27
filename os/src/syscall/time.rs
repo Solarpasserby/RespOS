@@ -6,7 +6,7 @@ use crate::mm::{copy_from_user, copy_to_user};
 use crate::mutex::SpinLock;
 use crate::signal::{SiField, Sig, SigInfo};
 use crate::task::{
-    TaskControlBlock, current_task, prepare_current_task_blocked, switch_to_next_task,
+    TASK_MANAGER, current_task, prepare_current_task_blocked, switch_to_next_task,
     yield_current_task,
 };
 use crate::timer::{TimeSpec, get_time_ms, get_time_us, get_timeout_ms};
@@ -683,7 +683,7 @@ pub fn sys_timer_settime(
     Ok(0)
 }
 
-pub fn check_posix_timers(task: &TaskControlBlock) {
+pub fn check_posix_timers() {
     let mut expired = Vec::new();
     {
         let mut timers = POSIX_TIMERS.lock();
@@ -691,13 +691,10 @@ pub fn check_posix_timers(task: &TaskControlBlock) {
             let Ok(now_ms) = clock_time_ms(timer.clock_id) else {
                 continue;
             };
-            if timer.owner_tgid != task.tgid()
-                || timer.deadline_ms == 0
-                || now_ms < timer.deadline_ms
-            {
+            if timer.deadline_ms == 0 || now_ms < timer.deadline_ms {
                 continue;
             }
-            expired.push(timer.signo);
+            expired.push((timer.owner_tgid, timer.signo));
             timer.deadline_ms = if timer.interval_ms == 0 {
                 0
             } else {
@@ -706,9 +703,11 @@ pub fn check_posix_timers(task: &TaskControlBlock) {
         }
     }
 
-    for signo in expired {
+    for (owner_tgid, signo) in expired {
         let sig = Sig::from(signo);
-        if sig.is_valid() {
+        if sig.is_valid()
+            && let Some(task) = TASK_MANAGER.get(owner_tgid)
+        {
             let siginfo = SigInfo::new(sig.raw(), SigInfo::KERNEL, SiField::None);
             task.receive_siginfo(siginfo, false);
         }
