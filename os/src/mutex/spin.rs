@@ -80,6 +80,28 @@ impl<T, S: MutexOperations> SpinMutex<T, S> {
         }
     }
 
+    /// 尝试获取锁一次，不自旋等待。
+    ///
+    /// 主要用于诊断和尽力而为的统计路径；失败时会恢复 `before_lock`
+    /// 改变的中断状态。
+    #[inline(always)]
+    pub fn try_lock(&self) -> Option<MutexGuard<T, S>> {
+        let mut support_guard = S::before_lock();
+        if self
+            .lock
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            S::after_unlock(&mut support_guard);
+            return None;
+        }
+        Some(MutexGuard {
+            mutex: self,
+            support_guard,
+            _not_send: PhantomData,
+        })
+    }
+
     /// 获取一把允许跨任务移动的 guard。
     ///
     /// # Safety

@@ -32,6 +32,18 @@ pub fn heap_allocated() -> usize {
     heap_allocator::HEAP_ALLOCATOR.lock().stats_alloc_user()
 }
 
+pub fn try_free_frame_count() -> Option<usize> {
+    Some(frame_allocator::FRAME_ALLOCATOR.try_lock()?.free_frames())
+}
+
+pub fn try_heap_allocated() -> Option<usize> {
+    Some(
+        heap_allocator::HEAP_ALLOCATOR
+            .try_lock()?
+            .stats_alloc_user(),
+    )
+}
+
 /// 初始化内存管理，启用虚拟地址
 pub fn init() {
     #[cfg(target_arch = "loongarch64")]

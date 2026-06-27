@@ -79,6 +79,7 @@ pub const O_CREATE: usize = 1 << 6;
 pub const O_TRUNC: usize = 1 << 9;
 pub const O_APPEND: usize = 1 << 10;
 pub const O_DIRECTORY: usize = 1 << 16;
+pub const O_CLOEXEC: usize = 1 << 19;
 
 pub const SEEK_SET: usize = 0;
 pub const SEEK_CUR: usize = 1;

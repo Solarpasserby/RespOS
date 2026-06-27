@@ -516,13 +516,13 @@ pub fn wakeup_task(tid: usize) {
     }
 }
 
-pub fn scheduler_health_counts() -> (usize, usize, usize) {
+pub fn scheduler_health_counts() -> Option<(usize, usize, usize)> {
     let (ready, blocked) = {
-        let scheduler = SCHEDULER.lock();
+        let scheduler = SCHEDULER.try_lock()?;
         (scheduler.task_index.len(), scheduler.blocked_tasks.len())
     };
-    let deferred = DEAD_TASKS.lock().len();
-    (ready, blocked, deferred)
+    let deferred = DEAD_TASKS.try_lock()?.len();
+    Some((ready, blocked, deferred))
 }
 
 bitflags! {

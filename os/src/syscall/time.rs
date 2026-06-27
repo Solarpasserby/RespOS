@@ -705,11 +705,11 @@ pub fn check_posix_timers() {
 
     for (owner_tgid, signo) in expired {
         let sig = Sig::from(signo);
-        if sig.is_valid()
-            && let Some(task) = TASK_MANAGER.get(owner_tgid)
-        {
-            let siginfo = SigInfo::new(sig.raw(), SigInfo::KERNEL, SiField::None);
-            task.receive_siginfo(siginfo, false);
+        if sig.is_valid() {
+            if let Some(task) = TASK_MANAGER.get(owner_tgid) {
+                let siginfo = SigInfo::new(sig.raw(), SigInfo::KERNEL, SiField::None);
+                task.receive_siginfo(siginfo, false);
+            }
         }
     }
 }

@@ -8,8 +8,8 @@ extern crate alloc;
 
 use alloc::string::String;
 use user_lib::{
-    O_CREATE, O_RDONLY, O_TRUNC, O_WRONLY, chdir, chmod, close, exec, execve, exit, fork, mkdir,
-    open, poweroff, read, symlink, time_get, unlink, waitpid, write,
+    O_CLOEXEC, O_CREATE, O_RDONLY, O_TRUNC, O_WRONLY, chdir, chmod, close, exec, execve, exit,
+    fork, lseek, mkdir, open, poweroff, read, symlink, time_get, unlink, waitpid, write,
 };
 
 const BUSYBOX_PATH: &str = "/musl/busybox\0";
@@ -717,14 +717,15 @@ struct LtpHealth {
     deferred: usize,
 }
 
-fn read_ltp_health() -> Option<LtpHealth> {
-    let fd = open("/proc/respos_health\0", O_RDONLY, 0);
+fn read_ltp_health(fd: isize) -> Option<LtpHealth> {
     if fd < 0 {
+        return None;
+    }
+    if lseek(fd as usize, 0, 0) < 0 {
         return None;
     }
     let mut buf = [0u8; 256];
     let len = read(fd as usize, &mut buf);
-    close(fd as usize);
     if len <= 0 {
         return None;
     }
@@ -770,6 +771,7 @@ fn ltp_health_anomaly(before: LtpHealth, after: LtpHealth) -> bool {
 }
 
 fn record_ltp_health(
+    fd: isize,
     previous: &mut Option<LtpHealth>,
     sequence: usize,
     group: &str,
@@ -777,10 +779,7 @@ fn record_ltp_health(
     reason: &str,
     force: bool,
 ) {
-    let Some(current) = read_ltp_health() else {
-        if previous.is_none() {
-            println!("LTP HEALTH unavailable group={} case={}", group, case_name);
-        }
+    let Some(current) = read_ltp_health(fd) else {
         return;
     };
     let anomaly = previous.is_some_and(|old| ltp_health_anomaly(old, current));
@@ -845,7 +844,11 @@ fn run_ltp_selected(
     let mut skip: i32 = 0;
     let mut health = None;
     let mut case_sequence = 0usize;
-    record_ltp_health(&mut health, 0, group_name, "-", "baseline", true);
+    let health_fd = open("/proc/respos_health\0", O_RDONLY | O_CLOEXEC, 0);
+    if health_fd < 0 {
+        println!("LTP HEALTH unavailable group={}", group_name);
+    }
+    record_ltp_health(health_fd, &mut health, 0, group_name, "-", "baseline", true);
 
     for (phase_idx, phase) in LTP_OSCOMP.iter().enumerate() {
         let phase_num = phase_idx + 1;
@@ -856,6 +859,7 @@ fn run_ltp_selected(
             phase.name
         );
         record_ltp_health(
+            health_fd,
             &mut health,
             case_sequence,
             group_name,
@@ -941,6 +945,7 @@ fn run_ltp_selected(
                 );
                 fail += 1;
                 record_ltp_health(
+                    health_fd,
                     &mut health,
                     case_sequence,
                     group_name,
@@ -963,6 +968,7 @@ fn run_ltp_selected(
                 );
                 fail += 1;
                 record_ltp_health(
+                    health_fd,
                     &mut health,
                     case_sequence,
                     group_name,
@@ -988,6 +994,7 @@ fn run_ltp_selected(
                     fail += 1;
                 }
                 record_ltp_health(
+                    health_fd,
                     &mut health,
                     case_sequence,
                     group_name,
@@ -1010,6 +1017,9 @@ fn run_ltp_selected(
         skip,
         pass + fail + skip
     );
+    if health_fd >= 0 {
+        close(health_fd as usize);
+    }
     println!("#### OS COMP TEST GROUP END {} ####", group_name);
     let _ = chdir("/\0");
 }
@@ -1065,8 +1075,8 @@ fn main() -> i32 {
     // _run_lmbench_glibc();
     // _run_cyclictest_musl();
     // _run_cyclictest_glibc();
-    _run_ltp_glibc();
     _run_ltp_musl();
+    _run_ltp_glibc();
     println!("[testrunner] all selected tests finished, powering off");
     poweroff();
     0
