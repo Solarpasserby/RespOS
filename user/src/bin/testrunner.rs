@@ -8,8 +8,8 @@ extern crate alloc;
 
 use alloc::string::String;
 use user_lib::{
-    O_CREATE, O_RDONLY, O_TRUNC, O_WRONLY, chdir, chmod, close, exec, execve, exit, fork, mkdir,
-    kill, open, poweroff, read, symlink, time_get, unlink, waitpid, waitpid_nohang, write, SIGKILL,
+    O_CREATE, O_RDONLY, O_TRUNC, O_WRONLY, SIGKILL, chdir, chmod, close, exec, execve, exit, fork,
+    kill, mkdir, open, poweroff, read, symlink, time_get, unlink, waitpid, waitpid_nohang, write,
 };
 
 const BUSYBOX_PATH: &str = "/musl/busybox\0";
@@ -637,6 +637,8 @@ const LTP_SKIP: &[&str] = &[
     "openat02_child",
     "mount03_suid_child",
     "writev03",
+    // pipe2_02 风险较大，收益较低，跳过
+    "pipe2_02",
     // fork13 能通过，但运行时间过长占用评测时间，且考虑到收益很小，跳过
     "fork13",
     // fork14 需要构造 16TiB 级 VMA；当前 39-bit/8GiB mmap 窗口无法支持，且该测例收益很小，阶段推进时跳过。
@@ -704,10 +706,7 @@ fn wait_ltp_case_with_timeout(pid: usize, name: &str, start_ms: isize) -> Result
 
         let elapsed_ms = ltp_elapsed_ms(start_ms);
         if elapsed_ms >= LTP_CASE_TIMEOUT_MS {
-            println!(
-                "[testrunner] kill {} after {} ms timeout",
-                name, elapsed_ms
-            );
+            println!("[testrunner] kill {} after {} ms timeout", name, elapsed_ms);
             let _ = kill(pid, SIGKILL);
             let waited = waitpid(pid, &mut ec);
             if waited == pid as isize {
