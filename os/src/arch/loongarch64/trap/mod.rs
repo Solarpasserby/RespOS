@@ -54,12 +54,17 @@ fn handle_user_page_fault(_cx: &TrapContext, exception: estat::Exception) {
         .op_memory_set_write(|memory_set| {
             memory_set.handle_page_fault(page_fault_cause(exception), badv)
         });
-    if result.is_err() {
+    if let Err(err) = result {
         let task = current_task().expect("[kernel] current task is None.");
-        if task.op_sig_pending(|pending| pending.mask.contain_signal(Sig::SIGSEGV)) {
-            exit_by_signal_and_run_next(Sig::SIGSEGV.raw());
+        let sig = if err == Errno::EIO {
+            Sig::SIGBUS
+        } else {
+            Sig::SIGSEGV
+        };
+        if task.op_sig_pending(|pending| pending.mask.contain_signal(sig)) {
+            exit_by_signal_and_run_next(sig.raw());
         }
-        let siginfo = SigInfo::new(Sig::SIGSEGV.raw(), SigInfo::KERNEL, SiField::None);
+        let siginfo = SigInfo::new(sig.raw(), SigInfo::KERNEL, SiField::None);
         task.receive_siginfo(siginfo, true);
     }
 }

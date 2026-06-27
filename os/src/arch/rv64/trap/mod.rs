@@ -101,8 +101,13 @@ pub fn trap_handler(cx: &mut TrapContext) {
                 .op_memory_set_write(|memory_set| {
                     memory_set.handle_page_fault(page_fault_cause, stval)
                 });
-            if result.is_err() {
-                let siginfo = SigInfo::new(Sig::SIGSEGV.raw(), SigInfo::KERNEL, SiField::None);
+            if let Err(err) = result {
+                let sig = if err == Errno::EIO {
+                    Sig::SIGBUS
+                } else {
+                    Sig::SIGSEGV
+                };
+                let siginfo = SigInfo::new(sig.raw(), SigInfo::KERNEL, SiField::None);
                 current_task()
                     .expect("[kernel] current task is None.")
                     .receive_siginfo(siginfo, true);

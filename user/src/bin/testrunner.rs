@@ -8,8 +8,8 @@ extern crate alloc;
 
 use alloc::string::String;
 use user_lib::{
-    O_CREATE, O_RDONLY, O_TRUNC, O_WRONLY, SIGKILL, chdir, chmod, close, exec, execve, exit, fork,
-    kill, mkdir, open, poweroff, read, symlink, time_get, unlink, waitpid, waitpid_nohang, write,
+    O_CREATE, O_RDONLY, O_TRUNC, O_WRONLY, chdir, chmod, close, exec, execve, exit, fork, mkdir,
+    open, poweroff, read, symlink, time_get, unlink, waitpid, write,
 };
 
 const BUSYBOX_PATH: &str = "/musl/busybox\0";
@@ -26,7 +26,6 @@ const IOZONE_SCRIPT: &str = "iozone_testcode.sh\0";
 const NETPERF_SCRIPT: &str = "netperf_testcode.sh\0";
 const IPERF_SCRIPT: &str = "iperf_testcode.sh\0";
 const CYCLICTEST_SCRIPT: &str = "cyclictest_testcode.sh\0";
-const LTP_CASE_TIMEOUT_MS: isize = 120_000;
 
 const RV_MUSL_LOADER: &str = "/lib/ld-musl-riscv64.so.1\0";
 const RV_MUSL_SF_LOADER: &str = "/lib/ld-musl-riscv64-sf.so.1\0";
@@ -707,32 +706,6 @@ fn print_ltp_case_time(group_name: &str, name: &str, ret: i32, elapsed_ms: isize
     );
 }
 
-fn wait_ltp_case_with_timeout(pid: usize, name: &str, start_ms: isize) -> Result<i32, i32> {
-    let mut ec: i32 = 0;
-    loop {
-        let waited = waitpid_nohang(pid, &mut ec);
-        if waited == pid as isize {
-            return Ok(ec);
-        }
-        if waited < 0 {
-            return Err(1);
-        }
-
-        let elapsed_ms = ltp_elapsed_ms(start_ms);
-        if elapsed_ms >= LTP_CASE_TIMEOUT_MS {
-            println!("[testrunner] kill {} after {} ms timeout", name, elapsed_ms);
-            let _ = kill(pid, SIGKILL);
-            let waited = waitpid(pid, &mut ec);
-            if waited == pid as isize {
-                return Ok(ec);
-            }
-            return Err(1);
-        }
-
-        user_lib::yield_();
-    }
-}
-
 fn run_ltp_selected(
     workdir: &str,
     group_name: &str,
@@ -820,14 +793,15 @@ fn run_ltp_selected(
                 continue;
             }
 
-            let waited = wait_ltp_case_with_timeout(pid as usize, name_str, start_ms);
+            let mut ec: i32 = 0;
+            let waited = waitpid(pid as usize, &mut ec);
             let elapsed_ms = ltp_elapsed_ms(start_ms);
-            if waited.is_err() {
+            if waited < 0 {
                 println!("FAIL LTP CASE {} : 1", name_str);
                 print_ltp_case_time(group_name, name_str, 1, elapsed_ms);
                 fail += 1;
             } else {
-                let ret = ltp_script_exit_code(waited.unwrap());
+                let ret = ltp_script_exit_code(ec);
                 println!("FAIL LTP CASE {} : {}", name_str, ret);
                 print_ltp_case_time(group_name, name_str, ret, elapsed_ms);
                 if ret == 0 {

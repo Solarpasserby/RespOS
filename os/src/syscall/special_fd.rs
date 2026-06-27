@@ -119,7 +119,10 @@ impl FileOp for EventFd {
             return Err(Errno::EINVAL);
         }
         let mut counter = self.counter.lock();
-        *counter = counter.checked_add(value).ok_or(Errno::EAGAIN)?;
+        if value > (u64::MAX - 1).saturating_sub(*counter) {
+            return Err(Errno::EAGAIN);
+        }
+        *counter += value;
         Ok(8)
     }
 
