@@ -163,7 +163,6 @@ pub fn trap_handler(cx: &mut TrapContext) {
             );
         }
     }
-    check_all_task_timers();
     handle_signals();
 }
 

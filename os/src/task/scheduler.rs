@@ -10,6 +10,7 @@ use crate::{arch::task::__switch, mutex::SpinNoIrqLock};
 use alloc::{collections::vec_deque::VecDeque, sync::Arc, vec::Vec};
 use bitflags::bitflags;
 use core::sync::atomic::{Ordering, compiler_fence};
+use hashbrown::HashMap;
 use lazy_static::lazy_static;
 
 lazy_static! {
@@ -25,7 +26,7 @@ const SCHED_IDLE: usize = 5;
 const RT_QUEUE_COUNT: usize = 100;
 const NORMAL_QUEUE_COUNT: usize = 40;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ReadyQueue {
     Rt(usize),
     Normal(usize),
@@ -339,7 +340,8 @@ pub struct Scheduler {
     idle_queue: VecDeque<Arc<TaskControlBlock>>,
     rt_bitmap: u128,
     normal_bitmap: u64,
-    blocked_queue: VecDeque<Arc<TaskControlBlock>>,
+    task_index: HashMap<usize, ReadyQueue>,
+    blocked_tasks: HashMap<usize, Arc<TaskControlBlock>>,
 }
 
 impl Scheduler {
@@ -351,13 +353,20 @@ impl Scheduler {
             idle_queue: VecDeque::new(),
             rt_bitmap: 0,
             normal_bitmap: 0,
-            blocked_queue: VecDeque::new(),
+            task_index: HashMap::new(),
+            blocked_tasks: HashMap::new(),
         }
     }
 
     /// 添加任务到调度器就绪队列。
     pub fn add(&mut self, task: Arc<TaskControlBlock>) {
-        match ready_queue_for(&task) {
+        let tid = task.tid();
+        let queue = ready_queue_for(&task);
+        if let Some(old_queue) = self.task_index.insert(tid, queue) {
+            debug_assert!(false, "task {tid} is already queued");
+            self.remove_from_ready_queue(tid, old_queue);
+        }
+        match queue {
             ReadyQueue::Rt(idx) => {
                 self.rt_queues[idx].push_back(task);
                 self.rt_bitmap |= 1u128 << (idx - 1);
@@ -377,6 +386,7 @@ impl Scheduler {
             let idx = bit + 1;
             if idx < RT_QUEUE_COUNT {
                 if let Some(task) = self.rt_queues[idx].pop_front() {
+                    self.task_index.remove(&task.tid());
                     if self.rt_queues[idx].is_empty() {
                         self.rt_bitmap &= !(1u128 << bit);
                     }
@@ -390,6 +400,7 @@ impl Scheduler {
             let idx = self.normal_bitmap.trailing_zeros() as usize;
             if idx < NORMAL_QUEUE_COUNT {
                 if let Some(task) = self.normal_queues[idx].pop_front() {
+                    self.task_index.remove(&task.tid());
                     if self.normal_queues[idx].is_empty() {
                         self.normal_bitmap &= !(1u64 << idx);
                     }
@@ -399,7 +410,9 @@ impl Scheduler {
             self.normal_bitmap &= !(1u64 << idx);
         }
 
-        self.idle_queue.pop_front()
+        let task = self.idle_queue.pop_front()?;
+        self.task_index.remove(&task.tid());
+        Some(task)
     }
 
     /// 是否没有可运行任务。
@@ -409,51 +422,87 @@ impl Scheduler {
 
     /// 从调度器就绪队列中移除任务。
     pub fn remove(&mut self, tid: usize) {
-        for idx in 1..RT_QUEUE_COUNT {
-            self.rt_queues[idx].retain(|task| task.tid() != tid);
-            if self.rt_queues[idx].is_empty() {
-                self.rt_bitmap &= !(1u128 << (idx - 1));
-            }
+        if let Some(queue) = self.task_index.remove(&tid) {
+            self.remove_from_ready_queue(tid, queue);
         }
-        for idx in 0..NORMAL_QUEUE_COUNT {
-            self.normal_queues[idx].retain(|task| task.tid() != tid);
-            if self.normal_queues[idx].is_empty() {
-                self.normal_bitmap &= !(1u64 << idx);
-            }
-        }
-        self.idle_queue.retain(|task| task.tid() != tid);
-        self.blocked_queue.retain(|task| task.tid() != tid);
+        self.blocked_tasks.remove(&tid);
     }
 
     /// 从调度器就绪队列中移除线程组。
     pub fn remove_thread_group(&mut self, tgid: usize) {
+        let mut removed = Vec::new();
         for idx in 1..RT_QUEUE_COUNT {
-            self.rt_queues[idx].retain(|task| task.tgid() != tgid);
+            self.rt_queues[idx].retain(|task| {
+                if task.tgid() == tgid {
+                    removed.push(task.tid());
+                    false
+                } else {
+                    true
+                }
+            });
             if self.rt_queues[idx].is_empty() {
                 self.rt_bitmap &= !(1u128 << (idx - 1));
             }
         }
         for idx in 0..NORMAL_QUEUE_COUNT {
-            self.normal_queues[idx].retain(|task| task.tgid() != tgid);
+            self.normal_queues[idx].retain(|task| {
+                if task.tgid() == tgid {
+                    removed.push(task.tid());
+                    false
+                } else {
+                    true
+                }
+            });
             if self.normal_queues[idx].is_empty() {
                 self.normal_bitmap &= !(1u64 << idx);
             }
         }
-        self.idle_queue.retain(|task| task.tgid() != tgid);
-        self.blocked_queue.retain(|task| task.tgid() != tgid);
+        self.idle_queue.retain(|task| {
+            if task.tgid() == tgid {
+                removed.push(task.tid());
+                false
+            } else {
+                true
+            }
+        });
+        for tid in removed {
+            self.task_index.remove(&tid);
+        }
+        self.blocked_tasks.retain(|_, task| task.tgid() != tgid);
     }
 
     /// 阻塞任务。
     pub fn block(&mut self, task: Arc<TaskControlBlock>) {
-        self.blocked_queue.push_back(task);
+        let tid = task.tid();
+        debug_assert!(
+            !self.blocked_tasks.contains_key(&tid),
+            "task {tid} is already blocked"
+        );
+        self.blocked_tasks.insert(tid, task);
     }
 
     /// 从阻塞队列中移除指定 tid 的任务。
     pub fn wake(&mut self, tid: usize) -> Option<Arc<TaskControlBlock>> {
-        if let Some(pos) = self.blocked_queue.iter().position(|t| t.tid() == tid) {
-            Some(self.blocked_queue.remove(pos).unwrap())
-        } else {
-            None
+        self.blocked_tasks.remove(&tid)
+    }
+
+    fn remove_from_ready_queue(&mut self, tid: usize, queue: ReadyQueue) {
+        match queue {
+            ReadyQueue::Rt(idx) => {
+                self.rt_queues[idx].retain(|task| task.tid() != tid);
+                if self.rt_queues[idx].is_empty() {
+                    self.rt_bitmap &= !(1u128 << (idx - 1));
+                }
+            }
+            ReadyQueue::Normal(idx) => {
+                self.normal_queues[idx].retain(|task| task.tid() != tid);
+                if self.normal_queues[idx].is_empty() {
+                    self.normal_bitmap &= !(1u64 << idx);
+                }
+            }
+            ReadyQueue::Idle => {
+                self.idle_queue.retain(|task| task.tid() != tid);
+            }
         }
     }
 }

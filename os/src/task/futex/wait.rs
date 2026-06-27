@@ -10,20 +10,118 @@ use crate::task::scheduler::{
 };
 use crate::task::{current_task, futex::FUTEX_BITSET_MATCH_ANY, yield_current_task};
 use crate::timer::{TimeSpec, get_time_ms, get_timeout_ms};
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use lazy_static::lazy_static;
 
 const FUTEX_TRACE: bool = false;
 
 struct TimedFutexWait {
-    tid: usize,
     deadline: FutexDeadline,
     timed_out: bool,
 }
 
+struct TimedFutexWaits {
+    waits: BTreeMap<usize, TimedFutexWait>,
+    user_deadlines: BTreeMap<usize, Vec<usize>>,
+    timeout_deadlines: BTreeMap<usize, Vec<usize>>,
+}
+
+impl TimedFutexWaits {
+    fn new() -> Self {
+        Self {
+            waits: BTreeMap::new(),
+            user_deadlines: BTreeMap::new(),
+            timeout_deadlines: BTreeMap::new(),
+        }
+    }
+
+    fn register(&mut self, tid: usize, deadline: FutexDeadline) {
+        self.waits.insert(
+            tid,
+            TimedFutexWait {
+                deadline,
+                timed_out: false,
+            },
+        );
+        let deadlines = match deadline {
+            FutexDeadline::UserClock(_) => &mut self.user_deadlines,
+            FutexDeadline::TimeoutClock(_) => &mut self.timeout_deadlines,
+        };
+        deadlines.entry(deadline.millis()).or_default().push(tid);
+    }
+
+    fn finish(&mut self, tid: usize) -> bool {
+        let Some(wait) = self.waits.remove(&tid) else {
+            return false;
+        };
+        let (deadlines, deadline_ms) = match wait.deadline {
+            FutexDeadline::UserClock(ms) => (&mut self.user_deadlines, ms),
+            FutexDeadline::TimeoutClock(ms) => (&mut self.timeout_deadlines, ms),
+        };
+        let remove_bucket = if let Some(tids) = deadlines.get_mut(&deadline_ms) {
+            tids.retain(|queued_tid| *queued_tid != tid);
+            tids.is_empty()
+        } else {
+            false
+        };
+        if remove_bucket {
+            deadlines.remove(&deadline_ms);
+        }
+        wait.timed_out
+    }
+
+    fn expire(&mut self, now_user: usize, now_timeout: usize) -> Vec<usize> {
+        let mut expired = Vec::new();
+        Self::expire_clock(
+            &mut self.waits,
+            &mut self.user_deadlines,
+            now_user,
+            true,
+            &mut expired,
+        );
+        Self::expire_clock(
+            &mut self.waits,
+            &mut self.timeout_deadlines,
+            now_timeout,
+            false,
+            &mut expired,
+        );
+        expired
+    }
+
+    fn expire_clock(
+        waits: &mut BTreeMap<usize, TimedFutexWait>,
+        deadlines: &mut BTreeMap<usize, Vec<usize>>,
+        now: usize,
+        user_clock: bool,
+        expired: &mut Vec<usize>,
+    ) {
+        while let Some((&deadline_ms, _)) = deadlines.first_key_value() {
+            if deadline_ms > now {
+                break;
+            }
+            let tids = deadlines.remove(&deadline_ms).unwrap_or_default();
+            for tid in tids {
+                let Some(wait) = waits.get_mut(&tid) else {
+                    continue;
+                };
+                let same_deadline = match wait.deadline {
+                    FutexDeadline::UserClock(ms) => user_clock && ms == deadline_ms,
+                    FutexDeadline::TimeoutClock(ms) => !user_clock && ms == deadline_ms,
+                };
+                if same_deadline && !wait.timed_out {
+                    wait.timed_out = true;
+                    expired.push(tid);
+                }
+            }
+        }
+    }
+}
+
 lazy_static! {
-    static ref TIMED_FUTEX_WAITS: SpinNoIrqLock<Vec<TimedFutexWait>> =
-        SpinNoIrqLock::new(Vec::new());
+    static ref TIMED_FUTEX_WAITS: SpinNoIrqLock<TimedFutexWaits> =
+        SpinNoIrqLock::new(TimedFutexWaits::new());
 }
 
 fn read_futex_value(uaddr: usize) -> SysResult<u32> {
@@ -181,6 +279,14 @@ enum FutexDeadline {
 }
 
 impl FutexDeadline {
+    fn millis(self) -> usize {
+        match self {
+            FutexDeadline::UserClock(deadline_ms) | FutexDeadline::TimeoutClock(deadline_ms) => {
+                deadline_ms
+            }
+        }
+    }
+
     fn expired(self) -> bool {
         match self {
             FutexDeadline::UserClock(deadline_ms) => get_time_ms() >= deadline_ms,
@@ -190,33 +296,17 @@ impl FutexDeadline {
 }
 
 fn register_timed_wait(tid: usize, deadline: FutexDeadline) {
-    TIMED_FUTEX_WAITS.lock().push(TimedFutexWait {
-        tid,
-        deadline,
-        timed_out: false,
-    });
+    TIMED_FUTEX_WAITS.lock().register(tid, deadline);
 }
 
 fn finish_timed_wait(tid: usize) -> bool {
-    let mut waits = TIMED_FUTEX_WAITS.lock();
-    if let Some(pos) = waits.iter().position(|wait| wait.tid == tid) {
-        waits.remove(pos).timed_out
-    } else {
-        false
-    }
+    TIMED_FUTEX_WAITS.lock().finish(tid)
 }
 
 pub fn check_futex_timeouts() {
-    let mut expired = Vec::new();
-    {
-        let mut waits = TIMED_FUTEX_WAITS.lock();
-        for wait in waits.iter_mut() {
-            if !wait.timed_out && wait.deadline.expired() {
-                wait.timed_out = true;
-                expired.push(wait.tid);
-            }
-        }
-    }
+    let expired = TIMED_FUTEX_WAITS
+        .lock()
+        .expire(get_time_ms(), get_timeout_ms());
 
     for tid in expired {
         FUTEX_QUEUES.lock().remove_tid(tid);

@@ -72,14 +72,67 @@ struct PosixTimer {
 
 #[derive(Clone, Copy)]
 struct NanosleepWait {
-    tid: usize,
     clock_id: usize,
     deadline_ms: usize,
     timed_out: bool,
 }
 
+struct NanosleepWaits {
+    waits: BTreeMap<usize, NanosleepWait>,
+    deadlines: BTreeMap<usize, BTreeMap<usize, Vec<usize>>>,
+}
+
+impl NanosleepWaits {
+    fn new() -> Self {
+        Self {
+            waits: BTreeMap::new(),
+            deadlines: BTreeMap::new(),
+        }
+    }
+
+    fn register(&mut self, tid: usize, clock_id: usize, deadline_ms: usize) {
+        self.waits.insert(
+            tid,
+            NanosleepWait {
+                clock_id,
+                deadline_ms,
+                timed_out: false,
+            },
+        );
+        self.deadlines
+            .entry(clock_id)
+            .or_default()
+            .entry(deadline_ms)
+            .or_default()
+            .push(tid);
+    }
+
+    fn finish(&mut self, tid: usize) -> bool {
+        let Some(wait) = self.waits.remove(&tid) else {
+            return false;
+        };
+        let mut remove_clock = false;
+        if let Some(deadlines) = self.deadlines.get_mut(&wait.clock_id) {
+            let remove_bucket = if let Some(tids) = deadlines.get_mut(&wait.deadline_ms) {
+                tids.retain(|queued_tid| *queued_tid != tid);
+                tids.is_empty()
+            } else {
+                false
+            };
+            if remove_bucket {
+                deadlines.remove(&wait.deadline_ms);
+            }
+            remove_clock = deadlines.is_empty();
+        }
+        if remove_clock {
+            self.deadlines.remove(&wait.clock_id);
+        }
+        wait.timed_out
+    }
+}
+
 lazy_static! {
-    static ref NANOSLEEP_WAITS: SpinLock<Vec<NanosleepWait>> = SpinLock::new(Vec::new());
+    static ref NANOSLEEP_WAITS: SpinLock<NanosleepWaits> = SpinLock::new(NanosleepWaits::new());
 }
 
 const NANOSLEEP_TIMEOUT_CLOCK: usize = usize::MAX;
@@ -321,21 +374,11 @@ fn is_supported_clock(clock_id: usize) -> bool {
 }
 
 fn register_nanosleep_wait(tid: usize, clock_id: usize, deadline_ms: usize) {
-    NANOSLEEP_WAITS.lock().push(NanosleepWait {
-        tid,
-        clock_id,
-        deadline_ms,
-        timed_out: false,
-    });
+    NANOSLEEP_WAITS.lock().register(tid, clock_id, deadline_ms);
 }
 
 fn finish_nanosleep_wait(tid: usize) -> bool {
-    let mut waits = NANOSLEEP_WAITS.lock();
-    if let Some(pos) = waits.iter().position(|wait| wait.tid == tid) {
-        waits.remove(pos).timed_out
-    } else {
-        false
-    }
+    NANOSLEEP_WAITS.lock().finish(tid)
 }
 
 fn nanosleep_clock_ms(clock_id: usize) -> SysResult<usize> {
@@ -350,16 +393,40 @@ pub fn check_nanosleep_timeouts() {
     let mut expired = Vec::new();
     {
         let mut waits = NANOSLEEP_WAITS.lock();
-        for wait in waits.iter_mut() {
-            if wait.timed_out {
-                continue;
-            }
-            let Ok(now_ms) = nanosleep_clock_ms(wait.clock_id) else {
+        let clock_ids: Vec<usize> = waits.deadlines.keys().copied().collect();
+        for clock_id in clock_ids {
+            let Ok(now_ms) = nanosleep_clock_ms(clock_id) else {
                 continue;
             };
-            if now_ms >= wait.deadline_ms {
-                wait.timed_out = true;
-                expired.push(wait.tid);
+            let Some(deadlines) = waits.deadlines.get_mut(&clock_id) else {
+                continue;
+            };
+            let mut due = Vec::new();
+            while let Some((&deadline_ms, _)) = deadlines.first_key_value() {
+                if deadline_ms > now_ms {
+                    break;
+                }
+                due.push((
+                    deadline_ms,
+                    deadlines.remove(&deadline_ms).unwrap_or_default(),
+                ));
+            }
+            if deadlines.is_empty() {
+                waits.deadlines.remove(&clock_id);
+            }
+            for (deadline_ms, tids) in due {
+                for tid in tids {
+                    let Some(wait) = waits.waits.get_mut(&tid) else {
+                        continue;
+                    };
+                    if wait.clock_id == clock_id
+                        && wait.deadline_ms == deadline_ms
+                        && !wait.timed_out
+                    {
+                        wait.timed_out = true;
+                        expired.push(tid);
+                    }
+                }
             }
         }
     }

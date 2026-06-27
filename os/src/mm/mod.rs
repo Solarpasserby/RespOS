@@ -52,15 +52,21 @@ pub fn copy_cstr_from_user(ptr: *const u8) -> SysResult<String> {
     }
 
     let mut ret = String::new();
-
-    for offset in 0..USER_CSTR_MAX_LEN {
+    let mut offset = 0usize;
+    let mut chunk = [0u8; 256];
+    while offset < USER_CSTR_MAX_LEN {
         let cur = (ptr as usize).checked_add(offset).ok_or(Errno::EFAULT)?;
-        let mut ch = 0u8;
-        copy_from_user(&mut ch as *mut u8, cur as *const u8, 1)?;
-        if ch == 0 {
-            return Ok(ret);
+        let chunk_len = (PAGE_SIZE - VirtAddr::from(cur).page_offset())
+            .min(USER_CSTR_MAX_LEN - offset)
+            .min(chunk.len());
+        copy_from_user(chunk.as_mut_ptr(), cur as *const u8, chunk_len)?;
+        for &ch in &chunk[..chunk_len] {
+            if ch == 0 {
+                return Ok(ret);
+            }
+            ret.push(ch as char);
+            offset += 1;
         }
-        ret.push(ch as char);
     }
 
     Err(Errno::ENAMETOOLONG)
@@ -102,8 +108,6 @@ pub fn copy_from_user<T: Copy>(dst: *mut T, src: *const T, len: usize) -> SysRes
     let byte_len = len
         .checked_mul(core::mem::size_of::<T>())
         .ok_or(Errno::EFAULT)?;
-    // 检验来源地址有效性
-    check_user_readable(src, len)?;
     let dst_bytes = unsafe { core::slice::from_raw_parts_mut(dst as *mut u8, byte_len) };
     copy_user_bytes_to_kernel(src as usize, dst_bytes)?;
     Ok(len)
@@ -123,8 +127,6 @@ pub fn copy_to_user<T: Copy>(dst: *mut T, src: *const T, len: usize) -> SysResul
     let byte_len = len
         .checked_mul(core::mem::size_of::<T>())
         .ok_or(Errno::EFAULT)?;
-    // 检验目标地址有效性
-    check_user_writable(dst, len)?;
     let src_bytes = unsafe { core::slice::from_raw_parts(src as *const u8, byte_len) };
     copy_kernel_bytes_to_user(dst as usize, src_bytes)?;
     Ok(len)
@@ -139,9 +141,16 @@ pub fn copy_to_user<T: Copy>(dst: *mut T, src: *const T, len: usize) -> SysResul
 fn copy_user_bytes_to_kernel(user_start: usize, dst: &mut [u8]) -> SysResult {
     let mut copied = 0usize;
     let mut cur = user_start;
+    let end = user_start.checked_add(dst.len()).ok_or(Errno::EFAULT)?;
+    let vpn_range = VPNRange::new(
+        VirtAddr::from(user_start).floor(),
+        VirtAddr::from(end).ceil(),
+    );
     current_task()
         .expect("[kernel] current task is None.")
-        .op_memory_set_read(|memory_set| {
+        .op_memory_set_write(|memory_set| {
+            memory_set.check_user_access_range(vpn_range.clone(), MapPermission::READ)?;
+            memory_set.ensure_user_page_access(vpn_range, MapPermission::READ)?;
             while copied < dst.len() {
                 let va = VirtAddr::from(cur);
                 let vpn = va.floor();
@@ -168,9 +177,16 @@ fn copy_user_bytes_to_kernel(user_start: usize, dst: &mut [u8]) -> SysResult {
 fn copy_kernel_bytes_to_user(user_start: usize, src: &[u8]) -> SysResult {
     let mut copied = 0usize;
     let mut cur = user_start;
+    let end = user_start.checked_add(src.len()).ok_or(Errno::EFAULT)?;
+    let vpn_range = VPNRange::new(
+        VirtAddr::from(user_start).floor(),
+        VirtAddr::from(end).ceil(),
+    );
     current_task()
         .expect("[kernel] current task is None.")
-        .op_memory_set_read(|memory_set| {
+        .op_memory_set_write(|memory_set| {
+            memory_set.check_user_access_range(vpn_range.clone(), MapPermission::WRITE)?;
+            memory_set.ensure_user_page_access(vpn_range, MapPermission::WRITE)?;
             while copied < src.len() {
                 let va = VirtAddr::from(cur);
                 let vpn = va.floor();
