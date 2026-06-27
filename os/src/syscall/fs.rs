@@ -7,10 +7,10 @@ use crate::fs::mount::{do_mount, do_umount2};
 use crate::fs::vfs::{InodeOp, InodeType};
 use crate::fs::{
     AT_EMPTY_PATH, AT_FDCWD, AT_NO_AUTOMOUNT, AT_SYMLINK_NOFOLLOW, FdEntry, File, FileOp, KStat,
-    OpenFlags, Path, Pipe, SpecialFd, Stat, Statfs64, check_dir_search_permission, filename_create,
-    filename_link, filename_link_tmpfile, filename_lookup, filename_lookup_no_follow_final_symlink,
-    filename_rename, filename_symlink, filename_unlink, init_fdset, make_pipe, open_named_fifo,
-    path_open,
+    OpenFlags, POLL_READ, POLL_WRITE, Path, Pipe, PollEvents, SpecialFd, Stat, Statfs64,
+    check_dir_search_permission, filename_create, filename_link, filename_link_tmpfile,
+    filename_lookup, filename_lookup_no_follow_final_symlink, filename_rename, filename_symlink,
+    filename_unlink, init_fdset, make_pipe, open_named_fifo, path_open,
 };
 use crate::mm::{
     VPNRange, VirtAddr, check_user_readable, check_user_writable, copy_cstr_from_user,
@@ -3079,17 +3079,125 @@ fn ppoll_write_back(fds: *mut PollFd, pollfds: &[PollFd]) -> SysResult<()> {
     Ok(())
 }
 
-fn ppoll_wait_interruptible(task: &alloc::sync::Arc<crate::task::TaskControlBlock>) {
-    if prepare_current_task_blocked() {
-        if task.is_ready() {
-            remove_task(task.tid());
-            task.set_running();
-        } else {
-            switch_to_next_task();
+struct PollRegistration {
+    tid: usize,
+    files: Vec<Arc<dyn FileOp>>,
+    event_driven: bool,
+}
+
+impl PollRegistration {
+    fn new(tid: usize) -> Self {
+        Self {
+            tid,
+            files: Vec::new(),
+            event_driven: true,
         }
-    } else {
-        yield_current_task();
     }
+
+    fn add(&mut self, file: Arc<dyn FileOp>, events: PollEvents) {
+        if events != 0 {
+            self.event_driven &= file.register_poll_waiter(self.tid, events);
+            self.files.push(file);
+        }
+    }
+
+    fn clear(&mut self) {
+        for file in self.files.drain(..) {
+            file.unregister_poll_waiter(self.tid);
+        }
+    }
+}
+
+impl Drop for PollRegistration {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
+enum PollWake {
+    Retry,
+    Timeout,
+}
+
+fn ppoll_register(pollfds: &[PollFd], tid: usize) -> PollRegistration {
+    let task = current_task().expect("[kernel] current task is None.");
+    let mut registration = PollRegistration::new(tid);
+    for pollfd in pollfds {
+        if pollfd.fd < 0 {
+            continue;
+        }
+        let Ok(entry) = task.get_fd_entry(pollfd.fd as usize) else {
+            continue;
+        };
+        let mut events = 0;
+        if pollfd.events & POLLIN != 0 {
+            events |= POLL_READ;
+        }
+        if pollfd.events & POLLOUT != 0 {
+            events |= POLL_WRITE;
+        }
+        registration.add(entry.file, events);
+    }
+    registration
+}
+
+fn block_for_poll(
+    task: &Arc<crate::task::TaskControlBlock>,
+    mut registration: PollRegistration,
+    deadline_us: Option<usize>,
+    mut ready: impl FnMut() -> bool,
+) -> SysResult<PollWake> {
+    task.set_interruptible(true);
+    if !registration.event_driven {
+        registration.clear();
+        task.set_interruptible(false);
+        yield_current_task();
+        return Ok(PollWake::Retry);
+    }
+    if let Some(deadline_us) = deadline_us {
+        let deadline_ms = deadline_us.saturating_add(999) / 1000;
+        super::register_task_timeout(task.tid(), deadline_ms);
+    }
+
+    if !prepare_current_task_blocked() {
+        if deadline_us.is_some() {
+            super::finish_task_timeout(task.tid());
+        }
+        registration.clear();
+        task.set_interruptible(false);
+        yield_current_task();
+        return Ok(PollWake::Retry);
+    }
+
+    let immediate_ready = ready();
+    let immediate_timeout = deadline_us.is_some_and(|deadline| get_timeout_us() >= deadline);
+    let interrupted = task.check_signal_interrupt() || task.is_interrupted();
+    if immediate_ready || immediate_timeout || interrupted || task.is_ready() {
+        remove_task(task.tid());
+        task.set_running();
+    } else {
+        switch_to_next_task();
+    }
+
+    let timed_out = if deadline_us.is_some() {
+        super::finish_task_timeout(task.tid())
+    } else {
+        false
+    };
+    registration.clear();
+    task.set_interruptible(false);
+
+    if task.check_signal_interrupt() || task.is_interrupted() {
+        task.clear_interrupted();
+        return Err(Errno::EINTR);
+    }
+    if immediate_timeout
+        || timed_out
+        || deadline_us.is_some_and(|deadline| get_timeout_us() >= deadline)
+    {
+        return Ok(PollWake::Timeout);
+    }
+    Ok(PollWake::Retry)
 }
 
 /// ppoll — 等待 pollfd 数组中的 fd 就绪，带超时和信号掩码。
@@ -3121,7 +3229,7 @@ pub fn sys_ppoll(
             copy_from_user(pollfds.as_mut_ptr(), fds, nfds)?;
         }
 
-        let start_us = get_timeout_us();
+        let deadline_us = timeout_us.map(|timeout| get_timeout_us().saturating_add(timeout));
         loop {
             let ready = ppoll_scan_ready(&mut pollfds);
             if ready > 0 {
@@ -3134,8 +3242,7 @@ pub fn sys_ppoll(
                     ppoll_write_back(fds, &pollfds)?;
                     return Ok(0);
                 }
-                let elapsed_us = get_timeout_us().saturating_sub(start_us);
-                if elapsed_us >= timeout_us {
+                if deadline_us.is_some_and(|deadline| get_timeout_us() >= deadline) {
                     ppoll_write_back(fds, &pollfds)?;
                     return Ok(0);
                 }
@@ -3147,10 +3254,15 @@ pub fn sys_ppoll(
                 return Err(Errno::EINTR);
             }
 
-            if timeout_us.is_none() && nfds == 0 {
-                ppoll_wait_interruptible(&task);
-            } else {
-                yield_current_task();
+            let registration = ppoll_register(&pollfds, task.tid());
+            match block_for_poll(&task, registration, deadline_us, || {
+                ppoll_scan_ready(&mut pollfds) > 0
+            })? {
+                PollWake::Retry => {}
+                PollWake::Timeout => {
+                    ppoll_write_back(fds, &pollfds)?;
+                    return Ok(0);
+                }
             }
 
             if task.check_signal_interrupt() || task.is_interrupted() {
@@ -3196,7 +3308,7 @@ pub fn sys_pselect6(
 
     // 闭包保证 cleanup（恢复掩码）在任意退出路径上都执行
     let result = (|| {
-        let start_us = get_timeout_us();
+        let deadline_us = timeout_us.map(|timeout| get_timeout_us().saturating_add(timeout));
         let mut readfditer = init_fdset(readfds, nfds)?;
         let mut writeiter = init_fdset(writefds, nfds)?;
         let mut exceptiter = init_fdset(exceptfds, nfds)?;
@@ -3244,8 +3356,7 @@ pub fn sys_pselect6(
                 if timeout_us == 0 {
                     break;
                 }
-                let elapsed_us = get_timeout_us().saturating_sub(start_us);
-                if elapsed_us >= timeout_us {
+                if deadline_us.is_some_and(|deadline| get_timeout_us() >= deadline) {
                     break;
                 }
             }
@@ -3257,7 +3368,26 @@ pub fn sys_pselect6(
                 task.set_interruptible(false);
                 return Err(Errno::EINTR);
             }
-            yield_current_task();
+            let mut registration = PollRegistration::new(task.tid());
+            for file in &readfditer.files {
+                registration.add(file.clone(), POLL_READ);
+            }
+            for file in &writeiter.files {
+                registration.add(file.clone(), POLL_WRITE);
+            }
+            match block_for_poll(&task, registration, deadline_us, || {
+                readfditer
+                    .files
+                    .iter()
+                    .any(|file| file.readable() && file.read_ready())
+                    || writeiter
+                        .files
+                        .iter()
+                        .any(|file| file.writable() && file.write_ready())
+            })? {
+                PollWake::Retry => {}
+                PollWake::Timeout => break,
+            }
             // yield 后再次检查：其他任务或信号可能设置了中断标志
             if task.is_interrupted() {
                 task.clear_interrupted();

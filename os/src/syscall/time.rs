@@ -381,6 +381,14 @@ fn finish_nanosleep_wait(tid: usize) -> bool {
     NANOSLEEP_WAITS.lock().finish(tid)
 }
 
+pub fn register_task_timeout(tid: usize, deadline_ms: usize) {
+    register_nanosleep_wait(tid, NANOSLEEP_TIMEOUT_CLOCK, deadline_ms);
+}
+
+pub fn finish_task_timeout(tid: usize) -> bool {
+    finish_nanosleep_wait(tid)
+}
+
 fn nanosleep_clock_ms(clock_id: usize) -> SysResult<usize> {
     if clock_id == NANOSLEEP_TIMEOUT_CLOCK {
         Ok(get_timeout_ms())

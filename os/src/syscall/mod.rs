@@ -243,11 +243,14 @@ use special_fd::*;
 use system::*;
 use time::*;
 
-pub use time::{check_nanosleep_timeouts, check_posix_timers};
+pub use time::{
+    check_nanosleep_timeouts, check_posix_timers, finish_task_timeout, register_task_timeout,
+};
 
 pub fn check_all_task_timers() {
     crate::task::check_futex_timeouts();
     check_nanosleep_timeouts();
+    check_timerfd_expirations();
     crate::task::TASK_MANAGER.for_each(|task| {
         task.check_real_timer();
         check_posix_timers(task);

@@ -1,13 +1,20 @@
 use super::time::{ITimerSpec, clock_time_ms};
 use super::{Errno, SysResult};
 use crate::fs::vfs::InodeType;
-use crate::fs::{FdEntry, FileOp, KStat, OpenFlags, SpecialFd};
+use crate::fs::{
+    FdEntry, FileOp, KStat, OpenFlags, POLL_READ, POLL_WRITE, PollEvents, PollWaiters, SpecialFd,
+};
 use crate::mm::{check_user_readable, copy_cstr_from_user, copy_from_user, copy_to_user};
 use crate::mutex::SpinLock;
-use crate::task::{TASK_MANAGER, current_task, yield_current_task};
+use crate::task::{
+    TASK_MANAGER, current_task, prepare_current_task_blocked, remove_task, switch_to_next_task,
+    yield_current_task,
+};
 use crate::timer::TimeSpec;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
+use alloc::vec::Vec;
 use core::any::Any;
+use lazy_static::lazy_static;
 
 const O_NONBLOCK: usize = OpenFlags::O_NONBLOCK.bits() as usize;
 const O_CLOEXEC: usize = OpenFlags::O_CLOEXEC.bits() as usize;
@@ -63,6 +70,7 @@ pub struct EventFd {
     flags: OpenFlags,
     semaphore: bool,
     counter: SpinLock<u64>,
+    poll_waiters: PollWaiters,
 }
 
 impl EventFd {
@@ -71,8 +79,50 @@ impl EventFd {
             flags,
             semaphore,
             counter: SpinLock::new(initval as u64),
+            poll_waiters: PollWaiters::new(),
         }
     }
+}
+
+fn wait_for_file_event(
+    waiters: &PollWaiters,
+    events: PollEvents,
+    ready: impl Fn() -> bool,
+) -> SysResult {
+    let task = current_task().expect("[kernel] current task is None.");
+    task.set_interruptible(true);
+    waiters.register(task.tid(), events);
+
+    if ready() {
+        waiters.unregister(task.tid());
+        task.set_interruptible(false);
+        return Ok(());
+    }
+    if task.check_signal_interrupt() || task.is_interrupted() {
+        task.clear_interrupted();
+        waiters.unregister(task.tid());
+        task.set_interruptible(false);
+        return Err(Errno::EINTR);
+    }
+
+    if prepare_current_task_blocked() {
+        if task.is_ready() {
+            remove_task(task.tid());
+            task.set_running();
+        } else {
+            switch_to_next_task();
+        }
+    } else {
+        yield_current_task();
+    }
+
+    waiters.unregister(task.tid());
+    task.set_interruptible(false);
+    if task.check_signal_interrupt() || task.is_interrupted() {
+        task.clear_interrupted();
+        return Err(Errno::EINTR);
+    }
+    Ok(())
 }
 
 impl FileOp for EventFd {
@@ -84,27 +134,21 @@ impl FileOp for EventFd {
         if buf.len() < core::mem::size_of::<u64>() {
             return Err(Errno::EINVAL);
         }
-        let task = current_task().expect("[kernel] current task is None.");
         loop {
             let mut counter = self.counter.lock();
             if *counter != 0 {
                 let value = if self.semaphore { 1 } else { *counter };
                 *counter -= value;
                 buf[..8].copy_from_slice(&value.to_ne_bytes());
+                drop(counter);
+                self.poll_waiters.notify(POLL_WRITE);
                 return Ok(8);
             }
             drop(counter);
             if self.flags.contains(OpenFlags::O_NONBLOCK) {
                 return Err(Errno::EAGAIN);
             }
-            task.set_interruptible(true);
-            if task.check_signal_interrupt() || task.is_interrupted() {
-                task.clear_interrupted();
-                task.set_interruptible(false);
-                return Err(Errno::EINTR);
-            }
-            yield_current_task();
-            task.set_interruptible(false);
+            wait_for_file_event(&self.poll_waiters, POLL_READ, || self.read_ready())?;
         }
     }
 
@@ -118,12 +162,22 @@ impl FileOp for EventFd {
         if value == u64::MAX {
             return Err(Errno::EINVAL);
         }
-        let mut counter = self.counter.lock();
-        if value > (u64::MAX - 1).saturating_sub(*counter) {
-            return Err(Errno::EAGAIN);
+        loop {
+            let mut counter = self.counter.lock();
+            if value <= (u64::MAX - 1).saturating_sub(*counter) {
+                *counter += value;
+                drop(counter);
+                self.poll_waiters.notify(POLL_READ);
+                return Ok(8);
+            }
+            drop(counter);
+            if self.flags.contains(OpenFlags::O_NONBLOCK) {
+                return Err(Errno::EAGAIN);
+            }
+            wait_for_file_event(&self.poll_waiters, POLL_WRITE, || {
+                value <= (u64::MAX - 1).saturating_sub(*self.counter.lock())
+            })?;
         }
-        *counter += value;
-        Ok(8)
     }
 
     fn can_seek(&self) -> SysResult {
@@ -157,12 +211,26 @@ impl FileOp for EventFd {
     fn read_ready(&self) -> bool {
         *self.counter.lock() != 0
     }
+
+    fn write_ready(&self) -> bool {
+        *self.counter.lock() < u64::MAX - 1
+    }
+
+    fn register_poll_waiter(&self, tid: usize, events: PollEvents) -> bool {
+        self.poll_waiters.register(tid, events);
+        true
+    }
+
+    fn unregister_poll_waiter(&self, tid: usize) {
+        self.poll_waiters.unregister(tid);
+    }
 }
 
 pub struct TimerFd {
     clockid: usize,
     flags: OpenFlags,
     state: SpinLock<TimerFdState>,
+    poll_waiters: PollWaiters,
 }
 
 impl TimerFd {
@@ -171,6 +239,7 @@ impl TimerFd {
             clockid,
             flags,
             state: SpinLock::new(TimerFdState::default()),
+            poll_waiters: PollWaiters::new(),
         }
     }
 
@@ -220,7 +289,6 @@ impl FileOp for TimerFd {
         if buf.len() < core::mem::size_of::<u64>() {
             return Err(Errno::EINVAL);
         }
-        let task = current_task().expect("[kernel] current task is None.");
         loop {
             let mut state = self.state.lock();
             let expired = Self::expirations_locked(&state, clock_time_ms(self.clockid)?);
@@ -231,14 +299,10 @@ impl FileOp for TimerFd {
                 return Ok(8);
             }
             drop(state);
-            task.set_interruptible(true);
-            if task.check_signal_interrupt() || task.is_interrupted() {
-                task.clear_interrupted();
-                task.set_interruptible(false);
-                return Err(Errno::EINTR);
+            if self.flags.contains(OpenFlags::O_NONBLOCK) {
+                return Err(Errno::EAGAIN);
             }
-            yield_current_task();
-            task.set_interruptible(false);
+            wait_for_file_event(&self.poll_waiters, POLL_READ, || self.read_ready())?;
         }
     }
 
@@ -276,6 +340,40 @@ impl FileOp for TimerFd {
 
     fn read_ready(&self) -> bool {
         self.pending() > 0
+    }
+
+    fn register_poll_waiter(&self, tid: usize, events: PollEvents) -> bool {
+        self.poll_waiters.register(tid, events);
+        true
+    }
+
+    fn unregister_poll_waiter(&self, tid: usize) {
+        self.poll_waiters.unregister(tid);
+    }
+}
+
+lazy_static! {
+    static ref TIMERFDS: SpinLock<Vec<Weak<TimerFd>>> = SpinLock::new(Vec::new());
+}
+
+pub fn check_timerfd_expirations() {
+    let timerfds = {
+        let mut registry = TIMERFDS.lock();
+        let mut live = Vec::new();
+        registry.retain(|timerfd| {
+            if let Some(timerfd) = timerfd.upgrade() {
+                live.push(timerfd);
+                true
+            } else {
+                false
+            }
+        });
+        live
+    };
+    for timerfd in timerfds {
+        if timerfd.read_ready() {
+            timerfd.poll_waiters.notify(POLL_READ);
+        }
     }
 }
 
@@ -361,7 +459,9 @@ pub fn sys_timerfd_create(clockid: usize, flags: usize) -> SysResult<usize> {
     }
     let flags = flags_from_o_flags(flags, O_NONBLOCK | O_CLOEXEC)?;
     let task = current_task().expect("[kernel] current task is None.");
-    task.alloc_fd(FdEntry::new(Arc::new(TimerFd::new(clockid, flags)), flags))
+    let timerfd = Arc::new(TimerFd::new(clockid, flags));
+    TIMERFDS.lock().push(Arc::downgrade(&timerfd));
+    task.alloc_fd(FdEntry::new(timerfd, flags))
 }
 
 pub fn sys_timerfd_gettime(fd: usize, curr_value: *mut ITimerSpec) -> SysResult<usize> {
@@ -417,6 +517,10 @@ pub fn sys_timerfd_settime(
         deadline_ms,
         consumed: 0,
     };
+    drop(state);
+    if timerfd.read_ready() {
+        timerfd.poll_waiters.notify(POLL_READ);
+    }
     Ok(0)
 }
 

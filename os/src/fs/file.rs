@@ -4,7 +4,7 @@ use super::vfs::{InodeOp, InodeType, LinuxDirent64};
 use crate::fs::ext4::Ext4Inode;
 use crate::fs::mount::{MS_NOATIME, MS_NODIRATIME, check_mount_file_growth};
 use crate::fs::page_cache::PageCache;
-use crate::fs::{KStat, Path};
+use crate::fs::{KStat, Path, PollEvents};
 use crate::syscall::{Errno, SysResult};
 use crate::timer::{TimeSpec, get_time_ms};
 use alloc::sync::Arc;
@@ -73,6 +73,10 @@ pub trait FileOp: Any + Send + Sync {
     fn write_ready(&self) -> bool {
         true
     }
+    fn register_poll_waiter(&self, _tid: usize, _events: PollEvents) -> bool {
+        false
+    }
+    fn unregister_poll_waiter(&self, _tid: usize) {}
     fn is_tty(&self) -> bool {
         false
     }
