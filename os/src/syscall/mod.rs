@@ -251,9 +251,7 @@ pub fn check_all_task_timers() {
     crate::task::check_futex_timeouts();
     check_nanosleep_timeouts();
     check_timerfd_expirations();
-    crate::task::TASK_MANAGER.for_each(|task| {
-        task.check_real_timer();
-    });
+    crate::task::check_active_itimers();
     check_posix_timers();
 }
 

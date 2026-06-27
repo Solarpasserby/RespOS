@@ -32,7 +32,7 @@ pub use scheduler::{
     yield_current_task,
 };
 pub use task::TaskStatus;
-pub use task::{CloneFlags, TaskControlBlock};
+pub use task::{CloneFlags, TaskControlBlock, check_active_itimers};
 
 lazy_static! {
     pub static ref INITPROC: Arc<TaskControlBlock> = {

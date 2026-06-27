@@ -26,7 +26,12 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use bitflags::bitflags;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
+use lazy_static::lazy_static;
 use spin::RwLock;
+
+lazy_static! {
+    static ref ACTIVE_ITIMER_TASKS: SpinLock<BTreeSet<usize>> = SpinLock::new(BTreeSet::new());
+}
 
 /// 线程 tid 地址信息，用于 pthread 线程退出同步。
 pub struct TidAddress {
@@ -1448,6 +1453,11 @@ impl TaskControlBlock {
         };
         deadline_ref.store(deadline, Ordering::Relaxed);
         interval_ref.store(interval_ms, Ordering::Relaxed);
+        if deadline != 0 {
+            ACTIVE_ITIMER_TASKS.lock().insert(self.tgid());
+        } else if !self.has_active_itimer() {
+            ACTIVE_ITIMER_TASKS.lock().remove(&self.tgid());
+        }
         old_remaining
     }
 
@@ -1455,6 +1465,16 @@ impl TaskControlBlock {
         self.check_itimer(0);
         self.check_itimer(1);
         self.check_itimer(2);
+        if !self.has_active_itimer() {
+            ACTIVE_ITIMER_TASKS.lock().remove(&self.tgid());
+        }
+    }
+
+    fn has_active_itimer(&self) -> bool {
+        (0..3).any(|which| {
+            self.itimer_fields(which)
+                .is_some_and(|(deadline, _, _)| deadline.load(Ordering::Relaxed) != 0)
+        })
     }
 
     fn check_itimer(&self, which: usize) {
@@ -1574,6 +1594,17 @@ impl TaskControlBlock {
             self.set_nofile_limit(cur, max)
         } else {
             self.limits.set_rlimit(resource, cur, max)
+        }
+    }
+}
+
+pub fn check_active_itimers() {
+    let tids: Vec<usize> = ACTIVE_ITIMER_TASKS.lock().iter().copied().collect();
+    for tid in tids {
+        if let Some(task) = TASK_MANAGER.get(tid) {
+            task.check_real_timer();
+        } else {
+            ACTIVE_ITIMER_TASKS.lock().remove(&tid);
         }
     }
 }
