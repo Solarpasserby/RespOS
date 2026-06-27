@@ -59,6 +59,6 @@ fn futex_hash(uaddr: usize) -> usize {
     h & (FUTEX_HASH_SIZE - 1)
 }
 
-pub fn futex_hash_idx(uaddr: usize) -> usize {
-    futex_hash(uaddr)
+pub fn futex_hash_idx(key: &FutexKey) -> usize {
+    futex_hash(key.uaddr)
 }

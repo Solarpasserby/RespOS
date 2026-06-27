@@ -12,7 +12,7 @@ use super::namei::{
 };
 use super::vfs::Dentry;
 use super::vfs::{InodeOp, InodeType, SuperBlockOp};
-use crate::fs::dev::init_devfs;
+use crate::fs::dev::{LoopInode, init_devfs};
 use crate::fs::proc::init_procfs;
 use crate::syscall::{Errno, SysResult};
 use alloc::sync::{Arc, Weak};
@@ -70,6 +70,7 @@ pub struct Mount {
 struct MountBackingRoot {
     parent_inode: Arc<dyn InodeOp>,
     root: Arc<Dentry>,
+    capacity: Option<usize>,
 }
 
 /// 全局挂载表（类比 Linux mount tree）。
@@ -322,6 +323,20 @@ pub fn do_mount(_source: &str, target: &str, fstype: &str, flags: usize) -> SysR
         return Ok(0);
     }
 
+    if fstype == "tmpfs" {
+        let fs = crate::fs::ext4::super_block();
+        let backing_root = create_mount_backing_root(&fs, None)?;
+        let vfs_mount = VfsMount::new(backing_root.root.clone(), fs, flags as i32);
+        let parent_mount = get_mount_by_vfsmount(&target_path.mnt).ok_or(Errno::EINVAL)?;
+        add_mount(Mount::new_child_with_backing_root(
+            target_path.dentry.clone(),
+            vfs_mount,
+            parent_mount,
+            backing_root,
+        ));
+        return Ok(0);
+    }
+
     if !is_supported_block_fstype(fstype) {
         return Err(Errno::ENODEV);
     }
@@ -335,7 +350,13 @@ pub fn do_mount(_source: &str, target: &str, fstype: &str, flags: usize) -> SysR
         fstype if is_supported_block_fstype(fstype) => {
             info!("[kernel] mount: {} on {} type {}", _source, target, fstype);
             let ext4_fs = crate::fs::ext4::super_block();
-            let backing_root = create_mount_backing_root(&ext4_fs)?;
+            let capacity = source_path
+                .dentry
+                .get_inode()
+                .as_any()
+                .downcast_ref::<LoopInode>()
+                .and_then(|loop_device| loop_device.backing_size().ok());
+            let backing_root = create_mount_backing_root(&ext4_fs, capacity)?;
             let vfs_mount = VfsMount::new(backing_root.root.clone(), ext4_fs, flags as i32);
             let parent_mount = get_mount_by_vfsmount(&target_path.mnt).ok_or(Errno::EINVAL)?;
             add_mount(Mount::new_child_with_backing_root(
@@ -350,7 +371,10 @@ pub fn do_mount(_source: &str, target: &str, fstype: &str, flags: usize) -> SysR
     }
 }
 
-fn create_mount_backing_root(fs: &Arc<dyn SuperBlockOp>) -> SysResult<MountBackingRoot> {
+fn create_mount_backing_root(
+    fs: &Arc<dyn SuperBlockOp>,
+    capacity: Option<usize>,
+) -> SysResult<MountBackingRoot> {
     let real_root = fs.root_inode();
     for _ in 0..1024 {
         let id = MOUNT_BACKING_ID.fetch_add(1, Ordering::Relaxed);
@@ -363,6 +387,7 @@ fn create_mount_backing_root(fs: &Arc<dyn SuperBlockOp>) -> SysResult<MountBacki
                 return Ok(MountBackingRoot {
                     parent_inode: real_root,
                     root: Arc::new(Dentry::new(path, None, inode)),
+                    capacity,
                 });
             }
             Err(Errno::EEXIST) => continue,
@@ -370,6 +395,60 @@ fn create_mount_backing_root(fs: &Arc<dyn SuperBlockOp>) -> SysResult<MountBacki
         }
     }
     Err(Errno::ENOSPC)
+}
+
+pub fn check_mount_file_growth(path: &Path, old_size: usize, new_size: usize) -> SysResult {
+    if new_size <= old_size {
+        return Ok(());
+    }
+
+    let Some(mount) = get_mount_by_vfsmount(&path.mnt) else {
+        return Ok(());
+    };
+    let Some(backing_root) = mount.backing_root.as_ref() else {
+        return Ok(());
+    };
+    let Some(capacity) = backing_root.capacity else {
+        return Ok(());
+    };
+
+    let used = backing_tree_size(&backing_root.root)?;
+    let projected = used.saturating_sub(old_size).saturating_add(new_size);
+    if projected > capacity {
+        return Err(Errno::ENOSPC);
+    }
+    Ok(())
+}
+
+fn backing_tree_size(dentry: &Arc<Dentry>) -> SysResult<usize> {
+    let inode = dentry.try_get_inode().ok_or(Errno::ENOENT)?;
+    if inode.node_type() != InodeType::Directory {
+        return Ok(inode.stat(&dentry.abs_path)?.size);
+    }
+
+    let mut total = 0usize;
+    let entries = inode.readdir(&dentry.abs_path)?;
+    for entry in entries {
+        let Some(name) = dirent_name(entry.d_name.as_slice()) else {
+            continue;
+        };
+        if name == "." || name == ".." {
+            continue;
+        }
+        let child_abs_path = if dentry.abs_path == "/" {
+            alloc::format!("/{}", name)
+        } else {
+            alloc::format!("{}/{}", dentry.abs_path, name)
+        };
+        let child_inode = inode.lookup(&dentry.abs_path, name)?;
+        let child = Arc::new(Dentry::new(
+            child_abs_path,
+            Some(dentry.clone()),
+            child_inode,
+        ));
+        total = total.saturating_add(backing_tree_size(&child)?);
+    }
+    Ok(total)
 }
 
 const MNT_FORCE: usize = 1;

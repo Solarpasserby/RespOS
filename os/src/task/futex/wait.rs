@@ -1,7 +1,8 @@
 // os/src/task/futex/wait.rs
 
 use super::queue::{FUTEX_QUEUES, FutexKey, FutexQ, futex_hash_idx};
-use crate::mm::copy_from_user;
+use crate::config::PAGE_SIZE;
+use crate::mm::{VirtAddr, copy_from_user};
 use crate::mutex::SpinNoIrqLock;
 use crate::syscall::{Errno, SysResult};
 use crate::task::scheduler::{
@@ -31,13 +32,28 @@ fn read_futex_value(uaddr: usize) -> SysResult<u32> {
     Ok(val)
 }
 
-fn futex_key(uaddr: usize, private: bool) -> FutexKey {
-    let scope = if private {
-        current_task().expect("no current task").tgid()
-    } else {
-        0
-    };
-    FutexKey { scope, uaddr }
+fn futex_key(uaddr: usize, private: bool) -> SysResult<FutexKey> {
+    let task = current_task().expect("no current task");
+    if private {
+        return Ok(FutexKey {
+            scope: task.tgid(),
+            uaddr,
+        });
+    }
+
+    if let Ok(key) =
+        task.op_memory_set_read(|memory_set| memory_set.shared_futex_key(VirtAddr::from(uaddr)))
+    {
+        return Ok(FutexKey {
+            scope: key.owner,
+            uaddr: key.page_index * PAGE_SIZE + key.offset,
+        });
+    }
+
+    Ok(FutexKey {
+        scope: task.tgid(),
+        uaddr,
+    })
 }
 
 fn trace_futex(op: &str, key: &FutexKey, val: u32, extra: usize) {
@@ -68,8 +84,8 @@ fn futex_wait_common(
     }
 
     let task = current_task().expect("no current task");
-    let key = futex_key(uaddr, private);
-    let hash_idx = futex_hash_idx(uaddr);
+    let key = futex_key(uaddr, private)?;
+    let hash_idx = futex_hash_idx(&key);
 
     {
         let mut queues = FUTEX_QUEUES.lock();
@@ -246,8 +262,8 @@ fn futex_wait_timed_common(
     }
 
     let task = current_task().expect("no current task");
-    let key = futex_key(uaddr, private);
-    let hash_idx = futex_hash_idx(uaddr);
+    let key = futex_key(uaddr, private)?;
+    let hash_idx = futex_hash_idx(&key);
     loop {
         let actual_val = read_futex_value(uaddr)?;
         if actual_val != expected_val {
@@ -282,23 +298,26 @@ fn futex_wait_timed_common(
                 return Err(Errno::EAGAIN);
             }
 
-            if !prepare_current_task_blocked() {
-                drop(queues);
-                task.set_interruptible(true);
-                yield_current_task();
-                task.set_interruptible(false);
-                continue;
-            }
-
+            task.set_interruptible(true);
             queues.bucket_by_idx(hash_idx).push_back(FutexQ {
                 key: key.clone(),
                 tid: task.tid(),
                 bitset,
             });
+            register_timed_wait(task.tid(), deadline);
+
+            if !prepare_current_task_blocked() {
+                task.set_interruptible(false);
+                finish_timed_wait(task.tid());
+                queues
+                    .bucket_by_idx(hash_idx)
+                    .retain(|q| !(q.tid == task.tid() && q.key == key));
+                drop(queues);
+                yield_current_task();
+                continue;
+            }
         }
 
-        task.set_interruptible(true);
-        register_timed_wait(task.tid(), deadline);
         switch_to_next_task();
         task.set_interruptible(false);
 
@@ -332,8 +351,8 @@ fn futex_wake_common(uaddr: usize, nr_wake: u32, bitset: u32, private: bool) -> 
         return Err(Errno::EINVAL);
     }
 
-    let key = futex_key(uaddr, private);
-    let hash_idx = futex_hash_idx(uaddr);
+    let key = futex_key(uaddr, private)?;
+    let hash_idx = futex_hash_idx(&key);
     let mut woken_tids = Vec::new();
 
     {
@@ -371,15 +390,15 @@ fn futex_requeue_common(
         return Err(Errno::EINVAL);
     }
 
-    let source_key = futex_key(uaddr, private);
-    let target_key = futex_key(uaddr2, private);
+    let source_key = futex_key(uaddr, private)?;
+    let target_key = futex_key(uaddr2, private)?;
 
     if source_key == target_key {
         return futex_wake(uaddr, nr_wake, private);
     }
 
-    let source_idx = futex_hash_idx(uaddr);
-    let target_idx = futex_hash_idx(uaddr2);
+    let source_idx = futex_hash_idx(&source_key);
+    let target_idx = futex_hash_idx(&target_key);
     let mut moved = Vec::new();
     let mut woken_tids = Vec::new();
     let mut affected = 0usize;

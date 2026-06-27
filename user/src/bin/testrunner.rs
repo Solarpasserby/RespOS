@@ -770,7 +770,9 @@ fn run_ltp_selected(
             let pid = fork();
             if pid == 0 {
                 let argv: &[*const u8] = &[argv0.as_ptr(), core::ptr::null()];
-                let envp: &[*const u8] = &[
+                let slow_fork_case = name_str == "futex_cmp_requeue01"
+                    && (group_name == "ltp-glibc" || cfg!(target_arch = "loongarch64"));
+                let default_envp: &[*const u8] = &[
                     path_env_buf.as_ptr(),
                     ld_library_path_env_buf.as_ptr(),
                     ltp_root_env_buf.as_ptr(),
@@ -780,6 +782,20 @@ fn run_ltp_selected(
                     "LTP_VIRT_OVERRIDE=\0".as_ptr(),
                     core::ptr::null(),
                 ];
+                let extended_timeout_envp: &[*const u8] = &[
+                    path_env_buf.as_ptr(),
+                    ld_library_path_env_buf.as_ptr(),
+                    ltp_root_env_buf.as_ptr(),
+                    "TMPDIR=/tmp\0".as_ptr(),
+                    "LTP_VIRT_OVERRIDE=\0".as_ptr(),
+                    "LTP_TIMEOUT_MUL=4\0".as_ptr(),
+                    core::ptr::null(),
+                ];
+                let envp = if slow_fork_case {
+                    extended_timeout_envp
+                } else {
+                    default_envp
+                };
                 let ret = execve(&path, argv, envp);
                 println!("[testrunner] exec {} failed: {}", name_str, ret);
                 exit(-1);

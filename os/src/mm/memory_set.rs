@@ -222,6 +222,13 @@ pub(crate) enum MmapBacking<'a> {
     },
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct SharedFutexKey {
+    pub owner: usize,
+    pub page_index: usize,
+    pub offset: usize,
+}
+
 pub(crate) fn mmap_file_backing(
     file: Arc<dyn FileOp>,
     offset: usize,
@@ -1842,6 +1849,46 @@ impl MemorySet {
             self.check_valid_user_vpn(vpn, wanted_map_perm)?;
         }
         Ok(())
+    }
+
+    pub(crate) fn shared_futex_key(&self, vaddr: VirtAddr) -> SysResult<SharedFutexKey> {
+        let vpn = vaddr.floor();
+        let offset = vaddr.page_offset();
+        let area = self
+            .areas
+            .iter()
+            .rev()
+            .find(|area| area.vpn_range.contain(&vpn))
+            .ok_or(Errno::EFAULT)?;
+        if !area.shared {
+            return Err(Errno::EFAULT);
+        }
+
+        let page_offset = (vpn - area.vpn_range.get_start()) * PAGE_SIZE;
+        if let Some(backing) = &area.file_backing {
+            let stat = backing.file.get_stat()?;
+            let file_offset = backing.offset.checked_add(page_offset).ok_or(Errno::EIO)?;
+            return Ok(SharedFutexKey {
+                owner: (stat.dev as usize).rotate_left(17) ^ stat.ino as usize ^ 0x6675_7465_7866,
+                page_index: file_offset / PAGE_SIZE,
+                offset,
+            });
+        }
+
+        if let Some(attach_id) = area.shm_attach_id {
+            return Ok(SharedFutexKey {
+                owner: attach_id ^ 0x7368_6d66_7574_6578usize,
+                page_index: page_offset / PAGE_SIZE,
+                offset,
+            });
+        }
+
+        let frame = area.data_frames.get(&vpn).ok_or(Errno::EFAULT)?;
+        Ok(SharedFutexKey {
+            owner: usize::from(frame.ppn()) ^ 0x616e_6f6e_6675_7478usize,
+            page_index: page_offset / PAGE_SIZE,
+            offset,
+        })
     }
 
     /// 尝试处理用户态页错误，解决 COW 或惰性分配

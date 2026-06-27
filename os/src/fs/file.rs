@@ -2,7 +2,7 @@
 
 use super::vfs::{InodeOp, InodeType, LinuxDirent64};
 use crate::fs::ext4::Ext4Inode;
-use crate::fs::mount::{MS_NOATIME, MS_NODIRATIME};
+use crate::fs::mount::{MS_NOATIME, MS_NODIRATIME, check_mount_file_growth};
 use crate::fs::page_cache::PageCache;
 use crate::fs::{KStat, Path};
 use crate::syscall::{Errno, SysResult};
@@ -237,6 +237,12 @@ impl File {
         let inner = self.inner.lock();
         let visible_path = inner.path.abs_path();
         let path = self.storage_path(&visible_path);
+        let old_size = if let Some(ref pc) = inner.page_cache {
+            pc.len()
+        } else {
+            self.inode.stat(&path)?.size
+        };
+        check_mount_file_growth(&inner.path, old_size, size)?;
         match self.inode.truncate(&path, size) {
             Ok(_) => {}
             Err(Errno::ENOENT) if inner.page_cache.is_some() => {}
@@ -281,6 +287,15 @@ impl File {
         let inner = self.inner.lock();
         let visible_path = inner.path.abs_path();
         let path = self.storage_path(&visible_path);
+        let old_size = if let Some(ref pc) = inner.page_cache {
+            pc.len()
+        } else {
+            self.inode.stat(&path)?.size
+        };
+        if !buf.is_empty() {
+            let requested_end = offset.checked_add(buf.len()).ok_or(Errno::EINVAL)?;
+            check_mount_file_growth(&inner.path, old_size, requested_end)?;
+        }
         if let Some(ref pc) = inner.page_cache {
             let lower = inner.write_back.then_some((&self.inode, path.as_str()));
             let n = pc.write_at(offset, buf, lower)?;
@@ -383,6 +398,15 @@ impl FileOp for File {
         }
 
         let offset = inner.offset;
+        let old_size = if let Some(ref pc) = inner.page_cache {
+            pc.len()
+        } else {
+            self.inode.stat(&path)?.size
+        };
+        if !buf.is_empty() {
+            let requested_end = offset.checked_add(buf.len()).ok_or(Errno::EINVAL)?;
+            check_mount_file_growth(&inner.path, old_size, requested_end)?;
+        }
         let n = if let Some(ref pc) = inner.page_cache {
             let lower = inner.write_back.then_some((&self.inode, path.as_str()));
             let n = pc.write_at(offset, buf, lower)?;
