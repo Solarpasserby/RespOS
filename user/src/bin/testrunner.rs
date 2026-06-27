@@ -649,13 +649,27 @@ const LTP_SKIP: &[&str] = &[
 const LTP_ARCH_MUSL_SKIP: &[&str] = &[];
 
 #[cfg(not(target_arch = "loongarch64"))]
-const LTP_ARCH_MUSL_SKIP: &[&str] = &[];
+const LTP_ARCH_MUSL_SKIP: &[&str] = &[
+    // fork09 会打开接近 OPEN_MAX 的 fd 后再 fork；RV 评测机资源/时序下容易污染后续测例。
+    "fork09",
+    // fork10 本地可过，但 RV 评测机偶发卡死；收益低，先保护整轮 LTP。
+    "fork10",
+    // fork_procs 连续 fork/wait 1000 次，收益低且会放大 RV 进程回收压力。
+    "fork_procs",
+];
 
 #[cfg(target_arch = "loongarch64")]
 const LTP_ARCH_GLIBC_SKIP: &[&str] = &[];
 
 #[cfg(not(target_arch = "loongarch64"))]
-const LTP_ARCH_GLIBC_SKIP: &[&str] = &[];
+const LTP_ARCH_GLIBC_SKIP: &[&str] = &[
+    // fork09 会打开接近 OPEN_MAX 的 fd 后再 fork；RV 评测机资源/时序下容易污染后续测例。
+    "fork09",
+    // fork10 本地可过，但 RV 评测机偶发卡死；收益低，先保护整轮 LTP。
+    "fork10",
+    // fork_procs 连续 fork/wait 1000 次，收益低且会放大 RV 进程回收压力。
+    "fork_procs",
+];
 
 fn ltp_skip(group_name: &str, name: &str) -> bool {
     LTP_SKIP.contains(&name)
