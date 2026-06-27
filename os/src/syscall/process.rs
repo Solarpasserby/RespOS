@@ -1152,22 +1152,29 @@ pub fn sys_wait4(
         } else {
             None
         };
+        let exited_child_ids = task.exited_child_ids();
         let wait_result = task.op_children_mut(|children| {
-            if !children.iter().any(|(child_tid, child)| {
-                pid == -1 || target_pid == Some(*child_tid) || target_pgid == Some(child.pgid())
-            }) {
+            let matches_child = |child_tid: usize, child: &Arc<TaskControlBlock>| {
+                pid == -1 || target_pid == Some(child_tid) || target_pgid == Some(child.pgid())
+            };
+            let has_matching_child = if pid == -1 {
+                !children.is_empty()
+            } else if let Some(target_pid) = target_pid {
+                children.contains_key(&target_pid)
+            } else {
+                children
+                    .iter()
+                    .any(|(child_tid, child)| matches_child(*child_tid, child))
+            };
+            if !has_matching_child {
                 return Err(Errno::ECHILD);
             }
 
-            Ok(children.iter().find_map(|(child_tid, child)| {
-                let matches_pid = pid == -1
-                    || target_pid == Some(*child_tid)
-                    || target_pgid == Some(child.pgid());
-                if !matches_pid {
-                    return None;
-                }
-
-                if options.intersects(WaitOption::WUNTRACED | WaitOption::WCONTINUED) {
+            if options.intersects(WaitOption::WUNTRACED | WaitOption::WCONTINUED) {
+                if let Some(event) = children.iter().find_map(|(child_tid, child)| {
+                    if !matches_child(*child_tid, child) {
+                        return None;
+                    }
                     if let Some((code, status)) = child.peek_wait_event() {
                         if (code == SigInfo::CLD_STOPPED && options.contains(WaitOption::WUNTRACED))
                             || (code == SigInfo::CLD_CONTINUED
@@ -1176,11 +1183,23 @@ pub fn sys_wait4(
                             return Some((*child_tid, wait4_event_status(code, status), false));
                         }
                     }
+                    None
+                }) {
+                    return Ok(Some(event));
                 }
+            }
 
-                child
-                    .is_exited()
-                    .then(|| (*child_tid, child.wait_status(), true))
+            let queued = exited_child_ids.iter().find_map(|child_tid| {
+                children.get(child_tid).and_then(|child| {
+                    (matches_child(*child_tid, child) && child.is_exited())
+                        .then(|| (*child_tid, child.wait_status(), true))
+                })
+            });
+            Ok(queued.or_else(|| {
+                children.iter().find_map(|(child_tid, child)| {
+                    (matches_child(*child_tid, child) && child.is_exited())
+                        .then(|| (*child_tid, child.wait_status(), true))
+                })
             }))
         })?;
 
@@ -1215,6 +1234,7 @@ pub fn sys_wait4(
                 task.op_children_mut(|children| {
                     children.remove(&child_tid).unwrap();
                 });
+                task.remove_exited_child(child_tid);
             } else {
                 task.op_children_mut(|children| {
                     if let Some(child) = children.get(&child_tid) {
@@ -1293,28 +1313,32 @@ pub fn sys_waitid(
         } else {
             id
         };
+        let exited_child_ids = task.exited_child_ids();
 
         let wait_result = task.op_children_mut(|children| {
-            if !children.iter().any(|(child_tid, child)| match idtype {
+            let matches_child = |child_tid: usize, child: &Arc<TaskControlBlock>| match idtype {
                 WAITID_P_ALL => true,
-                WAITID_P_PID => *child_tid == id,
+                WAITID_P_PID => child_tid == id,
                 WAITID_P_PGID => child.pgid() == target_pgid,
                 _ => false,
-            }) {
+            };
+            let has_matching_child = match idtype {
+                WAITID_P_ALL => !children.is_empty(),
+                WAITID_P_PID => children.contains_key(&id),
+                WAITID_P_PGID => children
+                    .iter()
+                    .any(|(child_tid, child)| matches_child(*child_tid, child)),
+                _ => false,
+            };
+            if !has_matching_child {
                 return Err(Errno::ECHILD);
             }
 
-            Ok(children.iter().find_map(|(child_tid, child)| {
-                let matches_id = match idtype {
-                    WAITID_P_ALL => true,
-                    WAITID_P_PID => *child_tid == id,
-                    WAITID_P_PGID => child.pgid() == target_pgid,
-                    _ => false,
-                };
-                if !matches_id {
-                    return None;
-                }
-                if options & (WAITID_WSTOPPED | WAITID_WCONTINUED) != 0 {
+            if options & (WAITID_WSTOPPED | WAITID_WCONTINUED) != 0 {
+                if let Some(event) = children.iter().find_map(|(child_tid, child)| {
+                    if !matches_child(*child_tid, child) {
+                        return None;
+                    }
                     if let Some((code, status)) = child.peek_wait_event() {
                         if (code == SigInfo::CLD_STOPPED && options & WAITID_WSTOPPED != 0)
                             || (code == SigInfo::CLD_CONTINUED && options & WAITID_WCONTINUED != 0)
@@ -1326,15 +1350,36 @@ pub fn sys_waitid(
                             ));
                         }
                     }
+                    None
+                }) {
+                    return Ok(Some(event));
                 }
-                if options & WAITID_WEXITED != 0 && child.is_exited() {
-                    return Some((
-                        *child_tid,
-                        waitid_child_info(*child_tid, child.wait_status()),
-                        true,
-                    ));
-                }
-                None
+            }
+
+            if options & WAITID_WEXITED == 0 {
+                return Ok(None);
+            }
+            let queued = exited_child_ids.iter().find_map(|child_tid| {
+                children.get(child_tid).and_then(|child| {
+                    (matches_child(*child_tid, child) && child.is_exited()).then(|| {
+                        (
+                            *child_tid,
+                            waitid_child_info(*child_tid, child.wait_status()),
+                            true,
+                        )
+                    })
+                })
+            });
+            Ok(queued.or_else(|| {
+                children.iter().find_map(|(child_tid, child)| {
+                    (matches_child(*child_tid, child) && child.is_exited()).then(|| {
+                        (
+                            *child_tid,
+                            waitid_child_info(*child_tid, child.wait_status()),
+                            true,
+                        )
+                    })
+                })
             }))
         })?;
 
@@ -1347,6 +1392,7 @@ pub fn sys_waitid(
                     task.op_children_mut(|children| {
                         children.remove(&child_tid).unwrap();
                     });
+                    task.remove_exited_child(child_tid);
                 } else {
                     task.op_children_mut(|children| {
                         if let Some(child) = children.get(&child_tid) {

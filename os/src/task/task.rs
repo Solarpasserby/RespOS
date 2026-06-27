@@ -20,6 +20,7 @@ use crate::syscall::{Errno, SysResult};
 use crate::timer::{get_accounting_ms, get_timeout_ms};
 use crate::trap::TrapContext;
 use alloc::collections::btree_map::BTreeMap;
+use alloc::collections::btree_set::BTreeSet;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -366,6 +367,7 @@ pub struct TaskControlBlock {
     task_status: SpinLock<TaskStatus>,
     parent: Arc<SpinLock<Option<Weak<TaskControlBlock>>>>,
     children: Arc<SpinLock<BTreeMap<usize, Arc<TaskControlBlock>>>>,
+    exited_children: Arc<SpinLock<BTreeSet<usize>>>,
     exit_code: AtomicI32,
     exit_signal: AtomicI32,
     wait_event_code: AtomicI32,
@@ -440,6 +442,7 @@ impl TaskControlBlock {
             task_status: SpinLock::new(TaskStatus::Ready),
             parent: Arc::new(SpinLock::new(None)),
             children: Arc::new(SpinLock::new(BTreeMap::new())),
+            exited_children: Arc::new(SpinLock::new(BTreeSet::new())),
             exit_code: AtomicI32::new(0),
             exit_signal: AtomicI32::new(0),
             wait_event_code: AtomicI32::new(0),
@@ -527,6 +530,7 @@ impl TaskControlBlock {
             task_status: SpinLock::new(TaskStatus::Ready),
             parent: Arc::new(SpinLock::new(None)),
             children: Arc::new(SpinLock::new(BTreeMap::new())),
+            exited_children: Arc::new(SpinLock::new(BTreeSet::new())),
             exit_code: AtomicI32::new(0),
             exit_signal: AtomicI32::new(0),
             wait_event_code: AtomicI32::new(0),
@@ -613,6 +617,7 @@ impl TaskControlBlock {
             thread_group,
             parent,
             children,
+            exited_children,
             cwd,
             root,
             exe_path,
@@ -626,6 +631,7 @@ impl TaskControlBlock {
                 self.thread_group.clone(),
                 self.parent.clone(),
                 self.children.clone(),
+                self.exited_children.clone(),
                 self.cwd.clone(),
                 self.root.clone(),
                 self.exe_path.clone(),
@@ -646,6 +652,7 @@ impl TaskControlBlock {
                 Arc::new(SpinLock::new(ThreadGroup::new())),
                 Arc::new(SpinLock::new(Some(Arc::downgrade(&parent_for_child)))),
                 Arc::new(SpinLock::new(BTreeMap::new())),
+                Arc::new(SpinLock::new(BTreeSet::new())),
                 Arc::new(SpinLock::new(Path::from_existed_user(&self.cwd()))),
                 Arc::new(SpinLock::new(Path::from_existed_user(&self.root()))),
                 Arc::new(SpinLock::new(self.exe_path())),
@@ -724,6 +731,7 @@ impl TaskControlBlock {
             task_status: SpinLock::new(TaskStatus::Ready),
             parent,
             children,
+            exited_children,
             exit_code: AtomicI32::new(0),
             exit_signal: AtomicI32::new(0),
             wait_event_code: AtomicI32::new(0),
@@ -1115,6 +1123,26 @@ impl TaskControlBlock {
                 crate::task::scheduler::wakeup_task(parent.tid());
             }
         });
+    }
+    pub fn notify_parent_exit(&self, code: i32) {
+        self.op_parent(|parent| {
+            if let Some(parent) = parent.as_ref().and_then(|parent| parent.upgrade()) {
+                parent.exited_children.lock().insert(self.tid());
+                let siginfo =
+                    SigInfo::new(Sig::SIGCHLD.raw(), code, SiField::Kill { tid: self.tid() });
+                parent.receive_siginfo(siginfo, false);
+                crate::task::scheduler::wakeup_task(parent.tid());
+            }
+        });
+    }
+    pub fn exited_child_ids(&self) -> Vec<usize> {
+        self.exited_children.lock().iter().copied().collect()
+    }
+    pub fn remove_exited_child(&self, tid: usize) {
+        self.exited_children.lock().remove(&tid);
+    }
+    pub fn clear_exited_children(&self) {
+        self.exited_children.lock().clear();
     }
     pub fn set_parent(&self, parent: &Arc<TaskControlBlock>) {
         *self.parent.lock() = Some(Arc::downgrade(parent));
@@ -1712,6 +1740,7 @@ fn handle_robust_entry(
 
 fn reparent_children_to_init(task: &Arc<TaskControlBlock>) {
     let children = task.op_children_mut(core::mem::take);
+    task.clear_exited_children();
     for (_, child) in children {
         let exited = child.is_exited();
         let sigchld_code = if child.wait_status() & 0x7f != 0 {
@@ -1722,7 +1751,7 @@ fn reparent_children_to_init(task: &Arc<TaskControlBlock>) {
         child.set_parent(&INITPROC);
         INITPROC.add_child(child.clone());
         if exited {
-            child.notify_parent_sigchld(sigchld_code);
+            child.notify_parent_exit(sigchld_code);
         }
     }
 }
@@ -1793,18 +1822,7 @@ pub fn task_group_exit(task: Arc<TaskControlBlock>, exit_code: i32) {
 
     leader.set_exit_code(exit_code);
     leader.set_exited();
-    // 向父进程发送 SIGCHLD 信号
-    leader.op_parent(|parent_opt| {
-        if let Some(parent) = parent_opt.as_ref().and_then(|w| w.upgrade()) {
-            let siginfo = SigInfo::new(
-                Sig::SIGCHLD.raw(),
-                SigInfo::CLD_EXITED,
-                SiField::Kill { tid: leader.tid() },
-            );
-            parent.receive_siginfo(siginfo, false);
-            crate::task::scheduler::wakeup_task(parent.tid());
-        }
-    });
+    leader.notify_parent_exit(SigInfo::CLD_EXITED);
 
     // 清空残留信号
     leader.op_sig_pending_mut(|p| p.clear());
@@ -1841,17 +1859,7 @@ pub fn task_group_exit_by_signal(task: Arc<TaskControlBlock>, signal: i32) {
 
     leader.set_exit_signal(signal);
     leader.set_exited();
-    leader.op_parent(|parent_opt| {
-        if let Some(parent) = parent_opt.as_ref().and_then(|w| w.upgrade()) {
-            let siginfo = SigInfo::new(
-                Sig::SIGCHLD.raw(),
-                SigInfo::CLD_KILLED,
-                SiField::Kill { tid: leader.tid() },
-            );
-            parent.receive_siginfo(siginfo, false);
-            crate::task::scheduler::wakeup_task(parent.tid());
-        }
-    });
+    leader.notify_parent_exit(SigInfo::CLD_KILLED);
 
     leader.op_sig_pending_mut(|p| p.clear());
 
