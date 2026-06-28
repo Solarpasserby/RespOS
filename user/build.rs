@@ -58,6 +58,27 @@ fn read_ltp_list(path: &Path) -> Vec<(String, Vec<String>)> {
     if !current_cases.is_empty() {
         phases.push((current_name, current_cases));
     }
+    if let Ok(filter) = env::var("LTP_CASE_FILTER") {
+        let wanted: std::collections::BTreeSet<_> = filter
+            .split(',')
+            .map(str::trim)
+            .filter(|case| !case.is_empty())
+            .map(str::to_string)
+            .collect();
+        if !wanted.is_empty() {
+            phases = phases
+                .into_iter()
+                .filter_map(|(name, cases)| {
+                    let cases: Vec<_> = cases
+                        .into_iter()
+                        .filter(|case| wanted.contains(case))
+                        .collect();
+                    (!cases.is_empty()).then_some((name, cases))
+                })
+                .collect();
+        }
+    }
+
     phases
 }
 
@@ -65,6 +86,7 @@ fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let list_path = manifest_dir.join("oscomp_ltp_list.txt");
     println!("cargo:rerun-if-changed={}", list_path.display());
+    println!("cargo:rerun-if-env-changed=LTP_CASE_FILTER");
 
     let phases = read_ltp_list(&list_path);
     let mut generated = String::from(

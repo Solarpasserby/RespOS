@@ -10,7 +10,7 @@ use crate::task::{
     TASK_MANAGER, current_task, prepare_current_task_blocked, remove_task, switch_to_next_task,
     yield_current_task,
 };
-use crate::timer::TimeSpec;
+use crate::timer::{TimeSpec, get_timeout_us};
 use alloc::collections::BTreeMap;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -40,7 +40,9 @@ pub struct EpollFd {
 struct EpollInterest {
     events: u32,
     data: u64,
-    _file: Arc<dyn FileOp>,
+    file: Arc<dyn FileOp>,
+    last_ready: u32,
+    disabled: bool,
 }
 
 impl EpollFd {
@@ -74,7 +76,9 @@ impl EpollFd {
                     EpollInterest {
                         events,
                         data,
-                        _file: file,
+                        file,
+                        last_ready: 0,
+                        disabled: false,
                     },
                 );
             }
@@ -88,10 +92,82 @@ impl EpollFd {
                 let (events, data) = event.ok_or(Errno::EFAULT)?;
                 interest.events = events;
                 interest.data = data;
+                interest.last_ready = 0;
+                interest.disabled = false;
             }
             _ => return Err(Errno::EINVAL),
         }
         Ok(0)
+    }
+
+    fn scan_ready(&self, maxevents: usize, out: &mut Vec<(u32, u64)>) -> usize {
+        const EPOLLIN: u32 = 0x001;
+        const EPOLLOUT: u32 = 0x004;
+        const EPOLLET: u32 = 1 << 31;
+        const EPOLLONESHOT: u32 = 1 << 30;
+
+        let mut interests = self.interests.lock();
+        for interest in interests.values_mut() {
+            if out.len() >= maxevents {
+                break;
+            }
+            if interest.disabled {
+                continue;
+            }
+
+            let mut ready = 0;
+            if interest.events & EPOLLIN != 0 && interest.file.readable() && interest.file.read_ready()
+            {
+                ready |= EPOLLIN;
+            }
+            if interest.events & EPOLLOUT != 0
+                && interest.file.writable()
+                && interest.file.write_ready()
+            {
+                ready |= EPOLLOUT;
+            }
+
+            let report = if interest.events & EPOLLET != 0 {
+                let newly_ready = ready & !interest.last_ready;
+                interest.last_ready = ready;
+                newly_ready
+            } else {
+                ready
+            };
+            if report == 0 {
+                continue;
+            }
+
+            out.push((report & interest.events, interest.data));
+            if interest.events & EPOLLONESHOT != 0 {
+                interest.disabled = true;
+            }
+        }
+        out.len()
+    }
+
+    fn register_waiters(&self, tid: usize) -> Vec<Arc<dyn FileOp>> {
+        const EPOLLIN: u32 = 0x001;
+        const EPOLLOUT: u32 = 0x004;
+
+        let interests = self.interests.lock();
+        let mut files = Vec::new();
+        for interest in interests.values() {
+            if interest.disabled {
+                continue;
+            }
+            let mut events = 0;
+            if interest.events & EPOLLIN != 0 {
+                events |= POLL_READ;
+            }
+            if interest.events & EPOLLOUT != 0 {
+                events |= POLL_WRITE;
+            }
+            if events != 0 && interest.file.register_poll_waiter(tid, events) {
+                files.push(interest.file.clone());
+            }
+        }
+        files
     }
 }
 
@@ -581,6 +657,109 @@ pub fn sys_epoll_ctl(
         ))
     };
     epoll.ctl(op, fd, event, target.file)
+}
+
+fn write_epoll_events(events: *mut u8, ready: &[(u32, u64)]) -> SysResult<usize> {
+    for (idx, (event, data)) in ready.iter().enumerate() {
+        let mut raw = [0u8; 12];
+        raw[..4].copy_from_slice(&event.to_ne_bytes());
+        raw[4..].copy_from_slice(&data.to_ne_bytes());
+        let dst = unsafe { events.add(idx * raw.len()) };
+        copy_to_user(dst, raw.as_ptr(), raw.len())?;
+    }
+    Ok(ready.len())
+}
+
+pub fn sys_epoll_pwait(
+    epfd: usize,
+    events: *mut u8,
+    maxevents: usize,
+    timeout_ms: isize,
+    _sigmask: *const u8,
+    _sigsetsize: usize,
+) -> SysResult<usize> {
+    const EPOLL_MAX_EVENTS: usize = 4096;
+
+    if maxevents == 0 || maxevents > EPOLL_MAX_EVENTS {
+        return Err(Errno::EINVAL);
+    }
+
+    let task = current_task().expect("[kernel] current task is None.");
+    let epoll_entry = task.get_fd_entry(epfd)?;
+    let epoll = epoll_entry
+        .file
+        .as_any()
+        .downcast_ref::<EpollFd>()
+        .ok_or(Errno::EINVAL)?;
+
+    let deadline_us = if timeout_ms < 0 {
+        None
+    } else {
+        Some(get_timeout_us().saturating_add((timeout_ms as usize).saturating_mul(1000)))
+    };
+
+    let mut ready = Vec::new();
+    loop {
+        ready.clear();
+        if epoll.scan_ready(maxevents, &mut ready) > 0 {
+            return write_epoll_events(events, &ready);
+        }
+
+        if timeout_ms == 0 || deadline_us.is_some_and(|deadline| get_timeout_us() >= deadline) {
+            return Ok(0);
+        }
+
+        task.set_interruptible(true);
+        if task.check_signal_interrupt() || task.is_interrupted() {
+            task.clear_interrupted();
+            task.set_interruptible(false);
+            return Err(Errno::EINTR);
+        }
+
+        let registered = epoll.register_waiters(task.tid());
+        if registered.is_empty() {
+            task.set_interruptible(false);
+            yield_current_task();
+            continue;
+        }
+
+        if let Some(deadline_us) = deadline_us {
+            super::register_task_timeout(task.tid(), deadline_us.saturating_add(999) / 1000);
+        }
+
+        if prepare_current_task_blocked() {
+            ready.clear();
+            let became_ready = epoll.scan_ready(maxevents, &mut ready) > 0;
+            let timed_out = deadline_us.is_some_and(|deadline| get_timeout_us() >= deadline);
+            let interrupted = task.check_signal_interrupt() || task.is_interrupted();
+            if became_ready || timed_out || interrupted || task.is_ready() {
+                remove_task(task.tid());
+                task.set_running();
+            } else {
+                switch_to_next_task();
+            }
+        } else {
+            yield_current_task();
+        }
+
+        let timed_out = if deadline_us.is_some() {
+            super::finish_task_timeout(task.tid())
+        } else {
+            false
+        };
+        for file in registered {
+            file.unregister_poll_waiter(task.tid());
+        }
+        task.set_interruptible(false);
+
+        if task.check_signal_interrupt() || task.is_interrupted() {
+            task.clear_interrupted();
+            return Err(Errno::EINTR);
+        }
+        if timed_out || deadline_us.is_some_and(|deadline| get_timeout_us() >= deadline) {
+            return Ok(0);
+        }
+    }
 }
 
 pub fn sys_inotify_init1(flags: usize) -> SysResult<usize> {

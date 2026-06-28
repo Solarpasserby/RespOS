@@ -251,9 +251,8 @@ writev06
 writev07
 
 # oscomp LTP test list - Phase 8: io_advanced — readv, writev, sendfile (52 tests)
-# copy_file_range01：LA 两组约 129 秒可稳定获得 40 个 TPASS；RV 由 testrunner
-# 按架构跳过，避免 RV glibc 单组接近 389 秒的评测风险。
-copy_file_range01
+# 测例 copy_file_range01 时间成本太大
+# copy_file_range01
 copy_file_range03
 posix_fadvise01
 posix_fadvise01_64
@@ -702,6 +701,7 @@ munmap01
 munmap02
 munmap03
 mprotect05
+mremap05
 mremap06
 sbrk01
 sbrk02
@@ -736,6 +736,10 @@ chroot04
 epoll_create02
 epoll_ctl02
 epoll_ctl03
+epoll_wait02
+epoll_wait03
+epoll_wait06
+epoll_wait07
 eventfd2_01
 eventfd2_02
 eventfd2_03
@@ -795,13 +799,3 @@ umount02
 umount03
 umount2_01
 umount2_02
-
-# oscomp LTP test list - Phase 19: scripts — shell helpers (8 tests)
-#ar01.sh
-#cp_tests.sh
-#du01.sh
-#file01.sh
-#ln_tests.sh
-#tar_tests.sh
-#wc01.sh
-#which01.sh

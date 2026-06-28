@@ -867,6 +867,9 @@ impl MemorySet {
             }
             let new_start = VirtAddr::from(new_addr).floor();
             let new_range = VPNRange::new(new_start, VirtAddr::from(new_end).floor());
+            if old_range.intersect_with(&new_range) {
+                return Err(Errno::EINVAL);
+            }
             let mut middle = self.take_exact_area(old_range)?;
             middle.notify_mmap_close();
             middle.unmap_ptes_only(&mut self.page_table);

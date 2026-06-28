@@ -434,7 +434,8 @@ impl FileOp for Pipe {
     // 管道写端是否有空间可立即写入而不阻塞
     fn write_ready(&self) -> bool {
         let buffer = self.buffer.lock();
-        buffer.available_bytes() < buffer.capacity
+        let free = buffer.capacity.saturating_sub(buffer.available_bytes());
+        free >= PAGE_SIZE.min(buffer.capacity)
     }
     fn register_poll_waiter(&self, tid: usize, events: PollEvents) -> bool {
         self.poll_waiters.register(tid, events);

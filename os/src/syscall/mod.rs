@@ -22,6 +22,7 @@ const SYSCALL_IOCTL: usize = 29;
 const SYSCALL_EVENTFD2: usize = 19;
 const SYSCALL_EPOLL_CREATE1: usize = 20;
 const SYSCALL_EPOLL_CTL: usize = 21;
+const SYSCALL_EPOLL_PWAIT: usize = 22;
 const SYSCALL_INOTIFY_INIT1: usize = 26;
 const SYSCALL_MKNODAT: usize = 33;
 const SYSCALL_FLOCK: usize = 32;
@@ -313,6 +314,14 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         SYSCALL_EPOLL_CTL => {
             sys_epoll_ctl(args[0], args[1], args[2], args[3] as *const u8)
         }
+        SYSCALL_EPOLL_PWAIT => sys_epoll_pwait(
+            args[0],
+            args[1] as *mut u8,
+            args[2],
+            args[3] as isize,
+            args[4] as *const u8,
+            args[5],
+        ),
         SYSCALL_INOTIFY_INIT1 => sys_inotify_init1(args[0]),
         SYSCALL_FCNTL => sys_fcntl(args[0], args[1], args[2]),
         SYSCALL_IOCTL => sys_ioctl(args[0], args[1], args[2]),
