@@ -5,7 +5,9 @@
 //! 核心数据结构参照 Linux 的 `struct vfsmount` / `struct mount` / mount tree。
 
 use super::Path;
-use super::dentry_cache::remove_dentry_cache_tree;
+use super::dentry_cache::{
+    remove_dentry_cache, remove_dentry_cache_descendants, remove_dentry_cache_tree,
+};
 use super::namei::{
     AT_FDCWD, filename_lookup, filename_lookup_no_follow_final_mount,
     filename_lookup_no_follow_final_symlink,
@@ -264,6 +266,7 @@ pub fn path_global_abs_path(path: &Path) -> alloc::string::String {
 /// 第一版只支持 ext4 挂载到目录。不处理 bind mount、remount 等复杂语义。
 pub fn do_mount(_source: &str, target: &str, fstype: &str, flags: usize) -> SysResult<usize> {
     let target_path = filename_lookup_no_follow_final_mount(AT_FDCWD, target)?;
+    let target_visible_path = target_path.global_abs_path();
 
     if target_path.dentry.get_inode().node_type() != InodeType::Directory {
         return Err(Errno::ENOTDIR);
@@ -289,6 +292,7 @@ pub fn do_mount(_source: &str, target: &str, fstype: &str, flags: usize) -> SysR
         if get_mount_by_dentry(&target_path.dentry).is_some() {
             return Err(Errno::EBUSY);
         }
+        remove_dentry_cache_descendants(target_visible_path.as_str());
         let moved_mount = Arc::new(Mount {
             mountpoint: target_path.dentry.clone(),
             vfs_mount: source_mount.vfs_mount.clone(),
@@ -315,6 +319,7 @@ pub fn do_mount(_source: &str, target: &str, fstype: &str, flags: usize) -> SysR
             flags as i32,
         );
         let parent_mount = get_mount_by_vfsmount(&target_path.mnt).ok_or(Errno::EINVAL)?;
+        remove_dentry_cache_descendants(target_visible_path.as_str());
         add_mount(Mount::new_child(
             target_path.dentry.clone(),
             vfs_mount,
@@ -328,6 +333,7 @@ pub fn do_mount(_source: &str, target: &str, fstype: &str, flags: usize) -> SysR
         let backing_root = create_mount_backing_root(&fs, None)?;
         let vfs_mount = VfsMount::new(backing_root.root.clone(), fs, flags as i32);
         let parent_mount = get_mount_by_vfsmount(&target_path.mnt).ok_or(Errno::EINVAL)?;
+        remove_dentry_cache_descendants(target_visible_path.as_str());
         add_mount(Mount::new_child_with_backing_root(
             target_path.dentry.clone(),
             vfs_mount,
@@ -359,6 +365,7 @@ pub fn do_mount(_source: &str, target: &str, fstype: &str, flags: usize) -> SysR
             let backing_root = create_mount_backing_root(&ext4_fs, capacity)?;
             let vfs_mount = VfsMount::new(backing_root.root.clone(), ext4_fs, flags as i32);
             let parent_mount = get_mount_by_vfsmount(&target_path.mnt).ok_or(Errno::EINVAL)?;
+            remove_dentry_cache_descendants(target_visible_path.as_str());
             add_mount(Mount::new_child_with_backing_root(
                 target_path.dentry.clone(),
                 vfs_mount,
@@ -514,6 +521,20 @@ fn remove_mount_tree_inner(mount: &Arc<Mount>, cleanup_backing_root: bool) {
     for child in children {
         remove_mount_tree_inner(&child, cleanup_backing_root);
     }
+
+    let visible_mountpoint_path = mount.parent.as_ref().and_then(Weak::upgrade).map(|parent| {
+        path_global_abs_path(&Path {
+            mnt: parent.vfs_mount.clone(),
+            dentry: mount.mountpoint.clone(),
+        })
+    });
+    if let Some(path) = visible_mountpoint_path {
+        remove_dentry_cache_tree(path.as_str());
+    }
+    if mount.backing_root.is_some() {
+        remove_dentry_cache_tree(mount.vfs_mount.root.abs_path.as_str());
+    }
+    remove_dentry_cache(mount.mountpoint.abs_path.as_str());
 
     if let Some(parent) = mount.parent.as_ref().and_then(Weak::upgrade) {
         parent

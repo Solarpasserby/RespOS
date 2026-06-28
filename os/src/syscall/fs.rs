@@ -1212,11 +1212,33 @@ pub fn sys_openat2(
     if khow.resolve & RESOLVE_NO_MAGICLINKS != 0 && path_str == "/proc/self/exe" {
         return Err(Errno::ELOOP);
     }
+    if OpenFlags::from(khow.flags as usize).contains(OpenFlags::O_NOFOLLOW)
+        && path_str == "/proc/self/exe"
+    {
+        return Err(Errno::ELOOP);
+    }
     if khow.resolve & RESOLVE_NO_SYMLINKS != 0 {
         let target = filename_lookup_no_follow_final_symlink(dirfd, path_str.as_str())?;
         if target.dentry.get_inode().node_type() == InodeType::SymLink {
             return Err(Errno::ELOOP);
         }
+    }
+    if khow.resolve == 0 && path_str == "/proc/self/exe" {
+        let task = current_task().expect("[kernel] current task is None.");
+        let exe_path = task.exe_path();
+        let open_flags = OpenFlags::from(khow.flags as usize);
+        let file = path_open(
+            AT_FDCWD,
+            exe_path.as_str(),
+            khow.flags as usize,
+            khow.mode as usize,
+        )?;
+        let file: Arc<dyn FileOp> = if file.inode().node_type() == InodeType::Fifo {
+            open_named_fifo(file.path().abs_path().as_str(), open_flags)?
+        } else {
+            file
+        };
+        return task.alloc_fd(FdEntry::new(file, open_flags));
     }
 
     sys_openat(dirfd, path, khow.flags as usize, khow.mode as usize)

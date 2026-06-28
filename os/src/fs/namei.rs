@@ -24,6 +24,7 @@ pub const AT_EMPTY_PATH: usize = 0x1000;
 pub const AT_SYMLINK_NOFOLLOW: usize = 0x100;
 
 const MAX_SYMLINK_FOLLOWS: usize = 40;
+const PATH_MAX: usize = 4096;
 const NAME_MAX: usize = 255;
 static NAMEI_MUTATION_LOCK: Mutex<()> = Mutex::new(());
 
@@ -683,7 +684,7 @@ fn resolve_path_from(
     symlink_follows: usize,
 ) -> SysResult<Arc<Path>> {
     // 限制 symlink 展开次数，防止 a -> b -> a 这种循环把内核拖进无限递归。
-    if symlink_follows > MAX_SYMLINK_FOLLOWS {
+    if symlink_follows >= MAX_SYMLINK_FOLLOWS {
         return Err(Errno::ELOOP);
     }
 
@@ -736,6 +737,10 @@ fn resolve_path_from(
             let target = inode.read_link(&child_path.abs_path())?;
             // target 替换当前 symlink，其余未解析 segment 继续拼到 target 后面。
             let next_path = join_symlink_target(&target, &nd.path_segments[nd.depth + 1..]);
+            if next_path.len() > PATH_MAX {
+                return Err(Errno::ENAMETOOLONG);
+            }
+            validate_path_components(&next_path)?;
             let next_base = if target.starts_with('/') {
                 // 绝对 symlink 目标从当前进程 root 开始解析。
                 task_root_path()
@@ -825,7 +830,9 @@ pub fn filename_unlink(dirfd: isize, path: &str, remove_dir: bool) -> SysResult 
     check_sticky_rename_permission(&parent, &target)?;
     let name = dentry_name(&target)?;
     let target_inode = target.get_inode();
+    let target_stat = target_inode.stat(&target.abs_path)?;
     let orphaned_open_file = target_ty == InodeType::Regular
+        && target_stat.nlink <= 1
         && Arc::strong_count(&target_inode) > 2
         && target_inode
             .as_any()
@@ -1095,6 +1102,10 @@ pub fn link_path_walk(nd: &mut Nameidata) -> SysResult {
                     }
                     let target = inode.read_link(&child_path.abs_path())?;
                     let next_path = join_symlink_target(&target, &nd.path_segments[nd.depth + 1..]);
+                    if next_path.len() > PATH_MAX {
+                        return Err(Errno::ENAMETOOLONG);
+                    }
+                    validate_path_components(&next_path)?;
                     let next_base = if target.starts_with('/') {
                         task_root_path()
                     } else {
