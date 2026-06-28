@@ -11,6 +11,7 @@ use crate::task::{
     yield_current_task,
 };
 use crate::timer::TimeSpec;
+use alloc::collections::BTreeMap;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::any::Any;
@@ -30,6 +31,111 @@ const MFD_HUGE_MASK: usize = 0x3f << 26;
 const MFD_ALLOWED_FLAGS: usize = MFD_CLOEXEC | MFD_ALLOW_SEALING | MFD_HUGETLB | MFD_HUGE_MASK;
 
 const PIDFD_NONBLOCK: usize = O_NONBLOCK;
+
+pub struct EpollFd {
+    flags: OpenFlags,
+    interests: SpinLock<BTreeMap<usize, EpollInterest>>,
+}
+
+struct EpollInterest {
+    events: u32,
+    data: u64,
+    _file: Arc<dyn FileOp>,
+}
+
+impl EpollFd {
+    fn new(flags: OpenFlags) -> Self {
+        Self {
+            flags,
+            interests: SpinLock::new(BTreeMap::new()),
+        }
+    }
+
+    fn ctl(
+        &self,
+        op: usize,
+        fd: usize,
+        event: Option<(u32, u64)>,
+        file: Arc<dyn FileOp>,
+    ) -> SysResult<usize> {
+        const EPOLL_CTL_ADD: usize = 1;
+        const EPOLL_CTL_DEL: usize = 2;
+        const EPOLL_CTL_MOD: usize = 3;
+
+        let mut interests = self.interests.lock();
+        match op {
+            EPOLL_CTL_ADD => {
+                if interests.contains_key(&fd) {
+                    return Err(Errno::EEXIST);
+                }
+                let (events, data) = event.ok_or(Errno::EFAULT)?;
+                interests.insert(
+                    fd,
+                    EpollInterest {
+                        events,
+                        data,
+                        _file: file,
+                    },
+                );
+            }
+            EPOLL_CTL_DEL => {
+                if interests.remove(&fd).is_none() {
+                    return Err(Errno::ENOENT);
+                }
+            }
+            EPOLL_CTL_MOD => {
+                let interest = interests.get_mut(&fd).ok_or(Errno::ENOENT)?;
+                let (events, data) = event.ok_or(Errno::EFAULT)?;
+                interest.events = events;
+                interest.data = data;
+            }
+            _ => return Err(Errno::EINVAL),
+        }
+        Ok(0)
+    }
+}
+
+impl FileOp for EpollFd {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn read<'a>(&'a self, _buf: &'a mut [u8]) -> SysResult<usize> {
+        Err(Errno::EINVAL)
+    }
+
+    fn write<'a>(&'a self, _buf: &'a [u8]) -> SysResult<usize> {
+        Err(Errno::EINVAL)
+    }
+
+    fn can_seek(&self) -> SysResult {
+        Err(Errno::ESPIPE)
+    }
+
+    fn seek(&self, _offset: isize) -> SysResult<usize> {
+        Err(Errno::ESPIPE)
+    }
+
+    fn get_offset(&self) -> usize {
+        0
+    }
+
+    fn get_flags(&self) -> OpenFlags {
+        self.flags
+    }
+
+    fn get_stat(&self) -> SysResult<KStat> {
+        Ok(KStat::minimal(0, InodeType::Unknown))
+    }
+
+    fn readable(&self) -> bool {
+        false
+    }
+
+    fn writable(&self) -> bool {
+        false
+    }
+}
 
 fn alloc_special_fd(flags: OpenFlags) -> SysResult<usize> {
     alloc_special_fd_with_type(flags, InodeType::Unknown)
@@ -429,7 +535,52 @@ pub fn sys_eventfd2(initval: usize, flags: usize) -> SysResult<usize> {
 
 pub fn sys_epoll_create1(flags: usize) -> SysResult<usize> {
     let flags = flags_from_o_flags(flags, O_CLOEXEC)?;
-    alloc_special_fd(flags)
+    let task = current_task().expect("[kernel] current task is None.");
+    task.alloc_fd(FdEntry::new(Arc::new(EpollFd::new(flags)), flags))
+}
+
+pub fn sys_epoll_ctl(
+    epfd: usize,
+    op: usize,
+    fd: usize,
+    event: *const u8,
+) -> SysResult<usize> {
+    const EPOLL_CTL_ADD: usize = 1;
+    const EPOLL_CTL_DEL: usize = 2;
+    const EPOLL_CTL_MOD: usize = 3;
+
+    let task = current_task().expect("[kernel] current task is None.");
+    let epoll_entry = task.get_fd_entry(epfd)?;
+    let epoll = epoll_entry
+        .file
+        .as_any()
+        .downcast_ref::<EpollFd>()
+        .ok_or(Errno::EINVAL)?;
+    let target = task.get_fd_entry(fd)?;
+    if epfd == fd {
+        return Err(Errno::EINVAL);
+    }
+    if !matches!(op, EPOLL_CTL_ADD | EPOLL_CTL_DEL | EPOLL_CTL_MOD) {
+        return Err(Errno::EINVAL);
+    }
+    if matches!(
+        target.file.get_stat()?.ty,
+        InodeType::Regular | InodeType::Directory | InodeType::BlockDevice
+    ) {
+        return Err(Errno::EPERM);
+    }
+
+    let event = if op == EPOLL_CTL_DEL {
+        None
+    } else {
+        let mut raw = [0u8; 12];
+        copy_from_user(raw.as_mut_ptr(), event, raw.len())?;
+        Some((
+            u32::from_ne_bytes(raw[..4].try_into().unwrap()),
+            u64::from_ne_bytes(raw[4..].try_into().unwrap()),
+        ))
+    };
+    epoll.ctl(op, fd, event, target.file)
 }
 
 pub fn sys_inotify_init1(flags: usize) -> SysResult<usize> {

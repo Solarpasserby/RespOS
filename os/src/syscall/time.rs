@@ -818,9 +818,13 @@ pub fn sys_clock_nanosleep(
     rem: *mut TimeSpec,
 ) -> SysResult<usize> {
     const TIMER_ABSTIME: usize = 1;
+    const CLOCK_THREAD_CPUTIME_ID: usize = 3;
 
     if !is_supported_clock(clock_id) || flags & !TIMER_ABSTIME != 0 {
         return Err(Errno::EINVAL);
+    }
+    if clock_id == CLOCK_THREAD_CPUTIME_ID {
+        return Err(Errno::EOPNOTSUPP);
     }
     if flags & TIMER_ABSTIME == 0 {
         return sys_nanosleep(req, rem);

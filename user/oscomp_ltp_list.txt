@@ -52,6 +52,7 @@ times03
 # oscomp LTP test list - Phase 3: clock_timer — clocks, timers, alarms (30 tests)
 # 测例 clock_gettime04，la musl没有解决
 adjtimex01
+adjtimex02
 alarm02
 alarm03
 alarm06
@@ -62,6 +63,7 @@ clock_getres01
 clock_gettime01
 clock_gettime02
 #clock_gettime04
+clock_nanosleep01
 clock_nanosleep02
 clock_settime02
 getitimer01
@@ -148,6 +150,9 @@ fcntl12
 fcntl12_64
 fcntl13
 fcntl13_64
+# fcntl14：依赖 F_SETLKW 等待队列与 sigpause 唤醒；当前每个冲突子项会等待
+# 60 秒后失败，完整 96 项收益不足以覆盖全局语义改造。
+#fcntl14
 fcntl29
 fcntl29_64
 fcntl30
@@ -442,6 +447,8 @@ rmdir01
 rmdir03
 symlink02
 symlink04
+symlink01
+symlinkat01
 truncate02
 truncate02_64
 truncate03
@@ -456,6 +463,7 @@ utime03
 utime04
 utime05
 utime07
+utimensat01
 
 # oscomp LTP test list - Phase 12: signal — signal handling (20 tests)
 # 测例 rt_sigqueueinfo01 sigwait01 报错奇怪收益低跳过完整通过
@@ -726,6 +734,8 @@ chroot02
 chroot03
 chroot04
 epoll_create02
+epoll_ctl02
+epoll_ctl03
 eventfd2_01
 eventfd2_02
 eventfd2_03
