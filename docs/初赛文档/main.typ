@@ -1834,8 +1834,119 @@ trap 层把两套架构的页错误都归一成 `PageFaultCause::Instruction/Loa
 
 == AI 辅助完成的工作
 
+RespOS 的开发过程中使用了 AI 编程助手辅助工程推进，主要场景是代码阅读、候选实现生成、日志分析和文档整理。AI 的定位不是替代内核设计决策，而是把重复性检索、样板代码、错误日志归纳和文档初稿生成前移；最终进入仓库的代码仍由团队成员结合测例、源码上下文和运行结果审查。
+
+在代码实现方面，AI 主要用于生成或改写局部函数、补齐系统调用分支、整理错误码映射、生成测试辅助脚本和 Makefile 规则。例如在补齐 `syscall/fs.rs`、`syscall/net.rs` 中部分系统调用入口的参数转换和错误码映射时，AI 可以根据已有分支风格生成候选 `match` 分支、用户指针检查和结构体字段初始化；团队再检查其是否满足 Linux ABI、是否破坏资源生命周期、是否与 RISC-V/LoongArch 双架构约束一致。
+
+在调试和测试方面，AI 参与了 LTP 日志过滤、失败测例分类、本地报告解读和回归命令整理。对于 `debug-rvoutput.txt`、`debug-laoutput.txt`、`rv-output.txt`、`la-output.txt` 等输出，AI 用于快速提取失败项、对照 baseline、归纳可能涉及的 syscall 或模块，并辅助维护 `user/oscomp_ltp_list.txt` 中的测例分组和跳过原因。实际是否跳过、是否修复、是否接受某个 workaround，仍由人工根据收益和风险决定。
+
+在文档方面，AI 用于把源码结构、关键路径和阶段性测试结果整理成 Typst 文档，包括章节初稿、表格、代码摘录和 SVG 示意图。文档中的模块描述均以 `os/src/`、`user/`、`vendor/` 和本地测试报告为依据；涉及排名和最终成绩的内容没有由 AI 猜测生成，仍保留 TODO 或阶段性说明。
+
+#figure(
+  kind: table,
+  supplement: [表],
+  caption: [AI 辅助任务与人工产出边界],
+)[
+  #table(
+    columns: (auto, 1fr, 1fr),
+    align: (center + horizon, left + horizon, left + horizon),
+    inset: 7pt,
+    table.header([任务类型], [AI 辅助内容], [人工确认内容]),
+    [代码生成], [局部函数、重复分支、错误码映射、脚本和 Makefile 片段。], [接口语义、资源生命周期、unsafe 边界、双架构行为和测例结果。],
+    [bug 定位], [从日志中提取失败测例、异常地址、返回码和模块线索。], [复现路径、根因判断、修复方案和是否回归。],
+    [测试分析], [汇总 LTP 报告、对照 baseline、整理跳过原因和耗时信息。], [测例取舍、最终分组、阶段性统计是否可写入文档。],
+    [文档撰写], [生成章节草稿、表格、图示和代码摘录。], [事实核对、措辞调整、章节边界和最终 PDF 编译结果。],
+  )
+]
+
 == 人工审核与边界控制
+
+内核代码存在大量 AI 不能直接保证正确性的边界。团队对 AI 生成内容采用“先局部、再验证、再合入”的流程：只接受与现有模块风格一致、能解释其状态变化、能通过构建或测例验证的改动；凡是涉及 unsafe 指针、页表、trap 入口、信号栈、文件系统写路径、任务退出和锁顺序的内容，必须由人工逐行检查。
+
+具体来说，以下内容不能仅凭 AI 输出直接合入：用户指针拷贝与页错误处理、`TrapContext` 布局和恢复路径、RISC-V/LoongArch 汇编入口、`fork`/`clone`/`execve`/`exit` 资源迁移、文件描述符和 dentry 生命周期、信号递送时机、futex 唤醒条件、socket 阻塞语义，以及任何可能造成内核内存破坏的 unsafe 代码。AI 可以帮助列出风险点，但不能替代对寄存器、页表项、锁保护范围和错误码的人工推导。
+
+项目中也保留了面向 AI 协作的上下文配置。`CLAUDE.md` 描述了构建命令、模块结构、关键依赖和设计约定，`.claude/settings.local.json` 记录了开发时允许的命令范围，例如 Typst 编译、日志读取、报告脚本和部分构建命令。这些配置用于减少 AI 对仓库结构的误读，但其中部分描述来自早期阶段，最终文档以当前源码和编译结果为准。
+
+```text
+CLAUDE.md              # AI 读取仓库时使用的项目上下文
+.claude/settings.local.json
+                       # 本地 AI 工具允许执行的命令白名单
+judge/local-report/    # LTP 报告，供人工和 AI 一起分析
+user/oscomp_ltp_list.txt
+                       # 测例分组、跳过原因和阶段性测试入口
+```
+
+这种边界控制的核心原则是：AI 可以加速搜索、归纳和样板生成，但不能替代内核关键路径的证明和复现。每一次实质性修改都需要回到源码、构建输出和运行日志，确认它解决的是实际问题，而不是只让局部测例输出看起来更好。
 
 == 借鉴的开源项目
 
+RespOS 在实现过程中参考并使用了多个开源项目。借鉴方式主要分为两类：一类是直接作为依赖纳入构建，例如 `lwext4_rust`、`smoltcp`、`riscv`、`virtio-drivers` 和 `sbi-rt`；另一类是参考设计思想和接口组织方式，例如 rCore 系列教学内核中的任务、地址空间、trap 和文件系统分层思路。项目没有把这些设计原样照搬，而是根据初赛测例、双架构支持和现有模块边界做了适配。
+
+#figure(
+  kind: table,
+  supplement: [表],
+  caption: [开源项目借鉴与适配],
+)[
+  #table(
+    columns: (auto, 1fr, 1fr),
+    align: (center + horizon, left + horizon, left + horizon),
+    inset: 7pt,
+    table.header([项目], [借鉴或使用内容], [RespOS 中的适配]),
+    [rCore 系列], [教学内核中的任务控制块、地址空间、trap 返回、页帧 RAII 和模块分层思路。], [扩展为 Linux ABI 兼容路径，补入线程组、fd/VFS、信号、mmap、双架构页表和大量测例驱动细节。],
+    [`lwext4_rust`], [Ext4 文件系统访问能力，以及对 C 版 lwext4 的 Rust 封装。], [通过 `fs/ext4/`、`Disk` 和块设备适配层接入 VFS，用于根文件系统和普通文件操作。],
+    [`smoltcp`], [无标准库环境下的 TCP/UDP 协议栈、socket 状态机和 IP 包处理。], [在 `net/` 中包装成 Linux socket ABI，并实现 IPv4 回环设备、端口分配和 socket option。],
+    [`virtio-drivers`], [VirtIO block 设备驱动框架和 transport 抽象。], [结合 `VirtIoHalImpl`、MMIO/PCI 平台配置和页帧 DMA 管理，支撑 Ext4 后端块设备。],
+    [`riscv`], [RISC-V CSR 访问、寄存器封装和内联汇编支持。], [用于 RISC-V trap、timer、`satp`、`sstatus`、`stvec` 等架构路径；LoongArch 路径则实现本地 CSR 封装。],
+    [`sbi-rt` / RustSBI], [SBI console、timer、shutdown 等固件接口。], [RISC-V 平台通过 RustSBI 启动并使用 SBI legacy console 和 system reset。],
+  )
+]
+
+在构建策略上，`vendor/README.md` 说明了本仓库直接 vendored 的依赖：`lwext4_rust` 固定到 `f9e3de7b0485429104e6b06ae0795e18f68ec957`，`riscv` 固定到 `11d43cf7cccb3b62a3caaf3e07a1db7449588f9a`，`smoltcp` 也作为 path dependency 放在 `vendor/smoltcp`。这样做的目的是减少比赛评测环境中的网络依赖，使构建过程尽量可复现。
+
+```toml
+smoltcp = {
+    path = "../vendor/smoltcp",
+    default-features = false,
+    features = [
+        "alloc", "log", "medium-ethernet", "medium-ip",
+        "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-udp",
+    ],
+}
+lwext4_rust = { path = "../vendor/lwext4_rust", default-features = false }
+
+[target.'cfg(target_arch = "riscv64")'.dependencies]
+riscv = { path = "../vendor/riscv", features = ["inline-asm"] }
+sbi-rt = { version = "0.0.3", features = ["legacy"] }
+```
+
 == 许可证与引用说明
+
+RespOS 仓库根目录使用 GPLv2 许可证，README 中也明确指向 `LICENSE`。直接纳入 `vendor/` 的第三方代码保留原项目许可证文件和来源说明；通过 Cargo 引入的依赖遵循其 crates.io 或上游仓库声明的许可证。项目在修改或包装第三方代码时，保留原版权和许可证信息，不删除上游 README、LICENSE 或 Cargo manifest 中的许可字段。
+
+#figure(
+  kind: table,
+  supplement: [表],
+  caption: [主要第三方代码与许可证],
+)[
+  #table(
+    columns: (auto, 1fr, auto),
+    align: (center + horizon, left + horizon, center + horizon),
+    inset: 7pt,
+    table.header([组件], [仓库位置或来源], [许可证]),
+    [RespOS], [`LICENSE`、`README.md`], [GPLv2],
+    [`lwext4_rust`], [`vendor/lwext4_rust`，含 `c/lwext4` 源码树], [GPL-2.0],
+    [`smoltcp`], [`vendor/smoltcp`，`Cargo.toml` 与 `LICENSE-0BSD.txt`], [0BSD],
+    [`riscv`], [`vendor/riscv`，来源为 rust-embedded/riscv], [ISC],
+    [`virtio-drivers`], [`os/Cargo.toml` 通过 crates.io 依赖], [按上游 crate 许可证],
+    [`sbi-rt`], [`os/Cargo.toml` 通过 crates.io 依赖], [按上游 crate 许可证],
+  )
+]
+
+文档引用代码时采用等宽字体标识文件名、模块名、结构体名和函数名；涉及第三方实现的部分只描述其接口作用和在 RespOS 中的适配方式，不复制大段上游源码。后续若继续引入新的第三方组件，应同步更新 `vendor/README.md`、Cargo 依赖、许可证说明和本章表格，保证评审可以追溯代码来源。
+
+#summary-box(
+  [本章小结],
+  [AI 在 RespOS 初赛开发中主要承担检索、归纳、样板生成、日志分析和文档整理工作，关键内核路径仍由人工审核和测试确认。项目借鉴并使用 rCore、lwext4_rust、smoltcp、virtio-drivers、RustSBI 等开源项目，同时保留 vendored 依赖的来源和许可证信息；后续新增依赖或 AI 辅助产出，也应继续遵守可追溯、可复现、可人工审查的原则。],
+  fill: rgb("#F8FAFC"),
+  accent: rgb("#667085"),
+)

@@ -5,6 +5,9 @@ Vendored dependencies used by the OS crate.
   source tree so the build does not need `git submodule update`.
 - `riscv`: copied from `https://github.com/rcore-os/riscv` at
   `11d43cf7cccb3b62a3caaf3e07a1db7449588f9a`.
+- `smoltcp`: vendored under `vendor/smoltcp` and referenced as a path
+  dependency. It is used with `default-features = false` and the feature set
+  required by the in-kernel loopback TCP/UDP stack.
 
 These crates are referenced with `path` dependencies from `os/Cargo.toml` to
 avoid network access during contest grading builds.
