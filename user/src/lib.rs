@@ -168,6 +168,9 @@ pub fn mkdir(path: &str, mode: usize) -> isize {
 pub fn unlink(path: &str) -> isize {
     sys_unlinkat(AT_FDCWD, path, 0)
 }
+pub fn rmdir(path: &str) -> isize {
+    sys_rmdir(AT_FDCWD, path)
+}
 pub fn link(oldpath: &str, newpath: &str) -> isize {
     sys_linkat(AT_FDCWD, oldpath, AT_FDCWD, newpath, 0)
 }

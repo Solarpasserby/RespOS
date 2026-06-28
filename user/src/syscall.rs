@@ -49,6 +49,7 @@ const SYSCALL_EXECVE: usize = 221;
 const SYSCALL_MMAP: usize = 222;
 const SYSCALL_WAIT4: usize = 260;
 const SYSCALL_COPY_FILE_RANGE: usize = 285;
+const AT_REMOVEDIR: usize = 0x200;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default)]
@@ -179,6 +180,10 @@ pub fn sys_unlinkat(dirfd: isize, path: &str, flags: usize) -> isize {
         SYSCALL_UNLINKAT,
         [dirfd as usize, path.as_ptr() as usize, flags, 0, 0, 0],
     )
+}
+
+pub fn sys_rmdir(dirfd: isize, path: &str) -> isize {
+    sys_unlinkat(dirfd, path, AT_REMOVEDIR)
 }
 
 pub fn sys_chdir(path: &str) -> isize {
