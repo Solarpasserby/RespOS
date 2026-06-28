@@ -26,9 +26,13 @@ pub fn sys_brk(addr: usize) -> SysResult<usize> {
                 memory_set.remove_area_with_overlap_range(VPNRange::new(new_end, old_end))?;
             }
         } else if new_end > old_end {
-            if let Err(_err) =
-                memory_set.ensure_private_writable_anonymous_range(VPNRange::new(old_end, new_end))
-            {
+            let grow_range = VPNRange::new(old_end, new_end);
+            #[cfg(target_arch = "loongarch64")]
+            let grow_result = memory_set.ensure_private_writable_anonymous_range_eager(grow_range);
+            #[cfg(not(target_arch = "loongarch64"))]
+            let grow_result = memory_set.ensure_private_writable_anonymous_range(grow_range);
+
+            if let Err(_err) = grow_result {
                 println!(
                     "[brk] grow failed old={:#x}, requested={:#x}, heap_bottom={:#x}, err={:?}",
                     old_brk, addr, memory_set.heap_bottom, _err
@@ -316,7 +320,8 @@ pub fn sys_get_mempolicy(
 
 /// 系统调用 sys_madvise
 ///
-/// 当前内核没有页回收器；多数 advice 只做 ABI 接受。
+/// 当前内核没有完整页回收器；多数 advice 只做 ABI 接受。
+/// MADV_DONTNEED 会按 Linux 私有映射语义丢弃当前驻留页，后续访问重新缺页填充。
 /// MADV_WIPEONFORK/MADV_KEEPONFORK 会记录到 VMA，fork 时按 Linux 语义处理。
 pub fn sys_madvise(addr: usize, len: usize, advice: i32) -> SysResult<usize> {
     if addr % PAGE_SIZE != 0 {
@@ -330,6 +335,16 @@ pub fn sys_madvise(addr: usize, len: usize, advice: i32) -> SysResult<usize> {
     let end_vpn = VirtAddr::from(end).ceil();
 
     match advice {
+        4 => {
+            let task = current_task().expect("[kernel] current task is None.");
+            task.op_memory_set_write(|memory_set| {
+                let vpn_range = VPNRange::new(start_vpn, end_vpn);
+                memory_set.check_madvise_range(vpn_range.clone(), advice)?;
+                memory_set.discard_private_pages_for_madvise(vpn_range);
+                memory_set.flush_tlb();
+                Ok(0)
+            })
+        }
         18 | 19 => {
             let task = current_task().expect("[kernel] current task is None.");
             task.op_memory_set_write(|memory_set| {
@@ -341,7 +356,6 @@ pub fn sys_madvise(addr: usize, len: usize, advice: i32) -> SysResult<usize> {
         | 1  // MADV_RANDOM
         | 2  // MADV_SEQUENTIAL
         | 3  // MADV_WILLNEED
-        | 4  // MADV_DONTNEED
         | 8  // MADV_FREE
         | 10 // MADV_DONTFORK
         | 11 // MADV_DOFORK

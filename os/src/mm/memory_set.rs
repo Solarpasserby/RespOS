@@ -281,12 +281,7 @@ impl MemorySet {
     }
 
     /// 将一段空的逻辑段加入地址空间，在内部完成映射关系的建立
-    fn push_empty_map_area(
-        &mut self,
-        map_area: MapArea,
-        data: Option<&[u8]>,
-        data_offset: usize,
-    ) {
+    fn push_empty_map_area(&mut self, map_area: MapArea, data: Option<&[u8]>, data_offset: usize) {
         self.try_push_empty_map_area(map_area, data, data_offset)
             .expect("failed to map area");
     }
@@ -570,7 +565,54 @@ impl MemorySet {
             );
             cursor = next;
         }
+        self.merge_adjacent_private_anonymous_areas();
         Ok(())
+    }
+
+    /// Ensure a heap range exists and has resident writable anonymous pages.
+    ///
+    /// This is used by architectures that choose not to overcommit the brk
+    /// heap. It preserves Linux-visible brk semantics while avoiding later
+    /// user-mode faults for pages whose allocation was already committed.
+    pub fn ensure_private_writable_anonymous_range_eager(
+        &mut self,
+        vpn_range: VPNRange,
+    ) -> SysResult {
+        self.ensure_private_writable_anonymous_range(vpn_range.clone())?;
+        self.ensure_user_page_access(vpn_range, MapPermission::WRITE)
+    }
+
+    fn merge_adjacent_private_anonymous_areas(&mut self) {
+        self.areas.sort_by_key(|area| area.vpn_range.get_start());
+
+        let mut idx = 0;
+        while idx + 1 < self.areas.len() {
+            if !Self::can_merge_private_anonymous(&self.areas[idx], &self.areas[idx + 1]) {
+                idx += 1;
+                continue;
+            }
+
+            let mut right = self.areas.remove(idx + 1);
+            let new_end = right.vpn_range.get_end();
+            self.areas[idx].vpn_range =
+                VPNRange::new(self.areas[idx].vpn_range.get_start(), new_end);
+            self.areas[idx].data_frames.append(&mut right.data_frames);
+        }
+    }
+
+    fn can_merge_private_anonymous(left: &MapArea, right: &MapArea) -> bool {
+        left.vpn_range.get_end() == right.vpn_range.get_start()
+            && left.map_type == MapType::Framed
+            && right.map_type == MapType::Framed
+            && !left.shared
+            && !right.shared
+            && left.file_backing.is_none()
+            && right.file_backing.is_none()
+            && left.shm_attach_id.is_none()
+            && right.shm_attach_id.is_none()
+            && left.map_perm == right.map_perm
+            && left.locked == right.locked
+            && left.wipe_on_fork == right.wipe_on_fork
     }
 
     fn prepare_mmap(&mut self, request: MmapRequest) -> SysResult<MmapPlacement> {
@@ -1248,6 +1290,28 @@ impl MemorySet {
         }
     }
 
+    /// Apply MADV_DONTNEED to resident pages while keeping the VMA itself.
+    ///
+    /// For private anonymous mappings, Linux discards the current physical page
+    /// and faults in a zero-filled page on the next access. For private
+    /// file-backed mappings, discarding the private page exposes file contents
+    /// again on the next fault. Shared mappings are left intact here because
+    /// they need backing-object level invalidation, not just a per-process PTE
+    /// drop.
+    pub fn discard_private_pages_for_madvise(&mut self, vpn_range: VPNRange) {
+        for area in self.areas.iter_mut() {
+            if area.shared || !area.vpn_range.intersect_with(&vpn_range) {
+                continue;
+            }
+
+            let start = area.vpn_range.get_start().max(vpn_range.get_start());
+            let end = area.vpn_range.get_end().min(vpn_range.get_end());
+            for vpn in VPNRange::new(start, end) {
+                area.unmap_one(&mut self.page_table, vpn);
+            }
+        }
+    }
+
     fn modify_user_pte_perm(&mut self, vpn: VirtPageNum, map_perm: MapPermission) {
         let Some(pte) = self.page_table.translate(vpn) else {
             return;
@@ -1438,8 +1502,7 @@ impl MemorySet {
     pub fn try_from_elf_data(
         elf_data: &[u8],
     ) -> SysResult<(Self, usize, usize, usize, Vec<AuxHeader>)> {
-        let mut memory_set =
-            Self::from_kernel_page_table().map_err(|_| Errno::ENOMEM)?;
+        let mut memory_set = Self::from_kernel_page_table().map_err(|_| Errno::ENOMEM)?;
 
         // 在用户空间映射 sigreturn 跳板页
         memory_set.try_map_trampoline()?;
@@ -1508,11 +1571,7 @@ impl MemorySet {
                     .checked_add(ph.file_size() as usize)
                     .ok_or(Errno::ENOEXEC)?;
                 let file_data = elf.input.get(file_start..file_end).ok_or(Errno::ENOEXEC)?;
-                memory_set.try_push_empty_map_area(
-                    map_area,
-                    Some(file_data),
-                    data_offset,
-                )?;
+                memory_set.try_push_empty_map_area(map_area, Some(file_data), data_offset)?;
             }
 
             if ph_type == xmas_elf::program::Type::Interp {
@@ -1546,17 +1605,14 @@ impl MemorySet {
                 .or_else(|| crate::loader::get_app_data_by_name(interp));
 
             if let Some(interp_data) = interp_data {
-                let interp_elf =
-                    xmas_elf::ElfFile::new(interp_data).map_err(|_| Errno::ENOEXEC)?;
+                let interp_elf = xmas_elf::ElfFile::new(interp_data).map_err(|_| Errno::ENOEXEC)?;
                 let interp_head = interp_elf.header;
                 let interp_ph_count = interp_head.pt2.ph_count();
                 entry_point = interp_head.pt2.entry_point() as usize + DL_INTERP_OFFSET;
 
                 for i in 0..interp_ph_count {
                     let ph = interp_elf.program_header(i).map_err(|_| Errno::ENOEXEC)?;
-                    if ph.get_type().map_err(|_| Errno::ENOEXEC)?
-                        == xmas_elf::program::Type::Load
-                    {
+                    if ph.get_type().map_err(|_| Errno::ENOEXEC)? == xmas_elf::program::Type::Load {
                         if ph.file_size() > ph.mem_size() {
                             return Err(Errno::ENOEXEC);
                         }
