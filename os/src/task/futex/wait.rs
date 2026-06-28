@@ -314,7 +314,11 @@ pub fn check_futex_timeouts() {
     }
 }
 
-fn futex_deadline_ms(timeout_ptr: usize, absolute: bool) -> SysResult<Option<FutexDeadline>> {
+fn futex_deadline_ms(
+    timeout_ptr: usize,
+    absolute: bool,
+    realtime: bool,
+) -> SysResult<Option<FutexDeadline>> {
     if timeout_ptr == 0 {
         return Ok(None);
     }
@@ -327,7 +331,11 @@ fn futex_deadline_ms(timeout_ptr: usize, absolute: bool) -> SysResult<Option<Fut
     )?;
     let timeout_ms = timeout.checked_duration_ms().ok_or(Errno::EINVAL)?;
     if absolute {
-        Ok(Some(FutexDeadline::UserClock(timeout_ms)))
+        Ok(Some(if realtime {
+            FutexDeadline::UserClock(timeout_ms)
+        } else {
+            FutexDeadline::TimeoutClock(timeout_ms)
+        }))
     } else {
         Ok(Some(FutexDeadline::TimeoutClock(
             get_timeout_ms()
@@ -542,7 +550,7 @@ pub fn futex_wait(
     timeout_ptr: usize,
     private: bool,
 ) -> SysResult<usize> {
-    let deadline_ms = futex_deadline_ms(timeout_ptr, false)?;
+    let deadline_ms = futex_deadline_ms(timeout_ptr, false, false)?;
     futex_wait_timed_common(
         uaddr,
         expected_val,
@@ -587,9 +595,10 @@ pub fn futex_wait_bitset(
     timeout_ptr: usize,
     bitset: u32,
     absolute_timeout: bool,
+    realtime: bool,
     private: bool,
 ) -> SysResult<usize> {
-    let deadline_ms = futex_deadline_ms(timeout_ptr, absolute_timeout)?;
+    let deadline_ms = futex_deadline_ms(timeout_ptr, absolute_timeout, realtime)?;
     futex_wait_timed_common(uaddr, expected_val, bitset, deadline_ms, private)
 }
 

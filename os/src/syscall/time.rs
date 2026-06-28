@@ -15,6 +15,8 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use lazy_static::lazy_static;
 
+const CAP_SYS_TIME: usize = 25;
+
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
 pub struct TimeVal {
@@ -235,8 +237,27 @@ pub fn sys_settimeofday(tv: *const TimeVal, _tz: *const TimeZone) -> SysResult<u
         if (time_val.sec as isize) < 0 || time_val.usec >= 1_000_000 {
             return Err(Errno::EINVAL);
         }
+        let task = current_task().expect("no current task");
+        if !task.has_cap(CAP_SYS_TIME) {
+            return Err(Errno::EPERM);
+        }
+        let target_us = time_val
+            .sec
+            .checked_mul(1_000_000)
+            .and_then(|us| us.checked_add(time_val.usec))
+            .and_then(|us| isize::try_from(us).ok())
+            .ok_or(Errno::EINVAL)?;
+        *REALTIME_OFFSET_US.lock() = target_us.saturating_sub(get_time_us() as isize);
+        return Ok(0);
     }
-    Err(Errno::EPERM)
+    if !_tz.is_null()
+        && !current_task()
+            .expect("no current task")
+            .has_cap(CAP_SYS_TIME)
+    {
+        return Err(Errno::EPERM);
+    }
+    Ok(0)
 }
 
 pub fn sys_clock_settime(clock_id: usize, tp: *const TimeSpec) -> SysResult<usize> {
@@ -253,11 +274,12 @@ pub fn sys_clock_settime(clock_id: usize, tp: *const TimeSpec) -> SysResult<usiz
         return Err(Errno::EINVAL);
     }
     let task = current_task().expect("no current task");
-    if task.euid() != 0 {
+    if !task.has_cap(CAP_SYS_TIME) {
         return Err(Errno::EPERM);
     }
 
-    let target_us = time_spec.checked_duration_us().ok_or(Errno::EINVAL)? as isize;
+    let target_us = isize::try_from(time_spec.checked_duration_us().ok_or(Errno::EINVAL)?)
+        .map_err(|_| Errno::EINVAL)?;
     let now_us = get_time_us() as isize;
     *REALTIME_OFFSET_US.lock() = target_us.saturating_sub(now_us);
     Ok(0)

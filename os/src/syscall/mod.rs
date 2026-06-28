@@ -205,6 +205,7 @@ const SYSCALL_MEMFD_CREATE: usize = 279;
 const SYSCALL_BPF: usize = 280;
 const SYSCALL_EXECVEAT: usize = 281;
 const SYSCALL_USERFAULTFD: usize = 282;
+const SYSCALL_MEMBARRIER: usize = 283;
 const SYSCALL_STATX: usize = 291;
 const SYSCALL_IO_URING_SETUP: usize = 425;
 const SYSCALL_OPEN_TREE: usize = 428;
@@ -437,6 +438,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
             args[0] as *const CapUserHeader,
             args[1] as *const CapUserData,
         ),
+        SYSCALL_MEMBARRIER => sys_membarrier(args[0] as isize, args[1]),
         SYSCALL_PERSONALITY => sys_personality(args[0]),
         SYSCALL_EXIT => sys_exit(args[0] as i32),
         SYSCALL_EXIT_GROUP => sys_exit_group(args[0] as i32),

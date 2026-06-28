@@ -63,7 +63,15 @@ pub fn do_futex(
             }
             futex_cmp_requeue(uaddr, val as u32, uaddr2, val2 as u32, val3 as u32, private)
         }
-        FUTEX_WAIT_BITSET => futex_wait_bitset(uaddr, val as u32, val2, val3 as u32, true, private),
+        FUTEX_WAIT_BITSET => futex_wait_bitset(
+            uaddr,
+            val as u32,
+            val2,
+            val3 as u32,
+            true,
+            clock_realtime,
+            private,
+        ),
         FUTEX_WAKE_BITSET => futex_wake_bitset(uaddr, val as u32, val3 as u32, private),
         _ => {
             warn!(

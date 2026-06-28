@@ -25,6 +25,7 @@ use crate::timer::TimeSpec;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{Ordering, fence};
 
 #[cfg(target_arch = "loongarch64")]
 const LOONGARCH_PTHREAD_TRACE: bool = false;
@@ -668,6 +669,25 @@ pub fn sys_gettid() -> SysResult<usize> {
     Ok(current_task()
         .expect("[kernel] current task is None.")
         .tid())
+}
+
+pub fn sys_membarrier(cmd: isize, flags: usize) -> SysResult<usize> {
+    const MEMBARRIER_CMD_QUERY: isize = 0;
+    const MEMBARRIER_CMD_GLOBAL: isize = 1;
+    const MEMBARRIER_CMD_PRIVATE_EXPEDITED: isize = 1 << 3;
+
+    if flags != 0 {
+        return Err(Errno::EINVAL);
+    }
+    match cmd {
+        MEMBARRIER_CMD_QUERY => Ok(MEMBARRIER_CMD_GLOBAL as usize),
+        MEMBARRIER_CMD_GLOBAL => {
+            fence(Ordering::SeqCst);
+            Ok(0)
+        }
+        MEMBARRIER_CMD_PRIVATE_EXPEDITED => Err(Errno::EPERM),
+        _ => Err(Errno::EINVAL),
+    }
 }
 
 /// 系统调用 sys-setpgid
