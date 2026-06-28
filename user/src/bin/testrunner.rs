@@ -20,6 +20,9 @@ const GLIBC_BASIC_RUN_ALL: &str = "/glibc/basic/run-all.sh\0";
 const MUSL_BASIC_TEST_MKDIR: &str = "/musl/basic/test_mkdir\0";
 const GLIBC_BASIC_TEST_MKDIR: &str = "/glibc/basic/test_mkdir\0";
 const LIBCBENCH_SCRIPT: &str = "libcbench_testcode.sh\0";
+const TMP_PATH: &str = "/tmp\0";
+const DEV_SHM_PATH: &str = "/dev/shm\0";
+const TMPDIR_DEV_SHM_ENV: &str = "TMPDIR=/dev/shm\0";
 const RUN_STATIC_SCRIPT: &str = "run-static.sh\0";
 const RUN_DYNAMIC_SCRIPT: &str = "run-dynamic.sh\0";
 const BUSYBOX_CMD_FILE: &str = "busybox_cmd.txt\0";
@@ -228,11 +231,24 @@ fn _run_basic_glibc() {
 }
 
 fn _run_libcbench_musl() {
-    run_shell_script("/musl/\0", BUSYBOX_PATH, LIBCBENCH_SCRIPT);
+    prepare_libcbench_tmp();
+    run_libcbench_script("/musl/\0", BUSYBOX_PATH);
 }
 
 fn _run_libcbench_glibc() {
-    run_shell_script("/glibc/\0", GLIBC_BUSYBOX_PATH, LIBCBENCH_SCRIPT);
+    prepare_libcbench_tmp();
+    run_libcbench_script("/glibc/\0", GLIBC_BUSYBOX_PATH);
+}
+
+fn prepare_libcbench_tmp() {
+    let _ = unlink(TMP_PATH);
+    let _ = rmdir(TMP_PATH);
+    let _ = symlink(DEV_SHM_PATH, TMP_PATH);
+}
+
+fn run_libcbench_script(workdir: &str, shell_path: &str) {
+    let envp: &[*const u8] = &[TMPDIR_DEV_SHM_ENV.as_ptr(), core::ptr::null()];
+    run_shell_script_with_env(workdir, shell_path, LIBCBENCH_SCRIPT, envp);
 }
 
 fn _run_static_musl() {
@@ -1072,10 +1088,10 @@ fn _run_ltp_glibc() {
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("[testrunner] start");
-    _run_basic_musl();
-    _run_basic_glibc();
-    // _run_libcbench_musl();
-    // _run_libcbench_glibc();
+    // _run_basic_musl();
+    // _run_basic_glibc();
+    _run_libcbench_musl();
+    _run_libcbench_glibc();
     // _run_busybox_musl();
     // _run_busybox_glibc();
     // _run_libctest_musl();
@@ -1102,10 +1118,10 @@ fn main() -> i32 {
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("[testrunner] start");
-    _run_basic_musl();
-    _run_basic_glibc();
-    // _run_libcbench_musl();
-    // _run_libcbench_glibc();
+    // _run_basic_musl();
+    // _run_basic_glibc();
+    _run_libcbench_musl();
+    _run_libcbench_glibc();
     // _run_busybox_musl();
     // _run_busybox_glibc();
     // _run_libctest_musl();

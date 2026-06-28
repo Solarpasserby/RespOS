@@ -504,6 +504,12 @@ impl FileOp for File {
             .intersects(OpenFlags::O_WRONLY | OpenFlags::O_RDWR)
     }
 
+    fn is_tty(&self) -> bool {
+        self.get_stat()
+            .map(|stat| stat.ty == InodeType::CharDevice && stat.rdev >> 8 == 5)
+            .unwrap_or(false)
+    }
+
     fn fsync(&self) -> SysResult<usize> {
         let inner = self.inner.lock();
         if let Some(ref pc) = inner.page_cache {

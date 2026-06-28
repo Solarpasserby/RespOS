@@ -11,6 +11,7 @@ mod null;
 mod random;
 mod rtc;
 mod shm;
+mod tty;
 mod zero;
 
 const DEVFS_DEV: u64 = 0x400;
@@ -28,6 +29,7 @@ const URANDOM_INO: u64 = 10;
 const CPU_DMA_LATENCY_INO: u64 = 11;
 const VDA_INO: u64 = 12;
 const VDA2_INO: u64 = 13;
+pub(super) const TTY_INO: u64 = 14;
 const NULL_RDEV: u64 = (1 << 8) | 3;
 const ZERO_RDEV: u64 = (1 << 8) | 5;
 const RANDOM_RDEV: u64 = (1 << 8) | 8;
@@ -38,6 +40,7 @@ const LOOP_CONTROL_RDEV: u64 = (10 << 8) | 237;
 const LOOP0_RDEV: u64 = 7 << 8;
 const VDA_RDEV: u64 = 253 << 8;
 const VDA2_RDEV: u64 = (253 << 8) | 2;
+pub(super) const TTY_RDEV: u64 = (5 << 8) | 0;
 
 use super::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64, SuperBlockOp};
 use super::{KStat, Statfs64};
@@ -51,6 +54,7 @@ use null::NullInode;
 use random::RandomInode;
 use rtc::RtcInode;
 use shm::shm_dir;
+use tty::TtyInode;
 use zero::ZeroInode;
 
 use crate::fs::dentry_cache;
@@ -82,6 +86,7 @@ impl InodeOp for DevDirInode {
         match name {
             "null" => Ok(Arc::new(NullInode)),
             "zero" => Ok(Arc::new(ZeroInode)),
+            "tty" => Ok(Arc::new(TtyInode)),
             "random" => Ok(Arc::new(RandomInode::random())),
             "urandom" => Ok(Arc::new(RandomInode::urandom())),
             "cpu_dma_latency" => Ok(Arc::new(CpuDmaLatencyInode)),
@@ -101,25 +106,26 @@ impl InodeOp for DevDirInode {
             dir_entry(2, 2, b"..\0"),
             entry(NULL_INO, InodeType::CharDevice, 3, b"null\0"),
             entry(ZERO_INO, InodeType::CharDevice, 4, b"zero\0"),
-            entry(RANDOM_INO, InodeType::CharDevice, 5, b"random\0"),
-            entry(URANDOM_INO, InodeType::CharDevice, 6, b"urandom\0"),
+            entry(TTY_INO, InodeType::CharDevice, 5, b"tty\0"),
+            entry(RANDOM_INO, InodeType::CharDevice, 6, b"random\0"),
+            entry(URANDOM_INO, InodeType::CharDevice, 7, b"urandom\0"),
             entry(
                 CPU_DMA_LATENCY_INO,
                 InodeType::CharDevice,
-                7,
+                8,
                 b"cpu_dma_latency\0",
             ),
-            entry(SHM_DIR_INO, InodeType::Directory, 8, b"shm\0"),
-            entry(MISC_DIR_INO, InodeType::Directory, 9, b"misc\0"),
+            entry(SHM_DIR_INO, InodeType::Directory, 9, b"shm\0"),
+            entry(MISC_DIR_INO, InodeType::Directory, 10, b"misc\0"),
             entry(
                 LOOP_CONTROL_INO,
                 InodeType::CharDevice,
-                10,
+                11,
                 b"loop-control\0",
             ),
-            entry(LOOP0_INO, InodeType::BlockDevice, 11, b"loop0\0"),
-            entry(VDA_INO, InodeType::BlockDevice, 12, b"vda\0"),
-            entry(VDA2_INO, InodeType::BlockDevice, 13, b"vda2\0"),
+            entry(LOOP0_INO, InodeType::BlockDevice, 12, b"loop0\0"),
+            entry(VDA_INO, InodeType::BlockDevice, 13, b"vda\0"),
+            entry(VDA2_INO, InodeType::BlockDevice, 14, b"vda2\0"),
         ])
     }
 

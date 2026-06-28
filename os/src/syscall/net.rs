@@ -26,18 +26,23 @@ const SO_SNDBUF: usize = 7;
 const SO_RCVBUF: usize = 8;
 const SO_KEEPALIVE: usize = 9;
 const SO_OOBINLINE: usize = 10;
+const SO_LINGER: usize = 13;
+const SO_REUSEPORT: usize = 15;
 const SO_RCVTIMEO: usize = 20;
 const SO_SNDTIMEO: usize = 21;
 const SO_SNDBUFFORCE: usize = 32;
 const SO_RCVBUFFORCE: usize = 33;
 const IPPROTO_IP: usize = 0;
+const IPPROTO_IPV6: usize = 41;
 const IPPROTO_TCP: usize = 6;
 const IPPROTO_UDP: usize = 17;
 const IP_TTL: usize = 2;
 const IP_RECVERR: usize = 11;
+const IPV6_V6ONLY: usize = 26;
 const IPPROTO_SCTP: usize = 132;
 const TCP_NODELAY: usize = 1;
 const TCP_MAXSEG: usize = 2;
+const TCP_INFO: usize = 11;
 const TCP_DEFAULT_MAXSEG: i32 = 1448;
 const MSG_OOB: usize = 0x1;
 const MSG_ERRQUEUE: usize = 0x2000;
@@ -596,6 +601,26 @@ fn write_sockopt<T: Copy>(optval: usize, optlen: usize, value: &T) -> SysResult 
     Ok(())
 }
 
+fn write_zero_sockopt(optval: usize, optlen: usize, actual_len: usize) -> SysResult {
+    if optval == 0 || optlen == 0 {
+        return Err(Errno::EFAULT);
+    }
+    let mut user_len = 0u32;
+    copy_from_user(&mut user_len as *mut u32, optlen as *const u32, 1)?;
+    if user_len as usize > 4096 {
+        return Err(Errno::EINVAL);
+    }
+    let write_len = core::cmp::min(user_len as usize, actual_len);
+    if write_len > 0 {
+        check_user_writable(optval as *mut u8, write_len)?;
+        let zeros = vec![0u8; write_len];
+        copy_to_user(optval as *mut u8, zeros.as_ptr(), write_len)?;
+    }
+    let actual_len_u32 = actual_len as u32;
+    copy_to_user(optlen as *mut u32, &actual_len_u32 as *const u32, 1)?;
+    Ok(())
+}
+
 fn parse_socket(
     domain: usize,
     socket_type: usize,
@@ -960,10 +985,14 @@ pub fn sys_setsockopt(
             sock.set_reuse_addr(read_i32(optval, optlen)? != 0);
             Ok(0)
         }
-        (SOL_SOCKET, SO_OOBINLINE | SO_DONTROUTE | SO_BROADCAST | SO_KEEPALIVE) => {
+        (
+            SOL_SOCKET,
+            SO_OOBINLINE | SO_DONTROUTE | SO_BROADCAST | SO_KEEPALIVE | SO_REUSEPORT,
+        ) => {
             let _ = read_i32(optval, optlen)?;
             Ok(0)
         }
+        (SOL_SOCKET, SO_LINGER) => Ok(0),
         (SOL_SOCKET, SO_SNDBUF) => {
             let size = read_i32(optval, optlen)?;
             if size < 0 {
@@ -1014,6 +1043,10 @@ pub fn sys_setsockopt(
             let _ = read_i32(optval, optlen)?;
             Ok(0)
         }
+        (IPPROTO_IPV6, IPV6_V6ONLY) => {
+            let _ = read_i32(optval, optlen)?;
+            Ok(0)
+        }
         _ => Err(Errno::ENOPROTOOPT),
     })
 }
@@ -1029,9 +1062,13 @@ pub fn sys_getsockopt(
         match (level, optname) {
             (SOL_SOCKET, SO_TYPE) => write_sockopt(optval, optlen, &sock.socket_type_value()),
             (SOL_SOCKET, SO_ERROR) => write_sockopt(optval, optlen, &0i32),
-            (SOL_SOCKET, SO_OOBINLINE | SO_DONTROUTE | SO_BROADCAST | SO_KEEPALIVE) => {
+            (
+                SOL_SOCKET,
+                SO_OOBINLINE | SO_DONTROUTE | SO_BROADCAST | SO_KEEPALIVE | SO_REUSEPORT,
+            ) => {
                 write_sockopt(optval, optlen, &0i32)
             }
+            (SOL_SOCKET, SO_LINGER) => write_sockopt(optval, optlen, &0i32),
             (SOL_SOCKET, SO_SNDBUF) => {
                 let size = core::cmp::min(sock.send_buf_size(), i32::MAX as u64) as i32;
                 write_sockopt(optval, optlen, &size)
@@ -1051,9 +1088,13 @@ pub fn sys_getsockopt(
                 write_sockopt(optval, optlen, &value)
             }
             (IPPROTO_TCP, TCP_MAXSEG) => write_sockopt(optval, optlen, &TCP_DEFAULT_MAXSEG),
-            (SOL_SOCKET, _) | (IPPROTO_IP, _) | (IPPROTO_TCP, _) | (IPPROTO_SCTP, _) => {
-                Err(Errno::ENOPROTOOPT)
-            }
+            (IPPROTO_TCP, TCP_INFO) => write_zero_sockopt(optval, optlen, 104),
+            (IPPROTO_IPV6, IPV6_V6ONLY) => write_sockopt(optval, optlen, &0i32),
+            (SOL_SOCKET, _)
+            | (IPPROTO_IP, _)
+            | (IPPROTO_IPV6, _)
+            | (IPPROTO_TCP, _)
+            | (IPPROTO_SCTP, _) => Err(Errno::ENOPROTOOPT),
             _ => Err(Errno::EOPNOTSUPP),
         }?;
         Ok(0)

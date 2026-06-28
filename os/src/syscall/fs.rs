@@ -1653,6 +1653,10 @@ impl From<KStat> for Statx {
     fn from(kstat: KStat) -> Self {
         const STATX_BASIC_STATS: u32 = 0x0000_07ff;
         let stat: Stat = kstat.into();
+        let rdev_major = ((stat.st_rdev >> 8) & 0xfff) as u32;
+        let rdev_minor = (stat.st_rdev & 0xff) as u32;
+        let dev_major = ((stat.st_dev >> 8) & 0xfff) as u32;
+        let dev_minor = (stat.st_dev & 0xff) as u32;
         Self {
             stx_mask: STATX_BASIC_STATS,
             stx_blksize: stat.st_blksize,
@@ -1666,6 +1670,10 @@ impl From<KStat> for Statx {
             stx_atime: stat.st_atime.into(),
             stx_ctime: stat.st_ctime.into(),
             stx_mtime: stat.st_mtime.into(),
+            stx_rdev_major: rdev_major,
+            stx_rdev_minor: rdev_minor,
+            stx_dev_major: dev_major,
+            stx_dev_minor: dev_minor,
             ..Default::default()
         }
     }
@@ -2358,6 +2366,7 @@ struct RtcTime {
 /// 需要下沉到具体 FileOp/设备驱动中实现，不能长期放在 syscall 层硬编码。
 pub fn sys_ioctl(fd: usize, request: usize, arg: usize) -> SysResult<usize> {
     const TIOCGWINSZ: usize = 0x5413;
+    const TIOCNOTTY: usize = 0x5422;
     const FIONREAD: usize = 0x541b;
     const RTC_RD_TIME: usize = 0x8024_7009;
 
@@ -2375,6 +2384,7 @@ pub fn sys_ioctl(fd: usize, request: usize, arg: usize) -> SysResult<usize> {
             copy_to_user(arg as *mut WinSize, &winsize as *const WinSize, 1)?;
             Ok(0)
         }
+        TIOCNOTTY if fd_entry.file.is_tty() => Ok(0),
         FIONREAD => {
             if let Some(pipe) = fd_entry.file.as_any().downcast_ref::<Pipe>() {
                 let nbytes = pipe.available_bytes() as i32;
