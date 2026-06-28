@@ -9,12 +9,16 @@ extern crate alloc;
 use alloc::string::String;
 use user_lib::{
     O_CLOEXEC, O_CREATE, O_RDONLY, O_TRUNC, O_WRONLY, chdir, chmod, close, exec, execve, exit,
-    fork, lseek, mkdir, open, poweroff, read, symlink, time_get, unlink, waitpid, write,
+    fork, lseek, mkdir, open, poweroff, read, rmdir, symlink, time_get, unlink, waitpid, write,
 };
 
 const BUSYBOX_PATH: &str = "/musl/busybox\0";
 const GLIBC_BUSYBOX_PATH: &str = "/glibc/busybox\0";
 const BASIC_SCRIPT: &str = "basic_testcode.sh\0";
+const MUSL_BASIC_RUN_ALL: &str = "/musl/basic/run-all.sh\0";
+const GLIBC_BASIC_RUN_ALL: &str = "/glibc/basic/run-all.sh\0";
+const MUSL_BASIC_TEST_MKDIR: &str = "/musl/basic/test_mkdir\0";
+const GLIBC_BASIC_TEST_MKDIR: &str = "/glibc/basic/test_mkdir\0";
 const LIBCBENCH_SCRIPT: &str = "libcbench_testcode.sh\0";
 const RUN_STATIC_SCRIPT: &str = "run-static.sh\0";
 const RUN_DYNAMIC_SCRIPT: &str = "run-dynamic.sh\0";
@@ -200,11 +204,26 @@ fn prepare_bin_shell(shell_path: &str) {
     prepare_noop_mkfs_in("/glibc/ltp/testcases/bin");
 }
 
+fn prepare_basic_files(run_all_path: &str, test_mkdir_path: &str) {
+    let _ = rmdir(test_mkdir_path);
+
+    let ret = chmod(run_all_path, 0o755);
+    if ret < 0 {
+        println!(
+            "[testrunner] chmod {} failed: {}",
+            strip_nul(run_all_path),
+            ret
+        );
+    }
+}
+
 fn _run_basic_musl() {
+    prepare_basic_files(MUSL_BASIC_RUN_ALL, MUSL_BASIC_TEST_MKDIR);
     run_shell_script("/musl/\0", BUSYBOX_PATH, BASIC_SCRIPT);
 }
 
 fn _run_basic_glibc() {
+    prepare_basic_files(GLIBC_BASIC_RUN_ALL, GLIBC_BASIC_TEST_MKDIR);
     run_shell_script("/glibc/\0", GLIBC_BUSYBOX_PATH, BASIC_SCRIPT);
 }
 
@@ -1053,8 +1072,8 @@ fn _run_ltp_glibc() {
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("[testrunner] start");
-    // _run_basic_musl();
-    // _run_basic_glibc();
+    _run_basic_musl();
+    _run_basic_glibc();
     // _run_libcbench_musl();
     // _run_libcbench_glibc();
     // _run_busybox_musl();
@@ -1072,8 +1091,8 @@ fn main() -> i32 {
     // _run_lmbench_glibc();
     // _run_cyclictest_musl();
     // _run_cyclictest_glibc();
-    _run_ltp_musl();
-    _run_ltp_glibc();
+    // _run_ltp_musl();
+    // _run_ltp_glibc();
     println!("[testrunner] all selected tests finished, powering off");
     poweroff();
     0
@@ -1083,8 +1102,8 @@ fn main() -> i32 {
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("[testrunner] start");
-    // _run_basic_musl();
-    // _run_basic_glibc();
+    _run_basic_musl();
+    _run_basic_glibc();
     // _run_libcbench_musl();
     // _run_libcbench_glibc();
     // _run_busybox_musl();
@@ -1102,8 +1121,8 @@ fn main() -> i32 {
     // _run_lmbench_glibc();
     // _run_cyclictest_musl(); // 系统调用不可用
     // _run_cyclictest_glibc();
-    _run_ltp_musl();
-    _run_ltp_glibc();
+    // _run_ltp_musl();
+    // _run_ltp_glibc();
     println!("[testrunner] all selected tests finished, powering off");
     poweroff();
     0
