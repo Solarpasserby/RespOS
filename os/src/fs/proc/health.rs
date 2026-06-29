@@ -1,5 +1,5 @@
-use super::super::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
 use super::super::KStat;
+use super::super::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
 use super::dirs::{proc_dev, proc_health_ino};
 use crate::syscall::{Errno, SysResult};
 use alloc::sync::Arc;

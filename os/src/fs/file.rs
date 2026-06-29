@@ -2,11 +2,11 @@
 
 use super::vfs::{InodeOp, InodeType, LinuxDirent64};
 use crate::fs::ext4::Ext4Inode;
-use crate::fs::mount::{check_mount_file_growth, MS_NOATIME, MS_NODIRATIME, MS_STRICTATIME};
+use crate::fs::mount::{MS_NOATIME, MS_NODIRATIME, MS_STRICTATIME, check_mount_file_growth};
 use crate::fs::page_cache::PageCache;
 use crate::fs::{KStat, Path, PollEvents};
 use crate::syscall::{Errno, SysResult};
-use crate::timer::{get_time_ms, TimeSpec};
+use crate::timer::{TimeSpec, get_time_ms};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
@@ -29,6 +29,9 @@ struct FileInner {
     offset: usize,
     path: Arc<Path>,
     flags: OpenFlags,
+    /// Cached directory entries for the current directory-stream pass.
+    /// Rebuilt whenever getdents starts from offset 0.
+    dirent_cache: Option<Arc<Vec<LinuxDirent64>>>,
     /// 普通文件共享 inode 上的页缓存；tmpfile 使用独立页缓存。
     page_cache: Option<Arc<PageCache>>,
     write_back: bool,
@@ -138,6 +141,7 @@ impl File {
                 offset,
                 path,
                 flags,
+                dirent_cache: None,
                 page_cache,
                 write_back,
                 tmpfile_meta: None,
@@ -161,6 +165,7 @@ impl File {
                 offset: 0,
                 path,
                 flags,
+                dirent_cache: None,
                 page_cache,
                 write_back: false,
                 tmpfile_meta: Some(meta),
@@ -202,6 +207,30 @@ impl File {
     }
 
     pub fn readdir(&self) -> SysResult<Vec<LinuxDirent64>> {
+        Ok(self.readdir_uncached()?.as_ref().clone())
+    }
+
+    pub fn readdir_cached(&self, current_off: usize) -> SysResult<Arc<Vec<LinuxDirent64>>> {
+        {
+            let inner = self.inner.lock();
+            if current_off != 0 {
+                if let Some(ref entries) = inner.dirent_cache {
+                    return Ok(entries.clone());
+                }
+            }
+        }
+
+        let entries = self.readdir_uncached()?;
+        let mut inner = self.inner.lock();
+        inner.dirent_cache = Some(entries.clone());
+        Ok(entries)
+    }
+
+    pub fn clear_dirent_cache(&self) {
+        self.inner.lock().dirent_cache = None;
+    }
+
+    fn readdir_uncached(&self) -> SysResult<Arc<Vec<LinuxDirent64>>> {
         let path = self.path();
         let mut entries = self.inode.readdir(&path.abs_path())?;
         if let Some(atime) = self.touch_atime_if_needed(&path, InodeType::Directory)? {
@@ -226,7 +255,7 @@ impl File {
             }
         }
 
-        Ok(entries)
+        Ok(Arc::new(entries))
     }
 }
 
@@ -458,8 +487,10 @@ impl File {
         }
 
         if !tmpfile {
-            self.inode
-                .set_times(storage_path.as_str(), Some(now), None)?;
+            if self.inode.as_any().downcast_ref::<Ext4Inode>().is_some() {
+                self.inode
+                    .set_times(storage_path.as_str(), Some(now), None)?;
+            }
         }
         Ok(Some(now))
     }
@@ -554,7 +585,11 @@ impl FileOp for File {
 
     fn seek(&self, offset: isize) -> SysResult<usize> {
         let offset = usize::try_from(offset).map_err(|_| Errno::EINVAL)?;
-        self.inner.lock().offset = offset;
+        let mut inner = self.inner.lock();
+        inner.offset = offset;
+        if offset == 0 {
+            inner.dirent_cache = None;
+        }
         Ok(offset)
     }
 

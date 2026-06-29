@@ -116,7 +116,9 @@ impl EpollFd {
             }
 
             let mut ready = 0;
-            if interest.events & EPOLLIN != 0 && interest.file.readable() && interest.file.read_ready()
+            if interest.events & EPOLLIN != 0
+                && interest.file.readable()
+                && interest.file.read_ready()
             {
                 ready |= EPOLLIN;
             }
@@ -615,12 +617,7 @@ pub fn sys_epoll_create1(flags: usize) -> SysResult<usize> {
     task.alloc_fd(FdEntry::new(Arc::new(EpollFd::new(flags)), flags))
 }
 
-pub fn sys_epoll_ctl(
-    epfd: usize,
-    op: usize,
-    fd: usize,
-    event: *const u8,
-) -> SysResult<usize> {
+pub fn sys_epoll_ctl(epfd: usize, op: usize, fd: usize, event: *const u8) -> SysResult<usize> {
     const EPOLL_CTL_ADD: usize = 1;
     const EPOLL_CTL_DEL: usize = 2;
     const EPOLL_CTL_MOD: usize = 3;

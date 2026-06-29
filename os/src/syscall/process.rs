@@ -6,26 +6,26 @@ use crate::config::CLK_TCK;
 use crate::fs::mount::MS_NOEXEC;
 use crate::fs::vfs::InodeType;
 use crate::fs::{
-    filename_lookup, path_open, File, FileOp, OpenFlags, AT_EMPTY_PATH, AT_FDCWD,
-    AT_SYMLINK_NOFOLLOW,
+    AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW, File, FileOp, OpenFlags, filename_lookup,
+    path_open,
 };
 use crate::loader::get_app_data_by_name;
 use crate::mm::{
-    copy_cstr_from_user, copy_from_user, copy_to_user, extract_cstrings_from_user, MapPermission,
-    VPNRange, VirtAddr,
+    MapPermission, VPNRange, VirtAddr, copy_cstr_from_user, copy_from_user, copy_to_user,
+    extract_cstrings_from_user,
 };
 use crate::signal::{LinuxSigInfo, SigInfo};
 use crate::task::{
-    add_task, blocking_and_run_next, current_task, do_futex, exit_and_run_next,
-    exit_group_and_run_next, prepare_current_task_blocked, remove_task, requeue_ready_task,
-    switch_to_next_task, yield_current_task, CloneFlags, TaskControlBlock, WaitOption,
-    TASK_MANAGER,
+    CloneFlags, TASK_MANAGER, TaskControlBlock, WaitOption, add_task, blocking_and_run_next,
+    current_task, do_futex, exit_and_run_next, exit_group_and_run_next,
+    prepare_current_task_blocked, remove_task, requeue_ready_task, switch_to_next_task,
+    yield_current_task,
 };
 use crate::timer::TimeSpec;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{fence, Ordering};
+use core::sync::atomic::{Ordering, fence};
 
 #[cfg(target_arch = "loongarch64")]
 const LOONGARCH_PTHREAD_TRACE: bool = false;

@@ -985,10 +985,7 @@ pub fn sys_setsockopt(
             sock.set_reuse_addr(read_i32(optval, optlen)? != 0);
             Ok(0)
         }
-        (
-            SOL_SOCKET,
-            SO_OOBINLINE | SO_DONTROUTE | SO_BROADCAST | SO_KEEPALIVE | SO_REUSEPORT,
-        ) => {
+        (SOL_SOCKET, SO_OOBINLINE | SO_DONTROUTE | SO_BROADCAST | SO_KEEPALIVE | SO_REUSEPORT) => {
             let _ = read_i32(optval, optlen)?;
             Ok(0)
         }
@@ -1065,9 +1062,7 @@ pub fn sys_getsockopt(
             (
                 SOL_SOCKET,
                 SO_OOBINLINE | SO_DONTROUTE | SO_BROADCAST | SO_KEEPALIVE | SO_REUSEPORT,
-            ) => {
-                write_sockopt(optval, optlen, &0i32)
-            }
+            ) => write_sockopt(optval, optlen, &0i32),
             (SOL_SOCKET, SO_LINGER) => write_sockopt(optval, optlen, &0i32),
             (SOL_SOCKET, SO_SNDBUF) => {
                 let size = core::cmp::min(sock.send_buf_size(), i32::MAX as u64) as i32;

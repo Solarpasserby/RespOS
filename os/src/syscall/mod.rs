@@ -311,9 +311,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         SYSCALL_DUP3 => sys_dup3(args[0], args[1], args[2]),
         SYSCALL_EVENTFD2 => sys_eventfd2(args[0], args[1]),
         SYSCALL_EPOLL_CREATE1 => sys_epoll_create1(args[0]),
-        SYSCALL_EPOLL_CTL => {
-            sys_epoll_ctl(args[0], args[1], args[2], args[3] as *const u8)
-        }
+        SYSCALL_EPOLL_CTL => sys_epoll_ctl(args[0], args[1], args[2], args[3] as *const u8),
         SYSCALL_EPOLL_PWAIT => sys_epoll_pwait(
             args[0],
             args[1] as *mut u8,

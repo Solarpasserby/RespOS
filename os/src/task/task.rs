@@ -1645,6 +1645,14 @@ impl TaskControlBlock {
 ///
 /// 修改线程退出码，随后移除线程并释放线程占有的资源
 fn exit_thread(task: Arc<TaskControlBlock>, exit_code: i32) {
+    exit_thread_inner(task, exit_code, true);
+}
+
+fn exit_thread_detached(task: Arc<TaskControlBlock>, exit_code: i32) {
+    exit_thread_inner(task, exit_code, false);
+}
+
+fn exit_thread_inner(task: Arc<TaskControlBlock>, exit_code: i32, remove_from_thread_group: bool) {
     exit_robust_list(&task);
     if let Some(ctid) = task.clear_child_tid_addr() {
         let zero: i32 = 0;
@@ -1652,16 +1660,16 @@ fn exit_thread(task: Arc<TaskControlBlock>, exit_code: i32) {
         let _ = crate::task::futex::futex_wake_private(ctid, 1);
         let _ = crate::task::futex::futex_wake(ctid, 1, false);
     }
-    // 添加这一行：先从调度器就绪队列中移除
     remove_task(task.tid());
-    // 只有数据 线程组 和 TASK_MANAGER 持有对线程的引用，当引用归零时该线程占有的私有资源被释放
-    task.op_thread_group_mut(|tg| tg.remove(&task.tid()));
+    if remove_from_thread_group {
+        task.op_thread_group_mut(|tg| tg.remove(&task.tid()));
+    }
     task.set_exit_code(exit_code);
     task.set_exited();
     TASK_MANAGER.remove(task.tid());
 }
 
-fn exit_thread_by_signal(task: Arc<TaskControlBlock>, signal: i32) {
+fn exit_thread_by_signal_detached(task: Arc<TaskControlBlock>, signal: i32) {
     exit_robust_list(&task);
     if let Some(ctid) = task.clear_child_tid_addr() {
         let zero: i32 = 0;
@@ -1670,7 +1678,6 @@ fn exit_thread_by_signal(task: Arc<TaskControlBlock>, signal: i32) {
         let _ = crate::task::futex::futex_wake(ctid, 1, false);
     }
     remove_task(task.tid());
-    task.op_thread_group_mut(|tg| tg.remove(&task.tid()));
     task.set_exit_signal(signal);
     task.set_exited();
     TASK_MANAGER.remove(task.tid());
@@ -1830,11 +1837,11 @@ pub fn task_group_exit(task: Arc<TaskControlBlock>, exit_code: i32) {
     for thread in threads {
         remove_task(thread.tid());
         if thread.tid() != leader.tid() {
-            exit_thread(thread, exit_code);
+            exit_thread_detached(thread, exit_code);
         }
     }
 
-    leader.op_thread_group_mut(|tg| tg.remove(&leader.tid()));
+    leader.op_thread_group_mut(|tg| tg.clear());
 
     // 修改孩子进程的父亲——托孤。children 是进程级资源，只处理一次。
     reparent_children_to_init(&task);
@@ -1873,11 +1880,11 @@ pub fn task_group_exit_by_signal(task: Arc<TaskControlBlock>, signal: i32) {
     for thread in threads {
         remove_task(thread.tid());
         if thread.tid() != leader.tid() {
-            exit_thread_by_signal(thread, signal);
+            exit_thread_by_signal_detached(thread, signal);
         }
     }
 
-    leader.op_thread_group_mut(|tg| tg.remove(&leader.tid()));
+    leader.op_thread_group_mut(|tg| tg.clear());
 
     reparent_children_to_init(&task);
 
@@ -2067,6 +2074,10 @@ impl ThreadGroup {
     }
     pub fn remove(&mut self, tid: &usize) {
         self.member.remove(tid);
+    }
+
+    pub fn clear(&mut self) {
+        self.member.clear();
     }
 
     pub fn iter(&self) -> impl Iterator<Item = Arc<TaskControlBlock>> + '_ {

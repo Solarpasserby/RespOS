@@ -64,6 +64,7 @@ pub struct StackFrameAllocator {
     current: usize,
     end: usize,
     recycled: Vec<usize>,
+    recycled_bitmap: Vec<bool>,
 }
 
 impl FrameAllocator for StackFrameAllocator {
@@ -72,12 +73,14 @@ impl FrameAllocator for StackFrameAllocator {
             current: 0,
             end: 0,
             recycled: Vec::new(),
+            recycled_bitmap: Vec::new(),
         }
     }
 
     fn alloc(&mut self) -> Option<PhysPageNum> {
         // `recycle` 中的值是页表页数数字，而输出要求为页表页数结构体
         if let Some(ppn) = self.recycled.pop() {
+            self.recycled_bitmap[ppn] = false;
             Some(ppn.into())
         } else if self.current == self.end {
             None
@@ -89,9 +92,10 @@ impl FrameAllocator for StackFrameAllocator {
 
     fn dealloc(&mut self, ppn: PhysPageNum) {
         let ppn = ppn.0; // 使用了变量遮蔽，需要处理意外情况
-        if ppn >= self.current || self.recycled.iter().find(|&v| *v == ppn).is_some() {
+        if ppn >= self.current || self.recycled_bitmap.get(ppn).copied().unwrap_or(false) {
             panic!("Failed to release frame ppn={:#?}", ppn);
         }
+        self.recycled_bitmap[ppn] = true;
         self.recycled.push(ppn);
     }
 }
@@ -100,6 +104,7 @@ impl StackFrameAllocator {
     fn init(&mut self, l: PhysPageNum, r: PhysPageNum) {
         self.current = l.0;
         self.end = r.0;
+        self.recycled_bitmap = alloc::vec![false; r.0];
     }
 
     pub fn free_frames(&self) -> usize {

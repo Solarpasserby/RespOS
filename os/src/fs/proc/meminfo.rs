@@ -1,7 +1,7 @@
 // os/src/fs/proc/meminfo.rs
 
-use super::super::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
 use super::super::KStat;
+use super::super::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
 use super::dirs::{proc_dev, proc_meminfo_ino};
 use crate::syscall::{Errno, SysResult};
 use alloc::string::String;

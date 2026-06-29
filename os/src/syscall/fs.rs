@@ -2895,8 +2895,9 @@ pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> SysResult<usize
     let current_off = file.get_offset();
     let mut written = 0;
     let mut next_off = current_off;
-    let dirents = file.readdir()?;
-    for dirent in dirents {
+    let dirents = file.readdir_cached(current_off)?;
+    let mut record_buf = [0u8; 280];
+    for dirent in dirents.iter() {
         let dirent_off = usize::try_from(dirent.d_off).map_err(|_| Errno::EINVAL)?;
         if dirent_off <= current_off {
             continue;
@@ -2912,10 +2913,13 @@ pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> SysResult<usize
             }
             break;
         }
-        let mut record = alloc::vec![0u8; dirent_size];
-        dirent.copy_to_buffer(&mut record);
+        if dirent_size > record_buf.len() {
+            return Err(Errno::EINVAL);
+        }
+        record_buf[..dirent_size].fill(0);
+        dirent.copy_to_buffer(&mut record_buf[..dirent_size]);
         let dst = unsafe { dirp.add(written) };
-        copy_to_user(dst, record.as_ptr(), dirent_size)?;
+        copy_to_user(dst, record_buf.as_ptr(), dirent_size)?;
         written += dirent_size;
         next_off = dirent_off;
     }
@@ -2923,6 +2927,8 @@ pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> SysResult<usize
     if written != 0 {
         let next_off = isize::try_from(next_off).map_err(|_| Errno::EINVAL)?;
         file.seek(next_off)?;
+    } else {
+        file.clear_dirent_cache();
     }
 
     Ok(written)

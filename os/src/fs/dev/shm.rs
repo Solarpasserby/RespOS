@@ -1,5 +1,5 @@
-use super::super::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
 use super::super::KStat;
+use super::super::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
 use super::{DEVFS_DEV, SHM_DIR_INO};
 use crate::syscall::{Errno, SysResult};
 use alloc::collections::BTreeMap;
