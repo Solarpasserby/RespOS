@@ -1,5 +1,5 @@
-use super::super::KStat;
 use super::super::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
+use super::super::KStat;
 use super::{DEVFS_DEV, SHM_DIR_INO};
 use crate::syscall::{Errno, SysResult};
 use alloc::collections::BTreeMap;
@@ -194,6 +194,12 @@ impl InodeOp for ShmFileInode {
         let end = off.checked_add(buf.len()).ok_or(Errno::EINVAL)?;
         let mut data = self.data.lock();
         if data.len() < end {
+            let capacity = data.capacity();
+            if capacity < end {
+                let target = end.max(capacity.saturating_mul(2)).max(4096);
+                data.try_reserve(target - capacity)
+                    .map_err(|_| Errno::ENOMEM)?;
+            }
             data.resize(end, 0);
         }
         data[off..end].copy_from_slice(buf);

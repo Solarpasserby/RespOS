@@ -8,6 +8,7 @@ extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec;
+use alloc::vec::Vec;
 use user_lib::{
     O_CLOEXEC, O_CREATE, O_DIRECTORY, O_RDONLY, O_TRUNC, O_WRONLY, SIGKILL, chdir, chmod, close,
     exec, execve, exit, fork, getdents64, kill, lseek, mkdir, open, poweroff, read, rmdir, symlink,
@@ -287,7 +288,61 @@ fn read_file(path: &str, buf: &mut [u8]) -> isize {
     n
 }
 
+fn has_shell_syntax(line: &str) -> bool {
+    line.as_bytes()
+        .iter()
+        .any(|ch| matches!(*ch, b'|' | b'<' | b'>' | b';' | b'&' | b'$' | b'`' | b'\\'))
+}
+
+fn parse_simple_busybox_args(line: &str) -> Option<Vec<String>> {
+    if has_shell_syntax(line) {
+        return None;
+    }
+
+    let mut args = Vec::new();
+    for raw in line.split_ascii_whitespace() {
+        let token = raw.trim_matches('"').trim_matches('\'');
+        if token.is_empty() || token.contains('"') || token.contains('\'') {
+            return None;
+        }
+        let mut arg = String::from(token);
+        arg.push('\0');
+        args.push(arg);
+    }
+
+    if args.is_empty() { None } else { Some(args) }
+}
+
+fn run_busybox_direct_command(busybox_path: &str, line: &str) -> Option<i32> {
+    let args = parse_simple_busybox_args(line)?;
+    let pid = fork();
+    if pid == 0 {
+        let mut argv = Vec::new();
+        argv.push("busybox\0".as_ptr());
+        for arg in args.iter() {
+            argv.push(arg.as_ptr());
+        }
+        argv.push(core::ptr::null());
+        let ret = exec(busybox_path, argv.as_slice());
+        println!("[testrunner] exec busybox command failed: {}", ret);
+        exit(-1);
+    }
+
+    if pid < 0 {
+        return Some(-1);
+    }
+    let mut ec = 0;
+    if waitpid(pid as usize, &mut ec) < 0 {
+        return Some(-1);
+    }
+    Some(ec)
+}
+
 fn run_busybox_command(shell_path: &str, line: &str) -> i32 {
+    if let Some(ec) = run_busybox_direct_command(shell_path, line) {
+        return ec;
+    }
+
     let mut command = String::from("./busybox ");
     command.push_str(line);
     command.push('\0');
