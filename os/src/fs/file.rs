@@ -2,11 +2,11 @@
 
 use super::vfs::{InodeOp, InodeType, LinuxDirent64};
 use crate::fs::ext4::Ext4Inode;
-use crate::fs::mount::{MS_NOATIME, MS_NODIRATIME, check_mount_file_growth};
+use crate::fs::mount::{check_mount_file_growth, MS_NOATIME, MS_NODIRATIME, MS_STRICTATIME};
 use crate::fs::page_cache::PageCache;
 use crate::fs::{KStat, Path, PollEvents};
 use crate::syscall::{Errno, SysResult};
-use crate::timer::{TimeSpec, get_time_ms};
+use crate::timer::{get_time_ms, TimeSpec};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
@@ -280,8 +280,38 @@ impl File {
         Ok(())
     }
 
+    fn flush_page_cache_if_needed(
+        &self,
+        pc: &Arc<PageCache>,
+        path: &str,
+        force: bool,
+    ) -> SysResult<bool> {
+        if force || pc.needs_writeback() {
+            match pc.sync(&self.inode, path) {
+                Ok(_) | Err(Errno::ENOENT) => Ok(true),
+                Err(err) => Err(err),
+            }
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn update_cached_write_times(inner: &mut FileInner, now: TimeSpec) {
+        inner.mtime_override = Some(now);
+        inner.ctime_override = Some(now);
+    }
+
+    fn sync_cached_write_times(&self, inner: &FileInner, path: &str) -> SysResult {
+        if inner.tmpfile_meta.is_none() {
+            if let Some(mtime) = inner.mtime_override {
+                self.inode.set_times(path, None, Some(mtime))?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn truncate(&self, size: usize) -> SysResult<usize> {
-        let inner = self.inner.lock();
+        let mut inner = self.inner.lock();
         let visible_path = inner.path.abs_path();
         let path = self.storage_path(&visible_path);
         let old_size = if let Some(ref pc) = inner.page_cache {
@@ -290,19 +320,25 @@ impl File {
             self.inode.stat(&path)?.size
         };
         check_mount_file_growth(&inner.path, old_size, size)?;
-        match self.inode.truncate(&path, size) {
-            Ok(_) => {}
-            Err(Errno::ENOENT) if inner.page_cache.is_some() => {}
-            Err(err) => return Err(err),
-        }
-        if let Some(ref pc) = inner.page_cache {
-            pc.resize(size);
-            if inner.write_back {
-                match pc.sync(&self.inode, &path) {
-                    Ok(_) | Err(Errno::ENOENT) => {}
+        if let Some(pc) = inner.page_cache.clone() {
+            if size < old_size {
+                match self.inode.truncate(&path, size) {
+                    Ok(_) => {}
+                    Err(Errno::ENOENT) => {}
                     Err(err) => return Err(err),
                 }
             }
+            pc.resize(size);
+            if inner.write_back {
+                if size < old_size {
+                    self.flush_page_cache_if_needed(&pc, &path, true)?;
+                }
+                let now = Self::now_timespec();
+                Self::update_cached_write_times(&mut inner, now);
+                self.sync_cached_write_times(&inner, &path)?;
+            }
+        } else {
+            self.inode.truncate(&path, size)?;
         }
         if inner.offset > size {
             drop(inner);
@@ -331,7 +367,7 @@ impl File {
     }
 
     pub fn write_at_offset(&self, offset: usize, buf: &[u8]) -> SysResult<usize> {
-        let inner = self.inner.lock();
+        let mut inner = self.inner.lock();
         let visible_path = inner.path.abs_path();
         let path = self.storage_path(&visible_path);
         let old_size = if let Some(ref pc) = inner.page_cache {
@@ -343,7 +379,7 @@ impl File {
             let requested_end = offset.checked_add(buf.len()).ok_or(Errno::EINVAL)?;
             check_mount_file_growth(&inner.path, old_size, requested_end)?;
         }
-        if let Some(ref pc) = inner.page_cache {
+        if let Some(pc) = inner.page_cache.clone() {
             let lower = inner.write_back.then_some((&self.inode, path.as_str()));
             let n = pc.write_at(offset, buf, lower)?;
             let end = offset.checked_add(n).ok_or(Errno::EINVAL)?;
@@ -351,11 +387,14 @@ impl File {
                 pc.resize(end);
             }
             if inner.write_back && n != 0 {
-                let written = self.inode.write_at(&path, offset, &buf[..n])?;
-                if written != n {
-                    return Err(Errno::EIO);
+                let force = inner
+                    .flags
+                    .intersects(OpenFlags::O_DSYNC | OpenFlags::O_SYNC);
+                let now = Self::now_timespec();
+                Self::update_cached_write_times(&mut inner, now);
+                if self.flush_page_cache_if_needed(&pc, &path, force)? {
+                    self.sync_cached_write_times(&inner, &path)?;
                 }
-                pc.mark_clean_range(offset, n);
             }
             Ok(n)
         } else {
@@ -374,16 +413,54 @@ impl File {
             return Ok(None);
         }
 
-        let mut now = Self::now_timespec();
+        let (flags, tmpfile, cached_atime, cached_mtime, cached_ctime) = {
+            let inner = self.inner.lock();
+            (
+                inner.flags,
+                inner.tmpfile_meta.is_some(),
+                inner.atime_override,
+                inner.mtime_override,
+                inner.ctime_override,
+            )
+        };
+        if flags.contains(OpenFlags::O_NOATIME) {
+            return Ok(None);
+        }
+
+        let now = Self::now_timespec();
         let visible_path = path.abs_path();
         let storage_path = self.storage_path(&visible_path);
-        if let Ok(stat) = self.inode.stat(storage_path.as_str()) {
-            if now.sec <= stat.atime.sec {
-                now.sec = stat.atime.sec + 1;
-                now.nsec = 0;
-            }
+        let (atime, mtime, ctime) = if tmpfile {
+            (
+                cached_atime.unwrap_or(now),
+                cached_mtime.unwrap_or(now),
+                cached_ctime.unwrap_or(now),
+            )
+        } else {
+            let stat = self.inode.stat(storage_path.as_str())?;
+            (
+                cached_atime.unwrap_or(stat.atime),
+                cached_mtime.unwrap_or(stat.mtime),
+                cached_ctime.unwrap_or(stat.ctime),
+            )
+        };
+
+        let timestamp_le = |left: TimeSpec, right: TimeSpec| {
+            left.sec < right.sec || (left.sec == right.sec && left.nsec <= right.nsec)
+        };
+        let stale = now.sec.saturating_sub(atime.sec) >= 24 * 60 * 60;
+        if !path.mnt.has_flag(MS_STRICTATIME)
+            && !timestamp_le(atime, mtime)
+            && !timestamp_le(atime, ctime)
+            && !stale
+        {
+            return Ok(None);
         }
-        let _ = self.inode.set_times(storage_path.as_str(), Some(now), None);
+
+        if !tmpfile {
+            self.inode
+                .set_times(storage_path.as_str(), Some(now), None)?;
+        }
         Ok(Some(now))
     }
 }
@@ -450,7 +527,7 @@ impl FileOp for File {
             let requested_end = offset.checked_add(buf.len()).ok_or(Errno::EINVAL)?;
             check_mount_file_growth(&inner.path, old_size, requested_end)?;
         }
-        let n = if let Some(ref pc) = inner.page_cache {
+        let n = if let Some(pc) = inner.page_cache.clone() {
             let lower = inner.write_back.then_some((&self.inode, path.as_str()));
             let n = pc.write_at(offset, buf, lower)?;
             let end = offset.checked_add(n).ok_or(Errno::EINVAL)?;
@@ -458,24 +535,19 @@ impl FileOp for File {
                 pc.resize(end);
             }
             if inner.write_back && n != 0 {
-                let written = self.inode.write_at(&path, offset, &buf[..n])?;
-                if written != n {
-                    return Err(Errno::EIO);
+                let force = inner
+                    .flags
+                    .intersects(OpenFlags::O_DSYNC | OpenFlags::O_SYNC);
+                let now = Self::now_timespec();
+                Self::update_cached_write_times(&mut inner, now);
+                if self.flush_page_cache_if_needed(&pc, &path, force)? {
+                    self.sync_cached_write_times(&inner, &path)?;
                 }
-                pc.mark_clean_range(offset, n);
             }
             n
         } else {
             self.inode.write_at(&path, offset, buf)?
         };
-        if n != 0 && inner.write_back {
-            let ms = get_time_ms();
-            let now = TimeSpec {
-                sec: (ms / 1000) as isize,
-                nsec: ((ms % 1000) * 1_000_000) as isize,
-            };
-            let _ = self.inode.set_times(&path, None, Some(now));
-        }
         inner.offset += n;
         Ok(n)
     }
@@ -567,10 +639,8 @@ impl FileOp for File {
             if inner.write_back {
                 let visible_path = inner.path.abs_path();
                 let path = self.storage_path(&visible_path);
-                match pc.sync(&self.inode, &path) {
-                    Ok(_) | Err(Errno::ENOENT) => {}
-                    Err(err) => return Err(err),
-                }
+                self.flush_page_cache_if_needed(pc, &path, true)?;
+                self.sync_cached_write_times(&inner, &path)?;
             }
         }
         Ok(0)
@@ -590,11 +660,13 @@ bitflags::bitflags! {
         const O_EXCL   = 1 << 7;
         const O_TRUNC  = 1 << 9;
         const O_NONBLOCK = 1 << 11;
+        const O_DSYNC = 1 << 12;
         const O_DIRECT = 1 << 14;
         const O_APPEND = 1 << 10;
         const O_DIRECTORY = 1 << 16;
         const O_NOFOLLOW = 1 << 17;
         const O_CLOEXEC = 1 << 19;
+        const O_SYNC = (1 << 20) | Self::O_DSYNC.bits();
         const O_NOATIME = 1 << 18;
         const O_PATH = 0o10000000;
         const O_TMPFILE = 0x410000;

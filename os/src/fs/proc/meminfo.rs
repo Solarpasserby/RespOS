@@ -1,7 +1,7 @@
 // os/src/fs/proc/meminfo.rs
 
-use super::super::KStat;
 use super::super::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
+use super::super::KStat;
 use super::dirs::{proc_dev, proc_meminfo_ino};
 use crate::syscall::{Errno, SysResult};
 use alloc::string::String;
@@ -72,9 +72,11 @@ fn generate_meminfo() -> String {
     let free_frames = crate::mm::free_frame_count();
     let page_size = crate::config::PAGE_SIZE;
     let cached_pages = crate::fs::page_cache_page_count();
+    let dirty_pages = crate::fs::page_cache_dirty_page_count();
     let mem_total = crate::config::MEMORY_END - crate::config::MEMORY_START;
     let mem_free = free_frames * page_size;
     let mem_cached = cached_pages * page_size;
+    let mem_dirty = dirty_pages * page_size;
     let heap_used = crate::mm::heap_allocated();
 
     let mut result = String::new();
@@ -82,6 +84,7 @@ fn generate_meminfo() -> String {
     let _ = writeln!(result, "MemFree:        {:8} kB", mem_free / 1024);
     let _ = writeln!(result, "MemAvailable:   {:8} kB", mem_free / 1024);
     let _ = writeln!(result, "Cached:         {:8} kB", mem_cached / 1024);
+    let _ = writeln!(result, "Dirty:          {:8} kB", mem_dirty / 1024);
     let _ = writeln!(result, "KernelHeap:     {:8} kB", heap_used / 1024);
     result
 }

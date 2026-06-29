@@ -1,5 +1,5 @@
-use super::super::KStat;
 use super::super::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
+use super::super::KStat;
 use super::dirs::{proc_dev, proc_health_ino};
 use crate::syscall::{Errno, SysResult};
 use alloc::sync::Arc;
@@ -101,19 +101,15 @@ impl InodeOp for HealthInode {
 fn generate_health() -> Option<HealthBuffer> {
     let (ready, blocked, deferred) = crate::task::scheduler_health_counts()?;
     let free_kb = crate::mm::try_free_frame_count()? * crate::config::PAGE_SIZE / 1024;
+    let cached_kb = crate::fs::page_cache_page_count() * crate::config::PAGE_SIZE / 1024;
+    let dirty_kb = crate::fs::page_cache_dirty_page_count() * crate::config::PAGE_SIZE / 1024;
     let heap_kb = crate::mm::try_heap_allocated()? / 1024;
     let tasks = crate::task::TASK_MANAGER.try_len()?;
     let mut result = HealthBuffer::new();
     writeln!(
         result,
-        "free_kb={} cached_kb={} heap_kb={} tasks={} ready={} blocked={} deferred={}",
-        free_kb,
-        crate::fs::page_cache_page_count() * crate::config::PAGE_SIZE / 1024,
-        heap_kb,
-        tasks,
-        ready,
-        blocked,
-        deferred,
+        "free_kb={} cached_kb={} dirty_kb={} heap_kb={} tasks={} ready={} blocked={} deferred={}",
+        free_kb, cached_kb, dirty_kb, heap_kb, tasks, ready, blocked, deferred,
     )
     .ok()?;
     Some(result)
