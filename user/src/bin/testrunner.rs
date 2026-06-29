@@ -7,9 +7,11 @@ extern crate user_lib;
 extern crate alloc;
 
 use alloc::string::String;
+use alloc::vec;
 use user_lib::{
-    O_CLOEXEC, O_CREATE, O_RDONLY, O_TRUNC, O_WRONLY, chdir, chmod, close, exec, execve, exit,
-    fork, lseek, mkdir, open, poweroff, read, rmdir, symlink, time_get, unlink, waitpid, write,
+    O_CLOEXEC, O_CREATE, O_DIRECTORY, O_RDONLY, O_TRUNC, O_WRONLY, SIGKILL, chdir, chmod, close,
+    exec, execve, exit, fork, getdents64, kill, lseek, mkdir, open, poweroff, read, rmdir, symlink,
+    time_get, unlink, waitpid, write, yield_,
 };
 
 const BUSYBOX_PATH: &str = "/musl/busybox\0";
@@ -42,6 +44,10 @@ const LA_GLIBC_LOADER: &str = "/lib64/ld-linux-loongarch-lp64d.so.1\0";
 
 fn strip_nul(s: &str) -> &str {
     &s[..s.len() - 1]
+}
+
+fn read_u16(buf: &[u8], offset: usize) -> u16 {
+    u16::from_le_bytes([buf[offset], buf[offset + 1]])
 }
 
 fn run_shell_script(workdir: &str, shell_path: &str, script_path: &str) {
@@ -712,6 +718,128 @@ include!(concat!(env!("OUT_DIR"), "/ltp_cases.rs"));
 
 const MUSL_LTP_BIN_DIR: &str = "/musl/ltp/testcases/bin/";
 const GLIBC_LTP_BIN_DIR: &str = "/glibc/ltp/testcases/bin/";
+const DIRENT64_HEADER_SIZE: usize = 19;
+const PROC_SCAN_BUF_SIZE: usize = 4096;
+const CLEANUP_PROCESS_NAMES: &[&str] = &["iperf3", "netserver"];
+
+fn parse_pid_name(name: &[u8]) -> Option<usize> {
+    if name.is_empty() {
+        return None;
+    }
+    let mut pid = 0usize;
+    for &ch in name {
+        if !ch.is_ascii_digit() {
+            return None;
+        }
+        pid = pid.checked_mul(10)?.checked_add((ch - b'0') as usize)?;
+    }
+    Some(pid)
+}
+
+fn proc_stat_comm(pid: usize) -> Option<String> {
+    let mut path = String::from("/proc/");
+    push_usize_decimal(&mut path, pid);
+    path.push_str("/stat\0");
+
+    let fd = open(path.as_str(), O_RDONLY | O_CLOEXEC, 0);
+    if fd < 0 {
+        return None;
+    }
+    let mut buf = [0u8; 256];
+    let len = read(fd as usize, &mut buf);
+    let _ = close(fd as usize);
+    if len <= 0 {
+        return None;
+    }
+    let text = core::str::from_utf8(&buf[..len as usize]).ok()?;
+    let start = text.find('(')?;
+    let end = text[start + 1..].find(')')? + start + 1;
+    Some(String::from(&text[start + 1..end]))
+}
+
+fn push_usize_decimal(dst: &mut String, mut value: usize) {
+    let mut digits = [0u8; 20];
+    let mut len = 0usize;
+    if value == 0 {
+        dst.push('0');
+        return;
+    }
+    while value > 0 {
+        digits[len] = b'0' + (value % 10) as u8;
+        value /= 10;
+        len += 1;
+    }
+    while len > 0 {
+        len -= 1;
+        dst.push(digits[len] as char);
+    }
+}
+
+fn cleanup_ltp_hostile_processes() {
+    let fd = open("/proc\0", O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0);
+    if fd < 0 {
+        println!("[testrunner] cannot scan /proc before LTP: {}", fd);
+        return;
+    }
+
+    let mut pids = vec![];
+    let mut buf = [0u8; PROC_SCAN_BUF_SIZE];
+    loop {
+        let size = getdents64(fd as usize, &mut buf);
+        if size < 0 {
+            println!("[testrunner] getdents64 /proc failed: {}", size);
+            break;
+        }
+        if size == 0 {
+            break;
+        }
+
+        let size = size as usize;
+        let mut offset = 0usize;
+        while offset + DIRENT64_HEADER_SIZE <= size {
+            let reclen = read_u16(&buf, offset + 16) as usize;
+            if reclen < DIRENT64_HEADER_SIZE || offset + reclen > size {
+                println!("[testrunner] invalid /proc dirent");
+                break;
+            }
+
+            let name_start = offset + DIRENT64_HEADER_SIZE;
+            let name_end = buf[name_start..offset + reclen]
+                .iter()
+                .position(|&ch| ch == 0)
+                .map(|pos| name_start + pos)
+                .unwrap_or(offset + reclen);
+            if let Some(pid) = parse_pid_name(&buf[name_start..name_end]) {
+                pids.push(pid);
+            }
+            offset += reclen;
+        }
+    }
+    let _ = close(fd as usize);
+
+    let mut killed = 0usize;
+    for pid in pids {
+        let Some(comm) = proc_stat_comm(pid) else {
+            continue;
+        };
+        if CLEANUP_PROCESS_NAMES.contains(&comm.as_str()) {
+            let ret = kill(pid, SIGKILL);
+            println!(
+                "[testrunner] cleanup before LTP: kill {} pid={} ret={}",
+                comm, pid, ret
+            );
+            if ret == 0 {
+                killed += 1;
+            }
+        }
+    }
+
+    if killed > 0 {
+        for _ in 0..16 {
+            yield_();
+        }
+    }
+}
 
 fn ltp_script_exit_code(status: i32) -> i32 {
     let signal = status & 0x7f;
@@ -1057,6 +1185,7 @@ fn run_ltp_selected(
 }
 
 fn _run_ltp_musl() {
+    cleanup_ltp_hostile_processes();
     prepare_musl_loader_links();
     prepare_ltp_common_files();
     prepare_bin_shell(BUSYBOX_PATH);
@@ -1071,6 +1200,7 @@ fn _run_ltp_musl() {
 }
 
 fn _run_ltp_glibc() {
+    cleanup_ltp_hostile_processes();
     prepare_glibc_loader_links();
     prepare_ltp_common_files();
     prepare_bin_shell(GLIBC_BUSYBOX_PATH);
