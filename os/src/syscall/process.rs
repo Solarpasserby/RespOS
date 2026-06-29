@@ -6,26 +6,26 @@ use crate::config::CLK_TCK;
 use crate::fs::mount::MS_NOEXEC;
 use crate::fs::vfs::InodeType;
 use crate::fs::{
-    AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW, File, FileOp, OpenFlags, filename_lookup,
-    path_open,
+    filename_lookup, path_open, File, FileOp, OpenFlags, AT_EMPTY_PATH, AT_FDCWD,
+    AT_SYMLINK_NOFOLLOW,
 };
 use crate::loader::get_app_data_by_name;
 use crate::mm::{
-    MapPermission, VPNRange, VirtAddr, copy_cstr_from_user, copy_from_user, copy_to_user,
-    extract_cstrings_from_user,
+    copy_cstr_from_user, copy_from_user, copy_to_user, extract_cstrings_from_user, MapPermission,
+    VPNRange, VirtAddr,
 };
 use crate::signal::{LinuxSigInfo, SigInfo};
 use crate::task::{
-    CloneFlags, TASK_MANAGER, TaskControlBlock, WaitOption, add_task, blocking_and_run_next,
-    current_task, do_futex, exit_and_run_next, exit_group_and_run_next,
-    prepare_current_task_blocked, remove_task, requeue_ready_task, switch_to_next_task,
-    yield_current_task,
+    add_task, blocking_and_run_next, current_task, do_futex, exit_and_run_next,
+    exit_group_and_run_next, prepare_current_task_blocked, remove_task, requeue_ready_task,
+    switch_to_next_task, yield_current_task, CloneFlags, TaskControlBlock, WaitOption,
+    TASK_MANAGER,
 };
 use crate::timer::TimeSpec;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{Ordering, fence};
+use core::sync::atomic::{fence, Ordering};
 
 #[cfg(target_arch = "loongarch64")]
 const LOONGARCH_PTHREAD_TRACE: bool = false;
@@ -36,6 +36,18 @@ fn is_elf(data: &[u8]) -> bool {
 
 fn is_noop_exec_marker(data: &[u8]) -> bool {
     data == b"RESPOS_NOOP_EXEC\n"
+}
+
+fn read_exec_head(file: &File) -> SysResult<Vec<u8>> {
+    const EXEC_HEAD_LEN: usize = 256;
+    let file_size = file.get_stat()?.size;
+    let mut head = Vec::new();
+    let len = file_size.min(EXEC_HEAD_LEN);
+    head.try_reserve_exact(len).map_err(|_| Errno::ENOMEM)?;
+    head.resize(len, 0);
+    let n = file.read_at_offset(0, &mut head)?;
+    head.truncate(n);
+    Ok(head)
 }
 
 fn is_ltp_noop_mkfs(path: &str) -> bool {
@@ -1063,18 +1075,22 @@ fn exec_fs_file(
     {
         exit_and_run_next(0);
     }
-    let all_data = file.read_all()?;
-    if is_noop_exec_marker(all_data.as_slice()) {
+    let head = read_exec_head(&file)?;
+    if is_noop_exec_marker(head.as_slice()) {
         exit_and_run_next(0);
     }
 
-    if !is_elf(all_data.as_slice()) {
+    if !is_elf(head.as_slice()) {
         if let Some((shell_path, shell_args)) =
-            shebang_args(exe_path.as_str(), all_data.as_slice(), args_vec.as_slice())
+            shebang_args(exe_path.as_str(), head.as_slice(), args_vec.as_slice())
         {
             let shell_file = path_open(AT_FDCWD, shell_path.as_str(), 0, 0)?;
             check_exec_permission(&task, &shell_file)?;
             let shell_exe_path = shell_file.path().global_abs_path();
+            let shell_head = read_exec_head(&shell_file)?;
+            if !is_elf(shell_head.as_slice()) {
+                return Err(Errno::ENOEXEC);
+            }
             let shell_data = shell_file.read_all()?;
             task.execve(
                 shell_exe_path,
@@ -1088,6 +1104,7 @@ fn exec_fs_file(
         return Err(Errno::ENOEXEC);
     }
 
+    let all_data = file.read_all()?;
     task.execve(exe_path, all_data.as_slice(), args_vec, envs_vec, true)?;
     Ok(0)
 }
