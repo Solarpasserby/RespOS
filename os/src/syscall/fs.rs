@@ -1709,7 +1709,7 @@ pub fn sys_statx(
 /// Linux 约定 nsec 可以是正常纳秒值，也可以是两个特殊值：
 /// UTIME_NOW 表示使用当前时间，UTIME_OMIT 表示保持原值不变。
 fn validate_utimens_time(ts: TimeSpec) -> SysResult<TimeSpec> {
-    if ts.nsec == UTIME_NOW || ts.nsec == UTIME_OMIT || ts.nsec < 1_000_000_000 {
+    if ts.nsec == UTIME_NOW || ts.nsec == UTIME_OMIT || (0..1_000_000_000).contains(&ts.nsec) {
         Ok(ts)
     } else {
         Err(Errno::EINVAL)
@@ -1762,8 +1762,7 @@ fn set_fd_times(fd: isize, atime: Option<TimeSpec>, mtime: Option<TimeSpec>) -> 
     let task = current_task().expect("[kernel] current task is None.");
     let file = task.get_fd_entry(fd as usize)?.file;
     let file = file.as_any().downcast_ref::<File>().ok_or(Errno::EINVAL)?;
-    let path = file.path();
-    file.inode().set_times(&path.abs_path(), atime, mtime)
+    file.set_times(atime, mtime)
 }
 
 fn set_fd_mode(fd: isize, mode: u32) -> SysResult {
@@ -1877,7 +1876,9 @@ fn do_chown_inode(
     check_chown_permission(&stat, owner, group)?;
     let uid = resolve_chown_id(owner, stat.uid)?;
     let gid = resolve_chown_id(group, stat.gid)?;
-    inode.set_owner(abs_path, uid, gid)?;
+    if uid != stat.uid || gid != stat.gid {
+        inode.set_owner(abs_path, uid, gid)?;
+    }
     if let Some(mode) = chown_cleared_mode(&stat, owner, group) {
         inode.set_mode(abs_path, mode)?;
     }

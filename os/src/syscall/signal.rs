@@ -429,6 +429,35 @@ pub fn sys_sigreturn() -> SysResult<usize> {
 
 //     Ok(trap_cx.x[10] as usize) // a0 作为返回值
 // }
+
+fn take_sigtimedwait_signal(
+    wanted_set: SigSet,
+    info_ptr: usize,
+    task: &crate::task::TaskControlBlock,
+) -> SysResult<Option<usize>> {
+    let Some((sig, siginfo)) = task.op_sig_pending(|pending| {
+        pending
+            .find_signal_in_set(wanted_set)
+            .and_then(|sig| pending.get_info(sig).copied().map(|info| (sig, info)))
+    }) else {
+        return Ok(None);
+    };
+
+    // Validate and write the userspace result before consuming the signal.
+    // On EFAULT Linux leaves the pending signal available for a later wait.
+    if info_ptr != 0 {
+        let user_siginfo: LinuxSigInfo = siginfo.into();
+        copy_to_user(
+            info_ptr as *mut LinuxSigInfo,
+            &user_siginfo as *const LinuxSigInfo,
+            1,
+        )?;
+    }
+    task.op_sig_pending_mut(|pending| pending.fetch_signal_from_set(wanted_set));
+    task.clear_interrupted();
+    Ok(Some(sig.raw() as usize))
+}
+
 /// sigtimedwait: 等待 set 中的某个信号，带超时
 /// 1. 读入目标信号集
 /// 2. 检查是否有已挂起的信号 → 有则立即返回
@@ -460,31 +489,36 @@ pub fn sys_rt_sigtimedwait(
     // rt_sigtimedwait 消费 set 中的 pending signal；调用方通常已经用
     // sigprocmask 阻塞这些信号。这里不能临时解屏蔽 wanted_set，否则
     // 普通信号派发可能先调用 handler 并消费掉待等待的信号。
-    if let Some((sig, siginfo)) =
-        task.op_sig_pending_mut(|pending| pending.fetch_signal_from_set(wanted_set))
-    {
-        // 如果用户传了 info 指针，把 siginfo 拷贝出去
-        if info_ptr != 0 {
-            copy_to_user(info_ptr as *mut SigInfo, &siginfo as *const SigInfo, 1)?;
-        }
-
-        info!("[sys_rt_sigtimedwait] immediate return signal: {:?}", sig);
-        return Ok(sig.raw() as usize);
+    if let Some(sig) = take_sigtimedwait_signal(wanted_set, info_ptr, &task)? {
+        info!("[sys_rt_sigtimedwait] immediate return signal: {}", sig);
+        return Ok(sig);
     }
 
     // ----- 3. 需要等待 -----
+    task.set_interruptible(true);
     if timeout_ptr != 0 {
         // 3a. 有限等待
         let mut timeout = TimeSpec::default();
-        copy_from_user(
+        let timeout_result = copy_from_user(
             &mut timeout as *mut TimeSpec,
             timeout_ptr as *const TimeSpec,
             1,
-        )?;
-        let total_ms = timeout.checked_duration_ms().ok_or(Errno::EINVAL)?;
+        );
+        if let Err(err) = timeout_result {
+            task.set_interruptible(false);
+            return Err(err);
+        }
+        let total_ms = match timeout.checked_duration_ms() {
+            Some(total_ms) => total_ms,
+            None => {
+                task.set_interruptible(false);
+                return Err(Errno::EINVAL);
+            }
+        };
 
         // timeout == 0 → 立即轮询返回 EAGAIN
         if timeout.is_zero() {
+            task.set_interruptible(false);
             return Err(Errno::EAGAIN);
         }
 
@@ -492,38 +526,59 @@ pub fn sys_rt_sigtimedwait(
 
         loop {
             // 检查信号
-            if let Some((sig, siginfo)) =
-                task.op_sig_pending_mut(|pending| pending.fetch_signal_from_set(wanted_set))
-            {
-                if info_ptr != 0 {
-                    copy_to_user(info_ptr as *mut SigInfo, &siginfo as *const SigInfo, 1)?;
+            match take_sigtimedwait_signal(wanted_set, info_ptr, &task) {
+                Ok(Some(sig)) => {
+                    info!("[sys_rt_sigtimedwait] received signal: {}", sig);
+                    task.set_interruptible(false);
+                    return Ok(sig);
                 }
-                info!("[sys_rt_sigtimedwait] received signal: {:?}", sig);
-                return Ok(sig.raw() as usize);
+                Ok(None) => {}
+                Err(err) => {
+                    task.set_interruptible(false);
+                    return Err(err);
+                }
+            }
+
+            if task.check_signal_interrupt() || task.is_interrupted() {
+                task.clear_interrupted();
+                task.set_interruptible(false);
+                return Err(Errno::EINTR);
             }
 
             // 检查超时
             if get_timeout_ms().saturating_sub(start_ms) >= total_ms {
                 info!("[sys_rt_sigtimedwait] timeout");
+                task.set_interruptible(false);
                 return Err(Errno::EAGAIN);
             }
 
-            // 让出 CPU
+            task.check_real_timer();
             yield_current_task();
         }
     } else {
         // 3b. 无限等待
         info!("[sys_rt_sigtimedwait] waiting indefinitely");
         loop {
-            if let Some((sig, siginfo)) =
-                task.op_sig_pending_mut(|pending| pending.fetch_signal_from_set(wanted_set))
-            {
-                if info_ptr != 0 {
-                    copy_to_user(info_ptr as *mut SigInfo, &siginfo as *const SigInfo, 1)?;
+            match take_sigtimedwait_signal(wanted_set, info_ptr, &task) {
+                Ok(Some(sig)) => {
+                    info!("[sys_rt_sigtimedwait] received signal: {}", sig);
+                    task.set_interruptible(false);
+                    return Ok(sig);
                 }
-                info!("[sys_rt_sigtimedwait] received signal: {:?}", sig);
-                return Ok(sig.raw() as usize);
+                Ok(None) => {}
+                Err(err) => {
+                    task.set_interruptible(false);
+                    return Err(err);
+                }
             }
+
+            if task.check_signal_interrupt() || task.is_interrupted() {
+                task.clear_interrupted();
+                task.set_interruptible(false);
+                return Err(Errno::EINTR);
+            }
+
+            task.check_real_timer();
             yield_current_task();
         }
     }

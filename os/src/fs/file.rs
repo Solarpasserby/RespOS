@@ -34,6 +34,8 @@ struct FileInner {
     write_back: bool,
     tmpfile_meta: Option<TmpFileMeta>,
     atime_override: Option<TimeSpec>,
+    mtime_override: Option<TimeSpec>,
+    ctime_override: Option<TimeSpec>,
 }
 
 /// 文件操作 trait
@@ -140,6 +142,8 @@ impl File {
                 write_back,
                 tmpfile_meta: None,
                 atime_override: None,
+                mtime_override: None,
+                ctime_override: None,
             }),
         }
     }
@@ -161,6 +165,8 @@ impl File {
                 write_back: false,
                 tmpfile_meta: Some(meta),
                 atime_override: None,
+                mtime_override: None,
+                ctime_override: None,
             }),
         }
     }
@@ -235,6 +241,43 @@ impl File {
 
     pub fn tmpfile_meta(&self) -> Option<TmpFileMeta> {
         self.inner.lock().tmpfile_meta
+    }
+
+    fn now_timespec() -> TimeSpec {
+        let ms = get_time_ms();
+        TimeSpec {
+            sec: (ms / 1000) as isize,
+            nsec: ((ms % 1000) * 1_000_000) as isize,
+        }
+    }
+
+    pub fn set_times(&self, atime: Option<TimeSpec>, mtime: Option<TimeSpec>) -> SysResult {
+        let (path, tmpfile) = {
+            let inner = self.inner.lock();
+            let visible_path = inner.path.abs_path();
+            (
+                self.storage_path(&visible_path),
+                inner.tmpfile_meta.is_some(),
+            )
+        };
+
+        if !tmpfile {
+            match self.inode.set_times(path.as_str(), atime, mtime) {
+                Ok(_) | Err(Errno::ENOENT) => {}
+                Err(err) => return Err(err),
+            }
+        }
+
+        let ctime = Self::now_timespec();
+        let mut inner = self.inner.lock();
+        if let Some(atime) = atime {
+            inner.atime_override = Some(atime);
+        }
+        if let Some(mtime) = mtime {
+            inner.mtime_override = Some(mtime);
+        }
+        inner.ctime_override = Some(ctime);
+        Ok(())
     }
 
     pub fn truncate(&self, size: usize) -> SysResult<usize> {
@@ -331,11 +374,7 @@ impl File {
             return Ok(None);
         }
 
-        let ms = get_time_ms();
-        let mut now = TimeSpec {
-            sec: (ms / 1000) as isize,
-            nsec: ((ms % 1000) * 1_000_000) as isize,
-        };
+        let mut now = Self::now_timespec();
         let visible_path = path.abs_path();
         let storage_path = self.storage_path(&visible_path);
         if let Ok(stat) = self.inode.stat(storage_path.as_str()) {
@@ -486,11 +525,23 @@ impl FileOp for File {
             if let Some(atime) = inner.atime_override {
                 stat.atime = atime;
             }
+            if let Some(mtime) = inner.mtime_override {
+                stat.mtime = mtime;
+            }
+            if let Some(ctime) = inner.ctime_override {
+                stat.ctime = ctime;
+            }
             return Ok(stat);
         }
         let mut stat = self.inode.stat(&path)?;
         if let Some(atime) = inner.atime_override {
             stat.atime = atime;
+        }
+        if let Some(mtime) = inner.mtime_override {
+            stat.mtime = mtime;
+        }
+        if let Some(ctime) = inner.ctime_override {
+            stat.ctime = ctime;
         }
         Ok(stat)
     }
