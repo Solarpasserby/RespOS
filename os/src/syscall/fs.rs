@@ -2,7 +2,7 @@
 
 use super::{Errno, SysResult};
 use crate::config::PAGE_SIZE;
-use crate::fs::dev::{LoopControlInode, LoopInode};
+use crate::fs::dev::{LoopControlInode, LoopInode, VirtBlkInode};
 use crate::fs::mount::{do_mount, do_umount2};
 use crate::fs::vfs::{InodeOp, InodeType};
 use crate::fs::{
@@ -2418,6 +2418,9 @@ fn device_ioctl(
     }
     if let Some(loop_device) = inode.as_any().downcast_ref::<LoopInode>() {
         return loop_device.ioctl(request, arg);
+    }
+    if let Some(block_device) = inode.as_any().downcast_ref::<VirtBlkInode>() {
+        return block_device.ioctl(request, arg);
     }
     Err(Errno::ENOTTY)
 }

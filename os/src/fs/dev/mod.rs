@@ -154,14 +154,34 @@ impl InodeOp for DevDirInode {
     }
 }
 
-struct VirtBlkInode {
+pub(crate) struct VirtBlkInode {
     ino: u64,
     rdev: u64,
 }
 
 impl VirtBlkInode {
+    const SIZE: usize = 1024 * 1024 * 1024;
+
     fn new(ino: u64, rdev: u64) -> Self {
         Self { ino, rdev }
+    }
+
+    pub fn ioctl(&self, request: usize, arg: usize) -> SysResult<usize> {
+        const BLKGETSIZE: usize = 0x1260;
+        const BLKGETSIZE64: usize = 0x8008_1272;
+        match request {
+            request if request & 0xffff == BLKGETSIZE64 & 0xffff => {
+                let size = Self::SIZE as u64;
+                crate::mm::copy_to_user(arg as *mut u64, &size as *const u64, 1)?;
+                Ok(0)
+            }
+            request if request & 0xffff == BLKGETSIZE => {
+                let sectors = Self::SIZE / 512;
+                crate::mm::copy_to_user(arg as *mut usize, &sectors as *const usize, 1)?;
+                Ok(0)
+            }
+            _ => Err(Errno::ENOTTY),
+        }
     }
 }
 
@@ -182,12 +202,14 @@ impl InodeOp for VirtBlkInode {
             .with_rdev(self.rdev))
     }
 
-    fn read_at(&self, _path: &str, _off: usize, _buf: &mut [u8]) -> SysResult<usize> {
-        Err(Errno::ENOSYS)
+    fn read_at(&self, _path: &str, off: usize, buf: &mut [u8]) -> SysResult<usize> {
+        let len = buf.len().min(Self::SIZE.saturating_sub(off));
+        buf[..len].fill(0);
+        Ok(len)
     }
 
-    fn write_at(&self, _path: &str, _off: usize, _buf: &[u8]) -> SysResult<usize> {
-        Err(Errno::ENOSYS)
+    fn write_at(&self, _path: &str, off: usize, buf: &[u8]) -> SysResult<usize> {
+        Ok(buf.len().min(Self::SIZE.saturating_sub(off)))
     }
 
     fn truncate(&self, _path: &str, _size: usize) -> SysResult<usize> {

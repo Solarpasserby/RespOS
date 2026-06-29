@@ -1,6 +1,7 @@
 // os/src/vfs/file.rs
 
 use super::vfs::{InodeOp, InodeType, LinuxDirent64};
+use crate::config::KERNEL_HEAP_SIZE;
 use crate::fs::ext4::Ext4Inode;
 use crate::fs::mount::{MS_NOATIME, MS_NODIRATIME, MS_STRICTATIME, check_mount_file_growth};
 use crate::fs::page_cache::PageCache;
@@ -176,6 +177,7 @@ impl File {
         }
     }
 
+    #[track_caller]
     pub fn read_all(&self) -> SysResult<Vec<u8>> {
         let inner = self.inner.lock();
         let visible_path = inner.path.abs_path();
@@ -183,6 +185,17 @@ impl File {
 
         if let Some(ref pc) = inner.page_cache {
             let size = pc.len();
+            if size > KERNEL_HEAP_SIZE / 2 {
+                let caller = core::panic::Location::caller();
+                println!(
+                    "read_all rejected oversized file path={} size={} caller={}:{}",
+                    visible_path,
+                    size,
+                    caller.file(),
+                    caller.line()
+                );
+                return Err(Errno::ENOMEM);
+            }
             let mut data = Vec::new();
             data.try_reserve_exact(size).map_err(|_| Errno::ENOMEM)?;
             data.resize(size, 0);
@@ -193,6 +206,17 @@ impl File {
         }
 
         let size = self.inode.stat(&path)?.size;
+        if size > KERNEL_HEAP_SIZE / 2 {
+            let caller = core::panic::Location::caller();
+            println!(
+                "read_all rejected oversized file path={} size={} caller={}:{}",
+                visible_path,
+                size,
+                caller.file(),
+                caller.line()
+            );
+            return Err(Errno::ENOMEM);
+        }
         let mut data = Vec::new();
         data.try_reserve_exact(size).map_err(|_| Errno::ENOMEM)?;
         data.resize(size, 0);

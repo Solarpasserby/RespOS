@@ -1179,6 +1179,7 @@ fn run_ltp_selected(
                     ld_library_path_env_buf.as_ptr(),
                     ltp_root_env_buf.as_ptr(),
                     "TMPDIR=/tmp\0".as_ptr(),
+                    "LTP_DEV=/dev/vda2\0".as_ptr(),
                     // LTP 会据此跳过 systemd-detect-virt 探测；
                     // 官方 benchmark 镜像中没有这个程序。
                     "LTP_VIRT_OVERRIDE=\0".as_ptr(),
@@ -1189,6 +1190,7 @@ fn run_ltp_selected(
                     ld_library_path_env_buf.as_ptr(),
                     ltp_root_env_buf.as_ptr(),
                     "TMPDIR=/tmp\0".as_ptr(),
+                    "LTP_DEV=/dev/vda2\0".as_ptr(),
                     "LTP_VIRT_OVERRIDE=\0".as_ptr(),
                     "LTP_TIMEOUT_MUL=4\0".as_ptr(),
                     core::ptr::null(),
