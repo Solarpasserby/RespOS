@@ -1088,23 +1088,23 @@ fn _run_ltp_glibc() {
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("[testrunner] start");
-    // _run_basic_musl();
-    // _run_basic_glibc();
-    // _run_libcbench_musl();
-    // _run_libcbench_glibc();
-    // _run_busybox_musl();
-    // _run_busybox_glibc();
-    // _run_libctest_musl();
-    // _run_lua_musl();
-    // _run_lua_glibc();
-    // _run_iperf_musl();
-    // _run_iperf_glibc();
-    // _run_iozone_glibc();
-    // _run_iozone_musl();
-    // _run_netperf_musl();
-    // _run_netperf_glibc();
-    // _run_lmbench_musl();
-    // _run_lmbench_glibc();
+    _run_basic_musl();
+    _run_basic_glibc();
+    _run_libcbench_musl();
+    _run_libcbench_glibc();
+    _run_busybox_musl();
+    _run_busybox_glibc();
+    _run_libctest_musl();
+    _run_lua_musl();
+    _run_lua_glibc();
+    _run_iperf_musl();
+    _run_iperf_glibc();
+    _run_iozone_glibc();
+    _run_iozone_musl();
+    _run_netperf_musl();
+    _run_netperf_glibc();
+    _run_lmbench_musl();
+    _run_lmbench_glibc();
     // _run_cyclictest_musl();
     // _run_cyclictest_glibc();
     _run_ltp_musl();
@@ -1118,25 +1118,25 @@ fn main() -> i32 {
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("[testrunner] start");
-    // _run_basic_musl();
-    // _run_basic_glibc();
-    // _run_libcbench_musl();
-    // _run_libcbench_glibc();
-    // _run_busybox_musl();
-    // _run_busybox_glibc();
-    // _run_libctest_musl();
-    // _run_lua_musl();
-    // _run_lua_glibc();
-    // _run_iperf_musl();
-    // _run_iperf_glibc();
-    // _run_iozone_glibc();
-    // _run_iozone_musl();
-    // _run_netperf_musl();
-    // _run_netperf_glibc();
-    // _run_lmbench_musl();
-    // _run_lmbench_glibc();
+    _run_basic_musl();
+    _run_basic_glibc();
+    _run_libcbench_musl();
+    _run_libcbench_glibc();
+    _run_busybox_musl();
+    _run_busybox_glibc();
+    _run_libctest_musl();
+    _run_lua_musl();
+    _run_lua_glibc();
+    _run_iperf_musl();
+    _run_iperf_glibc();
+    _run_iozone_glibc();
+    _run_iozone_musl();
+    _run_netperf_musl();
+    _run_netperf_glibc();
+    _run_lmbench_musl();
+    _run_lmbench_glibc();
     // _run_cyclictest_musl(); // 系统调用不可用
-    // _run_cyclictest_glibc(); // avoid hackbench residue before LTP
+    // _run_cyclictest_glibc();
     _run_ltp_musl();
     _run_ltp_glibc();
     println!("[testrunner] all selected tests finished, powering off");
