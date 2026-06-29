@@ -1586,6 +1586,7 @@ impl MemorySet {
                 }
             }
         }
+        let app_max_vpn_end = max_vpn_end;
 
         // —— 兼容未剥离 ELF：若 PT_INTERP 未能解析，再尝试 .interp section ——
         if need_dl && interp_path.is_none() {
@@ -1730,9 +1731,14 @@ impl MemorySet {
             None,
             0,
         )?;
-        // 映射堆段，初始不分配堆内存。当前用户栈不是放在固定高地址，
-        // 因此 brk 区必须放在栈之后，避免静态程序中堆和栈起点重叠。
-        let heap_bottom = user_stack_top + PAGE_SIZE;
+        // 动态程序的 brk 紧随主程序 LOAD 段，不能被高地址解释器抬高；
+        // 栈仍放在解释器之后，因此两者之间有完整的增长空间。
+        // 静态程序没有这一段地址间隔，继续把 brk 放在栈之后以避免重叠。
+        let heap_bottom = if need_dl {
+            usize::from(VirtAddr::from(app_max_vpn_end)) + PAGE_SIZE
+        } else {
+            user_stack_top + PAGE_SIZE
+        };
         memory_set.heap_bottom = heap_bottom;
         memory_set.brk = heap_bottom;
 

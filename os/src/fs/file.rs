@@ -320,7 +320,9 @@ impl File {
 
         if !tmpfile {
             match self.inode.set_times(path.as_str(), atime, mtime) {
-                Ok(_) | Err(Errno::ENOENT) => {}
+                // 参数已在 utimensat 层校验。lwext4 对仍打开但路径已 unlink
+                // 的 inode 返回 ENOENT/EINVAL；fd 级时间覆盖仍然有效。
+                Ok(_) | Err(Errno::ENOENT | Errno::EINVAL) => {}
                 Err(err) => return Err(err),
             }
         }

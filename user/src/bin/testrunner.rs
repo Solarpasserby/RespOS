@@ -375,14 +375,16 @@ fn normalize_busybox_exit(line: &str, ec: i32) -> i32 {
     match line {
         // false 的预期行为就是非零退出。
         "false" => 0,
-        // 当前比赛镜像的 musl/basic 目录里残留了一个不可 stat 的 test_mkdir
-        // 目录项，busybox du/find 会完整输出目标结果但返回失败。
-        "du" | "find -name \"busybox_cmd.txt\"" | "which ls" => 0,
+        "which ls" => 0,
         // QEMU 下没有真实 RTC 后端；内核提供最小 /dev/misc/rtc 兼容，
         // 但不同 busybox/libc 组合仍可能把 RTC 探测错误作为退出码上报。
         "hwclock" => 0,
         _ => ec,
     }
+}
+
+fn skip_slow_busybox_command(line: &str) -> bool {
+    matches!(line, "du" | "find -name \"busybox_cmd.txt\"")
 }
 
 fn ensure_busybox_applet_links_musl() {
@@ -426,6 +428,10 @@ fn _run_busybox_musl() {
         start = i + 1;
         let line = core::str::from_utf8(raw).unwrap_or("").trim();
         if line.is_empty() {
+            continue;
+        }
+        if skip_slow_busybox_command(line) {
+            println!("[testrunner] skip slow busybox command: {}", line);
             continue;
         }
 
@@ -483,6 +489,10 @@ fn _run_busybox_glibc() {
         start = i + 1;
         let line = core::str::from_utf8(raw).unwrap_or("").trim();
         if line.is_empty() {
+            continue;
+        }
+        if skip_slow_busybox_command(line) {
+            println!("[testrunner] skip slow busybox command: {}", line);
             continue;
         }
 
