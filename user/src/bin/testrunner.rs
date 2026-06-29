@@ -557,8 +557,52 @@ fn cleanup_benchmark_state() {
     let _ = unlink("/code/lmbench_src/bin/build/lmbench_all\0");
 }
 
+fn cleanup_iozone_state() {
+    // iozone throughput mode leaves one file per worker when it is interrupted.
+    // Remove only its known scratch files so a later libc/architecture run starts clean.
+    for path in [
+        "/musl/iozone.DUMMY.0\0",
+        "/musl/iozone.DUMMY.1\0",
+        "/musl/iozone.DUMMY.2\0",
+        "/musl/iozone.DUMMY.3\0",
+        "/musl/iozone.DUMMY.4\0",
+        "/musl/iozone.DUMMY.5\0",
+        "/musl/iozone.DUMMY.6\0",
+        "/musl/iozone.DUMMY.7\0",
+        "/glibc/iozone.DUMMY.0\0",
+        "/glibc/iozone.DUMMY.1\0",
+        "/glibc/iozone.DUMMY.2\0",
+        "/glibc/iozone.DUMMY.3\0",
+        "/glibc/iozone.DUMMY.4\0",
+        "/glibc/iozone.DUMMY.5\0",
+        "/glibc/iozone.DUMMY.6\0",
+        "/glibc/iozone.DUMMY.7\0",
+    ] {
+        let _ = unlink(path);
+    }
+}
+
+fn prepare_lmbench_state() -> bool {
+    prepare_benchmark_dirs();
+    for path in ["/var/tmp/lmbench\0", "/var/tmp/XXX\0"] {
+        let _ = unlink(path);
+        let fd = open(path, O_WRONLY | O_CREATE | O_TRUNC, 0o644);
+        if fd < 0 {
+            println!(
+                "[testrunner] cannot prepare lmbench file {}: {}",
+                strip_nul(path),
+                fd
+            );
+            return false;
+        }
+        let _ = close(fd as usize);
+    }
+    true
+}
+
 fn _run_iozone_musl() {
     cleanup_benchmark_state();
+    cleanup_iozone_state();
     prepare_benchmark_dirs();
     prepare_musl_loader_links();
     prepare_bin_shell(BUSYBOX_PATH);
@@ -567,16 +611,19 @@ fn _run_iozone_musl() {
         core::ptr::null(),
     ];
     run_shell_script_with_env("/musl/\0", BUSYBOX_PATH, IOZONE_SCRIPT, envp);
+    cleanup_iozone_state();
     cleanup_benchmark_state();
 }
 
 fn _run_iozone_glibc() {
     cleanup_benchmark_state();
+    cleanup_iozone_state();
     prepare_benchmark_dirs();
     prepare_glibc_loader_links();
     prepare_bin_shell(GLIBC_BUSYBOX_PATH);
     let envp: &[*const u8] = &["LD_LIBRARY_PATH=/glibc/lib\0".as_ptr(), core::ptr::null()];
     run_shell_script_with_env("/glibc/\0", GLIBC_BUSYBOX_PATH, IOZONE_SCRIPT, envp);
+    cleanup_iozone_state();
     cleanup_benchmark_state();
 }
 
@@ -597,6 +644,10 @@ fn prepare_loader_dirs() {
 
 fn _run_lmbench_musl() {
     cleanup_benchmark_state();
+    if !prepare_lmbench_state() {
+        cleanup_benchmark_state();
+        return;
+    }
     if chdir("/musl\0") < 0 {
         println!("[testrunner] cannot enter /musl");
         return;
@@ -604,7 +655,6 @@ fn _run_lmbench_musl() {
 
     prepare_musl_loader_links();
     prepare_bin_shell(BUSYBOX_PATH);
-    prepare_benchmark_dirs();
     // hello 脚本硬编码了构建机路径 /code/lmbench_src/bin/build/lmbench_all
     let _ = mkdir("/code\0", 0o755);
     let _ = mkdir("/code/lmbench_src\0", 0o755);
@@ -630,13 +680,16 @@ fn _run_lmbench_musl() {
 
 fn _run_lmbench_glibc() {
     cleanup_benchmark_state();
+    if !prepare_lmbench_state() {
+        cleanup_benchmark_state();
+        return;
+    }
     if chdir("/glibc\0") < 0 {
         println!("[testrunner] cannot enter /glibc");
         return;
     }
 
     prepare_bin_shell(GLIBC_BUSYBOX_PATH);
-    prepare_benchmark_dirs();
     // hello 脚本硬编码了构建机路径 /code/lmbench_src/bin/build/lmbench_all
     let _ = mkdir("/code\0", 0o755);
     let _ = mkdir("/code/lmbench_src\0", 0o755);

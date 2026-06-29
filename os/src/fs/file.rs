@@ -183,7 +183,9 @@ impl File {
 
         if let Some(ref pc) = inner.page_cache {
             let size = pc.len();
-            let mut data = alloc::vec![0u8; size];
+            let mut data = Vec::new();
+            data.try_reserve_exact(size).map_err(|_| Errno::ENOMEM)?;
+            data.resize(size, 0);
             let lower = inner.write_back.then_some((&self.inode, path.as_str()));
             let n = pc.read_at(0, &mut data, lower)?;
             data.truncate(n);
@@ -191,7 +193,9 @@ impl File {
         }
 
         let size = self.inode.stat(&path)?.size;
-        let mut data = alloc::vec![0u8; size];
+        let mut data = Vec::new();
+        data.try_reserve_exact(size).map_err(|_| Errno::ENOMEM)?;
+        data.resize(size, 0);
         let mut offset = 0;
 
         while offset < size {
@@ -350,7 +354,7 @@ impl File {
         };
         check_mount_file_growth(&inner.path, old_size, size)?;
         if let Some(pc) = inner.page_cache.clone() {
-            if size < old_size {
+            if inner.write_back && size != old_size {
                 match self.inode.truncate(&path, size) {
                     Ok(_) => {}
                     Err(Errno::ENOENT) => {}
