@@ -5,11 +5,13 @@
 //! - `null`  — `/dev/null`，丢弃写入，读取始终返回 EOF
 //! - `zero`  — `/dev/zero`，读取返回零字节，写入丢弃
 
+mod cpu_dma_latency;
 mod loop_device;
 mod null;
 mod random;
 mod rtc;
 mod shm;
+mod tty;
 mod zero;
 
 const DEVFS_DEV: u64 = 0x400;
@@ -24,13 +26,21 @@ const LOOP_CONTROL_INO: u64 = 7;
 const LOOP0_INO: u64 = 8;
 const RANDOM_INO: u64 = 9;
 const URANDOM_INO: u64 = 10;
+const CPU_DMA_LATENCY_INO: u64 = 11;
+const VDA_INO: u64 = 12;
+const VDA2_INO: u64 = 13;
+pub(super) const TTY_INO: u64 = 14;
 const NULL_RDEV: u64 = (1 << 8) | 3;
 const ZERO_RDEV: u64 = (1 << 8) | 5;
 const RANDOM_RDEV: u64 = (1 << 8) | 8;
 const URANDOM_RDEV: u64 = (1 << 8) | 9;
+const CPU_DMA_LATENCY_RDEV: u64 = (10 << 8) | 62;
 const RTC_RDEV: u64 = (254 << 8) | 0;
 const LOOP_CONTROL_RDEV: u64 = (10 << 8) | 237;
 const LOOP0_RDEV: u64 = 7 << 8;
+const VDA_RDEV: u64 = 253 << 8;
+const VDA2_RDEV: u64 = (253 << 8) | 2;
+pub(super) const TTY_RDEV: u64 = (5 << 8) | 0;
 
 use super::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64, SuperBlockOp};
 use super::{KStat, Statfs64};
@@ -38,11 +48,13 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::any::Any;
+use cpu_dma_latency::CpuDmaLatencyInode;
 pub use loop_device::{LoopControlInode, LoopInode};
 use null::NullInode;
 use random::RandomInode;
 use rtc::RtcInode;
 use shm::shm_dir;
+use tty::TtyInode;
 use zero::ZeroInode;
 
 use crate::fs::dentry_cache;
@@ -74,12 +86,16 @@ impl InodeOp for DevDirInode {
         match name {
             "null" => Ok(Arc::new(NullInode)),
             "zero" => Ok(Arc::new(ZeroInode)),
+            "tty" => Ok(Arc::new(TtyInode)),
             "random" => Ok(Arc::new(RandomInode::random())),
             "urandom" => Ok(Arc::new(RandomInode::urandom())),
+            "cpu_dma_latency" => Ok(Arc::new(CpuDmaLatencyInode)),
             "shm" => Ok(shm_dir()),
             "misc" => Ok(Arc::new(MiscDirInode)),
             "loop-control" => Ok(Arc::new(LoopControlInode)),
             "loop0" => Ok(Arc::new(LoopInode::new(0))),
+            "vda" => Ok(Arc::new(VirtBlkInode::new(VDA_INO, VDA_RDEV))),
+            "vda2" => Ok(Arc::new(VirtBlkInode::new(VDA2_INO, VDA2_RDEV))),
             _ => Err(Errno::ENOENT),
         }
     }
@@ -90,17 +106,26 @@ impl InodeOp for DevDirInode {
             dir_entry(2, 2, b"..\0"),
             entry(NULL_INO, InodeType::CharDevice, 3, b"null\0"),
             entry(ZERO_INO, InodeType::CharDevice, 4, b"zero\0"),
-            entry(RANDOM_INO, InodeType::CharDevice, 5, b"random\0"),
-            entry(URANDOM_INO, InodeType::CharDevice, 6, b"urandom\0"),
-            entry(SHM_DIR_INO, InodeType::Directory, 7, b"shm\0"),
-            entry(MISC_DIR_INO, InodeType::Directory, 8, b"misc\0"),
+            entry(TTY_INO, InodeType::CharDevice, 5, b"tty\0"),
+            entry(RANDOM_INO, InodeType::CharDevice, 6, b"random\0"),
+            entry(URANDOM_INO, InodeType::CharDevice, 7, b"urandom\0"),
+            entry(
+                CPU_DMA_LATENCY_INO,
+                InodeType::CharDevice,
+                8,
+                b"cpu_dma_latency\0",
+            ),
+            entry(SHM_DIR_INO, InodeType::Directory, 9, b"shm\0"),
+            entry(MISC_DIR_INO, InodeType::Directory, 10, b"misc\0"),
             entry(
                 LOOP_CONTROL_INO,
                 InodeType::CharDevice,
-                9,
+                11,
                 b"loop-control\0",
             ),
-            entry(LOOP0_INO, InodeType::BlockDevice, 10, b"loop0\0"),
+            entry(LOOP0_INO, InodeType::BlockDevice, 12, b"loop0\0"),
+            entry(VDA_INO, InodeType::BlockDevice, 13, b"vda\0"),
+            entry(VDA2_INO, InodeType::BlockDevice, 14, b"vda2\0"),
         ])
     }
 
@@ -124,6 +149,94 @@ impl InodeOp for DevDirInode {
     fn link(&self, _old_path: &str, _bare_dentry: Arc<Dentry>) -> SysResult {
         Err(Errno::EACCES)
     }
+    fn unlink(&self, _valid_dentry: &Arc<Dentry>) -> SysResult {
+        Err(Errno::EACCES)
+    }
+}
+
+pub(crate) struct VirtBlkInode {
+    ino: u64,
+    rdev: u64,
+}
+
+impl VirtBlkInode {
+    const SIZE: usize = 1024 * 1024 * 1024;
+
+    fn new(ino: u64, rdev: u64) -> Self {
+        Self { ino, rdev }
+    }
+
+    pub fn ioctl(&self, request: usize, arg: usize) -> SysResult<usize> {
+        const BLKGETSIZE: usize = 0x1260;
+        const BLKGETSIZE64: usize = 0x8008_1272;
+        match request {
+            request if request & 0xffff == BLKGETSIZE64 & 0xffff => {
+                let size = Self::SIZE as u64;
+                crate::mm::copy_to_user(arg as *mut u64, &size as *const u64, 1)?;
+                Ok(0)
+            }
+            request if request & 0xffff == BLKGETSIZE => {
+                let sectors = Self::SIZE / 512;
+                crate::mm::copy_to_user(arg as *mut usize, &sectors as *const usize, 1)?;
+                Ok(0)
+            }
+            _ => Err(Errno::ENOTTY),
+        }
+    }
+}
+
+impl InodeOp for VirtBlkInode {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn node_type(&self) -> InodeType {
+        InodeType::BlockDevice
+    }
+
+    fn stat(&self, _path: &str) -> SysResult<KStat> {
+        Ok(KStat::minimal(0, InodeType::BlockDevice)
+            .with_dev(DEVFS_DEV)
+            .with_ino(self.ino)
+            .with_mode(0o660)
+            .with_rdev(self.rdev))
+    }
+
+    fn read_at(&self, _path: &str, off: usize, buf: &mut [u8]) -> SysResult<usize> {
+        let len = buf.len().min(Self::SIZE.saturating_sub(off));
+        buf[..len].fill(0);
+        Ok(len)
+    }
+
+    fn write_at(&self, _path: &str, off: usize, buf: &[u8]) -> SysResult<usize> {
+        Ok(buf.len().min(Self::SIZE.saturating_sub(off)))
+    }
+
+    fn truncate(&self, _path: &str, _size: usize) -> SysResult<usize> {
+        Ok(0)
+    }
+
+    fn lookup(&self, _parent_path: &str, _name: &str) -> SysResult<Arc<dyn InodeOp>> {
+        Err(Errno::ENOTDIR)
+    }
+
+    fn readdir(&self, _path: &str) -> SysResult<Vec<LinuxDirent64>> {
+        Err(Errno::ENOTDIR)
+    }
+
+    fn create(
+        &self,
+        _parent_path: &str,
+        _name: &str,
+        _ty: InodeType,
+    ) -> SysResult<Arc<dyn InodeOp>> {
+        Err(Errno::EACCES)
+    }
+
+    fn link(&self, _old_path: &str, _bare_dentry: Arc<Dentry>) -> SysResult {
+        Err(Errno::EACCES)
+    }
+
     fn unlink(&self, _valid_dentry: &Arc<Dentry>) -> SysResult {
         Err(Errno::EACCES)
     }
@@ -204,7 +317,7 @@ impl SuperBlockOp for DevSuperBlock {
             f_blocks: 0,
             f_bfree: 0,
             f_bavail: 0,
-            f_files: 10,
+            f_files: 13,
             f_ffree: 0,
             f_namelen: 255,
             f_frsize: crate::config::PAGE_SIZE as i64,

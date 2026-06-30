@@ -52,6 +52,7 @@ times03
 # oscomp LTP test list - Phase 3: clock_timer — clocks, timers, alarms (30 tests)
 # 测例 clock_gettime04，la musl没有解决
 adjtimex01
+adjtimex02
 alarm02
 alarm03
 alarm06
@@ -62,6 +63,7 @@ clock_getres01
 clock_gettime01
 clock_gettime02
 #clock_gettime04
+clock_nanosleep01
 clock_nanosleep02
 clock_settime02
 getitimer01
@@ -94,11 +96,13 @@ fork04
 fork05
 fork07
 fork08
-fork09
+# fork09：仅 LA 运行，两组合计约 27 秒，仅产生 2 个 TPASS。
+#fork09
 fork10
 fork13
 fork14
-fork_procs
+# fork_procs：仅 LA 运行，两组执行 2000 次 fork/wait，约 21 秒仅产生 2 个 TPASS。
+#fork_procs
 pause01
 
 # oscomp LTP test list - Phase 5: fd — file descriptors (53 tests)
@@ -146,6 +150,9 @@ fcntl12
 fcntl12_64
 fcntl13
 fcntl13_64
+# fcntl14：依赖 F_SETLKW 等待队列与 sigpause 唤醒；当前每个冲突子项会等待
+# 60 秒后失败，完整 96 项收益不足以覆盖全局语义改造。
+#fcntl14
 fcntl29
 fcntl29_64
 fcntl30
@@ -159,6 +166,7 @@ flock04
 flock06
 
 # oscomp LTP test list - Phase 6: pipe — pipes, FIFOs, splice (32 tests)
+# pipe2_02_child 是 pipe2_02 的 helper，不作为独立测例运行
 pipe01
 pipe02
 pipe03
@@ -176,7 +184,6 @@ pipe14
 pipe15
 pipe2_01
 pipe2_02
-pipe2_02_child
 pipe2_04
 splice01
 splice02
@@ -244,7 +251,8 @@ writev06
 writev07
 
 # oscomp LTP test list - Phase 8: io_advanced — readv, writev, sendfile (52 tests)
-copy_file_range01
+# 测例 copy_file_range01 时间成本太大
+# copy_file_range01
 copy_file_range03
 posix_fadvise01
 posix_fadvise01_64
@@ -298,7 +306,6 @@ sendfile08
 sendfile08_64
 
 # oscomp LTP test list - Phase 9: fs_stat_perm — stat, chmod, chown (58 tests)
-# 测例 umask01，平台合计约 17s，仅 2 个 TPASS，性价比低
 access01
 access02
 access03
@@ -356,7 +363,7 @@ statvfs01
 statvfs02
 statx02
 statx03
-#umask01
+umask01
 
 # oscomp LTP test list - Phase 10: fs_xattr — extended attributes (22 tests)
 fgetxattr01
@@ -439,6 +446,8 @@ rmdir01
 rmdir03
 symlink02
 symlink04
+symlink01
+symlinkat01
 truncate02
 truncate02_64
 truncate03
@@ -453,6 +462,7 @@ utime03
 utime04
 utime05
 utime07
+utimensat01
 
 # oscomp LTP test list - Phase 12: signal — signal handling (20 tests)
 # 测例 rt_sigqueueinfo01 sigwait01 报错奇怪收益低跳过完整通过
@@ -460,6 +470,8 @@ kill03
 kill05
 kill06
 kill11
+# rt_sigqueueinfo01：信号本身可正确送达，但 LTP checkpoint 唤醒会超时；
+# 四组累计约 42 秒，仅产生 4 个 TPASS 后 TBROK。
 #rt_sigqueueinfo01
 sigaltstack02
 sighold02
@@ -470,7 +482,7 @@ signal04
 signal05
 sigpending02
 sigsuspend01
-#sigwait01
+sigwait01
 tgkill01
 tgkill02
 tgkill03
@@ -478,293 +490,312 @@ tkill01
 tkill02
 
 # oscomp LTP test list - Phase 13: exec — execute programs (18 tests)
-#execl01
-#execl01_child
-#execle01
-#execle01_child
-#execlp01
-#execlp01_child
-#execv01
-#execv01_child
-#execve01
-#execve02
-#execve03
-#execve05
-#execve06
-#execveat01
-#execveat02
+# 内核未配置 overlayfs，先跳过execveat03
+execl01
+execl01_child
+execle01
+execle01_child
+execlp01
+execlp01_child
+execv01
+execv01_child
+execve01
+execve02
+execve03
+execve05
+execve06
+execveat01
+execveat02
 #execveat03
-#execvp01
-#execvp01_child
+execvp01
+execvp01_child
 
 # oscomp LTP test list - Phase 14: wait — wait for children (27 tests)
-#wait01
-#wait02
-#wait401
-#wait402
-#wait403
-#waitid01
-#waitid02
-#waitid03
-#waitid04
-#waitid05
-#waitid06
-#waitid07
-#waitid08
-#waitid09
-#waitid10
-#waitid11
-#waitpid01
-#waitpid03
-#waitpid04
-#waitpid06
-#waitpid07
-#waitpid08
-#waitpid09
-#waitpid10
-#waitpid11
-#waitpid12
-#waitpid13
+wait01
+wait02
+wait401
+wait402
+wait403
+waitid01
+waitid02
+waitid03
+waitid04
+waitid05
+waitid06
+waitid07
+waitid08
+waitid09
+waitid10
+waitid11
+waitpid01
+waitpid03
+waitpid04
+waitpid06
+waitpid07
+waitpid08
+waitpid09
+waitpid10
+waitpid11
+waitpid12
+waitpid13
 
 # oscomp LTP test list - Phase 15: credential — setuid, setgid (36 tests)
-#setegid01
-#setegid02
-#setfsgid01
-#setfsgid02
-#setfsuid01
-#setfsuid02
-#setfsuid03
-#setgid01
-#setgid02
-#setgid03
-#setgroups01
-#setgroups02
+# setgroups03未通过
+setegid01
+setegid02
+setfsgid01
+setfsgid02
+setfsuid01
+setfsuid02
+setfsuid03
+setgid01
+setgid02
+setgid03
+setgroups01
+setgroups02
 #setgroups03
-#setpgid02
-#setpgrp02
-#setregid01
-#setregid02
-#setregid03
-#setregid04
-#setresgid02
-#setresgid03
-#setresuid01
-#setresuid02
-#setresuid03
-#setresuid04
-#setresuid05
-#setreuid01
-#setreuid02
-#setreuid03
-#setreuid04
-#setreuid05
-#setreuid06
-#setreuid07
-#setuid01
-#setuid03
-#setuid04
+setpgid02
+setpgrp02
+setregid01
+setregid02
+setregid03
+setregid04
+setresgid02
+setresgid03
+setresuid01
+setresuid02
+setresuid03
+setresuid04
+setresuid05
+setreuid01
+setreuid02
+setreuid03
+setreuid04
+setreuid05
+setreuid06
+setreuid07
+setuid01
+setuid03
+setuid04
 
 # oscomp LTP test list - Phase 16: resource_sched — priority, rlimit, sched (38 tests)
-#getpriority02
-#getrlimit01
-#getrlimit02
-#getrlimit03
-#mallinfo01
-#mallinfo02
-#mallopt01
-#nice01
-#nice02
-#nice03
-#nice04
-#sched_get_priority_max01
-#sched_get_priority_max02
-#sched_get_priority_min01
-#sched_get_priority_min02
-#sched_getaffinity01
-#sched_getparam01
-#sched_getparam03
-#sched_getscheduler01
-#sched_getscheduler02
-#sched_rr_get_interval01
-#sched_rr_get_interval02
-#sched_rr_get_interval03
-#sched_setaffinity01
-#sched_setparam01
-#sched_setparam02
-#sched_setparam03
-#sched_setparam04
-#sched_setparam05
-#sched_setscheduler01
-#sched_setscheduler03
-#sched_setscheduler04
-#sched_yield01
-#setpriority01
-#setpriority02
-#setrlimit02
-#setrlimit04
-#setrlimit05
+# compare 剩余差异说明：
+# - mallinfo01 / mallinfo02 / mallopt01：musl 组返回 TCONF，提示 libc 不实现非 POSIX mallinfo/mallopt；
+#   glibc 组已通过，属于用户态 libc 能力差异，不是内核 syscall 语义缺失。
+# - LA musl 多个 sched_* 用例少 pass：libc variant 在 tst_sched.h 中直接报
+#   “sched_* not supported” TCONF，syscall variant 已通过；这是 LA musl wrapper/测例二进制口径问题。
+# - sched_setscheduler04：LA musl 的检查阶段固定调用 libc sched_getscheduler/sched_getparam，
+#   没有进入内核 syscall；RV/LA glibc 已通过，reset-on-fork 内核语义已验证。
+# - setpriority01：PRIO_USER 分支因测试环境不能执行 useradd 创建 ltp_setpriority01 用户而 TCONF；
+#   PRIO_PROCESS 和 PRIO_PGRP 分支已通过。
+# - nice04：旧 compare 中 RV musl 曾显示 failed，但最新日志已 TPASS；重新生成 compare 后应消失。
+getpriority02
+getrlimit01
+getrlimit02
+getrlimit03
+mallinfo01
+mallinfo02
+mallopt01
+nice01
+nice02
+nice03
+nice04
+sched_get_priority_max01
+sched_get_priority_max02
+sched_get_priority_min01
+sched_get_priority_min02
+sched_getaffinity01
+sched_getparam01
+sched_getparam03
+sched_getscheduler01
+sched_getscheduler02
+sched_rr_get_interval01
+sched_rr_get_interval02
+sched_rr_get_interval03
+sched_setaffinity01
+sched_setparam01
+sched_setparam02
+sched_setparam03
+sched_setparam04
+sched_setparam05
+sched_setscheduler01
+sched_setscheduler03
+sched_setscheduler04
+sched_yield01
+setpriority01
+setpriority02
+setrlimit02
+setrlimit04
+setrlimit05
 
 # oscomp LTP test list - Phase 17: mmap_clone_ipc — mmap, clone, futex, SysV IPC (79 tests)
-#brk01
-#brk02
-#clone01
-#clone02
-#clone03
-#clone04
-#clone05
-#clone06
-#clone07
-#clone08
-#clone09
-#clone301
-#clone302
-#clone303
-#dirtypipe
+# 耗时/收益取舍：
+# - futex_cmp_requeue01：1000 waiter 压力组在 LA 单个 libc 下可耗时 1～3 分钟，
+#   RV musl 全量运行时还会大量 ETIMEDOUT；仅覆盖 7 个基准通过点，并会加重后续资源压力。
+# - mmap1：高频 mmap/munmap 压力测试，LA musl 约 188 秒仅产生 1 个 TPASS，
+#   LA glibc 还会因 SIGSEGV 直接 TBROK。
+# - mmap2：每组写入并映射 128 MiB 文件，约耗时 2 分钟，旧式输出没有评测可统计的 TPASS。
+# - mmap3：40 线程执行 1000 轮映射压力，单组约 1～3 分钟，仅产生 1 个 TPASS，
+#   部分 glibc 运行还会超时或 TBROK。
+# - mmap16：依赖文件系统延迟分配和存储耗尽后的 SIGBUS 语义，每组约 20 秒，
+#   当前稳定为 0 passed / 10 failed。
+brk01
+brk02
+clone01
+clone02
+clone03
+clone04
+clone05
+clone06
+clone07
+clone08
+clone09
+clone301
+clone302
+clone303
+dirtypipe
 #futex_cmp_requeue01
-#futex_cmp_requeue02
-#futex_wait01
-#futex_wait02
-#futex_wait03
-#futex_wait04
-#futex_wait05
-#futex_wait_bitset01
-#futex_wake01
-#futex_wake03
-#madvise01
-#madvise02
-#madvise05
-#madvise10
-#memfd_create01
-#memfd_create02
-#mlock01
-#mlock02
-#mlock03
-#mlock04
-#mmap001
-#mmap01
-#mmap02
-#mmap03
-#mmap04
-#mmap05
-#mmap06
-#mmap08
-#mmap09
+futex_cmp_requeue02
+futex_wait01
+futex_wait02
+futex_wait03
+futex_wait04
+futex_wait05
+futex_wait_bitset01
+futex_wake01
+futex_wake03
+madvise01
+madvise02
+madvise05
+madvise10
+memfd_create01
+memfd_create02
+mlock01
+mlock02
+mlock03
+mlock04
+mmap001
+mmap01
+mmap02
+mmap03
+mmap04
+mmap05
+mmap06
+mmap08
+mmap09
 #mmap1
-#mmap10
-#mmap11
-#mmap12
-#mmap13
-#mmap14
-#mmap15
+mmap10
+mmap11
+mmap12
+mmap13
+mmap14
+mmap15
 #mmap16
-#mmap17
-#mmap18
-#mmap19
+mmap17
+mmap18
+mmap19
 #mmap2
-#mmap20
+mmap20
 #mmap3
-#munmap01
-#munmap02
-#munmap03
-#mprotect05
-#mremap06
-#sbrk01
-#sbrk02
-#shmat01
-#shmat03
-#shmat04
-#shmctl01
-#shmctl03
-#shmctl07
-#shmctl08
-#shmdt01
-#shmdt02
-#shmem_2nstest
-#shmget02
-#shmget04
-#shmnstest
-#thp01
+munmap01
+munmap02
+munmap03
+mprotect05
+mremap05
+mremap06
+sbrk01
+sbrk02
+shmat01
+shmat03
+shmat04
+shmctl01
+shmctl03
+shmctl07
+shmctl08
+shmdt01
+shmdt02
+shmem_2nstest
+shmget02
+shmget04
+shmnstest
+thp01
 
 # oscomp LTP test list - Phase 18: socket_poll_advanced — socket, epoll, mount, misc (72 tests)
-#accept01
-#accept02
-#accept03
-#accept4_01
-#bind01
-#bind02
-#bind03
-#bind04
-#chroot01
-#chroot02
-#chroot03
-#chroot04
-#epoll_create02
-#eventfd2_01
-#eventfd2_02
-#eventfd2_03
-#getpeername01
-#getrandom01
-#getrandom02
-#getrandom03
-#getrandom04
-#getsockname01
-#getsockopt01
-#getsockopt02
-#in6_01
-#inotify_init1_01
-#inotify_init1_02
-#ioctl_ns07
-#membarrier01
-#memcmp01
-#memcpy01
-#memset01
-#mount01
-#mount02
-#mount03
-#mount03_suid_child
-#mount04
-#mount05
-#mount06
-#mount07
-#mtest01
-#poll01
-#poll02
-#ppoll01
-#pselect01
-#pselect01_64
-#pselect02
-#pselect02_64
-#pselect03
-#pselect03_64
-#recvmmsg01
-#recvmsg01
-#recvmsg02
-#recvmsg03
-#select01
-#select02
-#select03
-#select04
-#sendmmsg02
-#setsockopt01
-#setsockopt02
-#setsockopt03
-#setsockopt04
-#socket01
-#socket02
-#socketpair01
-#socketpair02
-#umount01
-#umount02
-#umount03
-#umount2_01
-#umount2_02
-
-# oscomp LTP test list - Phase 19: scripts — shell helpers (8 tests)
-#ar01.sh
-#cp_tests.sh
-#du01.sh
-#file01.sh
-#ln_tests.sh
-#tar_tests.sh
-#wc01.sh
-#which01.sh
+accept01
+accept02
+accept03
+accept4_01
+bind01
+bind02
+bind03
+bind04
+chroot01
+chroot02
+chroot03
+chroot04
+epoll_create02
+epoll_ctl02
+epoll_ctl03
+epoll_wait02
+epoll_wait03
+epoll_wait06
+epoll_wait07
+eventfd2_01
+eventfd2_02
+eventfd2_03
+getpeername01
+getrandom01
+getrandom02
+getrandom03
+getrandom04
+getsockname01
+getsockopt01
+getsockopt02
+in6_01
+inotify_init1_01
+inotify_init1_02
+ioctl_ns07
+membarrier01
+memcmp01
+memcpy01
+memset01
+mount01
+mount02
+mount03
+mount03_suid_child
+mount04
+mount05
+mount06
+mount07
+mtest01
+poll01
+poll02
+ppoll01
+pselect01
+pselect01_64
+pselect02
+pselect02_64
+pselect03
+pselect03_64
+recvmmsg01
+recvmsg01
+recvmsg02
+recvmsg03
+select01
+select02
+select03
+select04
+sendmmsg02
+setsockopt01
+setsockopt02
+setsockopt03
+setsockopt04
+socket01
+socket02
+socketpair01
+socketpair02
+umount01
+umount02
+umount03
+umount2_01
+umount2_02

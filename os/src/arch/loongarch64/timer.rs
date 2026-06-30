@@ -95,16 +95,16 @@ pub fn init_clock_freq() {
     let div = (cfg5 >> 16) & 0xffff;
 
     if base_freq != 0 && mul != 0 && div != 0 {
-        let cpucfg_freq = base_freq * mul / div;
-        println!(
+        let _cpucfg_freq = base_freq * mul / div;
+        info!(
             "[timer] CPUCFG freq: {} Hz, hardware clock freq: {} Hz, user clock freq: {} Hz, accounting clock freq: {} Hz",
-            cpucfg_freq,
+            _cpucfg_freq,
             get_hardware_clock_freq(),
             get_user_clock_freq(),
             get_accounting_clock_freq()
         );
     } else {
-        println!(
+        warn!(
             "[timer] invalid CPUCFG timer freq base={} mul={} div={}, hardware clock freq: {} Hz, user clock freq: {} Hz, accounting clock freq: {} Hz",
             base_freq,
             mul,

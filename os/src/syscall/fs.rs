@@ -2,15 +2,15 @@
 
 use super::{Errno, SysResult};
 use crate::config::PAGE_SIZE;
-use crate::fs::dev::{LoopControlInode, LoopInode};
+use crate::fs::dev::{LoopControlInode, LoopInode, VirtBlkInode};
 use crate::fs::mount::{do_mount, do_umount2};
 use crate::fs::vfs::{InodeOp, InodeType};
 use crate::fs::{
     AT_EMPTY_PATH, AT_FDCWD, AT_NO_AUTOMOUNT, AT_SYMLINK_NOFOLLOW, FdEntry, File, FileOp, KStat,
-    OpenFlags, Path, Pipe, Stat, Statfs64, check_dir_search_permission, filename_create,
-    filename_link, filename_link_tmpfile, filename_lookup, filename_lookup_no_follow_final_symlink,
-    filename_rename, filename_symlink, filename_unlink, init_fdset, make_pipe, open_named_fifo,
-    path_open,
+    OpenFlags, POLL_READ, POLL_WRITE, Path, Pipe, PollEvents, SpecialFd, Stat, Statfs64,
+    check_dir_search_permission, filename_create, filename_link, filename_link_tmpfile,
+    filename_lookup, filename_lookup_no_follow_final_symlink, filename_rename, filename_symlink,
+    filename_unlink, init_fdset, make_pipe, open_named_fifo, path_open,
 };
 use crate::mm::{
     VPNRange, VirtAddr, check_user_readable, check_user_writable, copy_cstr_from_user,
@@ -927,6 +927,9 @@ pub fn sys_splice(
     if !in_is_pipe && !out_is_pipe {
         return Err(Errno::EINVAL);
     }
+    if !input.splice_supported() || !output.splice_supported() {
+        return Err(Errno::EINVAL);
+    }
     if in_is_pipe && !off_in.is_null() {
         return Err(Errno::ESPIPE);
     }
@@ -1107,13 +1110,33 @@ pub fn sys_vmsplice(fd: usize, iov: *const IoVec, iovcnt: usize, flags: usize) -
 pub fn sys_openat(dirfd: isize, path: *const u8, flags: usize, mode: usize) -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
     let path = copy_cstr_from_user(path)?;
+    let open_flags = OpenFlags::from(flags);
+    if dirfd == AT_FDCWD {
+        if let Some(fd_text) = path.strip_prefix("/proc/self/fd/") {
+            if !fd_text.is_empty() && !fd_text.contains('/') {
+                let fd = fd_text.parse::<usize>().map_err(|_| Errno::ENOENT)?;
+                let old_entry = task.get_fd_entry(fd)?;
+                if let Some(special) = old_entry.file.as_any().downcast_ref::<SpecialFd>() {
+                    let reopened = special.reopen(open_flags).ok_or(Errno::EACCES)?;
+                    let file: alloc::sync::Arc<dyn FileOp> = alloc::sync::Arc::new(reopened);
+                    if open_flags.contains(OpenFlags::O_TRUNC)
+                        && open_flags.intersects(OpenFlags::O_WRONLY | OpenFlags::O_RDWR)
+                    {
+                        file.truncate(0)?;
+                    }
+                    let new_fd = task.alloc_fd(FdEntry::new(file, open_flags))?;
+                    return Ok(new_fd);
+                }
+            }
+        }
+    }
     let file = path_open(dirfd, path.as_str(), flags, mode)?;
     let file: alloc::sync::Arc<dyn FileOp> = if file.inode().node_type() == InodeType::Fifo {
-        open_named_fifo(file.path().abs_path().as_str(), OpenFlags::from(flags))?
+        open_named_fifo(file.path().abs_path().as_str(), open_flags)?
     } else {
         file
     };
-    let fd = task.alloc_fd(FdEntry::new(file, flags.into()))?;
+    let fd = task.alloc_fd(FdEntry::new(file, open_flags))?;
     Ok(fd)
 }
 
@@ -1189,11 +1212,33 @@ pub fn sys_openat2(
     if khow.resolve & RESOLVE_NO_MAGICLINKS != 0 && path_str == "/proc/self/exe" {
         return Err(Errno::ELOOP);
     }
+    if OpenFlags::from(khow.flags as usize).contains(OpenFlags::O_NOFOLLOW)
+        && path_str == "/proc/self/exe"
+    {
+        return Err(Errno::ELOOP);
+    }
     if khow.resolve & RESOLVE_NO_SYMLINKS != 0 {
         let target = filename_lookup_no_follow_final_symlink(dirfd, path_str.as_str())?;
         if target.dentry.get_inode().node_type() == InodeType::SymLink {
             return Err(Errno::ELOOP);
         }
+    }
+    if khow.resolve == 0 && path_str == "/proc/self/exe" {
+        let task = current_task().expect("[kernel] current task is None.");
+        let exe_path = task.exe_path();
+        let open_flags = OpenFlags::from(khow.flags as usize);
+        let file = path_open(
+            AT_FDCWD,
+            exe_path.as_str(),
+            khow.flags as usize,
+            khow.mode as usize,
+        )?;
+        let file: Arc<dyn FileOp> = if file.inode().node_type() == InodeType::Fifo {
+            open_named_fifo(file.path().abs_path().as_str(), open_flags)?
+        } else {
+            file
+        };
+        return task.alloc_fd(FdEntry::new(file, open_flags));
     }
 
     sys_openat(dirfd, path, khow.flags as usize, khow.mode as usize)
@@ -1608,6 +1653,10 @@ impl From<KStat> for Statx {
     fn from(kstat: KStat) -> Self {
         const STATX_BASIC_STATS: u32 = 0x0000_07ff;
         let stat: Stat = kstat.into();
+        let rdev_major = ((stat.st_rdev >> 8) & 0xfff) as u32;
+        let rdev_minor = (stat.st_rdev & 0xff) as u32;
+        let dev_major = ((stat.st_dev >> 8) & 0xfff) as u32;
+        let dev_minor = (stat.st_dev & 0xff) as u32;
         Self {
             stx_mask: STATX_BASIC_STATS,
             stx_blksize: stat.st_blksize,
@@ -1621,6 +1670,10 @@ impl From<KStat> for Statx {
             stx_atime: stat.st_atime.into(),
             stx_ctime: stat.st_ctime.into(),
             stx_mtime: stat.st_mtime.into(),
+            stx_rdev_major: rdev_major,
+            stx_rdev_minor: rdev_minor,
+            stx_dev_major: dev_major,
+            stx_dev_minor: dev_minor,
             ..Default::default()
         }
     }
@@ -1656,7 +1709,7 @@ pub fn sys_statx(
 /// Linux 约定 nsec 可以是正常纳秒值，也可以是两个特殊值：
 /// UTIME_NOW 表示使用当前时间，UTIME_OMIT 表示保持原值不变。
 fn validate_utimens_time(ts: TimeSpec) -> SysResult<TimeSpec> {
-    if ts.nsec == UTIME_NOW || ts.nsec == UTIME_OMIT || ts.nsec < 1_000_000_000 {
+    if ts.nsec == UTIME_NOW || ts.nsec == UTIME_OMIT || (0..1_000_000_000).contains(&ts.nsec) {
         Ok(ts)
     } else {
         Err(Errno::EINVAL)
@@ -1709,8 +1762,7 @@ fn set_fd_times(fd: isize, atime: Option<TimeSpec>, mtime: Option<TimeSpec>) -> 
     let task = current_task().expect("[kernel] current task is None.");
     let file = task.get_fd_entry(fd as usize)?.file;
     let file = file.as_any().downcast_ref::<File>().ok_or(Errno::EINVAL)?;
-    let path = file.path();
-    file.inode().set_times(&path.abs_path(), atime, mtime)
+    file.set_times(atime, mtime)
 }
 
 fn set_fd_mode(fd: isize, mode: u32) -> SysResult {
@@ -1824,7 +1876,9 @@ fn do_chown_inode(
     check_chown_permission(&stat, owner, group)?;
     let uid = resolve_chown_id(owner, stat.uid)?;
     let gid = resolve_chown_id(group, stat.gid)?;
-    inode.set_owner(abs_path, uid, gid)?;
+    if uid != stat.uid || gid != stat.gid {
+        inode.set_owner(abs_path, uid, gid)?;
+    }
     if let Some(mode) = chown_cleared_mode(&stat, owner, group) {
         inode.set_mode(abs_path, mode)?;
     }
@@ -1999,7 +2053,6 @@ pub fn sys_ftruncate(fd: usize, length: isize) -> SysResult<usize> {
     if !file.writable() {
         return Err(Errno::EINVAL);
     }
-    let file = file.as_any().downcast_ref::<File>().ok_or(Errno::EINVAL)?;
     file.truncate(length as usize)
 }
 
@@ -2030,11 +2083,16 @@ pub fn sys_truncate(path: *const u8, length: isize) -> SysResult<usize> {
 
 pub fn sys_fallocate(fd: usize, mode: usize, offset: isize, len: isize) -> SysResult<usize> {
     const FALLOC_FL_KEEP_SIZE: usize = 0x01;
+    const FALLOC_FL_PUNCH_HOLE: usize = 0x02;
+    const FALLOC_ALLOWED_FLAGS: usize = FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE;
 
     if offset < 0 || len <= 0 {
         return Err(Errno::EINVAL);
     }
-    if mode & !FALLOC_FL_KEEP_SIZE != 0 {
+    if mode & !FALLOC_ALLOWED_FLAGS != 0 {
+        return Err(Errno::EOPNOTSUPP);
+    }
+    if mode & FALLOC_FL_PUNCH_HOLE != 0 && mode & FALLOC_FL_KEEP_SIZE == 0 {
         return Err(Errno::EOPNOTSUPP);
     }
 
@@ -2046,7 +2104,9 @@ pub fn sys_fallocate(fd: usize, mode: usize, offset: isize, len: isize) -> SysRe
     if !file.writable() {
         return Err(Errno::EBADF);
     }
-    let file = file.as_any().downcast_ref::<File>().ok_or(Errno::EINVAL)?;
+    if mode & FALLOC_FL_PUNCH_HOLE != 0 {
+        return file.punch_hole(offset as usize, len as usize);
+    }
     if mode & FALLOC_FL_KEEP_SIZE == 0 && file.get_stat()?.size < end {
         file.truncate(end)?;
     }
@@ -2139,7 +2199,7 @@ fn access_mode_allowed(stat: &KStat, mode: usize, use_effective_ids: bool) -> bo
     } else {
         task.uid()
     } as u32;
-    let gid = if use_effective_ids {
+    let primary_gid = if use_effective_ids {
         task.egid()
     } else {
         task.gid()
@@ -2155,7 +2215,8 @@ fn access_mode_allowed(stat: &KStat, mode: usize, use_effective_ids: bool) -> bo
 
     let granted = if uid == stat.uid {
         (perm >> 6) & 0o7
-    } else if gid == stat.gid {
+    } else if primary_gid == stat.gid || task.supplementary_groups().contains(&(stat.gid as usize))
+    {
         (perm >> 3) & 0o7
     } else {
         perm & 0o7
@@ -2177,14 +2238,18 @@ fn access_mode_allowed(stat: &KStat, mode: usize, use_effective_ids: bool) -> bo
 pub fn sys_statfs(path: *const u8, buf: *mut Statfs64) -> SysResult<usize> {
     let path = copy_cstr_from_user(path)?;
     let resolved = filename_lookup(AT_FDCWD, path.as_str(), 0)?;
-    let statfs = resolved.mnt.fs.statfs()?;
+    let mut statfs = resolved.mnt.fs.statfs()?;
+    statfs.f_flags = resolved.mnt.statfs_flags() as i64;
     copy_to_user(buf, &statfs as *const Statfs64, 1)?;
     Ok(0)
 }
 
 fn statfs_for_fileop(file: &Arc<dyn FileOp>) -> SysResult<Statfs64> {
     if let Some(file) = file.as_any().downcast_ref::<File>() {
-        return file.path().mnt.fs.statfs();
+        let path = file.path();
+        let mut statfs = path.mnt.fs.statfs()?;
+        statfs.f_flags = path.mnt.statfs_flags() as i64;
+        return Ok(statfs);
     }
 
     let stat = file.get_stat()?;
@@ -2302,6 +2367,7 @@ struct RtcTime {
 /// 需要下沉到具体 FileOp/设备驱动中实现，不能长期放在 syscall 层硬编码。
 pub fn sys_ioctl(fd: usize, request: usize, arg: usize) -> SysResult<usize> {
     const TIOCGWINSZ: usize = 0x5413;
+    const TIOCNOTTY: usize = 0x5422;
     const FIONREAD: usize = 0x541b;
     const RTC_RD_TIME: usize = 0x8024_7009;
 
@@ -2319,6 +2385,7 @@ pub fn sys_ioctl(fd: usize, request: usize, arg: usize) -> SysResult<usize> {
             copy_to_user(arg as *mut WinSize, &winsize as *const WinSize, 1)?;
             Ok(0)
         }
+        TIOCNOTTY if fd_entry.file.is_tty() => Ok(0),
         FIONREAD => {
             if let Some(pipe) = fd_entry.file.as_any().downcast_ref::<Pipe>() {
                 let nbytes = pipe.available_bytes() as i32;
@@ -2351,6 +2418,9 @@ fn device_ioctl(
     }
     if let Some(loop_device) = inode.as_any().downcast_ref::<LoopInode>() {
         return loop_device.ioctl(request, arg);
+    }
+    if let Some(block_device) = inode.as_any().downcast_ref::<VirtBlkInode>() {
+        return block_device.ioctl(request, arg);
     }
     Err(Errno::ENOTTY)
 }
@@ -2428,6 +2498,8 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SysResult<usize> {
     const F_DUPFD_CLOEXEC: usize = 1030;
     const F_SETPIPE_SZ: usize = 1031;
     const F_GETPIPE_SZ: usize = 1032;
+    const F_ADD_SEALS: usize = 1033;
+    const F_GET_SEALS: usize = 1034;
     const FD_CLOEXEC: usize = 1;
 
     let task = current_task().expect("[kernel] current task is None.");
@@ -2486,6 +2558,22 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SysResult<usize> {
         F_SETPIPE_SZ => {
             let pipe = pipe_ref(&fd_entry.file).ok_or(Errno::EBADF)?;
             pipe.set_capacity(arg)
+        }
+        F_GET_SEALS => {
+            let memfd = fd_entry
+                .file
+                .as_any()
+                .downcast_ref::<SpecialFd>()
+                .ok_or(Errno::EINVAL)?;
+            Ok(memfd.seals())
+        }
+        F_ADD_SEALS => {
+            let memfd = fd_entry
+                .file
+                .as_any()
+                .downcast_ref::<SpecialFd>()
+                .ok_or(Errno::EINVAL)?;
+            memfd.add_seals(arg)
         }
         F_GETLK => {
             let flock = arg as *mut LinuxFlock;
@@ -2810,8 +2898,9 @@ pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> SysResult<usize
     let current_off = file.get_offset();
     let mut written = 0;
     let mut next_off = current_off;
-    let dirents = file.readdir()?;
-    for dirent in dirents {
+    let dirents = file.readdir_cached(current_off)?;
+    let mut record_buf = [0u8; 280];
+    for dirent in dirents.iter() {
         let dirent_off = usize::try_from(dirent.d_off).map_err(|_| Errno::EINVAL)?;
         if dirent_off <= current_off {
             continue;
@@ -2827,10 +2916,13 @@ pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> SysResult<usize
             }
             break;
         }
-        let mut record = alloc::vec![0u8; dirent_size];
-        dirent.copy_to_buffer(&mut record);
+        if dirent_size > record_buf.len() {
+            return Err(Errno::EINVAL);
+        }
+        record_buf[..dirent_size].fill(0);
+        dirent.copy_to_buffer(&mut record_buf[..dirent_size]);
         let dst = unsafe { dirp.add(written) };
-        copy_to_user(dst, record.as_ptr(), dirent_size)?;
+        copy_to_user(dst, record_buf.as_ptr(), dirent_size)?;
         written += dirent_size;
         next_off = dirent_off;
     }
@@ -2838,6 +2930,8 @@ pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> SysResult<usize
     if written != 0 {
         let next_off = isize::try_from(next_off).map_err(|_| Errno::EINVAL)?;
         file.seek(next_off)?;
+    } else {
+        file.clear_dirent_cache();
     }
 
     Ok(written)
@@ -2851,6 +2945,12 @@ pub fn sys_mount(
     flags: usize,
     _data: *const u8,
 ) -> SysResult<usize> {
+    if current_task().ok_or(Errno::ESRCH)?.euid() != 0 {
+        return Err(Errno::EPERM);
+    }
+    if source.is_null() || fstype.is_null() {
+        return Err(Errno::EINVAL);
+    }
     let _source_str = copy_cstr_from_user(source)?;
     let target_str = copy_cstr_from_user(target)?;
     let fstype_str = copy_cstr_from_user(fstype)?;
@@ -2864,6 +2964,9 @@ pub fn sys_mount(
 
 /// 系统调用 sys-umount2
 pub fn sys_umount2(target: *const u8, flags: usize) -> SysResult<usize> {
+    if current_task().ok_or(Errno::ESRCH)?.euid() != 0 {
+        return Err(Errno::EPERM);
+    }
     let target = copy_cstr_from_user(target)?;
     do_umount2(target.as_str(), flags)
 }
@@ -3018,17 +3121,125 @@ fn ppoll_write_back(fds: *mut PollFd, pollfds: &[PollFd]) -> SysResult<()> {
     Ok(())
 }
 
-fn ppoll_wait_interruptible(task: &alloc::sync::Arc<crate::task::TaskControlBlock>) {
-    if prepare_current_task_blocked() {
-        if task.is_ready() {
-            remove_task(task.tid());
-            task.set_running();
-        } else {
-            switch_to_next_task();
+struct PollRegistration {
+    tid: usize,
+    files: Vec<Arc<dyn FileOp>>,
+    event_driven: bool,
+}
+
+impl PollRegistration {
+    fn new(tid: usize) -> Self {
+        Self {
+            tid,
+            files: Vec::new(),
+            event_driven: true,
         }
-    } else {
-        yield_current_task();
     }
+
+    fn add(&mut self, file: Arc<dyn FileOp>, events: PollEvents) {
+        if events != 0 {
+            self.event_driven &= file.register_poll_waiter(self.tid, events);
+            self.files.push(file);
+        }
+    }
+
+    fn clear(&mut self) {
+        for file in self.files.drain(..) {
+            file.unregister_poll_waiter(self.tid);
+        }
+    }
+}
+
+impl Drop for PollRegistration {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
+enum PollWake {
+    Retry,
+    Timeout,
+}
+
+fn ppoll_register(pollfds: &[PollFd], tid: usize) -> PollRegistration {
+    let task = current_task().expect("[kernel] current task is None.");
+    let mut registration = PollRegistration::new(tid);
+    for pollfd in pollfds {
+        if pollfd.fd < 0 {
+            continue;
+        }
+        let Ok(entry) = task.get_fd_entry(pollfd.fd as usize) else {
+            continue;
+        };
+        let mut events = 0;
+        if pollfd.events & POLLIN != 0 {
+            events |= POLL_READ;
+        }
+        if pollfd.events & POLLOUT != 0 {
+            events |= POLL_WRITE;
+        }
+        registration.add(entry.file, events);
+    }
+    registration
+}
+
+fn block_for_poll(
+    task: &Arc<crate::task::TaskControlBlock>,
+    mut registration: PollRegistration,
+    deadline_us: Option<usize>,
+    mut ready: impl FnMut() -> bool,
+) -> SysResult<PollWake> {
+    task.set_interruptible(true);
+    if !registration.event_driven {
+        registration.clear();
+        task.set_interruptible(false);
+        yield_current_task();
+        return Ok(PollWake::Retry);
+    }
+    if let Some(deadline_us) = deadline_us {
+        let deadline_ms = deadline_us.saturating_add(999) / 1000;
+        super::register_task_timeout(task.tid(), deadline_ms);
+    }
+
+    if !prepare_current_task_blocked() {
+        if deadline_us.is_some() {
+            super::finish_task_timeout(task.tid());
+        }
+        registration.clear();
+        task.set_interruptible(false);
+        yield_current_task();
+        return Ok(PollWake::Retry);
+    }
+
+    let immediate_ready = ready();
+    let immediate_timeout = deadline_us.is_some_and(|deadline| get_timeout_us() >= deadline);
+    let interrupted = task.check_signal_interrupt() || task.is_interrupted();
+    if immediate_ready || immediate_timeout || interrupted || task.is_ready() {
+        remove_task(task.tid());
+        task.set_running();
+    } else {
+        switch_to_next_task();
+    }
+
+    let timed_out = if deadline_us.is_some() {
+        super::finish_task_timeout(task.tid())
+    } else {
+        false
+    };
+    registration.clear();
+    task.set_interruptible(false);
+
+    if task.check_signal_interrupt() || task.is_interrupted() {
+        task.clear_interrupted();
+        return Err(Errno::EINTR);
+    }
+    if immediate_timeout
+        || timed_out
+        || deadline_us.is_some_and(|deadline| get_timeout_us() >= deadline)
+    {
+        return Ok(PollWake::Timeout);
+    }
+    Ok(PollWake::Retry)
 }
 
 /// ppoll — 等待 pollfd 数组中的 fd 就绪，带超时和信号掩码。
@@ -3060,7 +3271,7 @@ pub fn sys_ppoll(
             copy_from_user(pollfds.as_mut_ptr(), fds, nfds)?;
         }
 
-        let start_us = get_timeout_us();
+        let deadline_us = timeout_us.map(|timeout| get_timeout_us().saturating_add(timeout));
         loop {
             let ready = ppoll_scan_ready(&mut pollfds);
             if ready > 0 {
@@ -3073,8 +3284,7 @@ pub fn sys_ppoll(
                     ppoll_write_back(fds, &pollfds)?;
                     return Ok(0);
                 }
-                let elapsed_us = get_timeout_us().saturating_sub(start_us);
-                if elapsed_us >= timeout_us {
+                if deadline_us.is_some_and(|deadline| get_timeout_us() >= deadline) {
                     ppoll_write_back(fds, &pollfds)?;
                     return Ok(0);
                 }
@@ -3086,10 +3296,15 @@ pub fn sys_ppoll(
                 return Err(Errno::EINTR);
             }
 
-            if timeout_us.is_none() && nfds == 0 {
-                ppoll_wait_interruptible(&task);
-            } else {
-                yield_current_task();
+            let registration = ppoll_register(&pollfds, task.tid());
+            match block_for_poll(&task, registration, deadline_us, || {
+                ppoll_scan_ready(&mut pollfds) > 0
+            })? {
+                PollWake::Retry => {}
+                PollWake::Timeout => {
+                    ppoll_write_back(fds, &pollfds)?;
+                    return Ok(0);
+                }
             }
 
             if task.check_signal_interrupt() || task.is_interrupted() {
@@ -3135,7 +3350,7 @@ pub fn sys_pselect6(
 
     // 闭包保证 cleanup（恢复掩码）在任意退出路径上都执行
     let result = (|| {
-        let start_us = get_timeout_us();
+        let deadline_us = timeout_us.map(|timeout| get_timeout_us().saturating_add(timeout));
         let mut readfditer = init_fdset(readfds, nfds)?;
         let mut writeiter = init_fdset(writefds, nfds)?;
         let mut exceptiter = init_fdset(exceptfds, nfds)?;
@@ -3183,8 +3398,7 @@ pub fn sys_pselect6(
                 if timeout_us == 0 {
                     break;
                 }
-                let elapsed_us = get_timeout_us().saturating_sub(start_us);
-                if elapsed_us >= timeout_us {
+                if deadline_us.is_some_and(|deadline| get_timeout_us() >= deadline) {
                     break;
                 }
             }
@@ -3196,7 +3410,26 @@ pub fn sys_pselect6(
                 task.set_interruptible(false);
                 return Err(Errno::EINTR);
             }
-            yield_current_task();
+            let mut registration = PollRegistration::new(task.tid());
+            for file in &readfditer.files {
+                registration.add(file.clone(), POLL_READ);
+            }
+            for file in &writeiter.files {
+                registration.add(file.clone(), POLL_WRITE);
+            }
+            match block_for_poll(&task, registration, deadline_us, || {
+                readfditer
+                    .files
+                    .iter()
+                    .any(|file| file.readable() && file.read_ready())
+                    || writeiter
+                        .files
+                        .iter()
+                        .any(|file| file.writable() && file.write_ready())
+            })? {
+                PollWake::Retry => {}
+                PollWake::Timeout => break,
+            }
             // yield 后再次检查：其他任务或信号可能设置了中断标志
             if task.is_interrupted() {
                 task.clear_interrupted();

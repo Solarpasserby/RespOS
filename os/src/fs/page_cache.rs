@@ -20,6 +20,18 @@ lazy_static! {
 static NEXT_PAGE_CACHE_ID: AtomicUsize = AtomicUsize::new(1);
 static NEXT_LRU_GENERATION: AtomicUsize = AtomicUsize::new(1);
 static PAGE_CACHE_PAGE_COUNT: AtomicUsize = AtomicUsize::new(0);
+static PAGE_CACHE_DIRTY_PAGE_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+const WRITEBACK_BATCH_PAGES: usize = 32;
+const DIRTY_PAGES_PER_CACHE_HIGH_WATERMARK: usize = 256;
+
+pub fn page_cache_page_count() -> usize {
+    PAGE_CACHE_PAGE_COUNT.load(Ordering::Relaxed)
+}
+
+pub fn page_cache_dirty_page_count() -> usize {
+    PAGE_CACHE_DIRTY_PAGE_COUNT.load(Ordering::Relaxed)
+}
 
 #[derive(Clone, Copy)]
 struct LruEntry {
@@ -37,6 +49,7 @@ enum ReclaimResult {
 pub struct Page {
     data: Vec<u8>, // PAGE_SIZE 字节
     dirty: bool,
+    write_version: usize,
     generation: usize,
     queued: bool,
 }
@@ -46,6 +59,7 @@ impl Page {
         Self {
             data: alloc::vec![0u8; PAGE_SIZE],
             dirty: false,
+            write_version: 0,
             generation,
             queued: false,
         }
@@ -58,6 +72,7 @@ pub struct PageCache {
     id: usize,
     pages: Mutex<BTreeMap<usize, Arc<Mutex<Page>>>>,
     file_size: Mutex<usize>,
+    dirty_pages: AtomicUsize,
 }
 
 impl PageCache {
@@ -67,6 +82,7 @@ impl PageCache {
             id,
             pages: Mutex::new(BTreeMap::new()),
             file_size: Mutex::new(file_size),
+            dirty_pages: AtomicUsize::new(0),
         });
         PAGE_CACHE_REGISTRY
             .lock()
@@ -76,6 +92,15 @@ impl PageCache {
 
     pub fn len(&self) -> usize {
         *self.file_size.lock()
+    }
+
+    pub fn needs_writeback(&self) -> bool {
+        let dirty = self.dirty_pages.load(Ordering::Relaxed);
+        dirty >= DIRTY_PAGES_PER_CACHE_HIGH_WATERMARK
+            || (dirty != 0
+                && (PAGE_CACHE_DIRTY_PAGE_COUNT.load(Ordering::Relaxed)
+                    > PAGE_CACHE_GLOBAL_MAX_PAGES / 2
+                    || PAGE_CACHE_PAGE_COUNT.load(Ordering::Relaxed) > PAGE_CACHE_GLOBAL_MAX_PAGES))
     }
 
     fn next_generation() -> usize {
@@ -158,7 +183,12 @@ impl PageCache {
                 .collect();
             removed_pages = victims.len();
             for victim in victims {
-                pages.remove(&victim);
+                if let Some(page) = pages.remove(&victim) {
+                    if page.lock().dirty {
+                        self.dirty_pages.fetch_sub(1, Ordering::Relaxed);
+                        PAGE_CACHE_DIRTY_PAGE_COUNT.fetch_sub(1, Ordering::Relaxed);
+                    }
+                }
             }
             if new_size % PAGE_SIZE != 0 {
                 let last_page_idx = new_size / PAGE_SIZE;
@@ -300,7 +330,12 @@ impl PageCache {
             };
             let mut p = page.lock();
             p.data[page_off..page_off + n].copy_from_slice(&buf[copied..copied + n]);
+            if !p.dirty {
+                self.dirty_pages.fetch_add(1, Ordering::Relaxed);
+                PAGE_CACHE_DIRTY_PAGE_COUNT.fetch_add(1, Ordering::Relaxed);
+            }
             p.dirty = true;
+            p.write_version = p.write_version.wrapping_add(1);
             drop(p);
             pos += n;
             copied += n;
@@ -319,7 +354,13 @@ impl PageCache {
         let pages = self.pages.lock();
         for page_idx in start_page..end_page {
             if let Some(page) = pages.get(&page_idx) {
-                page.lock().dirty = false;
+                let mut guard = page.lock();
+                if guard.dirty {
+                    guard.dirty = false;
+                    self.dirty_pages.fetch_sub(1, Ordering::Relaxed);
+                    PAGE_CACHE_DIRTY_PAGE_COUNT.fetch_sub(1, Ordering::Relaxed);
+                }
+                drop(guard);
                 touched_pages.push((page_idx, page.clone()));
             }
         }
@@ -333,7 +374,6 @@ impl PageCache {
     /// 将脏页写回
     pub fn sync(&self, inode: &Arc<dyn InodeOp>, path: &str) -> SysResult {
         let file_size = *self.file_size.lock();
-        let mut cleaned = false;
         let pages: Vec<_> = self
             .pages
             .lock()
@@ -341,30 +381,70 @@ impl PageCache {
             .map(|(&idx, p)| (idx, p.clone()))
             .collect();
 
-        for (page_idx, page) in pages {
-            let offset = page_idx * PAGE_SIZE;
-            if offset >= file_size {
-                continue;
+        let mut cursor = 0usize;
+        let mut cleaned = false;
+        let mut cleaned_pages = Vec::new();
+
+        while cursor < pages.len() {
+            while cursor < pages.len() && !pages[cursor].1.lock().dirty {
+                cursor += 1;
+            }
+            if cursor == pages.len() {
+                break;
             }
 
-            let len = (file_size - offset).min(PAGE_SIZE);
-            let p = page.lock();
-            if !p.dirty {
-                continue;
+            let first_page_idx = pages[cursor].0;
+            if first_page_idx * PAGE_SIZE >= file_size {
+                break;
             }
 
-            let written = inode.write_at(path, offset, &p.data[..len])?;
-            if written != len {
+            let mut expected_page_idx = first_page_idx;
+            let mut snapshots = Vec::new();
+            let mut data = Vec::new();
+
+            while cursor < pages.len() && snapshots.len() < WRITEBACK_BATCH_PAGES {
+                let (page_idx, page) = &pages[cursor];
+                if *page_idx != expected_page_idx {
+                    break;
+                }
+                let page_offset = page_idx * PAGE_SIZE;
+                if page_offset >= file_size {
+                    break;
+                }
+                let page_len = (file_size - page_offset).min(PAGE_SIZE);
+                let page_guard = page.lock();
+                if !page_guard.dirty {
+                    break;
+                }
+                data.extend_from_slice(&page_guard.data[..page_len]);
+                snapshots.push((page.clone(), page_guard.write_version));
+                drop(page_guard);
+                expected_page_idx += 1;
+                cursor += 1;
+            }
+
+            let offset = first_page_idx * PAGE_SIZE;
+            let written = inode.write_at(path, offset, &data)?;
+            if written != data.len() {
                 return Err(Errno::EIO);
             }
-            drop(p);
 
-            page.lock().dirty = false;
-            self.touch_page(page_idx, &page);
-            cleaned = true;
+            for (page_offset, (page, version)) in snapshots.into_iter().enumerate() {
+                let mut page_guard = page.lock();
+                if page_guard.dirty && page_guard.write_version == version {
+                    page_guard.dirty = false;
+                    self.dirty_pages.fetch_sub(1, Ordering::Relaxed);
+                    PAGE_CACHE_DIRTY_PAGE_COUNT.fetch_sub(1, Ordering::Relaxed);
+                    cleaned_pages.push((first_page_idx + page_offset, page.clone()));
+                    cleaned = true;
+                }
+            }
         }
 
         if cleaned {
+            for (page_idx, page) in cleaned_pages {
+                self.touch_page(page_idx, &page);
+            }
             Self::reclaim_global();
         }
         Ok(())
@@ -375,8 +455,12 @@ impl Drop for PageCache {
     fn drop(&mut self) {
         PAGE_CACHE_REGISTRY.lock().remove(&self.id);
         let page_count = self.pages.lock().len();
+        let dirty_count = self.dirty_pages.load(Ordering::Relaxed);
         if page_count != 0 {
             PAGE_CACHE_PAGE_COUNT.fetch_sub(page_count, Ordering::Relaxed);
+        }
+        if dirty_count != 0 {
+            PAGE_CACHE_DIRTY_PAGE_COUNT.fetch_sub(dirty_count, Ordering::Relaxed);
         }
     }
 }

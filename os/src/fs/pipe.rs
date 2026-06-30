@@ -2,7 +2,7 @@
 
 use super::KStat;
 use super::vfs::InodeType;
-use super::{FileOp, OpenFlags};
+use super::{FileOp, OpenFlags, POLL_HUP, POLL_READ, POLL_WRITE, PollEvents, PollWaiters};
 use crate::config::{PAGE_SIZE, PIPE_BUFFER_SIZE};
 use crate::syscall::{Errno, SysResult};
 use crate::task::{
@@ -44,6 +44,7 @@ pub fn set_pipe_max_size(value: usize) -> SysResult {
 
 pub struct Pipe {
     buffer: Arc<Mutex<PipeRingBuffer>>,
+    poll_waiters: Arc<PollWaiters>,
     readable: bool,
     writable: bool,
 }
@@ -51,10 +52,12 @@ pub struct Pipe {
 impl Pipe {
     /// return (pipe_read, pipe_write)
     fn end_with_buffer(buffer: Arc<Mutex<PipeRingBuffer>>, readable: bool, writable: bool) -> Self {
+        let poll_waiters = buffer.lock().poll_waiters.clone();
         Self {
             readable,
             writable,
             buffer,
+            poll_waiters,
         }
     }
 
@@ -76,6 +79,10 @@ impl Pipe {
                 break;
             }
         }
+        drop(buffer);
+        if read_size != 0 {
+            self.poll_waiters.notify(POLL_WRITE);
+        }
         read_size
     }
     pub fn write_inner(&self, buf: &[u8]) -> usize {
@@ -88,6 +95,10 @@ impl Pipe {
             } else {
                 break;
             }
+        }
+        drop(buffer);
+        if write_size != 0 {
+            self.poll_waiters.notify(POLL_READ);
         }
         write_size
     }
@@ -123,7 +134,12 @@ impl Pipe {
         if capacity < buffer.available_bytes() {
             return Err(Errno::EBUSY);
         }
+        let grew = capacity > buffer.capacity;
         buffer.capacity = capacity;
+        drop(buffer);
+        if grew {
+            self.poll_waiters.notify(POLL_WRITE);
+        }
         Ok(capacity)
     }
 
@@ -151,6 +167,9 @@ impl FileOp for NamedFifoEnd {
     fn as_any(&self) -> &dyn Any {
         self.inner.as_any()
     }
+    fn splice_supported(&self) -> bool {
+        true
+    }
     fn read<'a>(&'a self, buf: &'a mut [u8]) -> SysResult<usize> {
         self.inner.read(buf)
     }
@@ -177,6 +196,12 @@ impl FileOp for NamedFifoEnd {
     }
     fn write_ready(&self) -> bool {
         self.inner.write_ready()
+    }
+    fn register_poll_waiter(&self, tid: usize, events: PollEvents) -> bool {
+        self.inner.register_poll_waiter(tid, events)
+    }
+    fn unregister_poll_waiter(&self, tid: usize) {
+        self.inner.unregister_poll_waiter(tid);
     }
     fn get_flags(&self) -> OpenFlags {
         self.inner.get_flags()
@@ -239,6 +264,9 @@ impl FileOp for Pipe {
     fn as_any(&self) -> &dyn Any {
         self
     }
+    fn splice_supported(&self) -> bool {
+        true
+    }
     fn read<'a>(&'a self, buf: &'a mut [u8]) -> SysResult<usize> {
         if buf.is_empty() {
             return Ok(0);
@@ -287,6 +315,7 @@ impl FileOp for Pipe {
                 wakeup_task(tid);
             }
             if ret != 0 {
+                self.poll_waiters.notify(POLL_WRITE);
                 return Ok(ret);
             }
             if should_block {
@@ -359,6 +388,7 @@ impl FileOp for Pipe {
                 wakeup_task(tid);
             }
             if ret != 0 {
+                self.poll_waiters.notify(POLL_READ);
                 return Ok(ret);
             }
             if should_block {
@@ -404,7 +434,15 @@ impl FileOp for Pipe {
     // 管道写端是否有空间可立即写入而不阻塞
     fn write_ready(&self) -> bool {
         let buffer = self.buffer.lock();
-        buffer.available_bytes() < buffer.capacity
+        let free = buffer.capacity.saturating_sub(buffer.available_bytes());
+        free >= PAGE_SIZE.min(buffer.capacity)
+    }
+    fn register_poll_waiter(&self, tid: usize, events: PollEvents) -> bool {
+        self.poll_waiters.register(tid, events);
+        true
+    }
+    fn unregister_poll_waiter(&self, tid: usize) {
+        self.poll_waiters.unregister(tid);
     }
 
     fn get_flags(&self) -> OpenFlags {
@@ -438,6 +476,7 @@ impl Drop for Pipe {
             buffer.write_closed = true;
             wake_waiters.append(&mut buffer.read_waiters);
         }
+        self.poll_waiters.notify(POLL_READ | POLL_WRITE | POLL_HUP);
         for tid in wake_waiters {
             wakeup_task(tid);
         }
@@ -451,6 +490,7 @@ struct PipeRingBuffer {
     write_closed: bool, // 管道写端是否关闭
     read_waiters: VecDeque<usize>,
     write_waiters: VecDeque<usize>,
+    poll_waiters: Arc<PollWaiters>,
 }
 
 impl PipeRingBuffer {
@@ -469,6 +509,7 @@ impl PipeRingBuffer {
             write_closed: false,
             read_waiters: VecDeque::new(),
             write_waiters: VecDeque::new(),
+            poll_waiters: Arc::new(PollWaiters::new()),
         }
     }
 

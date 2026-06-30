@@ -30,6 +30,10 @@ impl TaskManager {
         self.0.lock().len()
     }
 
+    pub fn try_len(&self) -> Option<usize> {
+        Some(self.0.try_lock()?.len())
+    }
+
     pub fn get(&self, tid: usize) -> Option<Arc<TaskControlBlock>> {
         match self.0.lock().get(&tid) {
             Some(task) => task.upgrade(),

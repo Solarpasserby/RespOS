@@ -103,6 +103,10 @@ impl LoopInode {
         Self { id }
     }
 
+    pub fn backing_size(&self) -> SysResult<usize> {
+        Ok(loop_backend()?.get_stat()?.size)
+    }
+
     pub fn ioctl(&self, request: usize, arg: usize) -> SysResult<usize> {
         match request {
             LOOP_SET_FD => {
@@ -127,12 +131,12 @@ impl LoopInode {
                 }
             }
             request if request & 0xffff == BLKGETSIZE64 & 0xffff => {
-                let size = loop_backend()?.get_stat()?.size as u64;
+                let size = self.backing_size()? as u64;
                 copy_to_user(arg as *mut u64, &size as *const u64, 1)?;
                 Ok(0)
             }
             request if request & 0xffff == BLKGETSIZE => {
-                let sectors = (loop_backend()?.get_stat()?.size / 512) as usize;
+                let sectors = self.backing_size()? / 512;
                 copy_to_user(arg as *mut usize, &sectors as *const usize, 1)?;
                 Ok(0)
             }

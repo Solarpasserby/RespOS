@@ -21,7 +21,7 @@ pub struct Ext4SuperBlock {
 
 impl Ext4SuperBlock {
     pub fn new(disk: Disk) -> Self {
-        println!("init ext4 device superblock");
+        info!("initializing ext4 device superblock");
         let inner =
             Ext4BlockWrapper::<Disk>::new(disk).expect("failed to initialize EXT4 filesystem");
         let root = Ext4Inode::get_or_create(2, Ext4InodeTypes::EXT4_DE_DIR);

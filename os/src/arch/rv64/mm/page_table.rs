@@ -1,13 +1,58 @@
 // os/src/arch/rv64/mm/page_table.rs
 
-use crate::config::KERNEL_BASE;
+use crate::config::{KERNEL_BASE, PAGE_SIZE_BITS};
 use crate::mm::{
     FrameTracker, KERNEL_SPACE, MapPermission, PPN_WIDTH_SV39, PhysAddr, PhysPageNum, VirtAddr,
     VirtPageNum, frame_alloc,
 };
+use crate::syscall::{Errno, SysResult};
+use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::{vec, vec::Vec};
 use bitflags::*;
+use lazy_static::lazy_static;
+use spin::Mutex;
+
+const PAGE_TABLE_FRAME_QUARANTINE_LIMIT: usize = 128;
+
+lazy_static! {
+    static ref PAGE_TABLE_FRAME_QUARANTINE: Mutex<PageTableFrameQuarantine> =
+        Mutex::new(PageTableFrameQuarantine::new());
+}
+
+struct PageTableFrameQuarantine {
+    page_count: usize,
+    retired: VecDeque<Vec<FrameTracker>>,
+}
+
+impl PageTableFrameQuarantine {
+    fn new() -> Self {
+        Self {
+            page_count: 0,
+            retired: VecDeque::new(),
+        }
+    }
+
+    fn retire(&mut self, frames: Vec<FrameTracker>) -> Vec<Vec<FrameTracker>> {
+        if frames.is_empty() {
+            return Vec::new();
+        }
+
+        self.page_count += frames.len();
+        self.retired.push_back(frames);
+
+        let mut expired = Vec::new();
+        while self.page_count > PAGE_TABLE_FRAME_QUARANTINE_LIMIT {
+            let Some(frames) = self.retired.pop_front() else {
+                self.page_count = 0;
+                break;
+            };
+            self.page_count -= frames.len();
+            expired.push(frames);
+        }
+        expired
+    }
+}
 
 /// 页表
 ///
@@ -28,18 +73,18 @@ impl PageTable {
         }
     }
     /// 依据内核空间页表创建新页表
-    pub fn from_kernel() -> Self {
-        let frame = frame_alloc().unwrap();
+    pub fn from_kernel() -> SysResult<Self> {
+        let frame = frame_alloc().ok_or(Errno::ENOMEM)?;
         let kernel_page_table = &KERNEL_SPACE.lock().page_table;
         let kernel_root_ppn = kernel_page_table.root_ppn;
         // 拷贝内核空间的根页表页
-        let index = VirtAddr::from(KERNEL_BASE).floor().indexes()[0];
+        let index = (KERNEL_BASE >> (PAGE_SIZE_BITS + 18)) & 0x1FF;
         frame.ppn().get_pte_array()[index..]
             .copy_from_slice(&kernel_root_ppn.get_pte_array()[index..]);
-        PageTable {
+        Ok(PageTable {
             root_ppn: frame.ppn(),
             frames: vec![frame],
-        }
+        })
     }
     /// 临时页表无数据，仅用于查询用户程序的数据
     pub fn from_token(satp: usize) -> Self {
@@ -53,6 +98,20 @@ impl PageTable {
     pub fn token(&self) -> usize {
         (8usize << 60) | self.root_ppn.0
     }
+
+    /// 延迟回收当前页表持有的页表页帧。
+    ///
+    /// 进程退出时内核仍可能暂时运行在该进程的 satp 上，不能立刻释放根页表。
+    /// 将页表帧放入有限隔离队列，超过上限后再释放最旧的一批，既避免
+    /// 退出路径上复用仍可能被硬件观察到的页表帧，也防止长时间 LTP 压力下
+    /// 页表帧无限累积。
+    pub fn retire_owned_frames(&mut self) {
+        let expired = PAGE_TABLE_FRAME_QUARANTINE
+            .lock()
+            .retire(core::mem::take(&mut self.frames));
+        drop(expired);
+    }
+
     /// 转译虚拟页号为对应页表项
     pub fn translate(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
         self.find_pte(vpn).map(|pte| *pte)
@@ -90,21 +149,19 @@ pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> &'static mut T {
 /// 均返回页表项的可变借用，用于修改或读取页表项
 impl PageTable {
     /// 根据虚拟地址寻找目标页表项，若发现多级页表不存在则创建
-    fn find_pte_create(&mut self, vpn: VirtPageNum) -> Option<&mut PageTableEntry> {
+    fn find_pte_create(&mut self, vpn: VirtPageNum) -> SysResult<&mut PageTableEntry> {
         let idxs = vpn.indexes();
         let mut ppn = self.root_ppn;
-        let mut result: Option<&mut PageTableEntry> = None;
         for i in 0..3 {
             let pte = &mut ppn.get_pte_array()[idxs[i]];
             if i == 2 {
                 // 直接返回目标的页表项，
-                result = Some(pte);
-                break;
+                return Ok(pte);
             }
             // 页表页由页帧分配器分配得到，默认为空，没有修改的页表项均无效
             if !pte.is_valid() {
                 // 当前页表项无效，表示当前非叶子页表页的孩子页表页不存在，创建新的页表页
-                let frame = frame_alloc().unwrap();
+                let frame = frame_alloc().ok_or(Errno::ENOMEM)?;
                 // 更新当前页表页上的页表项
                 *pte = PageTableEntry::new(frame.ppn(), PTEFlags::VALID);
                 // 加入页表，由页表统一维护页表页帧
@@ -112,7 +169,7 @@ impl PageTable {
             }
             ppn = pte.ppn();
         }
-        result
+        Err(Errno::EFAULT)
     }
 
     /// 根据虚拟地址寻找目标页表项
@@ -139,13 +196,16 @@ impl PageTable {
     /// 在页表中建立物理地址和虚拟地址的映射关系
     ///
     /// 一般用于初始化一个新分配的物理页帧，所以还需要页表项标志位数据
-    pub fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) {
-        let pte = self.find_pte_create(vpn).unwrap();
-        assert!(!pte.is_valid(), "vpn {:?} is mapped before mapping", vpn); // 页表项应当没有被创建
+    pub fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) -> SysResult {
+        let pte = self.find_pte_create(vpn)?;
+        if pte.is_valid() {
+            return Err(Errno::EEXIST);
+        }
         *pte = PageTableEntry::new(
             ppn,
             flags | PTEFlags::VALID | PTEFlags::ACCESSED | PTEFlags::DIRTY,
         ); // 被映射的物理页帧必定有效，这里需要统一配置
+        Ok(())
     }
     /// 在页表中消除物理页和虚拟页的映射关系
     pub fn unmap(&mut self, vpn: VirtPageNum) {
@@ -251,7 +311,11 @@ impl PTEFlags {
 
 impl From<MapPermission> for PTEFlags {
     fn from(value: MapPermission) -> Self {
-        PTEFlags::from_bits(value.bits()).unwrap()
+        let mut flags = PTEFlags::from_bits(value.bits()).unwrap();
+        if flags.contains(PTEFlags::WRITE) {
+            flags.insert(PTEFlags::READ);
+        }
+        flags
     }
 }
 

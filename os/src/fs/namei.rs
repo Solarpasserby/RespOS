@@ -2,7 +2,9 @@
 
 use super::Path;
 use super::dentry_cache::{insert_dentry_cache, lookup_dentry_cache, remove_dentry_cache_tree};
-use super::mount::{VfsMount, get_mount_by_dentry, get_mount_by_vfsmount, root_path};
+use super::mount::{
+    MS_NODEV, MS_NOSYMFOLLOW, VfsMount, get_mount_by_dentry, get_mount_by_vfsmount, root_path,
+};
 use super::vfs::{Dentry, InodeType};
 use super::{File, OpenFlags, TmpFileMeta};
 use crate::fs::ext4::Ext4Inode;
@@ -22,6 +24,7 @@ pub const AT_EMPTY_PATH: usize = 0x1000;
 pub const AT_SYMLINK_NOFOLLOW: usize = 0x100;
 
 const MAX_SYMLINK_FOLLOWS: usize = 40;
+const PATH_MAX: usize = 4096;
 const NAME_MAX: usize = 255;
 static NAMEI_MUTATION_LOCK: Mutex<()> = Mutex::new(());
 
@@ -200,7 +203,6 @@ fn dentry_name(dentry: &Arc<Dentry>) -> SysResult<String> {
 fn inode_allows_perm(dentry: &Arc<Dentry>, mask: u32) -> SysResult<bool> {
     let task = current_task().expect("[kernel] current task is None.");
     let euid = task.fsuid() as u32;
-    let egid = task.fsgid() as u32;
     if euid == 0 {
         return Ok(true);
     }
@@ -209,7 +211,7 @@ fn inode_allows_perm(dentry: &Arc<Dentry>, mask: u32) -> SysResult<bool> {
     let mode = stat.mode & 0o777;
     let perm = if euid == stat.uid {
         (mode >> 6) & 0o7
-    } else if egid == stat.gid {
+    } else if task.in_group(stat.gid as usize) {
         (mode >> 3) & 0o7
     } else {
         mode & 0o7
@@ -300,6 +302,22 @@ fn check_open_permission(dentry: &Arc<Dentry>, flags: OpenFlags) -> SysResult {
 fn check_mount_writable(mnt: &Arc<VfsMount>) -> SysResult {
     if mnt.is_readonly() {
         Err(Errno::EROFS)
+    } else {
+        Ok(())
+    }
+}
+
+fn check_mount_device_allowed(
+    mnt: &Arc<VfsMount>,
+    inode: &Arc<dyn super::vfs::InodeOp>,
+) -> SysResult {
+    if mnt.has_flag(MS_NODEV)
+        && matches!(
+            inode.node_type(),
+            InodeType::CharDevice | InodeType::BlockDevice
+        )
+    {
+        Err(Errno::EACCES)
     } else {
         Ok(())
     }
@@ -427,6 +445,7 @@ pub fn open_last_lookups(nd: &mut Nameidata, flags: usize, mode: usize) -> SysRe
                 {
                     return Err(Errno::ENOTDIR);
                 }
+                check_mount_device_allowed(&nd.mnt, &inode)?;
                 check_open_permission(&dentry, flags)?;
                 // TODO: 此处默认 dentry 不是负目录项，在引入缓存后需修改
                 dentry
@@ -500,6 +519,7 @@ pub fn path_open(dirfd: isize, path: &str, flags: usize, mode: usize) -> SysResu
         {
             return Err(Errno::ENOTDIR);
         }
+        check_mount_device_allowed(&path.mnt, &inode)?;
         check_open_permission(&path.dentry, open_flags)?;
         return Ok(Arc::new(File::new(path, inode, open_flags)));
     }
@@ -664,7 +684,7 @@ fn resolve_path_from(
     symlink_follows: usize,
 ) -> SysResult<Arc<Path>> {
     // 限制 symlink 展开次数，防止 a -> b -> a 这种循环把内核拖进无限递归。
-    if symlink_follows > MAX_SYMLINK_FOLLOWS {
+    if symlink_follows >= MAX_SYMLINK_FOLLOWS {
         return Err(Errno::ELOOP);
     }
 
@@ -700,9 +720,10 @@ fn resolve_path_from(
         // 如果 child 是相对 symlink，后续解析必须以“链接所在目录”为起点。
         // 因此先保存当前目录 path，再去 lookup child。
         let symlink_base = Path::new(nd.mnt.clone(), nd.dentry.clone());
-        if nd.dentry.get_inode().node_type() == InodeType::Directory {
-            check_dir_search_permission(&nd.dentry)?;
+        if nd.dentry.get_inode().node_type() != InodeType::Directory {
+            return Err(Errno::ENOTDIR);
         }
+        check_dir_search_permission(&nd.dentry)?;
         // 中间路径必须穿过 mount；最后一级是否穿过 mount 由调用者决定。
         let child = lookup_dentry_maybe_follow_mount(&mut nd, !is_last || follow_final_mount)?;
         let child_path = Path::new(nd.mnt.clone(), child.clone());
@@ -710,9 +731,16 @@ fn resolve_path_from(
 
         // 中间 symlink 一定要展开；最后一级是否展开由 follow_final_symlink 决定。
         if inode.node_type() == InodeType::SymLink && (!is_last || follow_final_symlink) {
+            if child_path.mnt.has_flag(MS_NOSYMFOLLOW) {
+                return Err(Errno::ELOOP);
+            }
             let target = inode.read_link(&child_path.abs_path())?;
             // target 替换当前 symlink，其余未解析 segment 继续拼到 target 后面。
             let next_path = join_symlink_target(&target, &nd.path_segments[nd.depth + 1..]);
+            if next_path.len() > PATH_MAX {
+                return Err(Errno::ENAMETOOLONG);
+            }
+            validate_path_components(&next_path)?;
             let next_base = if target.starts_with('/') {
                 // 绝对 symlink 目标从当前进程 root 开始解析。
                 task_root_path()
@@ -801,7 +829,20 @@ pub fn filename_unlink(dirfd: isize, path: &str, remove_dir: bool) -> SysResult 
     let parent = target.get_parent().ok_or(Errno::EBUSY)?;
     check_sticky_rename_permission(&parent, &target)?;
     let name = dentry_name(&target)?;
-    parent.get_inode().unlink(&target)?;
+    let target_inode = target.get_inode();
+    let target_stat = target_inode.stat(&target.abs_path)?;
+    let orphaned_open_file = target_ty == InodeType::Regular
+        && target_stat.nlink <= 1
+        && Arc::strong_count(&target_inode) > 2
+        && target_inode
+            .as_any()
+            .downcast_ref::<Ext4Inode>()
+            .map(|inode| inode.orphan_regular_file(&target.abs_path))
+            .transpose()?
+            .is_some();
+    if !orphaned_open_file {
+        parent.get_inode().unlink(&target)?;
+    }
     parent.remove_child(name.as_str());
     remove_dentry_cache_tree(&target.abs_path);
     Ok(())
@@ -1053,11 +1094,18 @@ pub fn link_path_walk(nd: &mut Nameidata) -> SysResult {
                 let child_path = Path::new(nd.mnt.clone(), child_dentry.clone());
                 let inode = child_dentry.get_inode();
                 if inode.node_type() == InodeType::SymLink {
+                    if child_path.mnt.has_flag(MS_NOSYMFOLLOW) {
+                        return Err(Errno::ELOOP);
+                    }
                     if symlink_follows >= MAX_SYMLINK_FOLLOWS {
                         return Err(Errno::ELOOP);
                     }
                     let target = inode.read_link(&child_path.abs_path())?;
                     let next_path = join_symlink_target(&target, &nd.path_segments[nd.depth + 1..]);
+                    if next_path.len() > PATH_MAX {
+                        return Err(Errno::ENAMETOOLONG);
+                    }
+                    validate_path_components(&next_path)?;
                     let next_base = if target.starts_with('/') {
                         task_root_path()
                     } else {

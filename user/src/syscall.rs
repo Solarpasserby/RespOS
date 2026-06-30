@@ -11,6 +11,7 @@ const SYSCALL_LINKAT: usize = 37;
 const SYSCALL_UMOUNT2: usize = 39;
 const SYSCALL_MOUNT: usize = 40;
 const SYSCALL_CHDIR: usize = 49;
+const SYSCALL_FCHMODAT: usize = 53;
 const SYSCALL_OPENAT: usize = 56;
 const SYSCALL_CLOSE: usize = 57;
 const SYSCALL_PIPE2: usize = 59;
@@ -47,6 +48,8 @@ const SYSCALL_CLONE: usize = 220;
 const SYSCALL_EXECVE: usize = 221;
 const SYSCALL_MMAP: usize = 222;
 const SYSCALL_WAIT4: usize = 260;
+const SYSCALL_COPY_FILE_RANGE: usize = 285;
+const AT_REMOVEDIR: usize = 0x200;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default)]
@@ -146,6 +149,10 @@ pub fn sys_write(fd: usize, buf: &[u8]) -> isize {
     )
 }
 
+pub fn sys_copy_file_range(fd_in: usize, fd_out: usize, len: usize) -> isize {
+    syscall(SYSCALL_COPY_FILE_RANGE, [fd_in, 0, fd_out, 0, len, 0])
+}
+
 pub fn sys_getcwd(buf: &mut [u8]) -> isize {
     syscall(
         SYSCALL_GETCWD,
@@ -175,8 +182,19 @@ pub fn sys_unlinkat(dirfd: isize, path: &str, flags: usize) -> isize {
     )
 }
 
+pub fn sys_rmdir(dirfd: isize, path: &str) -> isize {
+    sys_unlinkat(dirfd, path, AT_REMOVEDIR)
+}
+
 pub fn sys_chdir(path: &str) -> isize {
     syscall(SYSCALL_CHDIR, [path.as_ptr() as usize, 0, 0, 0, 0, 0])
+}
+
+pub fn sys_fchmodat(dirfd: isize, path: &str, mode: usize, flags: usize) -> isize {
+    syscall(
+        SYSCALL_FCHMODAT,
+        [dirfd as usize, path.as_ptr() as usize, mode, flags, 0, 0],
+    )
 }
 
 pub fn sys_openat(dirfd: isize, path: &str, flags: usize, mode: usize) -> isize {
@@ -254,6 +272,13 @@ pub fn sys_wait4(pid: isize, exit_code: *mut i32) -> isize {
     syscall(
         SYSCALL_WAIT4,
         [pid as usize, exit_code as usize, 0, 0, 0, 0],
+    )
+}
+
+pub fn sys_wait4_options(pid: isize, exit_code: *mut i32, options: usize) -> isize {
+    syscall(
+        SYSCALL_WAIT4,
+        [pid as usize, exit_code as usize, options, 0, 0, 0],
     )
 }
 
@@ -411,7 +436,10 @@ pub fn sys_sendto(
     addr: usize,
     addrlen: usize,
 ) -> isize {
-    syscall(SYSCALL_SENDTO, [fd, buf as usize, len, flags, addr, addrlen])
+    syscall(
+        SYSCALL_SENDTO,
+        [fd, buf as usize, len, flags, addr, addrlen],
+    )
 }
 
 pub fn sys_recvfrom(
@@ -422,7 +450,10 @@ pub fn sys_recvfrom(
     addr: usize,
     addrlen: usize,
 ) -> isize {
-    syscall(SYSCALL_RECVFROM, [fd, buf as usize, len, flags, addr, addrlen])
+    syscall(
+        SYSCALL_RECVFROM,
+        [fd, buf as usize, len, flags, addr, addrlen],
+    )
 }
 
 pub fn sys_brk(addr: usize) -> isize {

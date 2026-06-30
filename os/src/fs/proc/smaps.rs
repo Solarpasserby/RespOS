@@ -3,6 +3,7 @@
 use super::super::KStat;
 use super::super::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
 use super::dirs::{proc_dev, proc_self_smaps_ino};
+use crate::config::PAGE_SIZE;
 use crate::mm::MapPermission;
 use crate::syscall::{Errno, SysResult};
 use crate::task::current_task;
@@ -80,8 +81,25 @@ fn generate_smaps() -> String {
     task.op_memory_set_read(|mm| {
         mm.each_area(|start, end, perm, _shared, _locked| {
             let p = perm_to_smaps_str(perm);
-            let _ = writeln!(result, "{:016x}-{:016x} {} 00000000 00:00 0", start, end, p);
-            let _ = writeln!(result);
+            let size_kb = end.saturating_sub(start).div_ceil(PAGE_SIZE) * (PAGE_SIZE / 1024);
+            let private_dirty_kb = if perm.contains(MapPermission::WRITE) {
+                size_kb
+            } else {
+                0
+            };
+            let pathname = if perm.contains(MapPermission::WRITE) {
+                " [heap]"
+            } else {
+                ""
+            };
+            let _ = writeln!(
+                result,
+                "{:016x}-{:016x} {} 00000000 00:00 0{}",
+                start, end, p, pathname
+            );
+            let _ = writeln!(result, "Size: {:>17} kB", size_kb);
+            let _ = writeln!(result, "Rss: {:>18} kB", size_kb);
+            let _ = writeln!(result, "Private_Dirty: {:>8} kB", private_dirty_kb);
         });
     });
     result

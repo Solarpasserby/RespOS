@@ -8,7 +8,7 @@ use crate::signal::{SiField, Sig, SigInfo};
 use crate::syscall::*;
 use crate::task::{
     current_task, exit_and_run_next, exit_by_signal_and_run_next, handle_signals,
-    yield_current_task,
+    preempt_current_task,
 };
 use core::arch::global_asm;
 
@@ -54,12 +54,17 @@ fn handle_user_page_fault(_cx: &TrapContext, exception: estat::Exception) {
         .op_memory_set_write(|memory_set| {
             memory_set.handle_page_fault(page_fault_cause(exception), badv)
         });
-    if result.is_err() {
+    if let Err(err) = result {
         let task = current_task().expect("[kernel] current task is None.");
-        if task.op_sig_pending(|pending| pending.mask.contain_signal(Sig::SIGSEGV)) {
-            exit_by_signal_and_run_next(Sig::SIGSEGV.raw());
+        let sig = if err == Errno::EIO {
+            Sig::SIGBUS
+        } else {
+            Sig::SIGSEGV
+        };
+        if task.op_sig_pending(|pending| pending.mask.contain_signal(sig)) {
+            exit_by_signal_and_run_next(sig.raw());
         }
-        let siginfo = SigInfo::new(Sig::SIGSEGV.raw(), SigInfo::KERNEL, SiField::None);
+        let siginfo = SigInfo::new(sig.raw(), SigInfo::KERNEL, SiField::None);
         task.receive_siginfo(siginfo, true);
     }
 }
@@ -120,7 +125,7 @@ pub fn trap_handler(cx: &mut TrapContext) {
             clear_timer_interrupt();
             set_next_ti_trigger();
             check_all_task_timers();
-            yield_current_task();
+            preempt_current_task();
         }
         estat::Trap::Exception(estat::Exception::Syscall) => {
             handle_user_syscall(cx);
@@ -158,7 +163,6 @@ pub fn trap_handler(cx: &mut TrapContext) {
             );
         }
     }
-    check_all_task_timers();
     handle_signals();
 }
 

@@ -10,7 +10,7 @@ mod context;
 use super::timer::set_next_ti_trigger;
 use crate::signal::{SiField, Sig, SigInfo};
 use crate::syscall::*;
-use crate::task::{current_task, exit_and_run_next, handle_signals, yield_current_task};
+use crate::task::{current_task, exit_and_run_next, handle_signals, preempt_current_task};
 use core::arch::global_asm;
 use riscv::register::{
     mtvec::TrapMode,
@@ -101,8 +101,13 @@ pub fn trap_handler(cx: &mut TrapContext) {
                 .op_memory_set_write(|memory_set| {
                     memory_set.handle_page_fault(page_fault_cause, stval)
                 });
-            if result.is_err() {
-                let siginfo = SigInfo::new(Sig::SIGSEGV.raw(), SigInfo::KERNEL, SiField::None);
+            if let Err(err) = result {
+                let sig = if err == Errno::EIO {
+                    Sig::SIGBUS
+                } else {
+                    Sig::SIGSEGV
+                };
+                let siginfo = SigInfo::new(sig.raw(), SigInfo::KERNEL, SiField::None);
                 current_task()
                     .expect("[kernel] current task is None.")
                     .receive_siginfo(siginfo, true);
@@ -128,7 +133,7 @@ pub fn trap_handler(cx: &mut TrapContext) {
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
             set_next_ti_trigger();
             check_all_task_timers();
-            yield_current_task();
+            preempt_current_task();
         }
         _ => {
             panic!(
@@ -138,7 +143,6 @@ pub fn trap_handler(cx: &mut TrapContext) {
             );
         }
     };
-    check_all_task_timers();
     handle_signals();
     return;
 }

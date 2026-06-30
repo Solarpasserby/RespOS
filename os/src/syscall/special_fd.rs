@@ -1,16 +1,25 @@
 use super::time::{ITimerSpec, clock_time_ms};
 use super::{Errno, SysResult};
 use crate::fs::vfs::InodeType;
-use crate::fs::{FdEntry, FileOp, KStat, OpenFlags, SpecialFd};
+use crate::fs::{
+    FdEntry, FileOp, KStat, OpenFlags, POLL_READ, POLL_WRITE, PollEvents, PollWaiters, SpecialFd,
+};
 use crate::mm::{check_user_readable, copy_cstr_from_user, copy_from_user, copy_to_user};
 use crate::mutex::SpinLock;
-use crate::task::{TASK_MANAGER, current_task, yield_current_task};
-use crate::timer::TimeSpec;
-use alloc::sync::Arc;
+use crate::task::{
+    TASK_MANAGER, current_task, prepare_current_task_blocked, remove_task, switch_to_next_task,
+    yield_current_task,
+};
+use crate::timer::{TimeSpec, get_timeout_us};
+use alloc::collections::BTreeMap;
+use alloc::sync::{Arc, Weak};
+use alloc::vec::Vec;
 use core::any::Any;
+use lazy_static::lazy_static;
 
 const O_NONBLOCK: usize = OpenFlags::O_NONBLOCK.bits() as usize;
 const O_CLOEXEC: usize = OpenFlags::O_CLOEXEC.bits() as usize;
+const EFD_SEMAPHORE: usize = 1;
 const TFD_TIMER_ABSTIME: usize = 1;
 const TFD_TIMER_CANCEL_ON_SET: usize = 1 << 1;
 const TFD_SETTIME_FLAGS: usize = TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET;
@@ -22,6 +31,189 @@ const MFD_HUGE_MASK: usize = 0x3f << 26;
 const MFD_ALLOWED_FLAGS: usize = MFD_CLOEXEC | MFD_ALLOW_SEALING | MFD_HUGETLB | MFD_HUGE_MASK;
 
 const PIDFD_NONBLOCK: usize = O_NONBLOCK;
+
+pub struct EpollFd {
+    flags: OpenFlags,
+    interests: SpinLock<BTreeMap<usize, EpollInterest>>,
+}
+
+struct EpollInterest {
+    events: u32,
+    data: u64,
+    file: Arc<dyn FileOp>,
+    last_ready: u32,
+    disabled: bool,
+}
+
+impl EpollFd {
+    fn new(flags: OpenFlags) -> Self {
+        Self {
+            flags,
+            interests: SpinLock::new(BTreeMap::new()),
+        }
+    }
+
+    fn ctl(
+        &self,
+        op: usize,
+        fd: usize,
+        event: Option<(u32, u64)>,
+        file: Arc<dyn FileOp>,
+    ) -> SysResult<usize> {
+        const EPOLL_CTL_ADD: usize = 1;
+        const EPOLL_CTL_DEL: usize = 2;
+        const EPOLL_CTL_MOD: usize = 3;
+
+        let mut interests = self.interests.lock();
+        match op {
+            EPOLL_CTL_ADD => {
+                if interests.contains_key(&fd) {
+                    return Err(Errno::EEXIST);
+                }
+                let (events, data) = event.ok_or(Errno::EFAULT)?;
+                interests.insert(
+                    fd,
+                    EpollInterest {
+                        events,
+                        data,
+                        file,
+                        last_ready: 0,
+                        disabled: false,
+                    },
+                );
+            }
+            EPOLL_CTL_DEL => {
+                if interests.remove(&fd).is_none() {
+                    return Err(Errno::ENOENT);
+                }
+            }
+            EPOLL_CTL_MOD => {
+                let interest = interests.get_mut(&fd).ok_or(Errno::ENOENT)?;
+                let (events, data) = event.ok_or(Errno::EFAULT)?;
+                interest.events = events;
+                interest.data = data;
+                interest.last_ready = 0;
+                interest.disabled = false;
+            }
+            _ => return Err(Errno::EINVAL),
+        }
+        Ok(0)
+    }
+
+    fn scan_ready(&self, maxevents: usize, out: &mut Vec<(u32, u64)>) -> usize {
+        const EPOLLIN: u32 = 0x001;
+        const EPOLLOUT: u32 = 0x004;
+        const EPOLLET: u32 = 1 << 31;
+        const EPOLLONESHOT: u32 = 1 << 30;
+
+        let mut interests = self.interests.lock();
+        for interest in interests.values_mut() {
+            if out.len() >= maxevents {
+                break;
+            }
+            if interest.disabled {
+                continue;
+            }
+
+            let mut ready = 0;
+            if interest.events & EPOLLIN != 0
+                && interest.file.readable()
+                && interest.file.read_ready()
+            {
+                ready |= EPOLLIN;
+            }
+            if interest.events & EPOLLOUT != 0
+                && interest.file.writable()
+                && interest.file.write_ready()
+            {
+                ready |= EPOLLOUT;
+            }
+
+            let report = if interest.events & EPOLLET != 0 {
+                let newly_ready = ready & !interest.last_ready;
+                interest.last_ready = ready;
+                newly_ready
+            } else {
+                ready
+            };
+            if report == 0 {
+                continue;
+            }
+
+            out.push((report & interest.events, interest.data));
+            if interest.events & EPOLLONESHOT != 0 {
+                interest.disabled = true;
+            }
+        }
+        out.len()
+    }
+
+    fn register_waiters(&self, tid: usize) -> Vec<Arc<dyn FileOp>> {
+        const EPOLLIN: u32 = 0x001;
+        const EPOLLOUT: u32 = 0x004;
+
+        let interests = self.interests.lock();
+        let mut files = Vec::new();
+        for interest in interests.values() {
+            if interest.disabled {
+                continue;
+            }
+            let mut events = 0;
+            if interest.events & EPOLLIN != 0 {
+                events |= POLL_READ;
+            }
+            if interest.events & EPOLLOUT != 0 {
+                events |= POLL_WRITE;
+            }
+            if events != 0 && interest.file.register_poll_waiter(tid, events) {
+                files.push(interest.file.clone());
+            }
+        }
+        files
+    }
+}
+
+impl FileOp for EpollFd {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn read<'a>(&'a self, _buf: &'a mut [u8]) -> SysResult<usize> {
+        Err(Errno::EINVAL)
+    }
+
+    fn write<'a>(&'a self, _buf: &'a [u8]) -> SysResult<usize> {
+        Err(Errno::EINVAL)
+    }
+
+    fn can_seek(&self) -> SysResult {
+        Err(Errno::ESPIPE)
+    }
+
+    fn seek(&self, _offset: isize) -> SysResult<usize> {
+        Err(Errno::ESPIPE)
+    }
+
+    fn get_offset(&self) -> usize {
+        0
+    }
+
+    fn get_flags(&self) -> OpenFlags {
+        self.flags
+    }
+
+    fn get_stat(&self) -> SysResult<KStat> {
+        Ok(KStat::minimal(0, InodeType::Unknown))
+    }
+
+    fn readable(&self) -> bool {
+        false
+    }
+
+    fn writable(&self) -> bool {
+        false
+    }
+}
 
 fn alloc_special_fd(flags: OpenFlags) -> SysResult<usize> {
     alloc_special_fd_with_type(flags, InodeType::Unknown)
@@ -58,10 +250,171 @@ struct TimerFdState {
     consumed: u64,
 }
 
+pub struct EventFd {
+    flags: OpenFlags,
+    semaphore: bool,
+    counter: SpinLock<u64>,
+    poll_waiters: PollWaiters,
+}
+
+impl EventFd {
+    fn new(initval: usize, flags: OpenFlags, semaphore: bool) -> Self {
+        Self {
+            flags,
+            semaphore,
+            counter: SpinLock::new(initval as u64),
+            poll_waiters: PollWaiters::new(),
+        }
+    }
+}
+
+fn wait_for_file_event(
+    waiters: &PollWaiters,
+    events: PollEvents,
+    ready: impl Fn() -> bool,
+) -> SysResult {
+    let task = current_task().expect("[kernel] current task is None.");
+    task.set_interruptible(true);
+    waiters.register(task.tid(), events);
+
+    if ready() {
+        waiters.unregister(task.tid());
+        task.set_interruptible(false);
+        return Ok(());
+    }
+    if task.check_signal_interrupt() || task.is_interrupted() {
+        task.clear_interrupted();
+        waiters.unregister(task.tid());
+        task.set_interruptible(false);
+        return Err(Errno::EINTR);
+    }
+
+    if prepare_current_task_blocked() {
+        if task.is_ready() {
+            remove_task(task.tid());
+            task.set_running();
+        } else {
+            switch_to_next_task();
+        }
+    } else {
+        yield_current_task();
+    }
+
+    waiters.unregister(task.tid());
+    task.set_interruptible(false);
+    if task.check_signal_interrupt() || task.is_interrupted() {
+        task.clear_interrupted();
+        return Err(Errno::EINTR);
+    }
+    Ok(())
+}
+
+impl FileOp for EventFd {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn read<'a>(&'a self, buf: &'a mut [u8]) -> SysResult<usize> {
+        if buf.len() < core::mem::size_of::<u64>() {
+            return Err(Errno::EINVAL);
+        }
+        loop {
+            let mut counter = self.counter.lock();
+            if *counter != 0 {
+                let value = if self.semaphore { 1 } else { *counter };
+                *counter -= value;
+                buf[..8].copy_from_slice(&value.to_ne_bytes());
+                drop(counter);
+                self.poll_waiters.notify(POLL_WRITE);
+                return Ok(8);
+            }
+            drop(counter);
+            if self.flags.contains(OpenFlags::O_NONBLOCK) {
+                return Err(Errno::EAGAIN);
+            }
+            wait_for_file_event(&self.poll_waiters, POLL_READ, || self.read_ready())?;
+        }
+    }
+
+    fn write<'a>(&'a self, buf: &'a [u8]) -> SysResult<usize> {
+        if buf.len() < core::mem::size_of::<u64>() {
+            return Err(Errno::EINVAL);
+        }
+        let mut raw = [0u8; 8];
+        raw.copy_from_slice(&buf[..8]);
+        let value = u64::from_ne_bytes(raw);
+        if value == u64::MAX {
+            return Err(Errno::EINVAL);
+        }
+        loop {
+            let mut counter = self.counter.lock();
+            if value <= (u64::MAX - 1).saturating_sub(*counter) {
+                *counter += value;
+                drop(counter);
+                self.poll_waiters.notify(POLL_READ);
+                return Ok(8);
+            }
+            drop(counter);
+            if self.flags.contains(OpenFlags::O_NONBLOCK) {
+                return Err(Errno::EAGAIN);
+            }
+            wait_for_file_event(&self.poll_waiters, POLL_WRITE, || {
+                value <= (u64::MAX - 1).saturating_sub(*self.counter.lock())
+            })?;
+        }
+    }
+
+    fn can_seek(&self) -> SysResult {
+        Err(Errno::ESPIPE)
+    }
+
+    fn seek(&self, _offset: isize) -> SysResult<usize> {
+        Err(Errno::ESPIPE)
+    }
+
+    fn get_offset(&self) -> usize {
+        0
+    }
+
+    fn get_flags(&self) -> OpenFlags {
+        self.flags
+    }
+
+    fn get_stat(&self) -> SysResult<KStat> {
+        Ok(KStat::minimal(0, InodeType::Unknown))
+    }
+
+    fn readable(&self) -> bool {
+        true
+    }
+
+    fn writable(&self) -> bool {
+        true
+    }
+
+    fn read_ready(&self) -> bool {
+        *self.counter.lock() != 0
+    }
+
+    fn write_ready(&self) -> bool {
+        *self.counter.lock() < u64::MAX - 1
+    }
+
+    fn register_poll_waiter(&self, tid: usize, events: PollEvents) -> bool {
+        self.poll_waiters.register(tid, events);
+        true
+    }
+
+    fn unregister_poll_waiter(&self, tid: usize) {
+        self.poll_waiters.unregister(tid);
+    }
+}
+
 pub struct TimerFd {
     clockid: usize,
     flags: OpenFlags,
     state: SpinLock<TimerFdState>,
+    poll_waiters: PollWaiters,
 }
 
 impl TimerFd {
@@ -70,6 +423,7 @@ impl TimerFd {
             clockid,
             flags,
             state: SpinLock::new(TimerFdState::default()),
+            poll_waiters: PollWaiters::new(),
         }
     }
 
@@ -119,7 +473,6 @@ impl FileOp for TimerFd {
         if buf.len() < core::mem::size_of::<u64>() {
             return Err(Errno::EINVAL);
         }
-        let task = current_task().expect("[kernel] current task is None.");
         loop {
             let mut state = self.state.lock();
             let expired = Self::expirations_locked(&state, clock_time_ms(self.clockid)?);
@@ -130,14 +483,10 @@ impl FileOp for TimerFd {
                 return Ok(8);
             }
             drop(state);
-            task.set_interruptible(true);
-            if task.check_signal_interrupt() || task.is_interrupted() {
-                task.clear_interrupted();
-                task.set_interruptible(false);
-                return Err(Errno::EINTR);
+            if self.flags.contains(OpenFlags::O_NONBLOCK) {
+                return Err(Errno::EAGAIN);
             }
-            yield_current_task();
-            task.set_interruptible(false);
+            wait_for_file_event(&self.poll_waiters, POLL_READ, || self.read_ready())?;
         }
     }
 
@@ -175,6 +524,40 @@ impl FileOp for TimerFd {
 
     fn read_ready(&self) -> bool {
         self.pending() > 0
+    }
+
+    fn register_poll_waiter(&self, tid: usize, events: PollEvents) -> bool {
+        self.poll_waiters.register(tid, events);
+        true
+    }
+
+    fn unregister_poll_waiter(&self, tid: usize) {
+        self.poll_waiters.unregister(tid);
+    }
+}
+
+lazy_static! {
+    static ref TIMERFDS: SpinLock<Vec<Weak<TimerFd>>> = SpinLock::new(Vec::new());
+}
+
+pub fn check_timerfd_expirations() {
+    let timerfds = {
+        let mut registry = TIMERFDS.lock();
+        let mut live = Vec::new();
+        registry.retain(|timerfd| {
+            if let Some(timerfd) = timerfd.upgrade() {
+                live.push(timerfd);
+                true
+            } else {
+                false
+            }
+        });
+        live
+    };
+    for timerfd in timerfds {
+        if timerfd.read_ready() {
+            timerfd.poll_waiters.notify(POLL_READ);
+        }
     }
 }
 
@@ -221,14 +604,159 @@ fn timerfd_ref(fd: usize) -> SysResult<Arc<dyn FileOp>> {
     Ok(entry.file)
 }
 
-pub fn sys_eventfd2(_initval: usize, flags: usize) -> SysResult<usize> {
-    let flags = flags_from_o_flags(flags, O_NONBLOCK | O_CLOEXEC)?;
-    alloc_special_fd(flags)
+pub fn sys_eventfd2(initval: usize, flags: usize) -> SysResult<usize> {
+    let fd_flags = flags_from_o_flags(flags, EFD_SEMAPHORE | O_NONBLOCK | O_CLOEXEC)?;
+    let task = current_task().expect("[kernel] current task is None.");
+    let file = Arc::new(EventFd::new(initval, fd_flags, flags & EFD_SEMAPHORE != 0));
+    task.alloc_fd(FdEntry::new(file, fd_flags))
 }
 
 pub fn sys_epoll_create1(flags: usize) -> SysResult<usize> {
     let flags = flags_from_o_flags(flags, O_CLOEXEC)?;
-    alloc_special_fd(flags)
+    let task = current_task().expect("[kernel] current task is None.");
+    task.alloc_fd(FdEntry::new(Arc::new(EpollFd::new(flags)), flags))
+}
+
+pub fn sys_epoll_ctl(epfd: usize, op: usize, fd: usize, event: *const u8) -> SysResult<usize> {
+    const EPOLL_CTL_ADD: usize = 1;
+    const EPOLL_CTL_DEL: usize = 2;
+    const EPOLL_CTL_MOD: usize = 3;
+
+    let task = current_task().expect("[kernel] current task is None.");
+    let epoll_entry = task.get_fd_entry(epfd)?;
+    let epoll = epoll_entry
+        .file
+        .as_any()
+        .downcast_ref::<EpollFd>()
+        .ok_or(Errno::EINVAL)?;
+    let target = task.get_fd_entry(fd)?;
+    if epfd == fd {
+        return Err(Errno::EINVAL);
+    }
+    if !matches!(op, EPOLL_CTL_ADD | EPOLL_CTL_DEL | EPOLL_CTL_MOD) {
+        return Err(Errno::EINVAL);
+    }
+    if matches!(
+        target.file.get_stat()?.ty,
+        InodeType::Regular | InodeType::Directory | InodeType::BlockDevice
+    ) {
+        return Err(Errno::EPERM);
+    }
+
+    let event = if op == EPOLL_CTL_DEL {
+        None
+    } else {
+        let mut raw = [0u8; 12];
+        copy_from_user(raw.as_mut_ptr(), event, raw.len())?;
+        Some((
+            u32::from_ne_bytes(raw[..4].try_into().unwrap()),
+            u64::from_ne_bytes(raw[4..].try_into().unwrap()),
+        ))
+    };
+    epoll.ctl(op, fd, event, target.file)
+}
+
+fn write_epoll_events(events: *mut u8, ready: &[(u32, u64)]) -> SysResult<usize> {
+    for (idx, (event, data)) in ready.iter().enumerate() {
+        let mut raw = [0u8; 12];
+        raw[..4].copy_from_slice(&event.to_ne_bytes());
+        raw[4..].copy_from_slice(&data.to_ne_bytes());
+        let dst = unsafe { events.add(idx * raw.len()) };
+        copy_to_user(dst, raw.as_ptr(), raw.len())?;
+    }
+    Ok(ready.len())
+}
+
+pub fn sys_epoll_pwait(
+    epfd: usize,
+    events: *mut u8,
+    maxevents: usize,
+    timeout_ms: isize,
+    _sigmask: *const u8,
+    _sigsetsize: usize,
+) -> SysResult<usize> {
+    const EPOLL_MAX_EVENTS: usize = 4096;
+
+    if maxevents == 0 || maxevents > EPOLL_MAX_EVENTS {
+        return Err(Errno::EINVAL);
+    }
+
+    let task = current_task().expect("[kernel] current task is None.");
+    let epoll_entry = task.get_fd_entry(epfd)?;
+    let epoll = epoll_entry
+        .file
+        .as_any()
+        .downcast_ref::<EpollFd>()
+        .ok_or(Errno::EINVAL)?;
+
+    let deadline_us = if timeout_ms < 0 {
+        None
+    } else {
+        Some(get_timeout_us().saturating_add((timeout_ms as usize).saturating_mul(1000)))
+    };
+
+    let mut ready = Vec::new();
+    loop {
+        ready.clear();
+        if epoll.scan_ready(maxevents, &mut ready) > 0 {
+            return write_epoll_events(events, &ready);
+        }
+
+        if timeout_ms == 0 || deadline_us.is_some_and(|deadline| get_timeout_us() >= deadline) {
+            return Ok(0);
+        }
+
+        task.set_interruptible(true);
+        if task.check_signal_interrupt() || task.is_interrupted() {
+            task.clear_interrupted();
+            task.set_interruptible(false);
+            return Err(Errno::EINTR);
+        }
+
+        let registered = epoll.register_waiters(task.tid());
+        if registered.is_empty() {
+            task.set_interruptible(false);
+            yield_current_task();
+            continue;
+        }
+
+        if let Some(deadline_us) = deadline_us {
+            super::register_task_timeout(task.tid(), deadline_us.saturating_add(999) / 1000);
+        }
+
+        if prepare_current_task_blocked() {
+            ready.clear();
+            let became_ready = epoll.scan_ready(maxevents, &mut ready) > 0;
+            let timed_out = deadline_us.is_some_and(|deadline| get_timeout_us() >= deadline);
+            let interrupted = task.check_signal_interrupt() || task.is_interrupted();
+            if became_ready || timed_out || interrupted || task.is_ready() {
+                remove_task(task.tid());
+                task.set_running();
+            } else {
+                switch_to_next_task();
+            }
+        } else {
+            yield_current_task();
+        }
+
+        let timed_out = if deadline_us.is_some() {
+            super::finish_task_timeout(task.tid())
+        } else {
+            false
+        };
+        for file in registered {
+            file.unregister_poll_waiter(task.tid());
+        }
+        task.set_interruptible(false);
+
+        if task.check_signal_interrupt() || task.is_interrupted() {
+            task.clear_interrupted();
+            return Err(Errno::EINTR);
+        }
+        if timed_out || deadline_us.is_some_and(|deadline| get_timeout_us() >= deadline) {
+            return Ok(0);
+        }
+    }
 }
 
 pub fn sys_inotify_init1(flags: usize) -> SysResult<usize> {
@@ -258,7 +786,9 @@ pub fn sys_timerfd_create(clockid: usize, flags: usize) -> SysResult<usize> {
     }
     let flags = flags_from_o_flags(flags, O_NONBLOCK | O_CLOEXEC)?;
     let task = current_task().expect("[kernel] current task is None.");
-    task.alloc_fd(FdEntry::new(Arc::new(TimerFd::new(clockid, flags)), flags))
+    let timerfd = Arc::new(TimerFd::new(clockid, flags));
+    TIMERFDS.lock().push(Arc::downgrade(&timerfd));
+    task.alloc_fd(FdEntry::new(timerfd, flags))
 }
 
 pub fn sys_timerfd_gettime(fd: usize, curr_value: *mut ITimerSpec) -> SysResult<usize> {
@@ -314,6 +844,10 @@ pub fn sys_timerfd_settime(
         deadline_ms,
         consumed: 0,
     };
+    drop(state);
+    if timerfd.read_ready() {
+        timerfd.poll_waiters.notify(POLL_READ);
+    }
     Ok(0)
 }
 
@@ -410,14 +944,21 @@ pub fn sys_open_tree(_dfd: isize, path: *const u8, flags: usize) -> SysResult<us
 }
 
 pub fn sys_memfd_create(name: *const u8, flags: usize) -> SysResult<usize> {
+    const MEMFD_NAME_MAX: usize = 249;
     if flags & !MFD_ALLOWED_FLAGS != 0 {
         return Err(Errno::EINVAL);
     }
-    let _ = copy_cstr_from_user(name)?;
-    alloc_special_fd_with_type(
-        fd_flags(false, flags & MFD_CLOEXEC != 0),
-        InodeType::Regular,
-    )
+    let name = copy_cstr_from_user(name)?;
+    if name.len() > MEMFD_NAME_MAX {
+        return Err(Errno::EINVAL);
+    }
+    let task = current_task().expect("[kernel] current task is None.");
+    let fd_flags = fd_flags(false, flags & MFD_CLOEXEC != 0);
+    let file = Arc::new(SpecialFd::new_memfd(
+        fd_flags,
+        flags & MFD_ALLOW_SEALING != 0,
+    ));
+    task.alloc_fd(FdEntry::new(file, fd_flags))
 }
 
 pub fn sys_memfd_secret(flags: usize) -> SysResult<usize> {

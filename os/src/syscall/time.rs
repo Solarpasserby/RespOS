@@ -5,12 +5,17 @@ use crate::config::CLK_TCK;
 use crate::mm::{copy_from_user, copy_to_user};
 use crate::mutex::SpinLock;
 use crate::signal::{SiField, Sig, SigInfo};
-use crate::task::{TaskControlBlock, current_task, yield_current_task};
+use crate::task::{
+    TASK_MANAGER, current_task, prepare_current_task_blocked, switch_to_next_task,
+    yield_current_task,
+};
 use crate::timer::{TimeSpec, get_time_ms, get_time_us, get_timeout_ms};
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use lazy_static::lazy_static;
+
+const CAP_SYS_TIME: usize = 25;
 
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
@@ -66,6 +71,73 @@ struct PosixTimer {
     deadline_ms: usize,
     interval_ms: usize,
 }
+
+#[derive(Clone, Copy)]
+struct NanosleepWait {
+    clock_id: usize,
+    deadline_ms: usize,
+    timed_out: bool,
+}
+
+struct NanosleepWaits {
+    waits: BTreeMap<usize, NanosleepWait>,
+    deadlines: BTreeMap<usize, BTreeMap<usize, Vec<usize>>>,
+}
+
+impl NanosleepWaits {
+    fn new() -> Self {
+        Self {
+            waits: BTreeMap::new(),
+            deadlines: BTreeMap::new(),
+        }
+    }
+
+    fn register(&mut self, tid: usize, clock_id: usize, deadline_ms: usize) {
+        self.waits.insert(
+            tid,
+            NanosleepWait {
+                clock_id,
+                deadline_ms,
+                timed_out: false,
+            },
+        );
+        self.deadlines
+            .entry(clock_id)
+            .or_default()
+            .entry(deadline_ms)
+            .or_default()
+            .push(tid);
+    }
+
+    fn finish(&mut self, tid: usize) -> bool {
+        let Some(wait) = self.waits.remove(&tid) else {
+            return false;
+        };
+        let mut remove_clock = false;
+        if let Some(deadlines) = self.deadlines.get_mut(&wait.clock_id) {
+            let remove_bucket = if let Some(tids) = deadlines.get_mut(&wait.deadline_ms) {
+                tids.retain(|queued_tid| *queued_tid != tid);
+                tids.is_empty()
+            } else {
+                false
+            };
+            if remove_bucket {
+                deadlines.remove(&wait.deadline_ms);
+            }
+            remove_clock = deadlines.is_empty();
+        }
+        if remove_clock {
+            self.deadlines.remove(&wait.clock_id);
+        }
+        wait.timed_out
+    }
+}
+
+lazy_static! {
+    static ref NANOSLEEP_WAITS: SpinLock<NanosleepWaits> = SpinLock::new(NanosleepWaits::new());
+}
+
+const NANOSLEEP_TIMEOUT_CLOCK: usize = usize::MAX;
 
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
@@ -165,8 +237,27 @@ pub fn sys_settimeofday(tv: *const TimeVal, _tz: *const TimeZone) -> SysResult<u
         if (time_val.sec as isize) < 0 || time_val.usec >= 1_000_000 {
             return Err(Errno::EINVAL);
         }
+        let task = current_task().expect("no current task");
+        if !task.has_cap(CAP_SYS_TIME) {
+            return Err(Errno::EPERM);
+        }
+        let target_us = time_val
+            .sec
+            .checked_mul(1_000_000)
+            .and_then(|us| us.checked_add(time_val.usec))
+            .and_then(|us| isize::try_from(us).ok())
+            .ok_or(Errno::EINVAL)?;
+        *REALTIME_OFFSET_US.lock() = target_us.saturating_sub(get_time_us() as isize);
+        return Ok(0);
     }
-    Err(Errno::EPERM)
+    if !_tz.is_null()
+        && !current_task()
+            .expect("no current task")
+            .has_cap(CAP_SYS_TIME)
+    {
+        return Err(Errno::EPERM);
+    }
+    Ok(0)
 }
 
 pub fn sys_clock_settime(clock_id: usize, tp: *const TimeSpec) -> SysResult<usize> {
@@ -183,11 +274,12 @@ pub fn sys_clock_settime(clock_id: usize, tp: *const TimeSpec) -> SysResult<usiz
         return Err(Errno::EINVAL);
     }
     let task = current_task().expect("no current task");
-    if task.euid() != 0 {
+    if !task.has_cap(CAP_SYS_TIME) {
         return Err(Errno::EPERM);
     }
 
-    let target_us = time_spec.checked_duration_us().ok_or(Errno::EINVAL)? as isize;
+    let target_us = isize::try_from(time_spec.checked_duration_us().ok_or(Errno::EINVAL)?)
+        .map_err(|_| Errno::EINVAL)?;
     let now_us = get_time_us() as isize;
     *REALTIME_OFFSET_US.lock() = target_us.saturating_sub(now_us);
     Ok(0)
@@ -301,6 +393,77 @@ fn is_supported_clock(clock_id: usize) -> bool {
             | CLOCK_BOOTTIME_ALARM
             | CLOCK_TAI
     )
+}
+
+fn register_nanosleep_wait(tid: usize, clock_id: usize, deadline_ms: usize) {
+    NANOSLEEP_WAITS.lock().register(tid, clock_id, deadline_ms);
+}
+
+fn finish_nanosleep_wait(tid: usize) -> bool {
+    NANOSLEEP_WAITS.lock().finish(tid)
+}
+
+pub fn register_task_timeout(tid: usize, deadline_ms: usize) {
+    register_nanosleep_wait(tid, NANOSLEEP_TIMEOUT_CLOCK, deadline_ms);
+}
+
+pub fn finish_task_timeout(tid: usize) -> bool {
+    finish_nanosleep_wait(tid)
+}
+
+fn nanosleep_clock_ms(clock_id: usize) -> SysResult<usize> {
+    if clock_id == NANOSLEEP_TIMEOUT_CLOCK {
+        Ok(get_timeout_ms())
+    } else {
+        clock_time_ms(clock_id)
+    }
+}
+
+pub fn check_nanosleep_timeouts() {
+    let mut expired = Vec::new();
+    {
+        let mut waits = NANOSLEEP_WAITS.lock();
+        let clock_ids: Vec<usize> = waits.deadlines.keys().copied().collect();
+        for clock_id in clock_ids {
+            let Ok(now_ms) = nanosleep_clock_ms(clock_id) else {
+                continue;
+            };
+            let Some(deadlines) = waits.deadlines.get_mut(&clock_id) else {
+                continue;
+            };
+            let mut due = Vec::new();
+            while let Some((&deadline_ms, _)) = deadlines.first_key_value() {
+                if deadline_ms > now_ms {
+                    break;
+                }
+                due.push((
+                    deadline_ms,
+                    deadlines.remove(&deadline_ms).unwrap_or_default(),
+                ));
+            }
+            if deadlines.is_empty() {
+                waits.deadlines.remove(&clock_id);
+            }
+            for (deadline_ms, tids) in due {
+                for tid in tids {
+                    let Some(wait) = waits.waits.get_mut(&tid) else {
+                        continue;
+                    };
+                    if wait.clock_id == clock_id
+                        && wait.deadline_ms == deadline_ms
+                        && !wait.timed_out
+                    {
+                        wait.timed_out = true;
+                        expired.push(tid);
+                    }
+                }
+            }
+        }
+    }
+
+    for tid in expired {
+        crate::task::wakeup_task(tid);
+    }
 }
 
 pub fn sys_clock_getres(clock_id: usize, res: *mut TimeSpec) -> SysResult<usize> {
@@ -542,7 +705,7 @@ pub fn sys_timer_settime(
     Ok(0)
 }
 
-pub fn check_posix_timers(task: &TaskControlBlock) {
+pub fn check_posix_timers() {
     let mut expired = Vec::new();
     {
         let mut timers = POSIX_TIMERS.lock();
@@ -550,13 +713,10 @@ pub fn check_posix_timers(task: &TaskControlBlock) {
             let Ok(now_ms) = clock_time_ms(timer.clock_id) else {
                 continue;
             };
-            if timer.owner_tgid != task.tgid()
-                || timer.deadline_ms == 0
-                || now_ms < timer.deadline_ms
-            {
+            if timer.deadline_ms == 0 || now_ms < timer.deadline_ms {
                 continue;
             }
-            expired.push(timer.signo);
+            expired.push((timer.owner_tgid, timer.signo));
             timer.deadline_ms = if timer.interval_ms == 0 {
                 0
             } else {
@@ -565,11 +725,13 @@ pub fn check_posix_timers(task: &TaskControlBlock) {
         }
     }
 
-    for signo in expired {
+    for (owner_tgid, signo) in expired {
         let sig = Sig::from(signo);
         if sig.is_valid() {
-            let siginfo = SigInfo::new(sig.raw(), SigInfo::KERNEL, SiField::None);
-            task.receive_siginfo(siginfo, false);
+            if let Some(task) = TASK_MANAGER.get(owner_tgid) {
+                let siginfo = SigInfo::new(sig.raw(), SigInfo::KERNEL, SiField::None);
+                task.receive_siginfo(siginfo, false);
+            }
         }
     }
 }
@@ -640,47 +802,13 @@ pub fn sys_nanosleep(req: *const TimeSpec, rem: *mut TimeSpec) -> SysResult<usiz
     let mut req_time = TimeSpec::default();
     copy_from_user(&mut req_time as *mut TimeSpec, req, 1)?;
     let time_ms = req_time.checked_duration_ms().ok_or(Errno::EINVAL)?;
-    let task = current_task().expect("no current task");
-
-    let start_time = get_timeout_ms();
-    loop {
-        let current_time = get_timeout_ms();
-        let elapsed = current_time.saturating_sub(start_time);
-        if elapsed >= time_ms {
-            break;
-        }
-        task.set_interruptible(true);
-        if task.check_signal_interrupt() || task.is_interrupted() {
-            task.clear_interrupted();
-            task.set_interruptible(false);
-            if !rem.is_null() {
-                let left_ms = time_ms - elapsed;
-                let remain = TimeSpec {
-                    sec: (left_ms / 1000) as isize,
-                    nsec: ((left_ms % 1000) * 1_000_000) as isize,
-                };
-                copy_to_user(rem, &remain as *const TimeSpec, 1)?;
-            }
-            return Err(Errno::EINTR);
-        }
-        yield_current_task();
-        task.set_interruptible(false);
-        if task.is_interrupted() || task.check_signal_interrupt() {
-            task.clear_interrupted();
-            if !rem.is_null() {
-                let now = get_timeout_ms();
-                let elapsed = now.saturating_sub(start_time).min(time_ms);
-                let left_ms = time_ms - elapsed;
-                let remain = TimeSpec {
-                    sec: (left_ms / 1000) as isize,
-                    nsec: ((left_ms % 1000) * 1_000_000) as isize,
-                };
-                copy_to_user(rem, &remain as *const TimeSpec, 1)?;
-            }
-            return Err(Errno::EINTR);
-        }
-    }
-    Ok(0)
+    let start_ms = get_timeout_ms();
+    let deadline_ms = start_ms.checked_add(time_ms).ok_or(Errno::EINVAL)?;
+    sleep_until_ms(
+        NANOSLEEP_TIMEOUT_CLOCK,
+        deadline_ms,
+        Some((start_ms, time_ms, rem)),
+    )
 }
 
 pub fn sys_clock_nanosleep(
@@ -689,19 +817,87 @@ pub fn sys_clock_nanosleep(
     req: *const TimeSpec,
     rem: *mut TimeSpec,
 ) -> SysResult<usize> {
-    const CLOCK_REALTIME: usize = 0;
-    const CLOCK_MONOTONIC: usize = 1;
     const TIMER_ABSTIME: usize = 1;
+    const CLOCK_THREAD_CPUTIME_ID: usize = 3;
 
-    // glibc 的 nanosleep() 在 RISC-V/LoongArch 上会通过 clock_nanosleep()
-    // 进入内核。这里先覆盖 LTP 当前使用的相对睡眠语义；绝对时间睡眠需要
-    // 基于 clock_id 计算 deadline，不能简单复用 sys_nanosleep。
-    match clock_id {
-        CLOCK_REALTIME | CLOCK_MONOTONIC => {}
-        _ => return Err(Errno::EINVAL),
-    }
-    if flags & TIMER_ABSTIME != 0 {
+    if !is_supported_clock(clock_id) || flags & !TIMER_ABSTIME != 0 {
         return Err(Errno::EINVAL);
     }
-    sys_nanosleep(req, rem)
+    if clock_id == CLOCK_THREAD_CPUTIME_ID {
+        return Err(Errno::EOPNOTSUPP);
+    }
+    if flags & TIMER_ABSTIME == 0 {
+        return sys_nanosleep(req, rem);
+    }
+
+    let mut req_time = TimeSpec::default();
+    copy_from_user(&mut req_time as *mut TimeSpec, req, 1)?;
+    let deadline_ms = req_time.checked_duration_ms().ok_or(Errno::EINVAL)?;
+    sleep_until_ms(clock_id, deadline_ms, None)
+}
+
+fn write_remaining_time(start_ms: usize, total_ms: usize, rem: *mut TimeSpec) -> SysResult<()> {
+    if rem.is_null() {
+        return Ok(());
+    }
+    let now_ms = get_timeout_ms();
+    let elapsed_ms = now_ms.saturating_sub(start_ms).min(total_ms);
+    let left_ms = total_ms - elapsed_ms;
+    let remain = TimeSpec {
+        sec: (left_ms / 1000) as isize,
+        nsec: ((left_ms % 1000) * 1_000_000) as isize,
+    };
+    copy_to_user(rem, &remain as *const TimeSpec, 1)?;
+    Ok(())
+}
+
+fn sleep_until_ms(
+    clock_id: usize,
+    deadline_ms: usize,
+    relative_rem: Option<(usize, usize, *mut TimeSpec)>,
+) -> SysResult<usize> {
+    let task = current_task().expect("no current task");
+
+    loop {
+        if nanosleep_clock_ms(clock_id)? >= deadline_ms {
+            return Ok(0);
+        }
+        if task.check_signal_interrupt() || task.is_interrupted() {
+            task.clear_interrupted();
+            if let Some((start_ms, total_ms, rem)) = relative_rem {
+                write_remaining_time(start_ms, total_ms, rem)?;
+            }
+            return Err(Errno::EINTR);
+        }
+
+        task.set_interruptible(true);
+        if task.check_signal_interrupt() || task.is_interrupted() {
+            task.clear_interrupted();
+            task.set_interruptible(false);
+            if let Some((start_ms, total_ms, rem)) = relative_rem {
+                write_remaining_time(start_ms, total_ms, rem)?;
+            }
+            return Err(Errno::EINTR);
+        }
+        if !prepare_current_task_blocked() {
+            yield_current_task();
+            task.set_interruptible(false);
+            continue;
+        }
+        register_nanosleep_wait(task.tid(), clock_id, deadline_ms);
+        switch_to_next_task();
+        task.set_interruptible(false);
+
+        if task.is_interrupted() || task.check_signal_interrupt() {
+            task.clear_interrupted();
+            finish_nanosleep_wait(task.tid());
+            if let Some((start_ms, total_ms, rem)) = relative_rem {
+                write_remaining_time(start_ms, total_ms, rem)?;
+            }
+            return Err(Errno::EINTR);
+        }
+        if finish_nanosleep_wait(task.tid()) {
+            return Ok(0);
+        }
+    }
 }

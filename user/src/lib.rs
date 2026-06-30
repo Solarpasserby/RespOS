@@ -79,6 +79,7 @@ pub const O_CREATE: usize = 1 << 6;
 pub const O_TRUNC: usize = 1 << 9;
 pub const O_APPEND: usize = 1 << 10;
 pub const O_DIRECTORY: usize = 1 << 16;
+pub const O_CLOEXEC: usize = 1 << 19;
 
 pub const SEEK_SET: usize = 0;
 pub const SEEK_CUR: usize = 1;
@@ -150,6 +151,9 @@ pub fn read(fd: usize, buf: &mut [u8]) -> isize {
 pub fn write(fd: usize, buf: &[u8]) -> isize {
     sys_write(fd, buf)
 }
+pub fn copy_file_range(fd_in: usize, fd_out: usize, len: usize) -> isize {
+    sys_copy_file_range(fd_in, fd_out, len)
+}
 pub fn getcwd(buf: &mut [u8]) -> isize {
     sys_getcwd(buf)
 }
@@ -165,6 +169,9 @@ pub fn mkdir(path: &str, mode: usize) -> isize {
 pub fn unlink(path: &str) -> isize {
     sys_unlinkat(AT_FDCWD, path, 0)
 }
+pub fn rmdir(path: &str) -> isize {
+    sys_rmdir(AT_FDCWD, path)
+}
 pub fn link(oldpath: &str, newpath: &str) -> isize {
     sys_linkat(AT_FDCWD, oldpath, AT_FDCWD, newpath, 0)
 }
@@ -173,6 +180,9 @@ pub fn symlink(target: &str, linkpath: &str) -> isize {
 }
 pub fn chdir(path: &str) -> isize {
     sys_chdir(path)
+}
+pub fn chmod(path: &str, mode: usize) -> isize {
+    sys_fchmodat(AT_FDCWD, path, mode, 0)
 }
 pub fn open(path: &str, flags: usize, mode: usize) -> isize {
     sys_openat(AT_FDCWD, path, flags, mode)
@@ -238,6 +248,10 @@ pub fn waitpid(pid: usize, exit_code: &mut i32) -> isize {
             exit_pid => return exit_pid,
         }
     }
+}
+pub fn waitpid_nohang(pid: usize, exit_code: &mut i32) -> isize {
+    const WNOHANG: usize = 1;
+    sys_wait4_options(pid as isize, exit_code as *mut _, WNOHANG)
 }
 
 pub fn socket(domain: usize, socket_type: usize, protocol: usize) -> isize {

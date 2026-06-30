@@ -2,7 +2,7 @@
 
 use super::{Errno, SysResult};
 use crate::config::{MMAP_MIN_ADDR, PAGE_SIZE};
-use crate::mm::{MapPermission, MmapBacking, VPNRange, VirtAddr, mmap_file_backing};
+use crate::mm::{MapPermission, MmapBacking, VPNRange, VirtAddr, copy_to_user, mmap_file_backing};
 use crate::task::current_task;
 use bitflags::bitflags;
 
@@ -26,28 +26,18 @@ pub fn sys_brk(addr: usize) -> SysResult<usize> {
                 memory_set.remove_area_with_overlap_range(VPNRange::new(new_end, old_end))?;
             }
         } else if new_end > old_end {
-            let remap_result = {
-                #[cfg(target_arch = "loongarch64")]
-                {
-                    memory_set.remap_writable_area_eager_from_end(old_end, new_end)
-                }
-                #[cfg(target_arch = "riscv64")]
-                {
-                    memory_set.remap_writable_area_lazy_from_end(old_end, new_end)
-                }
-            };
-            match remap_result {
-                Ok(()) => {}
-                Err(Errno::EINVAL) => {
-                    // 如果 brk 区间中间曾被 munmap()，旧堆顶所在的连续尾段可能已经
-                    // 不存在。此时从旧堆顶页边界新建一段匿名堆 VMA，保持 brk 可继续增长。
-                    memory_set.insert_framed_area_va_lazy(
-                        VirtAddr::from(old_end),
-                        VirtAddr::from(new_end),
-                        MapPermission::READ | MapPermission::WRITE | MapPermission::USER,
-                    );
-                }
-                Err(err) => return Err(err),
+            let grow_range = VPNRange::new(old_end, new_end);
+            #[cfg(target_arch = "loongarch64")]
+            let grow_result = memory_set.ensure_private_writable_anonymous_range_eager(grow_range);
+            #[cfg(not(target_arch = "loongarch64"))]
+            let grow_result = memory_set.ensure_private_writable_anonymous_range(grow_range);
+
+            if let Err(_err) = grow_result {
+                println!(
+                    "[brk] grow failed old={:#x}, requested={:#x}, heap_bottom={:#x}, err={:?}",
+                    old_brk, addr, memory_set.heap_bottom, _err
+                );
+                return Ok(old_brk);
             }
         }
 
@@ -67,14 +57,29 @@ pub fn sys_mmap(
     fd: isize,
     offset: usize,
 ) -> SysResult<usize> {
+    let raw_flags = flags as u32;
+    let shared_validate =
+        raw_flags & MMAPFLAGS::MAP_SHARED_VALIDATE.bits() == MMAPFLAGS::MAP_SHARED_VALIDATE.bits();
+    if shared_validate && raw_flags & !MMAPFLAGS::all().bits() != 0 {
+        return Err(Errno::EOPNOTSUPP);
+    }
+    let flags = MMAPFLAGS::from_bits_truncate(raw_flags);
+    let task = current_task().expect("[kernel] current task is None.");
+    let file = if flags.contains(MMAPFLAGS::MAP_ANONYMOUS) {
+        None
+    } else {
+        if fd < 0 {
+            return Err(Errno::EBADF);
+        }
+        Some(task.get_fd_entry(fd as usize)?.get_file())
+    };
+
     if len == 0 {
         return Err(Errno::EINVAL);
     }
     let map_len = len.checked_add(PAGE_SIZE - 1).ok_or(Errno::ENOMEM)? & !(PAGE_SIZE - 1);
 
     let prot = MMapProt::from_bits(prot as u32).ok_or(Errno::EINVAL)?;
-    let flags = MMAPFLAGS::from_bits(flags as u32).ok_or(Errno::EINVAL)?;
-    let shared_validate = flags.contains(MMAPFLAGS::MAP_SHARED_VALIDATE);
     let has_shared = flags.contains(MMAPFLAGS::MAP_SHARED) || shared_validate;
     let has_private = flags.contains(MMAPFLAGS::MAP_PRIVATE) && !shared_validate;
     if has_shared == has_private {
@@ -87,12 +92,17 @@ pub fn sys_mmap(
     if fixed && (_addr % PAGE_SIZE != 0 || _addr == 0) {
         return Err(Errno::EINVAL);
     }
-    let fixed_addr = fixed.then_some(_addr);
+    let requested_addr = if fixed {
+        Some(_addr)
+    } else if _addr != 0 {
+        Some(_addr & !(PAGE_SIZE - 1))
+    } else {
+        None
+    };
 
     let mut permission = MapPermission::from(prot);
     permission |= MapPermission::USER;
 
-    let task = current_task().expect("[kernel] current task is None.");
     if flags.contains(MMAPFLAGS::MAP_ANONYMOUS) {
         // 匿名映射忽略 fd，但 offset 必须为 0。
         if offset != 0 {
@@ -105,25 +115,35 @@ pub fn sys_mmap(
                 MmapBacking::LazyAnonymous
             };
             let start = memory_set.mmap_area(
-                fixed_addr, map_len, permission, replace, noreplace, locked, backing,
+                requested_addr,
+                map_len,
+                permission,
+                replace,
+                noreplace,
+                locked,
+                backing,
             )?;
             memory_set.flush_tlb();
             Ok(start)
         })
     } else {
         // 文件映射：当前是假实现，只把文件内容读入一份私有物理页拷贝。
-        if fd < 0 || offset % PAGE_SIZE != 0 {
+        if offset % PAGE_SIZE != 0 {
             return Err(Errno::EINVAL);
         }
-        let file = task.get_fd_entry(fd as usize)?.get_file();
-        if !file.readable() {
-            return Err(Errno::EACCES);
-        }
+        let file = file.expect("non-anonymous mmap must have a file");
+        file.mmap_allowed(has_shared, prot.contains(MMapProt::PROT_WRITE))?;
         let backing = mmap_file_backing(file, offset, len, map_len, has_shared)?;
 
         task.op_memory_set_write(|memory_set| {
             let start = memory_set.mmap_area(
-                fixed_addr, map_len, permission, replace, noreplace, locked, backing,
+                requested_addr,
+                map_len,
+                permission,
+                replace,
+                noreplace,
+                locked,
+                backing,
             )?;
             memory_set.flush_tlb();
             Ok(start)
@@ -143,6 +163,44 @@ pub fn sys_munmap(addr: usize, len: usize) -> SysResult<usize> {
         memory_set.munmap_range(addr, map_len)?;
         memory_set.flush_tlb();
         Ok(0)
+    })
+}
+
+pub fn sys_mremap(
+    old_addr: usize,
+    old_size: usize,
+    new_size: usize,
+    flags: usize,
+    new_addr: usize,
+) -> SysResult<usize> {
+    const MREMAP_MAYMOVE: usize = 1;
+    const MREMAP_FIXED: usize = 2;
+    const MREMAP_DONTUNMAP: usize = 4;
+    const MREMAP_KNOWN_MASK: usize = MREMAP_MAYMOVE | MREMAP_FIXED | MREMAP_DONTUNMAP;
+
+    if old_addr % PAGE_SIZE != 0 || old_size == 0 || new_size == 0 {
+        return Err(Errno::EINVAL);
+    }
+    if flags & !MREMAP_KNOWN_MASK != 0 {
+        return Err(Errno::EINVAL);
+    }
+    if flags & MREMAP_DONTUNMAP != 0 {
+        return Err(Errno::EINVAL);
+    }
+    if flags & MREMAP_FIXED != 0 && (flags & MREMAP_MAYMOVE == 0 || new_addr % PAGE_SIZE != 0) {
+        return Err(Errno::EINVAL);
+    }
+
+    let old_len = old_size.checked_add(PAGE_SIZE - 1).ok_or(Errno::ENOMEM)? & !(PAGE_SIZE - 1);
+    let new_len = new_size.checked_add(PAGE_SIZE - 1).ok_or(Errno::ENOMEM)? & !(PAGE_SIZE - 1);
+    let maymove = flags & MREMAP_MAYMOVE != 0;
+    let fixed_addr = (flags & MREMAP_FIXED != 0).then_some(new_addr);
+
+    let task = current_task().expect("[kernel] current task is None.");
+    task.op_memory_set_write(|memory_set| {
+        let start = memory_set.mremap_range(old_addr, old_len, new_len, maymove, fixed_addr)?;
+        memory_set.flush_tlb();
+        Ok(start)
     })
 }
 
@@ -171,10 +229,100 @@ pub fn sys_mprotect(addr: usize, len: usize, prot: u32) -> SysResult<usize> {
     })
 }
 
+fn mlock_vpn_range(addr: usize, len: usize) -> SysResult<Option<(VPNRange, usize)>> {
+    if len == 0 {
+        return Ok(None);
+    }
+    let end = addr.checked_add(len).ok_or(Errno::EINVAL)?;
+    let start_vpn = VirtAddr::from(addr).floor();
+    let end_vpn = VirtAddr::from(end).ceil();
+    let locked_len = end_vpn.0.saturating_sub(start_vpn.0) * PAGE_SIZE;
+    Ok(Some((VPNRange::new(start_vpn, end_vpn), locked_len)))
+}
+
+/// 系统调用 sys_mlock
+///
+/// 当前内核没有换出机制，锁页成功不需要额外状态；仍按 Linux ABI 校验地址区间和
+/// RLIMIT_MEMLOCK，并在失败时返回 ENOMEM/EPERM。
+pub fn sys_mlock(addr: usize, len: usize) -> SysResult<usize> {
+    let Some((vpn_range, locked_len)) = mlock_vpn_range(addr, len)? else {
+        return Ok(0);
+    };
+
+    let task = current_task().expect("[kernel] current task is None.");
+    task.op_memory_set_read(|memory_set| memory_set.check_user_mapped_range(vpn_range))
+        .map_err(|err| {
+            if err == Errno::EFAULT {
+                Errno::ENOMEM
+            } else {
+                err
+            }
+        })?;
+
+    if task.euid() != 0 {
+        let limit = task.memlock_limit().0;
+        if limit == 0 {
+            return Err(Errno::EPERM);
+        }
+        if locked_len > limit {
+            return Err(Errno::ENOMEM);
+        }
+    }
+
+    task.op_memory_set_write(|memory_set| memory_set.set_locked_range(vpn_range, true))?;
+    Ok(0)
+}
+
+/// 系统调用 sys_munlock
+pub fn sys_munlock(addr: usize, len: usize) -> SysResult<usize> {
+    let Some((vpn_range, _)) = mlock_vpn_range(addr, len)? else {
+        return Ok(0);
+    };
+    let task = current_task().expect("[kernel] current task is None.");
+    task.op_memory_set_read(|memory_set| memory_set.check_user_mapped_range(vpn_range))
+        .map_err(|err| {
+            if err == Errno::EFAULT {
+                Errno::ENOMEM
+            } else {
+                err
+            }
+        })?;
+    task.op_memory_set_write(|memory_set| memory_set.set_locked_range(vpn_range, false))?;
+    Ok(0)
+}
+
+pub fn sys_get_mempolicy(
+    mode: *mut i32,
+    nodemask: *mut usize,
+    maxnode: usize,
+    _addr: usize,
+    flags: usize,
+) -> SysResult<usize> {
+    const MPOL_F_NODE: usize = 1;
+    const MPOL_F_ADDR: usize = 2;
+
+    if flags & !(MPOL_F_NODE | MPOL_F_ADDR) != 0 {
+        return Err(Errno::EINVAL);
+    }
+    if !mode.is_null() {
+        let default_policy = 0i32;
+        copy_to_user(mode, &default_policy as *const i32, 1)?;
+    }
+    if !nodemask.is_null() && maxnode > 0 {
+        let zero = 0usize;
+        let words = maxnode.div_ceil(usize::BITS as usize);
+        for idx in 0..words {
+            copy_to_user(unsafe { nodemask.add(idx) }, &zero as *const usize, 1)?;
+        }
+    }
+    Ok(0)
+}
+
 /// 系统调用 sys_madvise
 ///
-/// 当前内核没有页回收器，也没有 per-VMA 行为标志；这里先按 Linux ABI 接受 libc
-/// 常见 advice，尤其是 glibc pthread 栈缓存路径使用的 MADV_DONTNEED/MADV_FREE。
+/// 当前内核没有完整页回收器；多数 advice 只做 ABI 接受。
+/// MADV_DONTNEED 会按 Linux 私有映射语义丢弃当前驻留页，后续访问重新缺页填充。
+/// MADV_WIPEONFORK/MADV_KEEPONFORK 会记录到 VMA，fork 时按 Linux 语义处理。
 pub fn sys_madvise(addr: usize, len: usize, advice: i32) -> SysResult<usize> {
     if addr % PAGE_SIZE != 0 {
         return Err(Errno::EINVAL);
@@ -182,14 +330,32 @@ pub fn sys_madvise(addr: usize, len: usize, advice: i32) -> SysResult<usize> {
     if len == 0 {
         return Ok(0);
     }
-    let _end = addr.checked_add(len).ok_or(Errno::EINVAL)?;
+    let end = addr.checked_add(len).ok_or(Errno::EINVAL)?;
+    let start_vpn = VirtAddr::from(addr).floor();
+    let end_vpn = VirtAddr::from(end).ceil();
 
     match advice {
+        4 => {
+            let task = current_task().expect("[kernel] current task is None.");
+            task.op_memory_set_write(|memory_set| {
+                let vpn_range = VPNRange::new(start_vpn, end_vpn);
+                memory_set.check_madvise_range(vpn_range.clone(), advice)?;
+                memory_set.discard_private_pages_for_madvise(vpn_range);
+                memory_set.flush_tlb();
+                Ok(0)
+            })
+        }
+        18 | 19 => {
+            let task = current_task().expect("[kernel] current task is None.");
+            task.op_memory_set_write(|memory_set| {
+                memory_set.advise_fork_behavior(VPNRange::new(start_vpn, end_vpn), advice == 18)
+            })?;
+            Ok(0)
+        }
         0  // MADV_NORMAL
         | 1  // MADV_RANDOM
         | 2  // MADV_SEQUENTIAL
         | 3  // MADV_WILLNEED
-        | 4  // MADV_DONTNEED
         | 8  // MADV_FREE
         | 10 // MADV_DONTFORK
         | 11 // MADV_DOFORK
@@ -199,15 +365,19 @@ pub fn sys_madvise(addr: usize, len: usize, advice: i32) -> SysResult<usize> {
         | 15 // MADV_NOHUGEPAGE
         | 16 // MADV_DONTDUMP
         | 17 // MADV_DODUMP
-        | 18 // MADV_WIPEONFORK
-        | 19 // MADV_KEEPONFORK
         | 20 // MADV_COLD
         | 21 // MADV_PAGEOUT
         | 22 // MADV_POPULATE_READ
         | 23 // MADV_POPULATE_WRITE
         | 25 // MADV_COLLAPSE
         | 26 // MADV_GUARD_INSTALL
-        | 27 => Ok(0), // MADV_GUARD_REMOVE
+        | 27 => {
+            let task = current_task().expect("[kernel] current task is None.");
+            task.op_memory_set_read(|memory_set| {
+                memory_set.check_madvise_range(VPNRange::new(start_vpn, end_vpn), advice)
+            })?;
+            Ok(0)
+        } // MADV_GUARD_REMOVE
         _ => Err(Errno::EINVAL),
     }
 }

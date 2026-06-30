@@ -66,6 +66,24 @@ pub fn remove_dentry_cache_tree(abs_path: &str) {
     }
 }
 
+/// 从全局缓存移除指定路径的子树，但保留路径自身 dentry。
+pub fn remove_dentry_cache_descendants(abs_path: &str) {
+    let mut cache = DENTRY_CACHE.lock();
+    let mut prefix = String::from(abs_path);
+    if !prefix.ends_with('/') {
+        prefix.push('/');
+    }
+
+    let keys: Vec<String> = cache
+        .keys()
+        .filter(|path| path.starts_with(&prefix))
+        .cloned()
+        .collect();
+    for key in keys {
+        cache.remove(&key);
+    }
+}
+
 /// 回收所有只被缓存引用的 dentry（物理页不够时调用）
 pub fn clean_dentry_cache() {
     let mut cache = DENTRY_CACHE.lock();

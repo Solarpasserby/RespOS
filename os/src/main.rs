@@ -58,12 +58,6 @@ fn rust_main_high() -> ! {
     #[cfg(target_arch = "loongarch64")]
     timer::init_clock_freq();
 
-    error!("hello world");
-    warn!("hello world");
-    info!("hello world");
-    debug!("hello world");
-    trace!("hello world");
-
     trap::init();
     mm::init();
     net::init();
@@ -71,6 +65,7 @@ fn rust_main_high() -> ! {
     trap::enable_timer_interrupt();
     timer::set_next_ti_trigger();
 
+    #[cfg(feature = "verbose_boot")]
     loader::list_apps();
     task::run_tasks();
 

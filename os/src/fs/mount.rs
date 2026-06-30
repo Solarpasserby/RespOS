@@ -5,13 +5,16 @@
 //! 核心数据结构参照 Linux 的 `struct vfsmount` / `struct mount` / mount tree。
 
 use super::Path;
+use super::dentry_cache::{
+    remove_dentry_cache, remove_dentry_cache_descendants, remove_dentry_cache_tree,
+};
 use super::namei::{
     AT_FDCWD, filename_lookup, filename_lookup_no_follow_final_mount,
     filename_lookup_no_follow_final_symlink,
 };
 use super::vfs::Dentry;
 use super::vfs::{InodeOp, InodeType, SuperBlockOp};
-use crate::fs::dev::init_devfs;
+use crate::fs::dev::{LoopInode, init_devfs};
 use crate::fs::proc::init_procfs;
 use crate::syscall::{Errno, SysResult};
 use alloc::sync::{Arc, Weak};
@@ -26,11 +29,23 @@ lazy_static! {
 }
 
 pub const MS_RDONLY: i32 = 1;
-const MS_REMOUNT: usize = 32;
-const MS_BIND: usize = 4096;
-const MS_MOVE: usize = 8192;
-const MS_PRIVATE: usize = 1 << 18;
+pub const MS_NOSUID: i32 = 2;
+pub const MS_NODEV: i32 = 4;
+pub const MS_NOEXEC: i32 = 8;
+pub const MS_REMOUNT: i32 = 32;
+pub const MS_NOSYMFOLLOW: i32 = 256;
+pub const MS_NOATIME: i32 = 1024;
+pub const MS_NODIRATIME: i32 = 2048;
+pub const MS_BIND: i32 = 4096;
+pub const MS_MOVE: i32 = 8192;
+pub const MS_PRIVATE: i32 = 1 << 18;
+pub const MS_STRICTATIME: i32 = 1 << 24;
+const ST_NOSYMFOLLOW: i32 = 0x2000;
 static MOUNT_BACKING_ID: AtomicUsize = AtomicUsize::new(0);
+
+fn is_supported_block_fstype(fstype: &str) -> bool {
+    matches!(fstype, "ext2" | "ext3" | "ext4" | "vfat")
+}
 
 /// 代表一个被挂载的文件系统实例（类比 Linux `struct vfsmount`）。
 pub struct VfsMount {
@@ -57,6 +72,7 @@ pub struct Mount {
 struct MountBackingRoot {
     parent_inode: Arc<dyn InodeOp>,
     root: Arc<Dentry>,
+    capacity: Option<usize>,
 }
 
 /// 全局挂载表（类比 Linux mount tree）。
@@ -92,11 +108,24 @@ impl VfsMount {
     }
 
     pub fn is_readonly(&self) -> bool {
-        self.flags.load(Ordering::Relaxed) & MS_RDONLY != 0
+        self.has_flag(MS_RDONLY)
+    }
+
+    pub fn has_flag(&self, flag: i32) -> bool {
+        self.flags.load(Ordering::Relaxed) & flag != 0
     }
 
     pub fn flags(&self) -> i32 {
         self.flags.load(Ordering::Relaxed)
+    }
+
+    pub fn statfs_flags(&self) -> i32 {
+        let flags = self.flags();
+        if flags & MS_NOSYMFOLLOW != 0 {
+            flags | ST_NOSYMFOLLOW
+        } else {
+            flags
+        }
     }
 
     fn set_flags(&self, flags: i32) {
@@ -237,27 +266,33 @@ pub fn path_global_abs_path(path: &Path) -> alloc::string::String {
 /// 第一版只支持 ext4 挂载到目录。不处理 bind mount、remount 等复杂语义。
 pub fn do_mount(_source: &str, target: &str, fstype: &str, flags: usize) -> SysResult<usize> {
     let target_path = filename_lookup_no_follow_final_mount(AT_FDCWD, target)?;
+    let target_visible_path = target_path.global_abs_path();
 
     if target_path.dentry.get_inode().node_type() != InodeType::Directory {
         return Err(Errno::ENOTDIR);
     }
 
-    if flags & MS_REMOUNT != 0 {
+    if flags & MS_REMOUNT as usize != 0 {
         let mount = get_mount_by_dentry(&target_path.dentry).ok_or(Errno::EINVAL)?;
-        mount.vfs_mount.set_flags((flags & !(MS_REMOUNT)) as i32);
+        if flags & MS_RDONLY as usize != 0 {
+            return Err(Errno::EBUSY);
+        }
+        mount.vfs_mount.set_flags(flags as i32);
         return Ok(0);
     }
 
-    if flags & MS_PRIVATE != 0 {
+    if flags & MS_PRIVATE as usize != 0 {
         return Ok(0);
     }
 
-    if flags & MS_MOVE != 0 {
+    if flags & MS_MOVE as usize != 0 {
         let source_mount = lookup_mount_target(_source)?;
+        let source_mountpoint_path = source_mount.mountpoint.abs_path.clone();
         let parent_mount = get_mount_by_vfsmount(&target_path.mnt).ok_or(Errno::EINVAL)?;
         if get_mount_by_dentry(&target_path.dentry).is_some() {
             return Err(Errno::EBUSY);
         }
+        remove_dentry_cache_descendants(target_visible_path.as_str());
         let moved_mount = Arc::new(Mount {
             mountpoint: target_path.dentry.clone(),
             vfs_mount: source_mount.vfs_mount.clone(),
@@ -267,6 +302,7 @@ pub fn do_mount(_source: &str, target: &str, fstype: &str, flags: usize) -> SysR
             backing_root: source_mount.backing_root.clone(),
         });
         remove_mount_tree_without_cleanup(&source_mount);
+        remove_dentry_cache_tree(source_mountpoint_path.as_str());
         add_mount(moved_mount);
         return Ok(0);
     }
@@ -275,7 +311,7 @@ pub fn do_mount(_source: &str, target: &str, fstype: &str, flags: usize) -> SysR
         return Err(Errno::EBUSY);
     }
 
-    if flags & MS_BIND != 0 {
+    if flags & MS_BIND as usize != 0 {
         let source_path = filename_lookup(AT_FDCWD, _source, 0)?;
         let vfs_mount = VfsMount::new(
             source_path.dentry.clone(),
@@ -283,6 +319,7 @@ pub fn do_mount(_source: &str, target: &str, fstype: &str, flags: usize) -> SysR
             flags as i32,
         );
         let parent_mount = get_mount_by_vfsmount(&target_path.mnt).ok_or(Errno::EINVAL)?;
+        remove_dentry_cache_descendants(target_visible_path.as_str());
         add_mount(Mount::new_child(
             target_path.dentry.clone(),
             vfs_mount,
@@ -291,13 +328,44 @@ pub fn do_mount(_source: &str, target: &str, fstype: &str, flags: usize) -> SysR
         return Ok(0);
     }
 
+    if fstype == "tmpfs" {
+        let fs = crate::fs::ext4::super_block();
+        let backing_root = create_mount_backing_root(&fs, None)?;
+        let vfs_mount = VfsMount::new(backing_root.root.clone(), fs, flags as i32);
+        let parent_mount = get_mount_by_vfsmount(&target_path.mnt).ok_or(Errno::EINVAL)?;
+        remove_dentry_cache_descendants(target_visible_path.as_str());
+        add_mount(Mount::new_child_with_backing_root(
+            target_path.dentry.clone(),
+            vfs_mount,
+            parent_mount,
+            backing_root,
+        ));
+        return Ok(0);
+    }
+
+    if !is_supported_block_fstype(fstype) {
+        return Err(Errno::ENODEV);
+    }
+
+    let source_path = filename_lookup(AT_FDCWD, _source, 0)?;
+    if source_path.dentry.get_inode().node_type() != InodeType::BlockDevice {
+        return Err(Errno::ENOTBLK);
+    }
+
     match fstype {
-        "ext2" | "ext3" | "ext4" | "vfat" => {
+        fstype if is_supported_block_fstype(fstype) => {
             info!("[kernel] mount: {} on {} type {}", _source, target, fstype);
             let ext4_fs = crate::fs::ext4::super_block();
-            let backing_root = create_mount_backing_root(&ext4_fs)?;
+            let capacity = source_path
+                .dentry
+                .get_inode()
+                .as_any()
+                .downcast_ref::<LoopInode>()
+                .and_then(|loop_device| loop_device.backing_size().ok());
+            let backing_root = create_mount_backing_root(&ext4_fs, capacity)?;
             let vfs_mount = VfsMount::new(backing_root.root.clone(), ext4_fs, flags as i32);
             let parent_mount = get_mount_by_vfsmount(&target_path.mnt).ok_or(Errno::EINVAL)?;
+            remove_dentry_cache_descendants(target_visible_path.as_str());
             add_mount(Mount::new_child_with_backing_root(
                 target_path.dentry.clone(),
                 vfs_mount,
@@ -306,11 +374,14 @@ pub fn do_mount(_source: &str, target: &str, fstype: &str, flags: usize) -> SysR
             ));
             Ok(0)
         }
-        _ => Err(Errno::ENODEV),
+        _ => unreachable!(),
     }
 }
 
-fn create_mount_backing_root(fs: &Arc<dyn SuperBlockOp>) -> SysResult<MountBackingRoot> {
+fn create_mount_backing_root(
+    fs: &Arc<dyn SuperBlockOp>,
+    capacity: Option<usize>,
+) -> SysResult<MountBackingRoot> {
     let real_root = fs.root_inode();
     for _ in 0..1024 {
         let id = MOUNT_BACKING_ID.fetch_add(1, Ordering::Relaxed);
@@ -323,6 +394,7 @@ fn create_mount_backing_root(fs: &Arc<dyn SuperBlockOp>) -> SysResult<MountBacki
                 return Ok(MountBackingRoot {
                     parent_inode: real_root,
                     root: Arc::new(Dentry::new(path, None, inode)),
+                    capacity,
                 });
             }
             Err(Errno::EEXIST) => continue,
@@ -330,6 +402,60 @@ fn create_mount_backing_root(fs: &Arc<dyn SuperBlockOp>) -> SysResult<MountBacki
         }
     }
     Err(Errno::ENOSPC)
+}
+
+pub fn check_mount_file_growth(path: &Path, old_size: usize, new_size: usize) -> SysResult {
+    if new_size <= old_size {
+        return Ok(());
+    }
+
+    let Some(mount) = get_mount_by_vfsmount(&path.mnt) else {
+        return Ok(());
+    };
+    let Some(backing_root) = mount.backing_root.as_ref() else {
+        return Ok(());
+    };
+    let Some(capacity) = backing_root.capacity else {
+        return Ok(());
+    };
+
+    let used = backing_tree_size(&backing_root.root)?;
+    let projected = used.saturating_sub(old_size).saturating_add(new_size);
+    if projected > capacity {
+        return Err(Errno::ENOSPC);
+    }
+    Ok(())
+}
+
+fn backing_tree_size(dentry: &Arc<Dentry>) -> SysResult<usize> {
+    let inode = dentry.try_get_inode().ok_or(Errno::ENOENT)?;
+    if inode.node_type() != InodeType::Directory {
+        return Ok(inode.stat(&dentry.abs_path)?.size);
+    }
+
+    let mut total = 0usize;
+    let entries = inode.readdir(&dentry.abs_path)?;
+    for entry in entries {
+        let Some(name) = dirent_name(entry.d_name.as_slice()) else {
+            continue;
+        };
+        if name == "." || name == ".." {
+            continue;
+        }
+        let child_abs_path = if dentry.abs_path == "/" {
+            alloc::format!("/{}", name)
+        } else {
+            alloc::format!("{}/{}", dentry.abs_path, name)
+        };
+        let child_inode = inode.lookup(&dentry.abs_path, name)?;
+        let child = Arc::new(Dentry::new(
+            child_abs_path,
+            Some(dentry.clone()),
+            child_inode,
+        ));
+        total = total.saturating_add(backing_tree_size(&child)?);
+    }
+    Ok(total)
 }
 
 const MNT_FORCE: usize = 1;
@@ -395,6 +521,20 @@ fn remove_mount_tree_inner(mount: &Arc<Mount>, cleanup_backing_root: bool) {
     for child in children {
         remove_mount_tree_inner(&child, cleanup_backing_root);
     }
+
+    let visible_mountpoint_path = mount.parent.as_ref().and_then(Weak::upgrade).map(|parent| {
+        path_global_abs_path(&Path {
+            mnt: parent.vfs_mount.clone(),
+            dentry: mount.mountpoint.clone(),
+        })
+    });
+    if let Some(path) = visible_mountpoint_path {
+        remove_dentry_cache_tree(path.as_str());
+    }
+    if mount.backing_root.is_some() {
+        remove_dentry_cache_tree(mount.vfs_mount.root.abs_path.as_str());
+    }
+    remove_dentry_cache(mount.mountpoint.abs_path.as_str());
 
     if let Some(parent) = mount.parent.as_ref().and_then(Weak::upgrade) {
         parent
