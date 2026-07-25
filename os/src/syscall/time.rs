@@ -615,9 +615,22 @@ pub fn sys_timer_create(
         deadline_ms: 0,
         interval_ms: 0,
     };
-    POSIX_TIMERS.lock().insert(id as usize, timer);
+
+    // timerid is the only handle by which userspace can subsequently manage
+    // this object. Do not publish the timer until that handle is visible.
     copy_to_user(timerid, &id as *const i32, 1)?;
+    POSIX_TIMERS.lock().insert(id as usize, timer);
     Ok(0)
+}
+
+/// Remove all POSIX timers owned by a process that is completing group exit.
+///
+/// Timers currently use the numeric tgid as their owner identity, so leaving
+/// one behind would also allow it to target an unrelated task after PID reuse.
+pub fn remove_posix_timers_for_owner(owner_tgid: usize) {
+    POSIX_TIMERS
+        .lock()
+        .retain(|_, timer| timer.owner_tgid != owner_tgid);
 }
 
 pub fn sys_timer_delete(timerid: usize) -> SysResult<usize> {

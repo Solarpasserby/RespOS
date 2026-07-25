@@ -248,6 +248,7 @@ use time::*;
 
 pub use time::{
     check_nanosleep_timeouts, check_posix_timers, finish_task_timeout, register_task_timeout,
+    remove_posix_timers_for_owner,
 };
 
 pub fn check_all_task_timers() {

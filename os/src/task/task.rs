@@ -1857,6 +1857,7 @@ pub fn task_group_exit(task: Arc<TaskControlBlock>, exit_code: i32) {
         });
     }
     task.fd_table.lock().clear();
+    crate::syscall::remove_posix_timers_for_owner(tgid);
 
     leader.set_exit_code(exit_code);
     leader.set_exited();
@@ -1894,6 +1895,7 @@ pub fn task_group_exit_by_signal(task: Arc<TaskControlBlock>, signal: i32) {
         mem.recycle_data_pages();
     });
     task.fd_table.lock().clear();
+    crate::syscall::remove_posix_timers_for_owner(tgid);
 
     leader.set_exit_signal(signal);
     leader.set_exited();
