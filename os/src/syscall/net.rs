@@ -506,6 +506,9 @@ fn collect_iov_bytes(iovs: &[MsgIov]) -> SysResult<Vec<u8>> {
     let total = iovs.iter().try_fold(0usize, |acc, item| {
         acc.checked_add(item.len).ok_or(Errno::EINVAL)
     })?;
+    if total > isize::MAX as usize {
+        return Err(Errno::EINVAL);
+    }
     let mut buf = Vec::with_capacity(total);
     for item in iovs {
         if item.len == 0 {

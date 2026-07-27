@@ -297,11 +297,13 @@ impl MemorySet {
             map_area.copy_data(&self.page_table, data, data_offset);
         }
         self.areas.push(map_area); // 转移所有权
+        self.areas.sort_by_key(|area| area.vpn_range.get_start());
         Ok(())
     }
     /// 惰性添加逻辑段——只记录虚拟地址范围，不分配物理页不建立映射
     fn push_map_area_lazy(&mut self, map_area: MapArea) {
         self.areas.push(map_area);
+        self.areas.sort_by_key(|area| area.vpn_range.get_start());
     }
 
     /// 对外暴露的添加内核栈段的接口
@@ -323,6 +325,7 @@ impl MemorySet {
         );
         area.map(&mut self.page_table)?;
         self.areas.push(area);
+        self.areas.sort_by_key(|area| area.vpn_range.get_start());
         Ok(())
     }
     /// 对外暴露的删除内核栈段的接口
@@ -613,6 +616,7 @@ impl MemorySet {
             && left.map_perm == right.map_perm
             && left.locked == right.locked
             && left.wipe_on_fork == right.wipe_on_fork
+            && left.dontfork == right.dontfork
     }
 
     fn prepare_mmap(&mut self, request: MmapRequest) -> SysResult<MmapPlacement> {
@@ -762,6 +766,8 @@ impl MemorySet {
         }
 
         self.finish_mmap(&placement);
+        self.areas.sort_by_key(|area| area.vpn_range.get_start());
+        self.debug_check_invariants();
         Ok(placement.start)
     }
 
@@ -880,6 +886,7 @@ impl MemorySet {
         if self.mmap_start == end {
             self.mmap_start = addr;
         }
+        self.debug_check_invariants();
         Ok(())
     }
 
@@ -920,6 +927,8 @@ impl MemorySet {
             middle.remap_existing_frames(&mut self.page_table)?;
             middle.notify_mmap_open();
             self.areas.push(middle);
+            self.areas.sort_by_key(|area| area.vpn_range.get_start());
+            self.debug_check_invariants();
             return Ok(new_addr);
         }
 
@@ -933,6 +942,7 @@ impl MemorySet {
                 VirtAddr::from(keep_end).floor(),
                 VirtAddr::from(old_end).floor(),
             ))?;
+            self.debug_check_invariants();
             return Ok(old_addr);
         }
 
@@ -944,6 +954,7 @@ impl MemorySet {
             );
             if !self.area_intersects(&extension) {
                 self.extend_area_end(old_range, VirtAddr::from(new_end).floor())?;
+                self.debug_check_invariants();
                 return Ok(old_addr);
             }
         }
@@ -966,6 +977,8 @@ impl MemorySet {
         middle.remap_existing_frames(&mut self.page_table)?;
         middle.notify_mmap_open();
         self.areas.push(middle);
+        self.areas.sort_by_key(|area| area.vpn_range.get_start());
+        self.debug_check_invariants();
         Ok(new_addr)
     }
 
@@ -1163,6 +1176,7 @@ impl MemorySet {
                 idx += 1;
             }
         }
+        self.debug_check_invariants();
         Ok(())
     }
 
@@ -1210,6 +1224,55 @@ impl MemorySet {
         Ok(())
     }
 
+    pub fn advise_dontfork(&mut self, vpn_range: VPNRange, dontfork: bool) -> SysResult {
+        self.check_user_mapped_range(vpn_range)?;
+        let mut idx = 0;
+        while idx < self.areas.len() {
+            if !self.areas[idx].vpn_range.intersect_with(&vpn_range) {
+                idx += 1;
+                continue;
+            }
+            let area = self.areas.remove(idx);
+            let overlap_start = area.vpn_range.get_start().max(vpn_range.get_start());
+            let overlap_end = area.vpn_range.get_end().min(vpn_range.get_end());
+            let split = area.split_by_overlap(overlap_start, overlap_end);
+            let mut middle = split.middle;
+            middle.dontfork = dontfork;
+            if let Some(left) = split.left {
+                self.areas.insert(idx, left);
+                idx += 1;
+            }
+            self.areas.insert(idx, middle);
+            idx += 1;
+            if let Some(right) = split.right {
+                self.areas.insert(idx, right);
+                idx += 1;
+            }
+        }
+        self.debug_check_invariants();
+        Ok(())
+    }
+
+    pub fn locked_bytes(&self) -> usize {
+        self.areas
+            .iter()
+            .filter(|area| area.locked && area.map_perm.contains(MapPermission::USER))
+            .map(|area| area.page_count() * PAGE_SIZE)
+            .sum()
+    }
+
+    pub fn unlocked_bytes_in_range(&self, vpn_range: VPNRange) -> usize {
+        self.areas
+            .iter()
+            .filter(|area| !area.locked && area.vpn_range.intersect_with(&vpn_range))
+            .map(|area| {
+                let start = area.vpn_range.get_start().max(vpn_range.get_start());
+                let end = area.vpn_range.get_end().min(vpn_range.get_end());
+                (end - start) * PAGE_SIZE
+            })
+            .sum()
+    }
+
     pub fn set_locked_range(&mut self, vpn_range: VPNRange, locked: bool) -> SysResult {
         for vpn in vpn_range {
             let area = self
@@ -1248,6 +1311,7 @@ impl MemorySet {
                 idx += 1;
             }
         }
+        self.debug_check_invariants();
         Ok(())
     }
 
@@ -1375,6 +1439,60 @@ impl MemorySet {
             f(start, end, area.map_perm, area.shared, area.locked);
         }
     }
+
+    /// Expensive structural checks used after address-space mutations in debug
+    /// kernels. Lazy VMAs are allowed to have no PTE/data frame.
+    #[cfg(debug_assertions)]
+    pub fn debug_check_invariants(&self) {
+        let mut previous_end = None;
+        for area in self.areas.iter() {
+            let start = area.vpn_range.get_start();
+            let end = area.vpn_range.get_end();
+            debug_assert!(start < end, "empty VMA: {:?}", start);
+            if let Some(prev) = previous_end {
+                debug_assert!(
+                    prev <= start,
+                    "unordered or overlapping VMAs: previous_end={:?}, current=[{:?}, {:?})",
+                    prev,
+                    start,
+                    end
+                );
+            }
+            previous_end = Some(end);
+
+            if let Some(backing) = &area.file_backing {
+                debug_assert!(backing.offset.checked_add(backing.len).is_some());
+                debug_assert!(backing.len <= area.page_count() * PAGE_SIZE);
+            }
+            for vpn in area.data_frames.keys() {
+                debug_assert!(area.vpn_range.contain(vpn), "frame outside its VMA");
+                let pte = self.page_table.translate(*vpn).expect("frame without PTE");
+                debug_assert!(pte.is_valid(), "frame has invalid PTE");
+                let flags = pte.flags();
+                if area.map_perm.contains(MapPermission::USER) {
+                    debug_assert!(flags.contains(PTEFlags::USER));
+                }
+                if area.map_perm.contains(MapPermission::READ) {
+                    debug_assert!(flags.contains(PTEFlags::READ));
+                }
+                if area.map_perm.contains(MapPermission::EXECUTE) {
+                    debug_assert!(flags.contains(PTEFlags::EXECUTE));
+                }
+                debug_assert!(!(area.shared && pte.is_cow()));
+                debug_assert!(!(pte.is_cow() && flags.contains(PTEFlags::WRITE)));
+                if !pte.is_cow() {
+                    debug_assert_eq!(
+                        flags.contains(PTEFlags::WRITE),
+                        area.map_perm.contains(MapPermission::WRITE)
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[inline]
+    pub fn debug_check_invariants(&self) {}
 
     /// 回收内部地址空间
     pub fn recycle_data_pages(&mut self) {
@@ -1744,6 +1862,10 @@ impl MemorySet {
 
         // 不再映射异常上下文到用户空间，发生异常时，切换到内核将用户上下文存入内核栈
 
+        memory_set
+            .areas
+            .sort_by_key(|area| area.vpn_range.get_start());
+        memory_set.debug_check_invariants();
         let token = memory_set.page_table.token();
         Ok((
             memory_set, // 用户程序地址空间
@@ -1768,6 +1890,9 @@ impl MemorySet {
 
         let mut copied_vpns = BTreeSet::new();
         for area in user_space.areas.iter_mut() {
+            if area.dontfork {
+                continue;
+            }
             let mut new_area = MapArea::from_another(area);
             let is_writable = area.map_perm.contains(MapPermission::WRITE);
 
@@ -1846,6 +1971,8 @@ impl MemorySet {
             memory_set.areas.push(new_area);
         }
         user_space.flush_tlb();
+        memory_set.debug_check_invariants();
+        user_space.debug_check_invariants();
         Ok(memory_set)
     }
 }
@@ -1958,6 +2085,9 @@ impl MemorySet {
 
     /// 尝试处理用户态页错误，解决 COW 或惰性分配
     pub fn handle_page_fault(&mut self, cause: PageFaultCause, stval: usize) -> SysResult {
+        if stval == 0 || stval >= TRAMPOLINE {
+            return Err(Errno::EFAULT);
+        }
         let vpn = VirtAddr::from(stval).floor();
 
         let area_idx = match self.areas.iter().position(|a| a.vpn_range.contain(&vpn)) {
@@ -1975,6 +2105,9 @@ impl MemorySet {
 
         // COW 写入：PTE 有效 + COW 标记 + area 允许写
         if is_store && pte.is_some_and(|p| p.is_valid() && p.is_cow()) {
+            if self.areas[area_idx].shared {
+                return Err(Errno::EFAULT);
+            }
             if !area_perm.contains(MapPermission::WRITE) {
                 return Err(Errno::EFAULT);
             }
@@ -1996,6 +2129,7 @@ impl MemorySet {
                 self.areas[area_idx].remap_one_with_data(&mut self.page_table, vpn, old_data)?;
             }
             self.flush_tlb();
+            self.debug_check_invariants();
             return Ok(());
         }
 
@@ -2016,6 +2150,7 @@ impl MemorySet {
 
             self.areas[area_idx].map_one(&mut self.page_table, vpn)?;
             self.flush_tlb();
+            self.debug_check_invariants();
             return Ok(());
         }
 
@@ -2031,7 +2166,10 @@ impl MemorySet {
             let pte = self.page_table.translate(vpn);
             let needs_fault = match pte {
                 Some(pte) if pte.is_valid() => {
-                    perm.contains(MapPermission::WRITE) && (!pte.writable() || pte.is_cow())
+                    (perm.contains(MapPermission::READ) && !pte.readable())
+                        || (perm.contains(MapPermission::WRITE)
+                            && (!pte.writable() || pte.is_cow()))
+                        || (perm.contains(MapPermission::EXECUTE) && !pte.executable())
                 }
                 _ => true,
             };
@@ -2064,6 +2202,7 @@ struct MapArea {
     shared: bool,
     locked: bool,
     wipe_on_fork: bool,
+    dontfork: bool,
     file_backing: Option<FileBacking>,
     shm_attach_id: Option<usize>,
 }
@@ -2082,6 +2221,7 @@ struct MapAreaMeta {
     shared: bool,
     locked: bool,
     wipe_on_fork: bool,
+    dontfork: bool,
     file_backing: Option<FileBacking>,
     shm_attach_id: Option<usize>,
 }
@@ -2112,6 +2252,7 @@ impl MapArea {
             shared: false,
             locked: false,
             wipe_on_fork: false,
+            dontfork: false,
             file_backing: None,
             shm_attach_id: None,
         }
@@ -2161,6 +2302,7 @@ impl MapArea {
             shared: self.shared,
             locked: self.locked,
             wipe_on_fork: self.wipe_on_fork,
+            dontfork: self.dontfork,
             file_backing: self.file_backing.clone(),
             shm_attach_id: self.shm_attach_id,
         }
@@ -2179,6 +2321,7 @@ impl MapArea {
             shared: meta.shared,
             locked: meta.locked,
             wipe_on_fork: meta.wipe_on_fork,
+            dontfork: meta.dontfork,
             file_backing: meta.file_backing,
             shm_attach_id: meta.shm_attach_id,
         }
@@ -2245,8 +2388,8 @@ impl MapArea {
         if let Some(backing) = &mut meta.file_backing {
             let delta = (range_start - area_start) * PAGE_SIZE;
             let range_len = (range_end - range_start) * PAGE_SIZE;
-            backing.offset = backing.offset.saturating_add(delta);
-            backing.len = backing.len.saturating_sub(delta).min(range_len);
+            (backing.offset, backing.len) =
+                split_file_window(backing.offset, backing.len, delta, range_len);
         }
         meta
     }
@@ -2451,9 +2594,10 @@ impl MapArea {
         // 由调用者保证 data 合法
         ppn.get_bytes_array().copy_from_slice(data);
 
-        page_table.unmap(vpn);
+        // The old PTE/frame remain intact until allocation and copying have
+        // succeeded. replace_pte cannot allocate, so ENOMEM never leaves a hole.
+        page_table.replace_pte(vpn, ppn, PTEFlags::from(self.map_perm))?;
         self.data_frames.insert(vpn, Arc::new(frame));
-        page_table.map(vpn, ppn, PTEFlags::from(self.map_perm))?;
         Ok(())
     }
 
@@ -2483,6 +2627,112 @@ impl MapArea {
         }
         page_table.try_unmap(vpn);
     }
+}
+
+fn split_file_window(
+    original_offset: usize,
+    original_len: usize,
+    delta: usize,
+    range_len: usize,
+) -> (usize, usize) {
+    (
+        original_offset.saturating_add(delta),
+        original_len.saturating_sub(delta).min(range_len),
+    )
+}
+
+#[cfg(debug_assertions)]
+mod split_self_tests {
+    use super::*;
+
+    fn split_preserves_anonymous_vma_flags() {
+        let mut area = MapArea::new_with_flags(
+            VirtAddr::from(0x20_0000),
+            VirtAddr::from(0x24_0000),
+            MapType::Framed,
+            MapPermission::READ | MapPermission::WRITE | MapPermission::USER,
+            true,
+            true,
+        );
+        area.wipe_on_fork = true;
+        area.dontfork = true;
+
+        let split = area.split_by_overlap(
+            VirtAddr::from(0x21_0000).floor(),
+            VirtAddr::from(0x23_0000).floor(),
+        );
+        for part in [
+            split.left.as_ref(),
+            Some(&split.middle),
+            split.right.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            assert!(part.shared);
+            assert!(part.locked);
+            assert!(part.wipe_on_fork);
+            assert!(part.dontfork);
+            assert_eq!(
+                part.map_perm,
+                MapPermission::READ | MapPermission::WRITE | MapPermission::USER
+            );
+        }
+    }
+
+    fn split_file_window_tracks_offset_and_short_backing() {
+        assert_eq!(
+            split_file_window(0x8000, 0x2800, 0, 0x1000),
+            (0x8000, 0x1000)
+        );
+        assert_eq!(
+            split_file_window(0x8000, 0x2800, 0x1000, 0x1000),
+            (0x9000, 0x1000)
+        );
+        assert_eq!(
+            split_file_window(0x8000, 0x2800, 0x2000, 0x1000),
+            (0xa000, 0x800)
+        );
+        assert_eq!(
+            split_file_window(0x8000, 0x2800, 0x3000, 0x1000),
+            (0xb000, 0)
+        );
+    }
+
+    fn split_head_tail_middle_and_twice() {
+        let area = MapArea::new(
+            VirtAddr::from(0x20_0000),
+            VirtAddr::from(0x24_0000),
+            MapType::Framed,
+            MapPermission::READ | MapPermission::USER,
+        );
+        let split = area.split_by_overlap(
+            VirtAddr::from(0x21_0000).floor(),
+            VirtAddr::from(0x23_0000).floor(),
+        );
+        assert_eq!(split.left.as_ref().unwrap().page_count(), 0x10);
+        assert_eq!(split.middle.page_count(), 0x20);
+        assert_eq!(split.right.as_ref().unwrap().page_count(), 0x10);
+
+        let second = split.middle.split_by_overlap(
+            VirtAddr::from(0x22_0000).floor(),
+            VirtAddr::from(0x23_0000).floor(),
+        );
+        assert_eq!(second.left.unwrap().page_count(), 0x10);
+        assert_eq!(second.middle.page_count(), 0x10);
+        assert!(second.right.is_none());
+    }
+
+    pub(super) fn run() {
+        split_preserves_anonymous_vma_flags();
+        split_file_window_tracks_offset_and_short_backing();
+        split_head_tail_middle_and_twice();
+    }
+}
+
+#[cfg(debug_assertions)]
+pub(super) fn run_split_self_tests() {
+    split_self_tests::run();
 }
 
 #[derive(Copy, Clone, PartialEq, Debug)]

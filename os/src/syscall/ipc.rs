@@ -21,6 +21,7 @@ const IPC_INFO: usize = 3;
 const SHM_RDONLY: usize = 0o10000;
 const SHM_RND: usize = 0o20000;
 const SHM_REMAP: usize = 0o40000;
+const SHM_EXEC: usize = 0o100000;
 const SHM_HUGETLB: usize = 0o4000;
 const SHM_LOCK: usize = 11;
 const SHM_UNLOCK: usize = 12;
@@ -35,9 +36,8 @@ const SHMMIN: usize = 1;
 const DEFAULT_SHMMAX: usize = usize::MAX - (1 << 24);
 const DEFAULT_SHMALL: usize = usize::MAX / PAGE_SIZE;
 const MODE_MASK: u32 = 0o777;
-#[cfg(target_arch = "loongarch64")]
-const SHMLBA: usize = 0x10000;
-#[cfg(not(target_arch = "loongarch64"))]
+// RespOS uses 4 KiB base pages on both supported architectures and does not
+// implement cache-aliasing constraints requiring a larger attach alignment.
 const SHMLBA: usize = PAGE_SIZE;
 
 static SHMMAX_VALUE: AtomicUsize = AtomicUsize::new(DEFAULT_SHMMAX);
@@ -366,25 +366,10 @@ pub fn sys_shmget(key: isize, size: usize, shmflg: usize) -> SysResult<usize> {
 }
 
 pub fn sys_shmat(shmid: usize, shmaddr: usize, shmflg: usize) -> SysResult<usize> {
-    let (map_len, frames, readonly, attach_id) = {
-        let mut table = SHM_TABLE.lock();
-        let segment = table.segments.get_mut(&shmid).ok_or(Errno::EINVAL)?;
-        let readonly = (shmflg & SHM_RDONLY) != 0;
-        let needed = if readonly { 0o400 } else { 0o600 };
-        if !shm_access_allowed(segment, needed) {
-            return Err(Errno::EACCES);
-        }
-        segment.atime = now_sec();
-        segment.lpid = current_task()
-            .expect("[kernel] current task is None.")
-            .tgid() as i32;
-        let map_len = segment.map_len;
-        let frames = segment.frames.clone();
-        let attach_id = table.alloc_attach_id()?;
-        table.attach_owners.insert(attach_id, shmid);
-        (map_len, frames, readonly, attach_id)
-    };
-
+    const SHMAT_KNOWN_FLAGS: usize = SHM_RDONLY | SHM_RND | SHM_REMAP | SHM_EXEC;
+    if shmflg & !SHMAT_KNOWN_FLAGS != 0 {
+        return Err(Errno::EINVAL);
+    }
     let addr = if shmaddr == 0 {
         if shmflg & SHM_REMAP != 0 {
             return Err(Errno::EINVAL);
@@ -402,9 +387,30 @@ pub fn sys_shmat(shmid: usize, shmaddr: usize, shmflg: usize) -> SysResult<usize
         return Err(Errno::EINVAL);
     };
 
+    let (map_len, frames, readonly, attach_id) = {
+        let mut table = SHM_TABLE.lock();
+        let segment = table.segments.get(&shmid).ok_or(Errno::EINVAL)?;
+        let readonly = (shmflg & SHM_RDONLY) != 0;
+        let mut needed = if readonly { 0o400 } else { 0o600 };
+        if shmflg & SHM_EXEC != 0 {
+            needed |= 0o100;
+        }
+        if !shm_access_allowed(segment, needed) {
+            return Err(Errno::EACCES);
+        }
+        let map_len = segment.map_len;
+        let frames = segment.frames.clone();
+        let attach_id = table.alloc_attach_id()?;
+        table.attach_owners.insert(attach_id, shmid);
+        (map_len, frames, readonly, attach_id)
+    };
+
     let mut permission = MapPermission::READ | MapPermission::USER;
     if !readonly {
         permission |= MapPermission::WRITE;
+    }
+    if shmflg & SHM_EXEC != 0 {
+        permission |= MapPermission::EXECUTE;
     }
 
     let task = current_task().expect("[kernel] current task is None.");
@@ -424,8 +430,12 @@ pub fn sys_shmat(shmid: usize, shmaddr: usize, shmflg: usize) -> SysResult<usize
         memory_set.flush_tlb();
         Ok(start)
     });
+    let mut table = SHM_TABLE.lock();
     if result.is_err() {
-        SHM_TABLE.lock().attach_owners.remove(&attach_id);
+        table.attach_owners.remove(&attach_id);
+    } else if let Some(segment) = table.segments.get_mut(&shmid) {
+        segment.atime = now_sec();
+        segment.lpid = task.tgid() as i32;
     }
     result
 }
