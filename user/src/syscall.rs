@@ -28,6 +28,9 @@ const SYSCALL_TIMER_CREATE: usize = 107;
 const SYSCALL_TIMER_GETTIME: usize = 108;
 const SYSCALL_TIMER_SETTIME: usize = 110;
 const SYSCALL_TIMER_DELETE: usize = 111;
+const SYSCALL_CLOCK_SETTIME: usize = 112;
+const SYSCALL_CLOCK_GETTIME: usize = 113;
+const SYSCALL_CLOCK_GETRES: usize = 114;
 const SYSCALL_SCHED_YIELD: usize = 124;
 const SYSCALL_SETPRIORITY: usize = 140;
 const SYSCALL_TIMES: usize = 153;
@@ -380,6 +383,24 @@ pub fn sys_timer_delete(timerid: usize) -> isize {
     syscall(SYSCALL_TIMER_DELETE, [timerid, 0, 0, 0, 0, 0])
 }
 
+pub fn sys_clock_settime(clock_id: usize, value: *const TimeSpec) -> isize {
+    syscall(
+        SYSCALL_CLOCK_SETTIME,
+        [clock_id, value as usize, 0, 0, 0, 0],
+    )
+}
+
+pub fn sys_clock_gettime(clock_id: usize, value: *mut TimeSpec) -> isize {
+    syscall(
+        SYSCALL_CLOCK_GETTIME,
+        [clock_id, value as usize, 0, 0, 0, 0],
+    )
+}
+
+pub fn sys_clock_getres(clock_id: usize, value: *mut TimeSpec) -> isize {
+    syscall(SYSCALL_CLOCK_GETRES, [clock_id, value as usize, 0, 0, 0, 0])
+}
+
 pub fn sys_prlimit64(
     pid: usize,
     resource: usize,
@@ -396,6 +417,20 @@ pub fn sys_futex(uaddr: *const u32, op: usize, val: usize, timeout: *const TimeS
     syscall(
         SYSCALL_FUTEX,
         [uaddr as usize, op, val, timeout as usize, 0, 0],
+    )
+}
+
+pub fn sys_futex_full(
+    uaddr: *const u32,
+    op: usize,
+    val: usize,
+    val2: usize,
+    uaddr2: *const u32,
+    val3: usize,
+) -> isize {
+    syscall(
+        SYSCALL_FUTEX,
+        [uaddr as usize, op, val, val2, uaddr2 as usize, val3],
     )
 }
 

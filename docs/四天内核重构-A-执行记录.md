@@ -55,17 +55,17 @@ smoke，不能作为功能 baseline。需要补充完整比赛镜像或把 A 组
 | syscall 家族 | 当前等级 | 当前支持边界/主要问题 | 下一步 |
 | --- | --- | --- | --- |
 | `clone/exec/exit/exit_group` | B | 已统一普通/信号退出并增加单次提交保护；项目仍采用 leader exit 结束线程组的简化策略 | 补 CLONE_VM/FILES 与并发 exit 回归 |
-| `wait4/waitid` | B | 已将 status/rusage copyout 放在 child accounting/reap 前；动态失败注入待执行 | 补非法指针后重试回归 |
+| `wait4/waitid` | A | status/rusage copyout 位于 accounting/reap 前；非法指针后重试已双架构压力验收 | 保持并发 wait 边界 |
 | `kill/tkill/tgkill/rt_sig*` | B | 有基础 signal 支持；copyout 失败、阻塞竞争和退出清理未完整验证 | 深审 `sigtimedwait` 和 signal info |
-| `futex/robust_list` | B | wake/timeout/signal single-winner 与线程退出清理已动态验收；CMP_REQUEUE 原子窗口和 SMP 待处理 | 完整镜像上连续竞争测试 |
+| `futex/robust_list` | B | wake/timeout/signal、线程退出清理和 CMP_REQUEUE 原子窗口已动态验收；真正 SMP 待处理 | 完整镜像上连续竞争测试 |
 | `sched_*` | B | 参数和属性接口存在；FIFO/RR、affinity 是否真实影响调度需验证 | 对照 scheduler 状态机 |
 | `get/setpriority` | B | 基础优先级状态存在 | 验证 ready task 重排 |
-| `prlimit/getrlimit/setrlimit` | B | 已改为校验、old-limit copyout、状态提交；并发修改仍需回归 | 补非法 old 指针和并发回归 |
+| `prlimit/getrlimit/setrlimit` | B | 校验、old-limit copyout、状态提交及非法指针重试已验收；真正并发修改未测 | 保持单核受限支持 |
 | credential/capability | B | uid/gid/cap 接口存在，完整权限模型不在本轮范围 | 明确受限支持边界 |
-| `timer_create/delete/get/settime` | B | create 失败不发布，owner 使用 Weak 稳定身份且 exit 清理；专项生命周期回归待执行 | 补失败注入、owner exit 和 PID 复用回归 |
+| `timer_create/delete/get/settime` | B | create/settime 失败原子性和 owner exit 已验收；Weak owner 防 PID 误投递，当前分配器不复用 PID | PID 回收启用后补动态复用回归 |
 | `get/setitimer` | B | task 内存在基础状态 | 验证 owner exit 和 signal 投递 |
-| `clock_gettime/getres` | D | CPU/TAI/alarm 使用启动时间冒充，getres 固定声称 1ns | 收紧支持范围 |
-| `clock_settime/settimeofday` | B | realtime offset 模型存在 | 验证不影响 monotonic |
+| `clock_gettime/getres` | B | fine/coarse 分辨率已直读验收；CPU/TAI/alarm 明确拒绝，不伪造时间 | 保持受限支持边界 |
+| `clock_settime/settimeofday` | B | realtime offset 已验证不影响 monotonic | 保持 CAP_SYS_TIME 与 clock-id 边界 |
 | `nanosleep/clock_nanosleep` | B | 有 timeout wait 表 | 验证 clock、signal 和唯一完成 |
 | `times` | D | user/system CPU tick 使用同一近似值 | 实现真实记账或明确受限 |
 | `adjtimex/clock_adjtime` | B | 仅为简化状态模型 | 明确不支持的 modes |
@@ -288,7 +288,7 @@ RV debug 的完整 9 项额外试跑中，严格计时项 `futex_wait05` 因 deb
   EAGAIN、timeout、bitset、wake、cmp_requeue 的双架构双 libc 覆盖；
 - signal/wake/timeout 三方相邻注入见第 13 节，线程退出 waiter 清理见第 14 节；
   SMP 压力尚未完成；
-- `FUTEX_CMP_REQUEUE` 用户值比较到 queue lock 之间的既有竞态仍保持为后续专项；
+- `FUTEX_CMP_REQUEUE` 用户值比较到 queue lock 的窗口已在第 16 节关闭；
 - 完整初赛镜像和本地修复日志均由 `.gitignore` 排除，不进入提交；
 - 本轮未执行 `git commit`，由任务负责人审查后提交。
 
@@ -358,8 +358,7 @@ nanosleep01, nanosleep02, nanosleep04
   时间；本轮按方案选择明确拒绝；
 - 当前系统无 suspend，因此 `CLOCK_BOOTTIME` 与 monotonic 在可观察范围内相同；
 - 未实现 NTP 调频、TAI offset、wakeup alarm 和高精度硬件 timer；
-- 仍建议后续增加专用小测，直接断言 fine/coarse 返回的 1 µs/1 ms 数值，并测试
-  调整 realtime 前后 monotonic 差值不跳变。
+- fine/coarse 返回值和 realtime/monotonic 独立性已在第 17 节完成专项动态验收。
 
 ## 10. 2026-07-28 wait4 失败注入验收
 
@@ -483,7 +482,7 @@ SP 读取 signal frame；修正为正常返回内核提供的 sigreturn trampoli
 结论：当前单核 release 环境下，wake、signal、timeout 三类完成源满足
 single-winner；loser 不会覆盖已提交结果，等待队列能够完整清理。该项关闭了
 第 8.5 节中的“三方相邻注入”缺口，但线程退出 waiter 残留、SMP 压力以及
-`FUTEX_CMP_REQUEUE` 用户值比较到 queue lock 的窗口仍待后续专项。
+`FUTEX_CMP_REQUEUE` 用户值比较到 queue lock 的窗口后续已在第 16 节关闭。
 
 本轮未执行 `git commit`；专项验证结束后重新构建默认 RV/LA release 内核。
 
@@ -520,9 +519,9 @@ single-winner；loser 不会覆盖已提交结果，等待队列能够完整清�
 `FutexWaits::cancel` 返回 wait/deadline 是否存在；默认运行语义不变。该项关闭
 第 8.5 和第 13 节中的“线程退出 waiter 残留”缺口。
 
-剩余 futex 专项为 SMP 压力，以及 `FUTEX_CMP_REQUEUE` 用户值比较到 queue lock
-之间的原子窗口。本轮未执行 `git commit`；专项结束后恢复默认双架构 release
-内核。
+当时剩余 futex 专项为 SMP 压力，以及 `FUTEX_CMP_REQUEUE` 用户值比较到 queue
+lock 之间的原子窗口；后者已在第 16 节关闭。本轮未执行 `git commit`；专项结束
+后恢复默认双架构 release 内核。
 
 ## 15. 2026-07-28 首次提交前综合审查
 
@@ -569,9 +568,161 @@ clock/nanosleep、scheduler、futex 以及四个专项探针。
 
 本次可以提交，但不等同于任务 A 全部验收结束。明确保留：
 
-- `FUTEX_CMP_REQUEUE` 用户值比较到 queue lock 之间的原子窗口；
+- `FUTEX_CMP_REQUEUE` 原子窗口后续已在第 16 节关闭；
 - 真正 SMP 并发压力；
 - CPU clock 运行时间记账、TAI、suspend/boottime 差异和 wakeup alarm；
 - PID 回收启用后的 timer PID-reuse 动态测试。
 
 本轮只审查、验证和同步记录，未执行 `git commit`。
+
+## 16. 2026-07-28 FUTEX_CMP_REQUEUE 原子窗口与 timeout 精度
+
+### 16.1 CMP_REQUEUE 线性化
+
+旧实现先在无 queue lock 状态读取并比较 `*uaddr`，随后才进入
+`futex_requeue_common` 获取 `FUTEX_QUEUES`。比较成功到 queue mutation 之间存在
+窗口，值已变化时仍可能 wake/requeue waiter。
+
+修复：
+
+- `futex_requeue_common` 接受可选 expected value；
+- CMP 路径先在锁外检查并预触发用户页，避免正常情况下持有 no-IRQ queue lock
+  时分配页面；
+- 最终 `copy_from_user`、expected 比较、wake/requeue 位于同一次
+  `FUTEX_QUEUES` 临界区；
+- 固定并注释锁序为
+  `FUTEX_QUEUES → MemorySet → FUTEX_WAITS → scheduler`；
+- 普通 REQUEUE 继续复用同一 queue mutation 实现；
+- source/target key 相同时仍只执行指定数量的 wake，不做无意义迁移。
+
+专项构建开关 `TASK_A_FUTEX_CMP_REQUEUE_TEST_YIELD=1` 在获取 queue lock 前强制
+让出 CPU，直到修改进程把 source word 从 expected 改变，稳定制造旧窗口。
+`task_a_futex_cmp_requeue_probe` 断言：
+
+1. CMP_REQUEUE 必须返回 `EAGAIN`；
+2. target wake 必须返回 0；
+3. source wake 必须返回 1；
+4. waiter 回收后 source/target 额外 wake 都必须返回 0。
+
+初版注入只执行一次 yield，第 6 轮修改进程尚未运行，比较按正确语义成功并使探针
+失败；修正为等待实际值变化后才进入最终比较，再开始正式计数。该失败属于注入
+不确定，不计为内核原子性失败。
+
+结果：
+
+| 检查 | 结果 |
+| --- | --- |
+| RV 强制窗口注入 | PASS，20/20 |
+| LA 强制窗口注入 | PASS，20/20 |
+| 双架构比较失败不迁移 | PASS，40/40 |
+| target/source wake 位置断言 | PASS，80/80 |
+| 最终 queue 残留断言 | PASS，80/80 |
+
+### 16.2 futex timeout 微秒化
+
+CMP 正常路径回归首次运行时，RV `futex_wait05` 的 musl/glibc 都出现亚毫秒级
+early wake，整组为 8/9 + 8/9。原因是 nanosleep 已改为微秒 deadline，但 futex
+仍使用“当前毫秒向下取整 + duration”的 deadline，最多可能提前近 1 ms。
+
+处理：
+
+- `FutexDeadline`、deadline map、过期扫描和相对 timeout 统一改为微秒；
+- 使用硬件已有的 `get_time_us/get_timeout_us`，不提高 timer interrupt 频率；
+- wake/signal/timeout 仍由原 single-winner 状态决定结果。
+
+修复后的回归：
+
+| 检查 | 结果 |
+| --- | --- |
+| RV 9 项 futex，musl/glibc | PASS，9/9 + 9/9 |
+| LA 9 项 futex，musl/glibc | PASS，9/9 + 9/9 |
+| 其中 `futex_cmp_requeue02` | 双架构双 libc 正常成功路径通过 |
+| 其中 `futex_wait05` | 双架构双 libc 无 early wake |
+| RV 三方竞态压力 | PASS，20/20 轮，60/60 场景 |
+| LA 三方竞态压力 | PASS，20/20 轮，60/60 场景 |
+
+当前单核任务范围内，CMP_REQUEUE 原子窗口已关闭。真正 SMP 下的页表并发变更和
+多核 queue contention 仍未动态验收。本轮未执行 `git commit`，并将在专项测试
+后恢复默认双架构 release 构建。
+
+## 17. 2026-07-28 clock 分辨率与 realtime/monotonic 独立性
+
+新增默认关闭的 `TASK_A_CLOCK_PROBE` 构建期开关和
+`task_a_clock_probe`，直接调用 clock syscall 验证此前只由 LTP 间接覆盖的边界。
+
+每轮断言：
+
+- `CLOCK_REALTIME`、`CLOCK_MONOTONIC`、`CLOCK_MONOTONIC_RAW`、
+  `CLOCK_BOOTTIME` 的 `clock_getres` 精确返回 1 µs；
+- `CLOCK_REALTIME_COARSE`、`CLOCK_MONOTONIC_COARSE` 精确返回 1 ms；
+- process/thread CPU clock、realtime/boottime alarm 和 TAI 返回 `EINVAL`；
+- 将 realtime 向前调整 3600 秒后，realtime 观测到对应跳变；
+- 同期 monotonic 只允许实际执行耗时增长，不得出现 realtime 的一小时跳变；
+- `clock_settime(CLOCK_MONOTONIC)` 返回 `EINVAL`。
+
+结果：
+
+| 检查 | 结果 |
+| --- | --- |
+| RV release 连续压力 | PASS，20/20 |
+| LA release 连续压力 | PASS，20/20 |
+| fine/coarse 分辨率轮次 | PASS，40/40 |
+| unsupported clock 边界轮次 | PASS，40/40 |
+| realtime/monotonic 独立性轮次 | PASS，40/40 |
+| monotonic 非法 settime | PASS，40/40 |
+| panic、timeout、分辨率误报、monotonic 跳变 | 未发现 |
+
+该项关闭第 9.4 节中最后两项建议性专项证据。CPU clock、TAI、suspend 语义和
+wakeup alarm 仍按方案作为明确不支持能力，不用伪实现换取表面通过。本轮未执行
+`git commit`，专项结束后恢复默认 RV/LA release 构建。
+
+## 18. 2026-07-28 任务 A 最终验收矩阵复核
+
+### 18.1 A 任务书最终清单
+
+| 验收项 | 状态 | 证据/边界 |
+| --- | --- | --- |
+| 普通退出与信号退出资源语义一致 | PASS | 统一 `ExitCause` 和 process-group exit |
+| process/signal/time/scheduler syscall 已分级 | PASS | 第 2 节 ABI 台账 |
+| POSIX timer copyout/owner-exit 不泄漏 | PASS | A-011/A-012 |
+| 异步对象不因 pid/tgid 复用误投递 | PASS（代码）/N/A（动态复用） | Weak owner；当前 PID 不回收 |
+| prlimit/timer/wait 提交与 copyout 顺序有测试 | PASS | 失败注入 100/100 双架构 |
+| wait copyout 失败不丢 child | PASS | 有效重试、accounting、ECHILD 断言 |
+| scheduler invariant 固定回归不触发 | PASS | debug/release 与 100 次复现 |
+| futex wake/timeout/signal 不重复完成 | PASS | 双架构三方竞态 40/40 |
+| 退出任务无 waiter/timer 残留 | PASS | waiter queue/wait/deadline 与 timer 删除计数 |
+| monotonic 不受 realtime 调整影响 | PASS | clock probe 双架构 40/40 |
+| 时钟精度和支持范围真实 | PASS | 1 µs/1 ms 直读；unsupported 返回 EINVAL |
+| RV/LA 双架构通过 | PASS | 构建、LTP、专项 probe |
+| 相关测试连续运行无随机 hang | PASS（单核范围） | 所有正式压力轮完成 |
+| A 的提交可按语义独立回退 | READY | `57046f1` + 当前待提交的 futex/clock 批次 |
+
+### 18.2 总控最终审查
+
+| 类别 | 状态 | 说明 |
+| --- | --- | --- |
+| RV/LA release 构建与产物类型 | PASS | `make check-submit MODE=release` |
+| rustfmt / diff whitespace | PASS | 全部涉及文件 |
+| 固定进程/同步 smoke | PASS | wait/timer/futex/clock 专项与 LTP 子集 |
+| futex LTP | PASS | RV/LA，musl/glibc 均 9/9 |
+| clock/nanosleep LTP | PASS | RV/LA，musl/glibc 均 7/7 |
+| 资源残留 | PASS | health、timer、waiter、Zombie 专项 |
+| ABI struct 与 errno | PASS | 原始 syscall probe 和失败注入 |
+| syscall 层新增测试特判 | PASS | 无；仅 testrunner/trace 构建期开关 |
+| 默认 RV/LA + 当前决赛镜像 smoke | PASS（启动/退出） | 正常关机、无 panic |
+| 决赛镜像旧 LTP 功能结果 | N/A | 文件缺失为 ENOENT，不误报功能失败/通过 |
+
+默认内核在当前 128 MiB 决赛镜像上运行完整 testrunner 时，RV 687 项、LA 688 项
+旧 LTP 因镜像不含对应文件返回 ENOENT；两架构均正常运行到汇总并关机，无 panic。
+功能结论继续采用 4 GiB 初赛完整镜像上的专项结果。
+
+### 18.3 保留边界与合并结论
+
+- 真正 SMP 的页表变化、queue contention 和并发 timer generation 未动态验收；
+- CPU clock、TAI、suspend/boottime 差异、wakeup alarm 明确不支持；
+- PID 分配器启用回收后需补 timer PID-reuse 动态测试；
+- 总控 7.3 建议的五类性能中位数尚未形成正式表格；release invariant 已编译消除，
+  当前专项未观察到功能性性能退化。
+
+结论：任务 A 的四天正确性必做项已完成，当前批次提交后可以进入合并审查；上述
+内容作为明确支持边界，不以伪实现补齐。本轮未执行 `git commit`。

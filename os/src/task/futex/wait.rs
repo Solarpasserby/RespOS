@@ -2,20 +2,22 @@
 
 use super::queue::{FUTEX_QUEUES, FutexKey, FutexQ, futex_hash_idx};
 use crate::config::PAGE_SIZE;
-use crate::mm::{VirtAddr, copy_from_user};
+use crate::mm::{VirtAddr, check_user_readable, copy_from_user};
 use crate::mutex::SpinNoIrqLock;
 use crate::syscall::{Errno, SysResult};
 use crate::task::scheduler::{
     prepare_current_task_blocked, remove_task, switch_to_next_task, wakeup_task,
 };
 use crate::task::{current_task, futex::FUTEX_BITSET_MATCH_ANY, yield_current_task};
-use crate::timer::{TimeSpec, get_time_ms, get_timeout_ms};
+use crate::timer::{TimeSpec, get_time_us, get_timeout_us};
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use lazy_static::lazy_static;
 
 const FUTEX_TRACE: bool = false;
 const FUTEX_EXIT_TRACE: bool = option_env!("TASK_A_FUTEX_EXIT_TRACE").is_some();
+const FUTEX_CMP_REQUEUE_TEST_YIELD: bool =
+    option_env!("TASK_A_FUTEX_CMP_REQUEUE_TEST_YIELD").is_some();
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WaitCompletion {
@@ -32,18 +34,18 @@ enum FutexDeadline {
 }
 
 impl FutexDeadline {
-    fn millis(self) -> usize {
+    fn micros(self) -> usize {
         match self {
-            FutexDeadline::UserClock(deadline_ms) | FutexDeadline::TimeoutClock(deadline_ms) => {
-                deadline_ms
+            FutexDeadline::UserClock(deadline_us) | FutexDeadline::TimeoutClock(deadline_us) => {
+                deadline_us
             }
         }
     }
 
     fn expired(self) -> bool {
         match self {
-            FutexDeadline::UserClock(deadline_ms) => get_time_ms() >= deadline_ms,
-            FutexDeadline::TimeoutClock(deadline_ms) => get_timeout_ms() >= deadline_ms,
+            FutexDeadline::UserClock(deadline_us) => get_time_us() >= deadline_us,
+            FutexDeadline::TimeoutClock(deadline_us) => get_timeout_us() >= deadline_us,
         }
     }
 }
@@ -84,7 +86,7 @@ impl FutexWaits {
             FutexDeadline::UserClock(_) => &mut self.user_deadlines,
             FutexDeadline::TimeoutClock(_) => &mut self.timeout_deadlines,
         };
-        deadlines.entry(deadline.millis()).or_default().push(tid);
+        deadlines.entry(deadline.micros()).or_default().push(tid);
     }
 
     fn complete(&mut self, tid: usize, completion: WaitCompletion) -> bool {
@@ -127,18 +129,18 @@ impl FutexWaits {
     }
 
     fn remove_deadline(&mut self, tid: usize, deadline: FutexDeadline) {
-        let (deadlines, deadline_ms) = match deadline {
-            FutexDeadline::UserClock(ms) => (&mut self.user_deadlines, ms),
-            FutexDeadline::TimeoutClock(ms) => (&mut self.timeout_deadlines, ms),
+        let (deadlines, deadline_us) = match deadline {
+            FutexDeadline::UserClock(us) => (&mut self.user_deadlines, us),
+            FutexDeadline::TimeoutClock(us) => (&mut self.timeout_deadlines, us),
         };
-        let remove_bucket = if let Some(tids) = deadlines.get_mut(&deadline_ms) {
+        let remove_bucket = if let Some(tids) = deadlines.get_mut(&deadline_us) {
             tids.retain(|queued_tid| *queued_tid != tid);
             tids.is_empty()
         } else {
             false
         };
         if remove_bucket {
-            deadlines.remove(&deadline_ms);
+            deadlines.remove(&deadline_us);
         }
     }
 
@@ -168,18 +170,18 @@ impl FutexWaits {
         user_clock: bool,
         expired: &mut Vec<usize>,
     ) {
-        while let Some((&deadline_ms, _)) = deadlines.first_key_value() {
-            if deadline_ms > now {
+        while let Some((&deadline_us, _)) = deadlines.first_key_value() {
+            if deadline_us > now {
                 break;
             }
-            let tids = deadlines.remove(&deadline_ms).unwrap_or_default();
+            let tids = deadlines.remove(&deadline_us).unwrap_or_default();
             for tid in tids {
                 let Some(wait) = waits.get_mut(&tid) else {
                     continue;
                 };
                 let same_deadline = match wait.deadline {
-                    Some(FutexDeadline::UserClock(ms)) => user_clock && ms == deadline_ms,
-                    Some(FutexDeadline::TimeoutClock(ms)) => !user_clock && ms == deadline_ms,
+                    Some(FutexDeadline::UserClock(us)) => user_clock && us == deadline_us,
+                    Some(FutexDeadline::TimeoutClock(us)) => !user_clock && us == deadline_us,
                     None => false,
                 };
                 if same_deadline && wait.completion == WaitCompletion::Pending {
@@ -371,7 +373,7 @@ pub fn check_futex_timeouts() {
     let expired = {
         // Lock order: FUTEX_QUEUES -> FUTEX_WAITS -> SCHEDULER.
         let mut queues = FUTEX_QUEUES.lock();
-        let expired = FUTEX_WAITS.lock().expire(get_time_ms(), get_timeout_ms());
+        let expired = FUTEX_WAITS.lock().expire(get_time_us(), get_timeout_us());
         for tid in &expired {
             queues.remove_tid(*tid);
         }
@@ -409,7 +411,7 @@ pub fn remove_futex_waiter(tid: usize) {
     }
 }
 
-fn futex_deadline_ms(
+fn futex_deadline_us(
     timeout_ptr: usize,
     absolute: bool,
     realtime: bool,
@@ -424,17 +426,17 @@ fn futex_deadline_ms(
         timeout_ptr as *const TimeSpec,
         1,
     )?;
-    let timeout_ms = timeout.checked_duration_ms().ok_or(Errno::EINVAL)?;
+    let timeout_us = timeout.checked_duration_us().ok_or(Errno::EINVAL)?;
     if absolute {
         Ok(Some(if realtime {
-            FutexDeadline::UserClock(timeout_ms)
+            FutexDeadline::UserClock(timeout_us)
         } else {
-            FutexDeadline::TimeoutClock(timeout_ms)
+            FutexDeadline::TimeoutClock(timeout_us)
         }))
     } else {
         Ok(Some(FutexDeadline::TimeoutClock(
-            get_timeout_ms()
-                .checked_add(timeout_ms)
+            get_timeout_us()
+                .checked_add(timeout_us)
                 .ok_or(Errno::EINVAL)?,
         )))
     }
@@ -616,6 +618,7 @@ fn futex_requeue_common(
     nr_wake: u32,
     uaddr2: usize,
     nr_requeue: u32,
+    expected_val: Option<u32>,
     private: bool,
 ) -> SysResult<usize> {
     if uaddr == 0 || uaddr2 == 0 {
@@ -625,8 +628,18 @@ fn futex_requeue_common(
     let source_key = futex_key(uaddr, private)?;
     let target_key = futex_key(uaddr2, private)?;
 
-    if source_key == target_key {
-        return futex_wake(uaddr, nr_wake, private);
+    // Resolve a lazy user page before taking the queue spin lock. The final
+    // value load still happens under FUTEX_QUEUES below, so comparison and
+    // queue mutation share one linearization interval without allowing page
+    // allocation/fault handling while the no-IRQ lock is held.
+    if expected_val.is_some() {
+        check_user_readable(uaddr as *const u32, 1)?;
+        if FUTEX_CMP_REQUEUE_TEST_YIELD {
+            let expected_val = expected_val.unwrap();
+            while read_futex_value(uaddr)? == expected_val {
+                yield_current_task();
+            }
+        }
     }
 
     let source_idx = futex_hash_idx(&source_key);
@@ -638,6 +651,16 @@ fn futex_requeue_common(
 
     {
         let mut queues = FUTEX_QUEUES.lock();
+        if let Some(expected_val) = expected_val {
+            // Lock order: FUTEX_QUEUES -> MemorySet -> FUTEX_WAITS.
+            // All other futex paths resolve MemorySet before taking the queue
+            // lock; none retains MemorySet while waiting for FUTEX_QUEUES.
+            let actual_val = read_futex_value(uaddr)?;
+            if actual_val != expected_val {
+                return Err(Errno::EAGAIN);
+            }
+        }
+
         let source_bucket = queues.bucket_by_idx(source_idx);
         let mut idx = 0;
         while idx < source_bucket.len() && woken_tids.len() < nr_wake as usize {
@@ -652,7 +675,10 @@ fn futex_requeue_common(
             }
         }
 
-        while idx < source_bucket.len() && requeued < nr_requeue as usize {
+        while source_key != target_key
+            && idx < source_bucket.len()
+            && requeued < nr_requeue as usize
+        {
             if source_bucket[idx].key == source_key {
                 let mut futex_q = source_bucket.remove(idx).unwrap();
                 futex_q.key = target_key.clone();
@@ -685,12 +711,12 @@ pub fn futex_wait(
     timeout_ptr: usize,
     private: bool,
 ) -> SysResult<usize> {
-    let deadline_ms = futex_deadline_ms(timeout_ptr, false, false)?;
+    let deadline_us = futex_deadline_us(timeout_ptr, false, false)?;
     futex_wait_timed_common(
         uaddr,
         expected_val,
         FUTEX_BITSET_MATCH_ANY,
-        deadline_ms,
+        deadline_us,
         private,
     )
 }
@@ -706,7 +732,7 @@ pub fn futex_requeue(
     nr_requeue: u32,
     private: bool,
 ) -> SysResult<usize> {
-    futex_requeue_common(uaddr, nr_wake, uaddr2, nr_requeue, private)
+    futex_requeue_common(uaddr, nr_wake, uaddr2, nr_requeue, None, private)
 }
 
 pub fn futex_cmp_requeue(
@@ -717,11 +743,14 @@ pub fn futex_cmp_requeue(
     expected_val: u32,
     private: bool,
 ) -> SysResult<usize> {
-    let actual_val = read_futex_value(uaddr)?;
-    if actual_val != expected_val {
-        return Err(Errno::EAGAIN);
-    }
-    futex_requeue_common(uaddr, nr_wake, uaddr2, nr_requeue, private)
+    futex_requeue_common(
+        uaddr,
+        nr_wake,
+        uaddr2,
+        nr_requeue,
+        Some(expected_val),
+        private,
+    )
 }
 
 pub fn futex_wait_bitset(
@@ -733,8 +762,8 @@ pub fn futex_wait_bitset(
     realtime: bool,
     private: bool,
 ) -> SysResult<usize> {
-    let deadline_ms = futex_deadline_ms(timeout_ptr, absolute_timeout, realtime)?;
-    futex_wait_timed_common(uaddr, expected_val, bitset, deadline_ms, private)
+    let deadline_us = futex_deadline_us(timeout_ptr, absolute_timeout, realtime)?;
+    futex_wait_timed_common(uaddr, expected_val, bitset, deadline_us, private)
 }
 
 pub fn futex_wake_bitset(

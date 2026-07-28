@@ -286,6 +286,18 @@ pub fn timer_delete_raw(timerid: usize) -> isize {
     sys_timer_delete(timerid)
 }
 
+pub fn clock_settime_raw(clock_id: usize, value: *const TimeSpec) -> isize {
+    sys_clock_settime(clock_id, value)
+}
+
+pub fn clock_gettime_raw(clock_id: usize, value: *mut TimeSpec) -> isize {
+    sys_clock_gettime(clock_id, value)
+}
+
+pub fn clock_getres_raw(clock_id: usize, value: *mut TimeSpec) -> isize {
+    sys_clock_getres(clock_id, value)
+}
+
 pub fn prlimit64_raw(
     pid: usize,
     resource: usize,
@@ -297,6 +309,24 @@ pub fn prlimit64_raw(
 
 pub fn futex_raw(uaddr: *const u32, op: usize, val: usize, timeout: *const TimeSpec) -> isize {
     sys_futex(uaddr, op, val, timeout)
+}
+
+pub fn futex_cmp_requeue_raw(
+    uaddr: *const u32,
+    nr_wake: usize,
+    nr_requeue: usize,
+    uaddr2: *const u32,
+    expected: u32,
+) -> isize {
+    const FUTEX_CMP_REQUEUE: usize = 4;
+    sys_futex_full(
+        uaddr,
+        FUTEX_CMP_REQUEUE,
+        nr_wake,
+        nr_requeue,
+        uaddr2,
+        expected as usize,
+    )
 }
 
 pub fn mmap_raw(
