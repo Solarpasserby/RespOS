@@ -26,5 +26,3 @@ judge/**
 !judge/**/
 !judge/**/*.py
 !judge/baseline/*
-LEARNING_LOG.md
-docs/四天内核重构-A-修复日志.md
