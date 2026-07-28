@@ -47,10 +47,14 @@ impl FutexQueues {
         &mut self.buckets[idx]
     }
 
-    pub fn remove_tid(&mut self, tid: usize) {
+    pub fn remove_tid(&mut self, tid: usize) -> usize {
+        let mut removed = 0;
         for bucket in self.buckets.iter_mut() {
+            let before = bucket.len();
             bucket.retain(|q| q.tid != tid);
+            removed += before - bucket.len();
         }
+        removed
     }
 }
 

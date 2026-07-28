@@ -15,19 +15,51 @@ use alloc::vec::Vec;
 use lazy_static::lazy_static;
 
 const FUTEX_TRACE: bool = false;
+const FUTEX_EXIT_TRACE: bool = option_env!("TASK_A_FUTEX_EXIT_TRACE").is_some();
 
-struct TimedFutexWait {
-    deadline: FutexDeadline,
-    timed_out: bool,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WaitCompletion {
+    Pending,
+    Woken,
+    TimedOut,
+    Interrupted,
 }
 
-struct TimedFutexWaits {
-    waits: BTreeMap<usize, TimedFutexWait>,
+#[derive(Clone, Copy)]
+enum FutexDeadline {
+    UserClock(usize),
+    TimeoutClock(usize),
+}
+
+impl FutexDeadline {
+    fn millis(self) -> usize {
+        match self {
+            FutexDeadline::UserClock(deadline_ms) | FutexDeadline::TimeoutClock(deadline_ms) => {
+                deadline_ms
+            }
+        }
+    }
+
+    fn expired(self) -> bool {
+        match self {
+            FutexDeadline::UserClock(deadline_ms) => get_time_ms() >= deadline_ms,
+            FutexDeadline::TimeoutClock(deadline_ms) => get_timeout_ms() >= deadline_ms,
+        }
+    }
+}
+
+struct FutexWait {
+    deadline: Option<FutexDeadline>,
+    completion: WaitCompletion,
+}
+
+struct FutexWaits {
+    waits: BTreeMap<usize, FutexWait>,
     user_deadlines: BTreeMap<usize, Vec<usize>>,
     timeout_deadlines: BTreeMap<usize, Vec<usize>>,
 }
 
-impl TimedFutexWaits {
+impl FutexWaits {
     fn new() -> Self {
         Self {
             waits: BTreeMap::new(),
@@ -36,14 +68,18 @@ impl TimedFutexWaits {
         }
     }
 
-    fn register(&mut self, tid: usize, deadline: FutexDeadline) {
+    fn register(&mut self, tid: usize, deadline: Option<FutexDeadline>) {
+        self.cancel(tid);
         self.waits.insert(
             tid,
-            TimedFutexWait {
+            FutexWait {
                 deadline,
-                timed_out: false,
+                completion: WaitCompletion::Pending,
             },
         );
+        let Some(deadline) = deadline else {
+            return;
+        };
         let deadlines = match deadline {
             FutexDeadline::UserClock(_) => &mut self.user_deadlines,
             FutexDeadline::TimeoutClock(_) => &mut self.timeout_deadlines,
@@ -51,11 +87,47 @@ impl TimedFutexWaits {
         deadlines.entry(deadline.millis()).or_default().push(tid);
     }
 
-    fn finish(&mut self, tid: usize) -> bool {
-        let Some(wait) = self.waits.remove(&tid) else {
-            return false;
+    fn complete(&mut self, tid: usize, completion: WaitCompletion) -> bool {
+        debug_assert_ne!(completion, WaitCompletion::Pending);
+        let deadline = {
+            let Some(wait) = self.waits.get_mut(&tid) else {
+                return false;
+            };
+            if wait.completion != WaitCompletion::Pending {
+                return false;
+            }
+            wait.completion = completion;
+            wait.deadline
         };
-        let (deadlines, deadline_ms) = match wait.deadline {
+        if let Some(deadline) = deadline {
+            self.remove_deadline(tid, deadline);
+        }
+        true
+    }
+
+    fn finish(&mut self, tid: usize) -> Option<WaitCompletion> {
+        let Some(wait) = self.waits.remove(&tid) else {
+            return None;
+        };
+        if let Some(deadline) = wait.deadline {
+            self.remove_deadline(tid, deadline);
+        }
+        Some(wait.completion)
+    }
+
+    fn cancel(&mut self, tid: usize) -> (bool, bool) {
+        let Some(wait) = self.waits.remove(&tid) else {
+            return (false, false);
+        };
+        let had_deadline = wait.deadline.is_some();
+        if let Some(deadline) = wait.deadline {
+            self.remove_deadline(tid, deadline);
+        }
+        (true, had_deadline)
+    }
+
+    fn remove_deadline(&mut self, tid: usize, deadline: FutexDeadline) {
+        let (deadlines, deadline_ms) = match deadline {
             FutexDeadline::UserClock(ms) => (&mut self.user_deadlines, ms),
             FutexDeadline::TimeoutClock(ms) => (&mut self.timeout_deadlines, ms),
         };
@@ -68,7 +140,6 @@ impl TimedFutexWaits {
         if remove_bucket {
             deadlines.remove(&deadline_ms);
         }
-        wait.timed_out
     }
 
     fn expire(&mut self, now_user: usize, now_timeout: usize) -> Vec<usize> {
@@ -91,7 +162,7 @@ impl TimedFutexWaits {
     }
 
     fn expire_clock(
-        waits: &mut BTreeMap<usize, TimedFutexWait>,
+        waits: &mut BTreeMap<usize, FutexWait>,
         deadlines: &mut BTreeMap<usize, Vec<usize>>,
         now: usize,
         user_clock: bool,
@@ -107,11 +178,13 @@ impl TimedFutexWaits {
                     continue;
                 };
                 let same_deadline = match wait.deadline {
-                    FutexDeadline::UserClock(ms) => user_clock && ms == deadline_ms,
-                    FutexDeadline::TimeoutClock(ms) => !user_clock && ms == deadline_ms,
+                    Some(FutexDeadline::UserClock(ms)) => user_clock && ms == deadline_ms,
+                    Some(FutexDeadline::TimeoutClock(ms)) => !user_clock && ms == deadline_ms,
+                    None => false,
                 };
-                if same_deadline && !wait.timed_out {
-                    wait.timed_out = true;
+                if same_deadline && wait.completion == WaitCompletion::Pending {
+                    wait.completion = WaitCompletion::TimedOut;
+                    wait.deadline = None;
                     expired.push(tid);
                 }
             }
@@ -120,8 +193,7 @@ impl TimedFutexWaits {
 }
 
 lazy_static! {
-    static ref TIMED_FUTEX_WAITS: SpinNoIrqLock<TimedFutexWaits> =
-        SpinNoIrqLock::new(TimedFutexWaits::new());
+    static ref FUTEX_WAITS: SpinNoIrqLock<FutexWaits> = SpinNoIrqLock::new(FutexWaits::new());
 }
 
 fn read_futex_value(uaddr: usize) -> SysResult<u32> {
@@ -203,13 +275,16 @@ fn futex_wait_common(
             tid: task.tid(),
             bitset,
         });
+        register_futex_wait(task.tid(), None);
 
         if task.check_signal_interrupt() {
             task.clear_interrupted();
             task.set_interruptible(false);
+            complete_futex_wait(task.tid(), WaitCompletion::Interrupted);
             queues
                 .bucket_by_idx(hash_idx)
                 .retain(|q| !(q.tid == task.tid() && q.key == key));
+            finish_futex_wait(task.tid());
             trace_futex(
                 "wait-eintr-before-block",
                 &key,
@@ -221,6 +296,7 @@ fn futex_wait_common(
 
         if !prepare_current_task_blocked() {
             task.set_interruptible(false);
+            cancel_futex_wait(task.tid());
             queues
                 .bucket_by_idx(hash_idx)
                 .retain(|q| !(q.tid == task.tid() && q.key == key));
@@ -232,9 +308,12 @@ fn futex_wait_common(
         if interrupted {
             task.clear_interrupted();
             task.set_interruptible(false);
+            complete_futex_wait(task.tid(), WaitCompletion::Interrupted);
             queues
                 .bucket_by_idx(hash_idx)
                 .retain(|q| !(q.tid == task.tid() && q.key == key));
+            finish_futex_wait(task.tid());
+            drop(queues);
             wakeup_task(task.tid());
             remove_task(task.tid());
             task.set_running();
@@ -252,65 +331,81 @@ fn futex_wait_common(
 
     switch_to_next_task();
     task.set_interruptible(false);
-    // ★ 醒来后检查：是 futex_wake 叫醒的，还是信号打断的？
-    if task.is_interrupted() {
-        task.clear_interrupted();
-        let mut queues = FUTEX_QUEUES.lock();
-        queues
-            .bucket_by_idx(hash_idx)
-            .retain(|q| !(q.tid == task.tid() && q.key == key));
-        trace_futex("wait-eintr", &key, expected_val, bitset as usize);
-        return Err(Errno::EINTR);
-    }
+    let completion = finish_futex_wait(task.tid()).unwrap_or(WaitCompletion::Pending);
+    task.clear_interrupted();
 
-    // 正常路径：被 futex_wake 唤醒
-    let mut queues = FUTEX_QUEUES.lock();
-    queues
+    // A winner normally removes the queue entry before waking the task. Keep
+    // this cleanup for a scheduler-level spurious wake.
+    FUTEX_QUEUES
+        .lock()
         .bucket_by_idx(hash_idx)
         .retain(|q| !(q.tid == task.tid() && q.key == key));
 
-    Ok(0)
-}
-
-#[derive(Clone, Copy)]
-enum FutexDeadline {
-    UserClock(usize),
-    TimeoutClock(usize),
-}
-
-impl FutexDeadline {
-    fn millis(self) -> usize {
-        match self {
-            FutexDeadline::UserClock(deadline_ms) | FutexDeadline::TimeoutClock(deadline_ms) => {
-                deadline_ms
-            }
+    match completion {
+        WaitCompletion::Interrupted => {
+            trace_futex("wait-eintr", &key, expected_val, bitset as usize);
+            Err(Errno::EINTR)
         }
-    }
-
-    fn expired(self) -> bool {
-        match self {
-            FutexDeadline::UserClock(deadline_ms) => get_time_ms() >= deadline_ms,
-            FutexDeadline::TimeoutClock(deadline_ms) => get_timeout_ms() >= deadline_ms,
-        }
+        WaitCompletion::TimedOut => Err(Errno::ETIMEDOUT),
+        WaitCompletion::Woken | WaitCompletion::Pending => Ok(0),
     }
 }
 
-fn register_timed_wait(tid: usize, deadline: FutexDeadline) {
-    TIMED_FUTEX_WAITS.lock().register(tid, deadline);
+fn register_futex_wait(tid: usize, deadline: Option<FutexDeadline>) {
+    FUTEX_WAITS.lock().register(tid, deadline);
 }
 
-fn finish_timed_wait(tid: usize) -> bool {
-    TIMED_FUTEX_WAITS.lock().finish(tid)
+fn complete_futex_wait(tid: usize, completion: WaitCompletion) -> bool {
+    FUTEX_WAITS.lock().complete(tid, completion)
+}
+
+fn finish_futex_wait(tid: usize) -> Option<WaitCompletion> {
+    FUTEX_WAITS.lock().finish(tid)
+}
+
+fn cancel_futex_wait(tid: usize) {
+    let _ = FUTEX_WAITS.lock().cancel(tid);
 }
 
 pub fn check_futex_timeouts() {
-    let expired = TIMED_FUTEX_WAITS
-        .lock()
-        .expire(get_time_ms(), get_timeout_ms());
+    let expired = {
+        // Lock order: FUTEX_QUEUES -> FUTEX_WAITS -> SCHEDULER.
+        let mut queues = FUTEX_QUEUES.lock();
+        let expired = FUTEX_WAITS.lock().expire(get_time_ms(), get_timeout_ms());
+        for tid in &expired {
+            queues.remove_tid(*tid);
+        }
+        expired
+    };
 
     for tid in expired {
-        FUTEX_QUEUES.lock().remove_tid(tid);
         wakeup_task(tid);
+    }
+}
+
+/// Claim signal interruption for a futex waiter and remove its queue entry.
+///
+/// Signal delivery still owns the scheduler wakeup because it also handles
+/// non-futex interruptible waits.
+pub fn interrupt_futex_wait(tid: usize) -> bool {
+    let mut queues = FUTEX_QUEUES.lock();
+    if !complete_futex_wait(tid, WaitCompletion::Interrupted) {
+        return false;
+    }
+    queues.remove_tid(tid);
+    true
+}
+
+/// Remove all futex wait state for a task that will never resume.
+pub fn remove_futex_waiter(tid: usize) {
+    let mut queues = FUTEX_QUEUES.lock();
+    let removed_queue = queues.remove_tid(tid);
+    let (removed_wait, removed_deadline) = FUTEX_WAITS.lock().cancel(tid);
+    if FUTEX_EXIT_TRACE && (removed_queue != 0 || removed_wait) {
+        println!(
+            "[futex-exit-trace] tid={} queue={} wait={} deadline={}",
+            tid, removed_queue, removed_wait, removed_deadline
+        );
     }
 }
 
@@ -402,11 +497,28 @@ fn futex_wait_timed_common(
                 tid: task.tid(),
                 bitset,
             });
-            register_timed_wait(task.tid(), deadline);
+            register_futex_wait(task.tid(), Some(deadline));
+
+            if task.check_signal_interrupt() {
+                task.clear_interrupted();
+                task.set_interruptible(false);
+                complete_futex_wait(task.tid(), WaitCompletion::Interrupted);
+                queues
+                    .bucket_by_idx(hash_idx)
+                    .retain(|q| !(q.tid == task.tid() && q.key == key));
+                finish_futex_wait(task.tid());
+                trace_futex(
+                    "wait-timed-eintr-before-block",
+                    &key,
+                    expected_val,
+                    bitset as usize,
+                );
+                return Err(Errno::EINTR);
+            }
 
             if !prepare_current_task_blocked() {
                 task.set_interruptible(false);
-                finish_timed_wait(task.tid());
+                cancel_futex_wait(task.tid());
                 queues
                     .bucket_by_idx(hash_idx)
                     .retain(|q| !(q.tid == task.tid() && q.key == key));
@@ -414,33 +526,54 @@ fn futex_wait_timed_common(
                 yield_current_task();
                 continue;
             }
+
+            let interrupted = task.is_interrupted() || task.check_signal_interrupt();
+            if interrupted {
+                task.clear_interrupted();
+                task.set_interruptible(false);
+                complete_futex_wait(task.tid(), WaitCompletion::Interrupted);
+                queues
+                    .bucket_by_idx(hash_idx)
+                    .retain(|q| !(q.tid == task.tid() && q.key == key));
+                finish_futex_wait(task.tid());
+                drop(queues);
+                wakeup_task(task.tid());
+                remove_task(task.tid());
+                task.set_running();
+                trace_futex(
+                    "wait-timed-eintr-after-block",
+                    &key,
+                    expected_val,
+                    bitset as usize,
+                );
+                return Err(Errno::EINTR);
+            }
         }
 
         switch_to_next_task();
         task.set_interruptible(false);
 
-        if task.is_interrupted() {
-            task.clear_interrupted();
-            finish_timed_wait(task.tid());
-            let mut queues = FUTEX_QUEUES.lock();
-            queues
-                .bucket_by_idx(hash_idx)
-                .retain(|q| !(q.tid == task.tid() && q.key == key));
-            trace_futex("wait-timed-eintr", &key, expected_val, bitset as usize);
-            return Err(Errno::EINTR);
-        }
-
-        if finish_timed_wait(task.tid()) {
-            trace_futex("wait-timedout", &key, expected_val, bitset as usize);
-            return Err(Errno::ETIMEDOUT);
-        }
+        let completion = finish_futex_wait(task.tid()).unwrap_or(WaitCompletion::Pending);
+        task.clear_interrupted();
 
         FUTEX_QUEUES
             .lock()
             .bucket_by_idx(hash_idx)
             .retain(|q| !(q.tid == task.tid() && q.key == key));
-        trace_futex("wait-timed-woken", &key, expected_val, bitset as usize);
-        return Ok(0);
+        return match completion {
+            WaitCompletion::Interrupted => {
+                trace_futex("wait-timed-eintr", &key, expected_val, bitset as usize);
+                Err(Errno::EINTR)
+            }
+            WaitCompletion::TimedOut => {
+                trace_futex("wait-timedout", &key, expected_val, bitset as usize);
+                Err(Errno::ETIMEDOUT)
+            }
+            WaitCompletion::Woken | WaitCompletion::Pending => {
+                trace_futex("wait-timed-woken", &key, expected_val, bitset as usize);
+                Ok(0)
+            }
+        };
     }
 }
 
@@ -460,7 +593,9 @@ fn futex_wake_common(uaddr: usize, nr_wake: u32, bitset: u32, private: bool) -> 
         while i < bucket.len() && woken_tids.len() < nr_wake as usize {
             if bucket[i].key == key && (bucket[i].bitset & bitset) != 0 {
                 let futex_q = bucket.remove(i).unwrap();
-                woken_tids.push(futex_q.tid);
+                if complete_futex_wait(futex_q.tid, WaitCompletion::Woken) {
+                    woken_tids.push(futex_q.tid);
+                }
             } else {
                 i += 1;
             }
@@ -469,7 +604,6 @@ fn futex_wake_common(uaddr: usize, nr_wake: u32, bitset: u32, private: bool) -> 
 
     let woken = woken_tids.len();
     for tid in woken_tids {
-        finish_timed_wait(tid);
         wakeup_task(tid);
     }
 
@@ -509,8 +643,10 @@ fn futex_requeue_common(
         while idx < source_bucket.len() && woken_tids.len() < nr_wake as usize {
             if source_bucket[idx].key == source_key {
                 let futex_q = source_bucket.remove(idx).unwrap();
-                woken_tids.push(futex_q.tid);
-                affected += 1;
+                if complete_futex_wait(futex_q.tid, WaitCompletion::Woken) {
+                    woken_tids.push(futex_q.tid);
+                    affected += 1;
+                }
             } else {
                 idx += 1;
             }
@@ -537,7 +673,6 @@ fn futex_requeue_common(
     }
 
     for tid in woken_tids {
-        finish_timed_wait(tid);
         wakeup_task(tid);
     }
 

@@ -36,6 +36,11 @@ const IOZONE_SCRIPT: &str = "iozone_testcode.sh\0";
 const NETPERF_SCRIPT: &str = "netperf_testcode.sh\0";
 const IPERF_SCRIPT: &str = "iperf_testcode.sh\0";
 const CYCLICTEST_SCRIPT: &str = "cyclictest_testcode.sh\0";
+const TASK_A_LTP_ONLY: bool = option_env!("TASK_A_LTP_ONLY").is_some();
+const TASK_A_WAIT4_PROBE: bool = option_env!("TASK_A_WAIT4_PROBE").is_some();
+const TASK_A_ATOMIC_PROBE: bool = option_env!("TASK_A_ATOMIC_PROBE").is_some();
+const TASK_A_FUTEX_RACE_PROBE: bool = option_env!("TASK_A_FUTEX_RACE_PROBE").is_some();
+const TASK_A_FUTEX_EXIT_PROBE: bool = option_env!("TASK_A_FUTEX_EXIT_PROBE").is_some();
 
 const RV_MUSL_LOADER: &str = "/lib/ld-musl-riscv64.so.1\0";
 const RV_MUSL_SF_LOADER: &str = "/lib/ld-musl-riscv64-sf.so.1\0";
@@ -1334,10 +1339,118 @@ fn _run_ltp_glibc() {
     );
 }
 
+fn run_task_a_wait4_probe() {
+    let pid = fork();
+    assert!(pid >= 0, "failed to fork task_a_wait4_probe");
+    if pid == 0 {
+        let argv = ["task_a_wait4_probe\0".as_ptr(), core::ptr::null()];
+        let ret = exec("task_a_wait4_probe\0", &argv);
+        println!("[testrunner] exec task_a_wait4_probe failed: {}", ret);
+        exit(-1);
+    }
+
+    let mut status = 0;
+    assert_eq!(waitpid(pid as usize, &mut status), pid);
+    assert_eq!(status, 0, "task_a_wait4_probe failed");
+    println!("[testrunner] task-a wait4 probe PASS");
+}
+
+fn run_task_a_atomic_probe() {
+    let pid = fork();
+    assert!(pid >= 0, "failed to fork task_a_atomic_probe");
+    if pid == 0 {
+        let argv = ["task_a_atomic_probe\0".as_ptr(), core::ptr::null()];
+        let ret = exec("task_a_atomic_probe\0", &argv);
+        println!("[testrunner] exec task_a_atomic_probe failed: {}", ret);
+        exit(-1);
+    }
+
+    let mut status = 0;
+    assert_eq!(waitpid(pid as usize, &mut status), pid);
+    assert_eq!(status, 0, "task_a_atomic_probe failed");
+    println!("[testrunner] task-a atomic probe PASS");
+}
+
+fn run_task_a_futex_race_probe() {
+    const ROUNDS: usize = 20;
+    for round in 1..=ROUNDS {
+        let pid = fork();
+        assert!(pid >= 0, "failed to fork task_a_futex_race_probe");
+        if pid == 0 {
+            let argv = ["task_a_futex_race_probe\0".as_ptr(), core::ptr::null()];
+            let ret = exec("task_a_futex_race_probe\0", &argv);
+            println!("[testrunner] exec task_a_futex_race_probe failed: {}", ret);
+            exit(-1);
+        }
+
+        let mut status = 0;
+        assert_eq!(waitpid(pid as usize, &mut status), pid);
+        assert_eq!(status, 0, "task_a_futex_race_probe failed");
+        println!(
+            "[testrunner] task-a futex race probe round {}/{} PASS",
+            round, ROUNDS
+        );
+    }
+}
+
+fn run_task_a_futex_exit_probe() {
+    const ROUNDS: usize = 20;
+    for round in 1..=ROUNDS {
+        let pid = fork();
+        assert!(pid >= 0, "failed to fork task_a_futex_exit_probe");
+        if pid == 0 {
+            let argv = ["task_a_futex_exit_probe\0".as_ptr(), core::ptr::null()];
+            let ret = exec("task_a_futex_exit_probe\0", &argv);
+            println!("[testrunner] exec task_a_futex_exit_probe failed: {}", ret);
+            exit(-1);
+        }
+
+        let mut status = 0;
+        assert_eq!(waitpid(pid as usize, &mut status), pid);
+        assert_eq!(status, 0, "task_a_futex_exit_probe failed");
+        println!(
+            "[testrunner] task-a futex exit probe round {}/{} PASS",
+            round, ROUNDS
+        );
+    }
+}
+
 #[cfg(target_arch = "riscv64")]
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("[testrunner] start");
+    if TASK_A_FUTEX_EXIT_PROBE {
+        run_task_a_futex_exit_probe();
+        println!("[testrunner] task-a futex exit probe finished, powering off");
+        poweroff();
+        return 0;
+    }
+    if TASK_A_FUTEX_RACE_PROBE {
+        run_task_a_futex_race_probe();
+        println!("[testrunner] task-a futex race probe finished, powering off");
+        poweroff();
+        return 0;
+    }
+    if TASK_A_ATOMIC_PROBE {
+        run_task_a_atomic_probe();
+        println!("[testrunner] task-a atomic probe finished, powering off");
+        poweroff();
+        return 0;
+    }
+    if TASK_A_WAIT4_PROBE {
+        run_task_a_wait4_probe();
+        println!("[testrunner] task-a wait4 probe finished, powering off");
+        poweroff();
+        return 0;
+    }
+    if TASK_A_LTP_ONLY {
+        println!("[testrunner] task-a LTP-only profile");
+        _run_ltp_musl();
+        _run_ltp_glibc();
+        println!("[testrunner] task-a selected tests finished, powering off");
+        poweroff();
+        return 0;
+    }
     _run_basic_musl();
     _run_basic_glibc();
     _run_libcbench_musl();
@@ -1368,6 +1481,38 @@ fn main() -> i32 {
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("[testrunner] start");
+    if TASK_A_FUTEX_EXIT_PROBE {
+        run_task_a_futex_exit_probe();
+        println!("[testrunner] task-a futex exit probe finished, powering off");
+        poweroff();
+        return 0;
+    }
+    if TASK_A_FUTEX_RACE_PROBE {
+        run_task_a_futex_race_probe();
+        println!("[testrunner] task-a futex race probe finished, powering off");
+        poweroff();
+        return 0;
+    }
+    if TASK_A_ATOMIC_PROBE {
+        run_task_a_atomic_probe();
+        println!("[testrunner] task-a atomic probe finished, powering off");
+        poweroff();
+        return 0;
+    }
+    if TASK_A_WAIT4_PROBE {
+        run_task_a_wait4_probe();
+        println!("[testrunner] task-a wait4 probe finished, powering off");
+        poweroff();
+        return 0;
+    }
+    if TASK_A_LTP_ONLY {
+        println!("[testrunner] task-a LTP-only profile");
+        _run_ltp_musl();
+        _run_ltp_glibc();
+        println!("[testrunner] task-a selected tests finished, powering off");
+        poweroff();
+        return 0;
+    }
     _run_basic_musl();
     _run_basic_glibc();
     _run_libcbench_musl();

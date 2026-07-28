@@ -5,7 +5,7 @@ pub mod sig_struct;
 use crate::config::TRAMPOLINE;
 use crate::mm::copy_to_user;
 
-use crate::task::{current_task, exit_and_run_next, exit_by_signal_and_run_next};
+use crate::task::{current_task, exit_by_signal_and_run_next};
 use sig_handler::{SigAction, SigActionFlag};
 pub use sig_info::{LinuxSigInfo, SiField, SigInfo};
 use sig_stack::{SigContext, SignalStack, UContext};
@@ -99,7 +99,7 @@ pub fn handle_signal() {
                     "[handle_signal] copy_to_user failed for signal {}, terminating task",
                     sig.raw()
                 );
-                exit_and_run_next(sig.raw() & 0x7F);
+                exit_by_signal_and_run_next(sig.raw());
             }
 
             // 决定向用户栈压入什么：
@@ -152,7 +152,7 @@ pub fn handle_signal() {
                         "[handle_signal] copy_to_user failed for signal {}, terminating task",
                         sig.raw()
                     );
-                    exit_and_run_next(sig.raw() & 0x7F);
+                    exit_by_signal_and_run_next(sig.raw());
                 }
             } else {
                 // ===== 普通路径
@@ -170,7 +170,7 @@ pub fn handle_signal() {
                         "[handle_signal] copy_to_user failed for signal {}, terminating task",
                         sig.raw()
                     );
-                    exit_and_run_next(sig.raw() & 0x7F);
+                    exit_by_signal_and_run_next(sig.raw());
                 }
             }
 

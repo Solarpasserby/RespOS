@@ -565,17 +565,8 @@ fn is_timerfd_clock(clockid: usize) -> bool {
     const CLOCK_REALTIME: usize = 0;
     const CLOCK_MONOTONIC: usize = 1;
     const CLOCK_BOOTTIME: usize = 7;
-    const CLOCK_REALTIME_ALARM: usize = 8;
-    const CLOCK_BOOTTIME_ALARM: usize = 9;
 
-    matches!(
-        clockid,
-        CLOCK_REALTIME
-            | CLOCK_MONOTONIC
-            | CLOCK_BOOTTIME
-            | CLOCK_REALTIME_ALARM
-            | CLOCK_BOOTTIME_ALARM
-    )
+    matches!(clockid, CLOCK_REALTIME | CLOCK_MONOTONIC | CLOCK_BOOTTIME)
 }
 
 fn ms_to_timespec(ms: usize) -> TimeSpec {

@@ -70,7 +70,7 @@ fn clear_bss() {
 
 use syscall::*;
 
-pub use syscall::{Stat, TimeSpec, TimeVal};
+pub use syscall::{ITimerSpec, RLimit, RUsage, Stat, TimeSpec, TimeVal};
 
 pub const O_RDONLY: usize = 0;
 pub const O_WRONLY: usize = 1 << 0;
@@ -218,6 +218,9 @@ pub fn time_get() -> isize {
         err => err,
     }
 }
+pub fn getpid() -> isize {
+    sys_getpid()
+}
 pub fn fork() -> isize {
     sys_clone(17, 0, 0, 0, 0)
 }
@@ -252,6 +255,59 @@ pub fn waitpid(pid: usize, exit_code: &mut i32) -> isize {
 pub fn waitpid_nohang(pid: usize, exit_code: &mut i32) -> isize {
     const WNOHANG: usize = 1;
     sys_wait4_options(pid as isize, exit_code as *mut _, WNOHANG)
+}
+
+pub fn wait4_raw(pid: isize, exit_code: *mut i32, options: usize, rusage: *mut RUsage) -> isize {
+    sys_wait4_full(pid, exit_code, options, rusage)
+}
+
+pub fn getrusage_raw(who: isize, usage: *mut RUsage) -> isize {
+    sys_getrusage(who, usage)
+}
+
+pub fn timer_create_raw(clock_id: usize, timerid: *mut i32) -> isize {
+    sys_timer_create(clock_id, timerid)
+}
+
+pub fn timer_gettime_raw(timerid: usize, current: *mut ITimerSpec) -> isize {
+    sys_timer_gettime(timerid, current)
+}
+
+pub fn timer_settime_raw(
+    timerid: usize,
+    flags: usize,
+    new_value: *const ITimerSpec,
+    old_value: *mut ITimerSpec,
+) -> isize {
+    sys_timer_settime(timerid, flags, new_value, old_value)
+}
+
+pub fn timer_delete_raw(timerid: usize) -> isize {
+    sys_timer_delete(timerid)
+}
+
+pub fn prlimit64_raw(
+    pid: usize,
+    resource: usize,
+    new_limit: *const RLimit,
+    old_limit: *mut RLimit,
+) -> isize {
+    sys_prlimit64(pid, resource, new_limit, old_limit)
+}
+
+pub fn futex_raw(uaddr: *const u32, op: usize, val: usize, timeout: *const TimeSpec) -> isize {
+    sys_futex(uaddr, op, val, timeout)
+}
+
+pub fn mmap_raw(
+    addr: usize,
+    len: usize,
+    prot: usize,
+    flags: usize,
+    fd: isize,
+    offset: usize,
+) -> isize {
+    sys_mmap(addr, len, prot, flags, fd, offset)
 }
 
 pub fn socket(domain: usize, socket_type: usize, protocol: usize) -> isize {

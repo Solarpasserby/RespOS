@@ -369,6 +369,7 @@ pub struct TaskControlBlock {
     sched: SchedState,
     caps: CapState,
     thread_group: Arc<SpinLock<ThreadGroup>>,
+    group_exiting: Arc<AtomicBool>,
     task_status: SpinLock<TaskStatus>,
     parent: Arc<SpinLock<Option<Weak<TaskControlBlock>>>>,
     children: Arc<SpinLock<BTreeMap<usize, Arc<TaskControlBlock>>>>,
@@ -444,6 +445,7 @@ impl TaskControlBlock {
             sched: SchedState::new(),
             caps: CapState::root(),
             thread_group: Arc::new(SpinLock::new(ThreadGroup::new())),
+            group_exiting: Arc::new(AtomicBool::new(false)),
             task_status: SpinLock::new(TaskStatus::Ready),
             parent: Arc::new(SpinLock::new(None)),
             children: Arc::new(SpinLock::new(BTreeMap::new())),
@@ -532,6 +534,7 @@ impl TaskControlBlock {
             sched: SchedState::new(),
             caps: CapState::root(),
             thread_group: Arc::new(SpinLock::new(ThreadGroup::new())),
+            group_exiting: Arc::new(AtomicBool::new(false)),
             task_status: SpinLock::new(TaskStatus::Ready),
             parent: Arc::new(SpinLock::new(None)),
             children: Arc::new(SpinLock::new(BTreeMap::new())),
@@ -620,6 +623,7 @@ impl TaskControlBlock {
             pgid,
             sid,
             thread_group,
+            group_exiting,
             parent,
             children,
             exited_children,
@@ -634,6 +638,7 @@ impl TaskControlBlock {
                 self.pgid(),
                 self.sid(),
                 self.thread_group.clone(),
+                self.group_exiting.clone(),
                 self.parent.clone(),
                 self.children.clone(),
                 self.exited_children.clone(),
@@ -655,6 +660,7 @@ impl TaskControlBlock {
                 self.pgid(),
                 self.sid(),
                 Arc::new(SpinLock::new(ThreadGroup::new())),
+                Arc::new(AtomicBool::new(false)),
                 Arc::new(SpinLock::new(Some(Arc::downgrade(&parent_for_child)))),
                 Arc::new(SpinLock::new(BTreeMap::new())),
                 Arc::new(SpinLock::new(BTreeSet::new())),
@@ -733,6 +739,7 @@ impl TaskControlBlock {
             sched: SchedState::from_parent(&self.sched),
             caps: CapState::from_parent(&self.caps),
             thread_group,
+            group_exiting,
             task_status: SpinLock::new(TaskStatus::Ready),
             parent,
             children,
@@ -967,6 +974,9 @@ impl TaskControlBlock {
         self.memory_set.read().token()
     }
     // 任务状态判断
+    pub fn is_running(&self) -> bool {
+        self.status() == TaskStatus::Running
+    }
     pub fn is_ready(&self) -> bool {
         self.status() == TaskStatus::Ready
     }
@@ -1348,6 +1358,7 @@ impl TaskControlBlock {
                 // ★ 改动：不只是 KILL/STOP 才唤醒，而是调用 check_signal_interrupt
                 if self.check_signal_interrupt() && !self.is_disabled_musl_sigcancel(sig) {
                     self.interrupted.store(true, Ordering::Relaxed);
+                    crate::task::futex::interrupt_futex_wait(self.tid());
                     if self.is_blocked() {
                         crate::task::scheduler::wakeup_task(self.tid());
                     }
@@ -1355,6 +1366,7 @@ impl TaskControlBlock {
                 // 保留原来的 KILL/STOP 立即唤醒逻辑作为兜底
                 else if sig.is_kill_or_stop() && self.is_blocked() {
                     self.interrupted.store(true, Ordering::Relaxed);
+                    crate::task::futex::interrupt_futex_wait(self.tid());
                     crate::task::scheduler::wakeup_task(self.tid());
                 }
             }
@@ -1388,11 +1400,13 @@ impl TaskControlBlock {
                     // ★ 改动：同样使用 check_signal_interrupt
                     if task.check_signal_interrupt() && !task.is_disabled_musl_sigcancel(sig) {
                         task.interrupted.store(true, Ordering::Relaxed);
+                        crate::task::futex::interrupt_futex_wait(task.tid());
                         if task.is_blocked() {
                             crate::task::scheduler::wakeup_task(task.tid());
                         }
                     } else if sig.is_kill_or_stop() && task.is_blocked() {
                         task.interrupted.store(true, Ordering::Relaxed);
+                        crate::task::futex::interrupt_futex_wait(task.tid());
                         crate::task::scheduler::wakeup_task(task.tid());
                     }
                 }
@@ -1589,7 +1603,17 @@ impl TaskControlBlock {
             self.limits.rlimit(resource)
         }
     }
+    pub fn validate_rlimit(&self, resource: usize, cur: usize, max: usize) -> SysResult {
+        if resource >= RLIMIT_COUNT || cur > max {
+            return Err(Errno::EINVAL);
+        }
+        if resource == RLIMIT_NOFILE && max > crate::config::FTB_RLIMIT {
+            return Err(Errno::EINVAL);
+        }
+        Ok(())
+    }
     pub fn set_rlimit(&self, resource: usize, cur: usize, max: usize) -> SysResult {
+        self.validate_rlimit(resource, cur, max)?;
         if resource == RLIMIT_NOFILE {
             self.set_nofile_limit(cur, max)
         } else {
@@ -1645,40 +1669,57 @@ impl TaskControlBlock {
 ///
 /// 修改线程退出码，随后移除线程并释放线程占有的资源
 fn exit_thread(task: Arc<TaskControlBlock>, exit_code: i32) {
-    exit_thread_inner(task, exit_code, true);
+    exit_thread_inner(task, ExitCause::Code(exit_code), true);
 }
 
-fn exit_thread_detached(task: Arc<TaskControlBlock>, exit_code: i32) {
-    exit_thread_inner(task, exit_code, false);
+#[derive(Clone, Copy)]
+enum ExitCause {
+    Code(i32),
+    Signal(i32),
 }
 
-fn exit_thread_inner(task: Arc<TaskControlBlock>, exit_code: i32, remove_from_thread_group: bool) {
-    exit_robust_list(&task);
+impl ExitCause {
+    fn apply_to(self, task: &TaskControlBlock) {
+        match self {
+            Self::Code(code) => task.set_exit_code(code),
+            Self::Signal(signal) => task.set_exit_signal(signal),
+        }
+    }
+
+    fn sigchld_code(self) -> i32 {
+        match self {
+            Self::Code(_) => SigInfo::CLD_EXITED,
+            Self::Signal(_) => SigInfo::CLD_KILLED,
+        }
+    }
+}
+
+fn exit_thread_detached(task: Arc<TaskControlBlock>, cause: ExitCause) {
+    exit_thread_inner(task, cause, false);
+}
+
+fn cleanup_exiting_thread(task: &Arc<TaskControlBlock>) {
+    exit_robust_list(task);
     if let Some(ctid) = task.clear_child_tid_addr() {
         let zero: i32 = 0;
         let _ = copy_to_user(ctid as *mut i32, &zero as *const i32, 1);
         let _ = crate::task::futex::futex_wake_private(ctid, 1);
         let _ = crate::task::futex::futex_wake(ctid, 1, false);
     }
+    crate::task::futex::remove_futex_waiter(task.tid());
     remove_task(task.tid());
+}
+
+fn exit_thread_inner(
+    task: Arc<TaskControlBlock>,
+    cause: ExitCause,
+    remove_from_thread_group: bool,
+) {
+    cleanup_exiting_thread(&task);
     if remove_from_thread_group {
         task.op_thread_group_mut(|tg| tg.remove(&task.tid()));
     }
-    task.set_exit_code(exit_code);
-    task.set_exited();
-    TASK_MANAGER.remove(task.tid());
-}
-
-fn exit_thread_by_signal_detached(task: Arc<TaskControlBlock>, signal: i32) {
-    exit_robust_list(&task);
-    if let Some(ctid) = task.clear_child_tid_addr() {
-        let zero: i32 = 0;
-        let _ = copy_to_user(ctid as *mut i32, &zero as *const i32, 1);
-        let _ = crate::task::futex::futex_wake_private(ctid, 1);
-        let _ = crate::task::futex::futex_wake(ctid, 1, false);
-    }
-    remove_task(task.tid());
-    task.set_exit_signal(signal);
+    cause.apply_to(&task);
     task.set_exited();
     TASK_MANAGER.remove(task.tid());
 }
@@ -1814,7 +1855,7 @@ pub fn task_exit(task: Arc<TaskControlBlock>, exit_code: i32) {
 }
 
 pub fn task_exit_by_signal(task: Arc<TaskControlBlock>, signal: i32) {
-    task_group_exit_by_signal(task, signal);
+    exit_process_group(task, ExitCause::Signal(signal));
 }
 
 /// 进程退出
@@ -1826,6 +1867,18 @@ pub fn task_exit_by_signal(task: Arc<TaskControlBlock>, signal: i32) {
 /// - 给父进程发送 SIGCHLD
 /// - 留下 exited 状态，等待父进程 wait 回收
 pub fn task_group_exit(task: Arc<TaskControlBlock>, exit_code: i32) {
+    exit_process_group(task, ExitCause::Code(exit_code));
+}
+
+fn exit_process_group(task: Arc<TaskControlBlock>, cause: ExitCause) {
+    if task
+        .group_exiting
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+
     let tgid = task.tgid();
     let threads = task.op_thread_group(|tg| tg.iter().collect::<Vec<_>>());
     let leader = threads
@@ -1834,11 +1887,42 @@ pub fn task_group_exit(task: Arc<TaskControlBlock>, exit_code: i32) {
         .cloned()
         .unwrap_or_else(|| task.clone());
 
+    // Arc counts include one resource owner per TCB. Distinguish references
+    // held by this thread group from a separate CLONE_VM/CLONE_FILES process:
+    // group exit may tear down the former, but must preserve the latter.
+    let memory_set_group_owners = threads
+        .iter()
+        .filter(|thread| Arc::ptr_eq(&thread.memory_set, &task.memory_set))
+        .count();
+    let memory_set_owned_by_group = Arc::strong_count(&task.memory_set) <= memory_set_group_owners;
+
+    let fd_table_ptr = {
+        let fd_table = task.fd_table.lock();
+        Arc::as_ptr(&fd_table)
+    };
+    let fd_table_group_owners = threads
+        .iter()
+        .filter(|thread| {
+            let fd_table = thread.fd_table.lock();
+            Arc::as_ptr(&fd_table) == fd_table_ptr
+        })
+        .count();
+    let fd_table_owned_by_group = {
+        let fd_table = task.fd_table.lock();
+        Arc::strong_count(&fd_table) <= fd_table_group_owners
+    };
+
+    let mut leader_cleaned = false;
     for thread in threads {
-        remove_task(thread.tid());
-        if thread.tid() != leader.tid() {
-            exit_thread_detached(thread, exit_code);
+        if thread.tid() == leader.tid() {
+            cleanup_exiting_thread(&thread);
+            leader_cleaned = true;
+        } else {
+            exit_thread_detached(thread, cause);
         }
+    }
+    if !leader_cleaned {
+        cleanup_exiting_thread(&leader);
     }
 
     leader.op_thread_group_mut(|tg| tg.clear());
@@ -1846,61 +1930,21 @@ pub fn task_group_exit(task: Arc<TaskControlBlock>, exit_code: i32) {
     // 修改孩子进程的父亲——托孤。children 是进程级资源，只处理一次。
     reparent_children_to_init(&task);
 
-    // robust list 仍然依赖用户地址，必须在拆掉用户地址空间前处理。
-    exit_robust_list(&leader);
-
-    // CLONE_VM creates a separate process that shares the same mm. Exiting one
-    // owner must not tear down mappings still referenced by another task.
-    if Arc::strong_count(&task.memory_set) == 1 {
+    if memory_set_owned_by_group {
         task.op_memory_set_write(|mem| {
             mem.recycle_data_pages();
         });
     }
-    task.fd_table.lock().clear();
+    if fd_table_owned_by_group {
+        task.fd_table.lock().clear();
+    }
     crate::syscall::remove_posix_timers_for_owner(tgid);
 
-    leader.set_exit_code(exit_code);
+    cause.apply_to(&leader);
     leader.set_exited();
-    leader.notify_parent_exit(SigInfo::CLD_EXITED);
+    leader.notify_parent_exit(cause.sigchld_code());
 
     // 清空残留信号
-    leader.op_sig_pending_mut(|p| p.clear());
-
-    TASK_MANAGER.remove(leader.tid());
-}
-
-pub fn task_group_exit_by_signal(task: Arc<TaskControlBlock>, signal: i32) {
-    let tgid = task.tgid();
-    let threads = task.op_thread_group(|tg| tg.iter().collect::<Vec<_>>());
-    let leader = threads
-        .iter()
-        .find(|thread| thread.tid() == tgid)
-        .cloned()
-        .unwrap_or_else(|| task.clone());
-
-    for thread in threads {
-        remove_task(thread.tid());
-        if thread.tid() != leader.tid() {
-            exit_thread_by_signal_detached(thread, signal);
-        }
-    }
-
-    leader.op_thread_group_mut(|tg| tg.clear());
-
-    reparent_children_to_init(&task);
-
-    exit_robust_list(&leader);
-
-    task.op_memory_set_write(|mem| {
-        mem.recycle_data_pages();
-    });
-    task.fd_table.lock().clear();
-    crate::syscall::remove_posix_timers_for_owner(tgid);
-
-    leader.set_exit_signal(signal);
-    leader.set_exited();
-    leader.notify_parent_exit(SigInfo::CLD_KILLED);
-
     leader.op_sig_pending_mut(|p| p.clear());
 
     TASK_MANAGER.remove(leader.tid());

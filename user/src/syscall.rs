@@ -22,11 +22,17 @@ const SYSCALL_WRITE: usize = 64;
 const SYSCALL_STAT: usize = 79;
 const SYSCALL_FSTAT: usize = 80;
 const SYSCALL_EXIT: usize = 93;
+const SYSCALL_FUTEX: usize = 98;
 const SYSCALL_NANOSLEEP: usize = 101;
+const SYSCALL_TIMER_CREATE: usize = 107;
+const SYSCALL_TIMER_GETTIME: usize = 108;
+const SYSCALL_TIMER_SETTIME: usize = 110;
+const SYSCALL_TIMER_DELETE: usize = 111;
 const SYSCALL_SCHED_YIELD: usize = 124;
 const SYSCALL_SETPRIORITY: usize = 140;
 const SYSCALL_TIMES: usize = 153;
 const SYSCALL_UNAME: usize = 160;
+const SYSCALL_GETRUSAGE: usize = 165;
 const SYSCALL_KILL: usize = 129;
 const SYSCALL_SIGACTION: usize = 134;
 const SYSCALL_SIGPROCMASK: usize = 135;
@@ -48,11 +54,12 @@ const SYSCALL_CLONE: usize = 220;
 const SYSCALL_EXECVE: usize = 221;
 const SYSCALL_MMAP: usize = 222;
 const SYSCALL_WAIT4: usize = 260;
+const SYSCALL_PRLIMIT64: usize = 261;
 const SYSCALL_COPY_FILE_RANGE: usize = 285;
 const AT_REMOVEDIR: usize = 0x200;
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct TimeSpec {
     pub sec: usize,
     pub nsec: usize,
@@ -63,6 +70,41 @@ pub struct TimeSpec {
 pub struct TimeVal {
     pub sec: usize,
     pub usec: usize,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default)]
+pub struct RUsage {
+    pub ru_utime: TimeVal,
+    pub ru_stime: TimeVal,
+    pub ru_maxrss: isize,
+    pub ru_ixrss: isize,
+    pub ru_idrss: isize,
+    pub ru_isrss: isize,
+    pub ru_minflt: isize,
+    pub ru_majflt: isize,
+    pub ru_nswap: isize,
+    pub ru_inblock: isize,
+    pub ru_oublock: isize,
+    pub ru_msgsnd: isize,
+    pub ru_msgrcv: isize,
+    pub ru_nsignals: isize,
+    pub ru_nvcsw: isize,
+    pub ru_nivcsw: isize,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct ITimerSpec {
+    pub interval: TimeSpec,
+    pub value: TimeSpec,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct RLimit {
+    pub cur: usize,
+    pub max: usize,
 }
 
 #[repr(C)]
@@ -279,6 +321,81 @@ pub fn sys_wait4_options(pid: isize, exit_code: *mut i32, options: usize) -> isi
     syscall(
         SYSCALL_WAIT4,
         [pid as usize, exit_code as usize, options, 0, 0, 0],
+    )
+}
+
+pub fn sys_wait4_full(
+    pid: isize,
+    exit_code: *mut i32,
+    options: usize,
+    rusage: *mut RUsage,
+) -> isize {
+    syscall(
+        SYSCALL_WAIT4,
+        [
+            pid as usize,
+            exit_code as usize,
+            options,
+            rusage as usize,
+            0,
+            0,
+        ],
+    )
+}
+
+pub fn sys_getrusage(who: isize, usage: *mut RUsage) -> isize {
+    syscall(
+        SYSCALL_GETRUSAGE,
+        [who as usize, usage as usize, 0, 0, 0, 0],
+    )
+}
+
+pub fn sys_timer_create(clock_id: usize, timerid: *mut i32) -> isize {
+    syscall(
+        SYSCALL_TIMER_CREATE,
+        [clock_id, 0, timerid as usize, 0, 0, 0],
+    )
+}
+
+pub fn sys_timer_gettime(timerid: usize, current: *mut ITimerSpec) -> isize {
+    syscall(
+        SYSCALL_TIMER_GETTIME,
+        [timerid, current as usize, 0, 0, 0, 0],
+    )
+}
+
+pub fn sys_timer_settime(
+    timerid: usize,
+    flags: usize,
+    new_value: *const ITimerSpec,
+    old_value: *mut ITimerSpec,
+) -> isize {
+    syscall(
+        SYSCALL_TIMER_SETTIME,
+        [timerid, flags, new_value as usize, old_value as usize, 0, 0],
+    )
+}
+
+pub fn sys_timer_delete(timerid: usize) -> isize {
+    syscall(SYSCALL_TIMER_DELETE, [timerid, 0, 0, 0, 0, 0])
+}
+
+pub fn sys_prlimit64(
+    pid: usize,
+    resource: usize,
+    new_limit: *const RLimit,
+    old_limit: *mut RLimit,
+) -> isize {
+    syscall(
+        SYSCALL_PRLIMIT64,
+        [pid, resource, new_limit as usize, old_limit as usize, 0, 0],
+    )
+}
+
+pub fn sys_futex(uaddr: *const u32, op: usize, val: usize, timeout: *const TimeSpec) -> isize {
+    syscall(
+        SYSCALL_FUTEX,
+        [uaddr as usize, op, val, timeout as usize, 0, 0],
     )
 }
 
