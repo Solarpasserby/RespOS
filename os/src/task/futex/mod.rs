@@ -48,6 +48,11 @@ pub fn do_futex(
         return Err(Errno::ENOSYS);
     }
 
+    validate_futex_address(uaddr)?;
+    if matches!(cmd, FUTEX_REQUEUE | FUTEX_CMP_REQUEUE) {
+        validate_futex_address(uaddr2)?;
+    }
+
     match cmd {
         FUTEX_WAIT => futex_wait(uaddr, val as u32, val2, private),
         FUTEX_WAKE => futex_wake(uaddr, val as u32, private),
@@ -81,4 +86,11 @@ pub fn do_futex(
             Err(Errno::ENOSYS)
         }
     }
+}
+
+fn validate_futex_address(uaddr: usize) -> SysResult {
+    if !uaddr.is_multiple_of(core::mem::align_of::<u32>()) {
+        return Err(Errno::EINVAL);
+    }
+    Ok(())
 }

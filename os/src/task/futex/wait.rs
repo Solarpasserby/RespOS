@@ -2,7 +2,7 @@
 
 use super::queue::{FUTEX_QUEUES, FutexKey, FutexQ, futex_hash_idx};
 use crate::config::PAGE_SIZE;
-use crate::mm::{VirtAddr, check_user_readable, copy_from_user};
+use crate::mm::{VirtAddr, check_user_readable, copy_from_user, read_user_u32_nofault};
 use crate::mutex::SpinNoIrqLock;
 use crate::syscall::{Errno, SysResult};
 use crate::task::scheduler::{
@@ -634,8 +634,7 @@ fn futex_requeue_common(
     // allocation/fault handling while the no-IRQ lock is held.
     if expected_val.is_some() {
         check_user_readable(uaddr as *const u32, 1)?;
-        if FUTEX_CMP_REQUEUE_TEST_YIELD {
-            let expected_val = expected_val.unwrap();
+        if let (true, Some(expected_val)) = (FUTEX_CMP_REQUEUE_TEST_YIELD, expected_val) {
             while read_futex_value(uaddr)? == expected_val {
                 yield_current_task();
             }
@@ -652,10 +651,11 @@ fn futex_requeue_common(
     {
         let mut queues = FUTEX_QUEUES.lock();
         if let Some(expected_val) = expected_val {
-            // Lock order: FUTEX_QUEUES -> MemorySet -> FUTEX_WAITS.
-            // All other futex paths resolve MemorySet before taking the queue
-            // lock; none retains MemorySet while waiting for FUTEX_QUEUES.
-            let actual_val = read_futex_value(uaddr)?;
+            // Lock order: FUTEX_QUEUES -> MemorySet(read) -> FUTEX_WAITS.
+            // The page was resolved above. This fixed-size no-fault read only
+            // translates the existing PTE; it cannot allocate or block on
+            // page-fault handling while the queue lock is held.
+            let actual_val = read_user_u32_nofault(uaddr as *const u32)?;
             if actual_val != expected_val {
                 return Err(Errno::EAGAIN);
             }

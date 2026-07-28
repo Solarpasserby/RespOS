@@ -221,6 +221,9 @@ pub fn time_get() -> isize {
 pub fn getpid() -> isize {
     sys_getpid()
 }
+pub fn getppid() -> isize {
+    sys_getppid()
+}
 pub fn fork() -> isize {
     sys_clone(17, 0, 0, 0, 0)
 }

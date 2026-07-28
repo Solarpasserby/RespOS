@@ -14,6 +14,7 @@ const FUTEX_WAIT: usize = 0;
 const FUTEX_WAKE: usize = 1;
 const EAGAIN: isize = 11;
 const EINTR: isize = 4;
+const EINVAL: isize = 22;
 const PAGE_SIZE: usize = 4096;
 const PROT_READ_WRITE: usize = 0x1 | 0x2;
 const MAP_SHARED_ANONYMOUS: usize = 0x1 | 0x20;
@@ -54,6 +55,15 @@ fn main() -> i32 {
 
     let source_ptr = source as *const AtomicU32 as *const u32;
     let target_ptr = target as *const AtomicU32 as *const u32;
+    let unaligned_source = (source_ptr as usize + 1) as *const u32;
+    let unaligned_target = (target_ptr as usize + 1) as *const u32;
+
+    assert_eq!(futex_raw(unaligned_source, FUTEX_WAKE, 1, null()), -EINVAL);
+    assert_eq!(
+        futex_cmp_requeue_raw(source_ptr, 0, 1, unaligned_target, 0),
+        -EINVAL
+    );
+    println!("[task-a-futex-cmp-requeue] unaligned address EINVAL PASS");
 
     let waiter = fork();
     assert!(waiter >= 0);

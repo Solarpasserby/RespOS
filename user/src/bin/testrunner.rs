@@ -44,6 +44,7 @@ const TASK_A_FUTEX_EXIT_PROBE: bool = option_env!("TASK_A_FUTEX_EXIT_PROBE").is_
 const TASK_A_FUTEX_CMP_REQUEUE_PROBE: bool =
     option_env!("TASK_A_FUTEX_CMP_REQUEUE_PROBE").is_some();
 const TASK_A_CLOCK_PROBE: bool = option_env!("TASK_A_CLOCK_PROBE").is_some();
+const TASK_A_PERF_PROBE: bool = option_env!("TASK_A_PERF_PROBE").is_some();
 
 const RV_MUSL_LOADER: &str = "/lib/ld-musl-riscv64.so.1\0";
 const RV_MUSL_SF_LOADER: &str = "/lib/ld-musl-riscv64-sf.so.1\0";
@@ -112,6 +113,22 @@ fn run_shell_script_with_env(
     }
 
     let _ = chdir("/\0");
+}
+
+fn run_task_a_perf_probe() {
+    let pid = fork();
+    assert!(pid >= 0, "failed to fork task_a_perf");
+    if pid == 0 {
+        let argv = ["task_a_perf\0".as_ptr(), core::ptr::null()];
+        let ret = exec("/musl/task_a_perf\0", &argv);
+        println!("[testrunner] exec task_a_perf failed: {}", ret);
+        exit(-1);
+    }
+
+    let mut status = 0;
+    assert_eq!(waitpid(pid as usize, &mut status), pid);
+    assert_eq!(status, 0, "task_a_perf failed");
+    println!("[testrunner] task-a performance probe PASS");
 }
 
 fn ensure_text_file(path: &str, content: &[u8]) {
@@ -1472,6 +1489,12 @@ fn run_task_a_clock_probe() {
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("[testrunner] start");
+    if TASK_A_PERF_PROBE {
+        run_task_a_perf_probe();
+        println!("[testrunner] task-a performance probe finished, powering off");
+        poweroff();
+        return 0;
+    }
     if TASK_A_CLOCK_PROBE {
         run_task_a_clock_probe();
         println!("[testrunner] task-a clock probe finished, powering off");
@@ -1546,6 +1569,12 @@ fn main() -> i32 {
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("[testrunner] start");
+    if TASK_A_PERF_PROBE {
+        run_task_a_perf_probe();
+        println!("[testrunner] task-a performance probe finished, powering off");
+        poweroff();
+        return 0;
+    }
     if TASK_A_CLOCK_PROBE {
         run_task_a_clock_probe();
         println!("[testrunner] task-a clock probe finished, powering off");

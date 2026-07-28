@@ -695,7 +695,7 @@ wakeup alarm 仍按方案作为明确不支持能力，不用伪实现换取表�
 | 时钟精度和支持范围真实 | PASS | 1 µs/1 ms 直读；unsupported 返回 EINVAL |
 | RV/LA 双架构通过 | PASS | 构建、LTP、专项 probe |
 | 相关测试连续运行无随机 hang | PASS（单核范围） | 所有正式压力轮完成 |
-| A 的提交可按语义独立回退 | READY | `57046f1` + 当前待提交的 futex/clock 批次 |
+| A 的提交可按语义独立回退 | READY | `57046f1` + `f35ff2d` + 当前收尾批次；由负责人完成最终 commit |
 
 ### 18.2 总控最终审查
 
@@ -721,8 +721,121 @@ wakeup alarm 仍按方案作为明确不支持能力，不用伪实现换取表�
 - 真正 SMP 的页表变化、queue contention 和并发 timer generation 未动态验收；
 - CPU clock、TAI、suspend/boottime 差异、wakeup alarm 明确不支持；
 - PID 分配器启用回收后需补 timer PID-reuse 动态测试；
-- 总控 7.3 建议的五类性能中位数尚未形成正式表格；release invariant 已编译消除，
-  当前专项未观察到功能性性能退化。
+- 总控 7.3 的五类性能中位数已在第 19 节形成正式表格；普通 syscall 和无竞争
+  futex 稳定，正确性敏感路径的开销及原因已单独记录。
 
 结论：任务 A 的四天正确性必做项已完成，当前批次提交后可以进入合并审查；上述
 内容作为明确支持边界，不以伪实现补齐。本轮未执行 `git commit`。
+
+## 19. 2026-07-28 调度与同步性能中位数
+
+### 19.1 口径与复现
+
+对比内核：
+
+- 修改前：`00c6822`；
+- 修改后：`f35ff2d` 加当前收尾批次（最终 commit 由负责人提交后回填）；
+- 两者只替换内核，使用相同的 4 GiB 初赛镜像副本和相同静态探针；
+- RV/LA 均为 release、单核、256 MiB；
+- QEMU 使用 `-icount shift=0,align=off,sleep=off`，减少宿主机调度噪声；
+- 每项在同一次 guest 启动中运行 7 轮，报告中位数，单位为 ns/op。
+
+探针源码为 `user/probes/task_a_perf.c`，默认内核不执行；仅当构建时设置
+`TASK_A_PERF_PROBE=1`，testrunner 才运行临时镜像中的 `/musl/task_a_perf`。
+交叉编译命令：
+
+```bash
+/opt/riscv64-linux-musl-cross/bin/riscv64-linux-musl-gcc \
+  -O2 -static -pthread -Wall -Wextra -Werror \
+  user/probes/task_a_perf.c -o task_a_perf_rv
+
+/opt/gcc-13.2.0-loongarch64-linux-gnu/bin/loongarch64-linux-gnu-gcc \
+  -O2 -static -pthread -Wall -Wextra -Werror \
+  user/probes/task_a_perf.c -o task_a_perf_la
+```
+
+计时使用 `CLOCK_REALTIME`，测试期间不执行调时。原因是修改前
+`CLOCK_MONOTONIC` 只有毫秒粒度，而 realtime 已有微秒粒度；使用 monotonic
+会让前后两组数据采用不同刻度。两份内核仍使用同一个 guest 时钟源。
+
+### 19.2 正式中位数
+
+| 架构 | 指标 | 修改前 | 修改后 | 变化 |
+| --- | --- | ---: | ---: | ---: |
+| RV | getpid/syscall | 466 | 465 | -0.2% |
+| RV | sched_yield | 1160 | 1212 | +4.5% |
+| RV | pthread create/join | 38090 | 47015 | +23.4% |
+| RV | futex uncontended wake | 691 | 692 | +0.1% |
+| RV | futex contended hand-off | 3750 | 4594 | +22.5% |
+| RV | 1 ms sleep/wakeup overhead | 无效（提前唤醒） | 4440 | 不比较 |
+| LA | getpid/syscall | 408 | 407 | -0.2% |
+| LA | sched_yield | 1092 | 1156 | +5.9% |
+| LA | pthread create/join | 31255 | 41305 | +32.2% |
+| LA | futex uncontended wake | 652 | 649 | -0.5% |
+| LA | futex contended hand-off | 3965 | 4915 | +24.0% |
+| LA | 1 ms sleep/wakeup overhead | 无效（提前唤醒） | 3410 | 不比较 |
+
+全部四次正式 QEMU 运行均返回 0、完成 7/7 轮并打印 `TASK_A_PERF PASS`，没有
+panic 或 hang。
+
+### 19.3 判定
+
+- getpid 和无竞争 futex 在两架构均处于 ±0.5%，没有观察到通用 syscall
+  或 futex fast path 的明显退化；
+- yield 增加 4.5%/5.9%。单任务 yield 会进入 timer 检查，新的 futex deadline
+  和调度状态检查增加了固定工作量；
+- pthread create/join 增加 23.4%/32.2%，主要覆盖新增的线程退出
+  robust/clear-child-tid、waiter 清理和 single-winner 完成路径；
+- 竞争 futex 增加 22.5%/24.0%，对应新增的 wake/signal/timeout 原子完成登记。
+  该登记是消除重复完成、队列残留和竞态 hang 的正确性成本；
+- 修改前的 1 ms sleep 会提前返回，累计时间不大于请求时间，因此“0 ns
+  overhead”不是性能优势。修改后数据表示满足“不早醒”语义后的真实唤醒开销。
+
+结论：超过 5% 的变化集中在本轮主动修复的同步正确性路径，且已由竞态压力、
+退出清理和 LTP 回归证明其必要性；不为了恢复旧数字回退 single-winner 或
+退出清理。后续性能优化必须以保持这些状态机断言为前提。默认 release 构建不会
+运行性能探针，debug invariant 仍由 `cfg(debug_assertions)` 编译隔离。本轮未
+执行 `git commit`。
+
+## 20. 2026-07-28 最终冻结审查
+
+### 20.1 本次发现与修复
+
+| 发现 | 文档约束 | 处理 |
+| --- | --- | --- |
+| futex 未拒绝 4 字节未对齐地址 | ABI 非法输入不得假成功或触发 panic | 所有已支持 futex op 统一校验主地址；requeue 同时校验目标地址，返回 `EINVAL` |
+| CMP_REQUEUE 锁内最终比较复用普通 copyin | 队列锁内重读值，但全局锁内不应惰性分配/copyin | 锁外 `check_user_readable` 解析页面，锁内使用固定 4 字节 `read_user_u32_nofault`，只持 MemorySet 读锁并翻译已有 PTE |
+| `getppid` 对 parent/Weak 直接 `unwrap` | 首日红名单要求消除可达 unwrap/expect | 改为安全升级 parent，根任务或失效 parent 返回 0；增加 fork 子进程 PPID 回归 |
+| 性能表仍指向上一次提交 | 性能数据必须对应最终源码 | 使用相同最小启动器和 `-icount` 口径重跑最终工作树，更新第 19 节 |
+
+### 20.2 新增动态证据
+
+| 检查 | RV | LA |
+| --- | --- | --- |
+| 未对齐 FUTEX_WAKE 返回 `EINVAL` | 20/20 | 20/20 |
+| 未对齐 CMP_REQUEUE 目标返回 `EINVAL` | 20/20 | 20/20 |
+| CMP 比较失败不迁移 waiter | 20/20 | 20/20 |
+| getppid 稳定 parent lookup | PASS | PASS |
+| timer_create/settime、prlimit 原子性 | PASS | PASS |
+| timer owner exit 清理 | PASS | PASS |
+| 最终性能探针 | 7/7，rc=0 | 7/7，rc=0 |
+| 默认 release `check-submit` | PASS | PASS |
+| 当前决赛镜像默认 smoke | 汇总、关机、rc=0 | 汇总、关机、rc=0 |
+
+以上运行均正常关机，无 panic、hang 或错误 queue mutation。
+
+### 20.3 对照总控的结论边界
+
+任务 A 个人最终清单的 14 项均为 PASS、N/A 或有明确受限边界，源码、专项探针、
+双架构和性能证据相互对应。任务 A 当前工作树满足进入合并审查的条件。
+
+以下总控项目不能由 A 单独代签，仍需集成负责人完成：
+
+- B/C 分支合并后的内存、文件系统和完整固定回归；
+- dirty page、page cache、文件 I/O 与跨模块 fd 生命周期；
+- B 对 A 的 futex user pointer/共享 mm 交叉审查，以及 C 的 pipe/poll 唤醒审查；
+- 三名负责人最终清单和“是否作为决赛 baseline”的整仓结论；
+- 真正 SMP queue contention、并发 timer generation 等已记录边界。
+
+因此最终措辞为：**任务 A 可合并；不能仅凭任务 A 宣称整个 RespOS 已成为新的
+决赛 baseline。** 本轮未执行 `git commit`。

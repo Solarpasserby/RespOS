@@ -6,7 +6,7 @@ extern crate user_lib;
 
 use core::ptr::{null, null_mut, without_provenance_mut};
 use user_lib::{
-    ITimerSpec, RLimit, TimeSpec, exit, fork, getpid, prlimit64_raw, timer_create_raw,
+    ITimerSpec, RLimit, TimeSpec, exit, fork, getpid, getppid, prlimit64_raw, timer_create_raw,
     timer_delete_raw, timer_gettime_raw, timer_settime_raw, waitpid,
 };
 
@@ -14,6 +14,22 @@ const CLOCK_REALTIME: usize = 0;
 const RLIMIT_NOFILE: usize = 7;
 const EFAULT: isize = 14;
 const EINVAL: isize = 22;
+
+fn test_getppid_without_unwrap() {
+    let parent_pid = getpid();
+    let child = fork();
+    assert!(child >= 0);
+    if child == 0 {
+        assert_eq!(getppid(), parent_pid);
+        exit(0);
+        unreachable!();
+    }
+
+    let mut status = 0;
+    assert_eq!(waitpid(child as usize, &mut status), child);
+    assert_eq!(status, 0);
+    println!("[task-a-atomic] getppid stable parent lookup PASS");
+}
 
 fn test_timer_create_publish_after_copyout() {
     let mut first = -1;
@@ -141,6 +157,7 @@ fn test_timer_owner_exit_cleanup() {
 
 #[unsafe(no_mangle)]
 fn main() -> i32 {
+    test_getppid_without_unwrap();
     test_timer_create_publish_after_copyout();
     test_timer_settime_copyout_atomicity();
     test_prlimit_copyout_atomicity();

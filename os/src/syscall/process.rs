@@ -1558,7 +1558,13 @@ pub fn sys_getpid() -> SysResult<usize> {
 /// 系统调用 sys-getppid
 pub fn sys_getppid() -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
-    Ok(task.op_parent(|parent| parent.as_ref().unwrap().upgrade().unwrap().tid()))
+    Ok(task.op_parent(|parent| {
+        parent
+            .as_ref()
+            .and_then(|parent| parent.upgrade())
+            .map(|parent| parent.tid())
+            .unwrap_or(0)
+    }))
 }
 
 /// 系统调用 sys_set_tid_address
