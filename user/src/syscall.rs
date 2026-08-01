@@ -2,14 +2,22 @@ use crate::SignalAction;
 use core::arch::asm;
 
 const SYSCALL_GETCWD: usize = 17;
+const SYSCALL_EPOLL_CREATE1: usize = 20;
+const SYSCALL_EPOLL_CTL: usize = 21;
+const SYSCALL_EPOLL_PWAIT: usize = 22;
 const SYSCALL_DUP: usize = 23;
 const SYSCALL_DUP3: usize = 24;
+const SYSCALL_FCNTL: usize = 25;
+const SYSCALL_IOCTL: usize = 29;
 const SYSCALL_MKDIRAT: usize = 34;
 const SYSCALL_UNLINKAT: usize = 35;
 const SYSCALL_SYMLINKAT: usize = 36;
 const SYSCALL_LINKAT: usize = 37;
 const SYSCALL_UMOUNT2: usize = 39;
 const SYSCALL_MOUNT: usize = 40;
+const SYSCALL_TRUNCATE: usize = 45;
+const SYSCALL_FTRUNCATE: usize = 46;
+const SYSCALL_FALLOCATE: usize = 47;
 const SYSCALL_CHDIR: usize = 49;
 const SYSCALL_FCHMODAT: usize = 53;
 const SYSCALL_OPENAT: usize = 56;
@@ -19,8 +27,17 @@ const SYSCALL_GETDENTS64: usize = 61;
 const SYSCALL_LSEEK: usize = 62;
 const SYSCALL_READ: usize = 63;
 const SYSCALL_WRITE: usize = 64;
+const SYSCALL_PREAD64: usize = 67;
+const SYSCALL_PWRITE64: usize = 68;
+const SYSCALL_PREADV: usize = 69;
+const SYSCALL_PWRITEV: usize = 70;
+const SYSCALL_READLINKAT: usize = 78;
 const SYSCALL_STAT: usize = 79;
 const SYSCALL_FSTAT: usize = 80;
+const SYSCALL_FSYNC: usize = 82;
+const SYSCALL_FDATASYNC: usize = 83;
+const SYSCALL_SYNC_FILE_RANGE: usize = 84;
+const SYSCALL_TIMERFD_CREATE: usize = 85;
 const SYSCALL_EXIT: usize = 93;
 const SYSCALL_NANOSLEEP: usize = 101;
 const SYSCALL_SCHED_YIELD: usize = 124;
@@ -47,6 +64,8 @@ const SYSCALL_MUNMAP: usize = 215;
 const SYSCALL_CLONE: usize = 220;
 const SYSCALL_EXECVE: usize = 221;
 const SYSCALL_MMAP: usize = 222;
+const SYSCALL_MEMFD_CREATE: usize = 279;
+const SYSCALL_RENAMEAT2: usize = 276;
 const SYSCALL_WAIT4: usize = 260;
 const SYSCALL_COPY_FILE_RANGE: usize = 285;
 const AT_REMOVEDIR: usize = 0x200;
@@ -106,6 +125,13 @@ pub struct Stat {
     pub unused: u64,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct IoVec {
+    pub base: *mut u8,
+    pub len: usize,
+}
+
 fn syscall(id: usize, args: [usize; 6]) -> isize {
     let mut ret: isize;
     unsafe {
@@ -149,6 +175,41 @@ pub fn sys_write(fd: usize, buf: &[u8]) -> isize {
     )
 }
 
+pub fn sys_pread64(fd: usize, buf: &mut [u8], offset: isize) -> isize {
+    syscall(
+        SYSCALL_PREAD64,
+        [
+            fd,
+            buf.as_mut_ptr() as usize,
+            buf.len(),
+            offset as usize,
+            0,
+            0,
+        ],
+    )
+}
+
+pub fn sys_pwrite64(fd: usize, buf: &[u8], offset: isize) -> isize {
+    syscall(
+        SYSCALL_PWRITE64,
+        [fd, buf.as_ptr() as usize, buf.len(), offset as usize, 0, 0],
+    )
+}
+
+pub fn sys_preadv(fd: usize, iov: &[IoVec], offset: isize) -> isize {
+    syscall(
+        SYSCALL_PREADV,
+        [fd, iov.as_ptr() as usize, iov.len(), offset as usize, 0, 0],
+    )
+}
+
+pub fn sys_pwritev(fd: usize, iov: &[IoVec], offset: isize) -> isize {
+    syscall(
+        SYSCALL_PWRITEV,
+        [fd, iov.as_ptr() as usize, iov.len(), offset as usize, 0, 0],
+    )
+}
+
 pub fn sys_copy_file_range(fd_in: usize, fd_out: usize, len: usize) -> isize {
     syscall(SYSCALL_COPY_FILE_RANGE, [fd_in, 0, fd_out, 0, len, 0])
 }
@@ -168,6 +229,43 @@ pub fn sys_dup3(fd_src: usize, fd_dst: usize, flags: usize) -> isize {
     syscall(SYSCALL_DUP3, [fd_src, fd_dst, flags, 0, 0, 0])
 }
 
+pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
+    syscall(SYSCALL_FCNTL, [fd, cmd, arg, 0, 0, 0])
+}
+
+pub fn sys_ioctl(fd: usize, request: usize, arg: usize) -> isize {
+    syscall(SYSCALL_IOCTL, [fd, request, arg, 0, 0, 0])
+}
+
+pub fn sys_epoll_create1(flags: usize) -> isize {
+    syscall(SYSCALL_EPOLL_CREATE1, [flags, 0, 0, 0, 0, 0])
+}
+
+pub fn sys_epoll_ctl(epfd: usize, op: usize, fd: usize, event: *const u8) -> isize {
+    syscall(SYSCALL_EPOLL_CTL, [epfd, op, fd, event as usize, 0, 0])
+}
+
+pub fn sys_epoll_pwait(
+    epfd: usize,
+    events: *mut u8,
+    maxevents: usize,
+    timeout_ms: isize,
+    sigmask: *const u8,
+    sigsetsize: usize,
+) -> isize {
+    syscall(
+        SYSCALL_EPOLL_PWAIT,
+        [
+            epfd,
+            events as usize,
+            maxevents,
+            timeout_ms as usize,
+            sigmask as usize,
+            sigsetsize,
+        ],
+    )
+}
+
 pub fn sys_mkdirat(dirfd: isize, path: &str, mode: usize) -> isize {
     syscall(
         SYSCALL_MKDIRAT,
@@ -179,6 +277,58 @@ pub fn sys_unlinkat(dirfd: isize, path: &str, flags: usize) -> isize {
     syscall(
         SYSCALL_UNLINKAT,
         [dirfd as usize, path.as_ptr() as usize, flags, 0, 0, 0],
+    )
+}
+
+pub fn sys_renameat2(
+    olddirfd: isize,
+    oldpath: &str,
+    newdirfd: isize,
+    newpath: &str,
+    flags: usize,
+) -> isize {
+    syscall(
+        SYSCALL_RENAMEAT2,
+        [
+            olddirfd as usize,
+            oldpath.as_ptr() as usize,
+            newdirfd as usize,
+            newpath.as_ptr() as usize,
+            flags,
+            0,
+        ],
+    )
+}
+
+pub fn sys_truncate(path: &str, length: usize) -> isize {
+    syscall(
+        SYSCALL_TRUNCATE,
+        [path.as_ptr() as usize, length, 0, 0, 0, 0],
+    )
+}
+
+pub fn sys_ftruncate(fd: usize, length: usize) -> isize {
+    syscall(SYSCALL_FTRUNCATE, [fd, length, 0, 0, 0, 0])
+}
+
+pub fn sys_fallocate(fd: usize, mode: usize, offset: isize, len: isize) -> isize {
+    syscall(
+        SYSCALL_FALLOCATE,
+        [fd, mode, offset as usize, len as usize, 0, 0],
+    )
+}
+
+pub fn sys_readlinkat(dirfd: isize, path: &str, buf: &mut [u8]) -> isize {
+    syscall(
+        SYSCALL_READLINKAT,
+        [
+            dirfd as usize,
+            path.as_ptr() as usize,
+            buf.as_mut_ptr() as usize,
+            buf.len(),
+            0,
+            0,
+        ],
     )
 }
 
@@ -232,6 +382,32 @@ pub fn sys_stat(path: &str, stat: &mut Stat) -> isize {
 
 pub fn sys_fstat(fd: usize, stat: &mut Stat) -> isize {
     syscall(SYSCALL_FSTAT, [fd, stat as *mut _ as usize, 0, 0, 0, 0])
+}
+
+pub fn sys_fsync(fd: usize) -> isize {
+    syscall(SYSCALL_FSYNC, [fd, 0, 0, 0, 0, 0])
+}
+
+pub fn sys_fdatasync(fd: usize) -> isize {
+    syscall(SYSCALL_FDATASYNC, [fd, 0, 0, 0, 0, 0])
+}
+
+pub fn sys_sync_file_range(fd: usize, offset: isize, nbytes: isize, flags: usize) -> isize {
+    syscall(
+        SYSCALL_SYNC_FILE_RANGE,
+        [fd, offset as usize, nbytes as usize, flags, 0, 0],
+    )
+}
+
+pub fn sys_timerfd_create(clockid: usize, flags: usize) -> isize {
+    syscall(SYSCALL_TIMERFD_CREATE, [clockid, flags, 0, 0, 0, 0])
+}
+
+pub fn sys_memfd_create(name: &str, flags: usize) -> isize {
+    syscall(
+        SYSCALL_MEMFD_CREATE,
+        [name.as_ptr() as usize, flags, 0, 0, 0, 0],
+    )
 }
 
 pub fn sys_exit(exit_code: i32) -> isize {

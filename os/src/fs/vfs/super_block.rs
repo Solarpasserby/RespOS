@@ -10,7 +10,7 @@ pub trait SuperBlockOp: Send + Sync {
     fn root_inode(&self) -> Arc<dyn InodeOp>;
 
     /// 将数据写回磁盘
-    fn sync(&self);
+    fn sync(&self) -> SysResult;
 
     fn statfs(&self) -> SysResult<Statfs64> {
         Err(Errno::EINVAL)

@@ -23,6 +23,7 @@ use super::Statfs64;
 use super::vfs::{Dentry, InodeOp, SuperBlockOp};
 use crate::fs::dentry_cache;
 use crate::fs::mount::{self, Mount, VfsMount, get_mount_by_dentry};
+use crate::syscall::SysResult;
 use alloc::sync::Arc;
 
 use dirs::{ProcDirInode, ProcSelfInode};
@@ -36,7 +37,9 @@ impl SuperBlockOp for ProcSuperBlock {
         Arc::new(ProcDirInode)
     }
 
-    fn sync(&self) {}
+    fn sync(&self) -> SysResult {
+        Ok(())
+    }
 
     fn statfs(&self) -> crate::syscall::SysResult<Statfs64> {
         Ok(Statfs64 {

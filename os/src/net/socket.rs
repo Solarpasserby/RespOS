@@ -743,6 +743,11 @@ impl FileOp for Socket {
         flags
     }
 
+    fn set_status_flags(&self, flags: OpenFlags) -> SysResult {
+        self.set_nonblocking(flags.contains(OpenFlags::O_NONBLOCK));
+        Ok(())
+    }
+
     fn get_stat(&self) -> SysResult<KStat> {
         Ok(KStat::minimal(0, InodeType::Socket))
     }

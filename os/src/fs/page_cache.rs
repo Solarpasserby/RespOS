@@ -72,6 +72,8 @@ pub struct PageCache {
     id: usize,
     pages: Mutex<BTreeMap<usize, Arc<Mutex<Page>>>>,
     file_size: Mutex<usize>,
+    /// 每次可见文件长度变化都递增。写回用它识别与 truncate/extend 的竞争。
+    size_version: AtomicUsize,
     dirty_pages: AtomicUsize,
 }
 
@@ -82,6 +84,7 @@ impl PageCache {
             id,
             pages: Mutex::new(BTreeMap::new()),
             file_size: Mutex::new(file_size),
+            size_version: AtomicUsize::new(0),
             dirty_pages: AtomicUsize::new(0),
         });
         PAGE_CACHE_REGISTRY
@@ -172,6 +175,9 @@ impl PageCache {
 
     pub fn resize(&self, new_size: usize) {
         let mut size = self.file_size.lock();
+        if new_size == *size {
+            return;
+        }
         let mut removed_pages = 0usize;
         if new_size < *size {
             let mut pages = self.pages.lock();
@@ -195,6 +201,9 @@ impl PageCache {
                 if let Some(page) = pages.get(&last_page_idx) {
                     let mut page = page.lock();
                     page.data[new_size % PAGE_SIZE..].fill(0);
+                    // 尾页内容也是写回快照的一部分；即使只是清零不可见尾部，
+                    // 也必须使并发写回的旧快照失效。
+                    page.write_version = page.write_version.wrapping_add(1);
                 }
             }
         }
@@ -202,6 +211,7 @@ impl PageCache {
             PAGE_CACHE_PAGE_COUNT.fetch_sub(removed_pages, Ordering::Relaxed);
         }
         *size = new_size;
+        self.size_version.fetch_add(1, Ordering::Release);
     }
 
     /// 查 BTreeMap 获取页（不触发 I/O）
@@ -292,6 +302,7 @@ impl PageCache {
             let mut size = self.file_size.lock();
             if end > *size {
                 *size = end;
+                self.size_version.fetch_add(1, Ordering::Release);
             }
         }
 
@@ -374,6 +385,7 @@ impl PageCache {
     /// 将脏页写回
     pub fn sync(&self, inode: &Arc<dyn InodeOp>, path: &str) -> SysResult {
         let file_size = *self.file_size.lock();
+        let size_version = self.size_version.load(Ordering::Acquire);
         let pages: Vec<_> = self
             .pages
             .lock()
@@ -427,6 +439,17 @@ impl PageCache {
             let written = inode.write_at(path, offset, &data)?;
             if written != data.len() {
                 return Err(Errno::EIO);
+            }
+
+            // truncate 可以与另一个 File 的 fsync 并发。旧长度的写回若越过新 EOF，
+            // 会重新扩展底层文件；检测到长度代次变化后立即恢复当前长度，并保留
+            // 所有 dirty/version 状态供下一次 fsync 重试。
+            if self.size_version.load(Ordering::Acquire) != size_version {
+                let current_size = *self.file_size.lock();
+                if offset.saturating_add(written) > current_size {
+                    inode.truncate(path, current_size)?;
+                }
+                continue;
             }
 
             for (page_offset, (page, version)) in snapshots.into_iter().enumerate() {

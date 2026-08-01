@@ -47,6 +47,7 @@ pub struct Pipe {
     poll_waiters: Arc<PollWaiters>,
     readable: bool,
     writable: bool,
+    flags: Mutex<OpenFlags>,
 }
 
 impl Pipe {
@@ -58,6 +59,11 @@ impl Pipe {
             writable,
             buffer,
             poll_waiters,
+            flags: Mutex::new(if writable {
+                OpenFlags::O_WRONLY
+            } else {
+                OpenFlags::O_RDONLY
+            }),
         }
     }
 
@@ -206,6 +212,9 @@ impl FileOp for NamedFifoEnd {
     fn get_flags(&self) -> OpenFlags {
         self.inner.get_flags()
     }
+    fn set_status_flags(&self, flags: OpenFlags) -> SysResult {
+        self.inner.set_status_flags(flags)
+    }
     fn get_stat(&self) -> SysResult<KStat> {
         self.inner.get_stat()
     }
@@ -254,9 +263,11 @@ pub fn open_named_fifo(path: &str, flags: OpenFlags) -> SysResult<Arc<dyn FileOp
         fifo.writers += 1;
     }
 
+    let inner = Pipe::end_with_buffer(fifo.buffer.clone(), readable, writable);
+    inner.set_status_flags(flags)?;
     Ok(Arc::new(NamedFifoEnd {
         path: String::from(path),
-        inner: Pipe::end_with_buffer(fifo.buffer.clone(), readable, writable),
+        inner,
     }))
 }
 
@@ -298,6 +309,9 @@ impl FileOp for Pipe {
                     // 缓冲区空且写端已关：EOF，直接返回
                     return Ok(0);
                 } else {
+                    if self.get_flags().contains(OpenFlags::O_NONBLOCK) {
+                        return Err(Errno::EAGAIN);
+                    }
                     // 缓冲区空但写端还在：需要阻塞等待数据
                     task.set_interruptible(true);
                     buffer.push_read_waiter(task.tid());
@@ -372,6 +386,9 @@ impl FileOp for Pipe {
                     wake_reader = buffer.pop_read_waiter();
                     write_size
                 } else {
+                    if self.get_flags().contains(OpenFlags::O_NONBLOCK) {
+                        return Err(Errno::EAGAIN);
+                    }
                     // 缓冲区满但读端还在：需要阻塞等待空间
                     task.set_interruptible(true);
                     buffer.push_write_waiter(task.tid());
@@ -446,7 +463,14 @@ impl FileOp for Pipe {
     }
 
     fn get_flags(&self) -> OpenFlags {
-        OpenFlags::empty()
+        *self.flags.lock()
+    }
+    fn set_status_flags(&self, flags: OpenFlags) -> SysResult {
+        let status_flags = OpenFlags::O_APPEND | OpenFlags::O_NONBLOCK | OpenFlags::O_DIRECT;
+        let mut current = self.flags.lock();
+        current.remove(status_flags);
+        *current |= flags & status_flags;
+        Ok(())
     }
     fn get_stat(&self) -> SysResult<KStat> {
         Ok(KStat::minimal(0, InodeType::Fifo)

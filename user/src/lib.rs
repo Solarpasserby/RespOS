@@ -70,7 +70,7 @@ fn clear_bss() {
 
 use syscall::*;
 
-pub use syscall::{Stat, TimeSpec, TimeVal};
+pub use syscall::{IoVec, Stat, TimeSpec, TimeVal};
 
 pub const O_RDONLY: usize = 0;
 pub const O_WRONLY: usize = 1 << 0;
@@ -78,6 +78,7 @@ pub const O_RDWR: usize = 1 << 1;
 pub const O_CREATE: usize = 1 << 6;
 pub const O_TRUNC: usize = 1 << 9;
 pub const O_APPEND: usize = 1 << 10;
+pub const O_NONBLOCK: usize = 1 << 11;
 pub const O_DIRECTORY: usize = 1 << 16;
 pub const O_CLOEXEC: usize = 1 << 19;
 
@@ -151,6 +152,18 @@ pub fn read(fd: usize, buf: &mut [u8]) -> isize {
 pub fn write(fd: usize, buf: &[u8]) -> isize {
     sys_write(fd, buf)
 }
+pub fn pread(fd: usize, buf: &mut [u8], offset: isize) -> isize {
+    sys_pread64(fd, buf, offset)
+}
+pub fn pwrite(fd: usize, buf: &[u8], offset: isize) -> isize {
+    sys_pwrite64(fd, buf, offset)
+}
+pub fn preadv(fd: usize, iov: &[IoVec], offset: isize) -> isize {
+    sys_preadv(fd, iov, offset)
+}
+pub fn pwritev(fd: usize, iov: &[IoVec], offset: isize) -> isize {
+    sys_pwritev(fd, iov, offset)
+}
 pub fn copy_file_range(fd_in: usize, fd_out: usize, len: usize) -> isize {
     sys_copy_file_range(fd_in, fd_out, len)
 }
@@ -163,11 +176,48 @@ pub fn dup(fd: usize) -> isize {
 pub fn dup2(fd_src: usize, fd_dst: usize) -> isize {
     sys_dup3(fd_src, fd_dst, 0)
 }
+pub fn fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
+    sys_fcntl(fd, cmd, arg)
+}
+pub fn ioctl(fd: usize, request: usize, arg: usize) -> isize {
+    sys_ioctl(fd, request, arg)
+}
+pub fn epoll_create1(flags: usize) -> isize {
+    sys_epoll_create1(flags)
+}
+pub fn epoll_ctl(epfd: usize, op: usize, fd: usize, event: *const u8) -> isize {
+    sys_epoll_ctl(epfd, op, fd, event)
+}
+pub fn epoll_pwait(
+    epfd: usize,
+    events: *mut u8,
+    maxevents: usize,
+    timeout_ms: isize,
+    sigmask: *const u8,
+    sigsetsize: usize,
+) -> isize {
+    sys_epoll_pwait(epfd, events, maxevents, timeout_ms, sigmask, sigsetsize)
+}
 pub fn mkdir(path: &str, mode: usize) -> isize {
     sys_mkdirat(AT_FDCWD, path, mode)
 }
 pub fn unlink(path: &str) -> isize {
     sys_unlinkat(AT_FDCWD, path, 0)
+}
+pub fn rename(oldpath: &str, newpath: &str) -> isize {
+    sys_renameat2(AT_FDCWD, oldpath, AT_FDCWD, newpath, 0)
+}
+pub fn rename_noreplace(oldpath: &str, newpath: &str) -> isize {
+    sys_renameat2(AT_FDCWD, oldpath, AT_FDCWD, newpath, 1)
+}
+pub fn truncate(path: &str, length: usize) -> isize {
+    sys_truncate(path, length)
+}
+pub fn ftruncate(fd: usize, length: usize) -> isize {
+    sys_ftruncate(fd, length)
+}
+pub fn fallocate(fd: usize, mode: usize, offset: isize, len: isize) -> isize {
+    sys_fallocate(fd, mode, offset, len)
 }
 pub fn rmdir(path: &str) -> isize {
     sys_rmdir(AT_FDCWD, path)
@@ -177,6 +227,9 @@ pub fn link(oldpath: &str, newpath: &str) -> isize {
 }
 pub fn symlink(target: &str, linkpath: &str) -> isize {
     sys_symlinkat(target, AT_FDCWD, linkpath)
+}
+pub fn readlink(path: &str, buf: &mut [u8]) -> isize {
+    sys_readlinkat(AT_FDCWD, path, buf)
 }
 pub fn chdir(path: &str) -> isize {
     sys_chdir(path)
@@ -189,6 +242,12 @@ pub fn open(path: &str, flags: usize, mode: usize) -> isize {
 }
 pub fn close(fd: usize) -> isize {
     sys_close(fd)
+}
+pub fn mmap(addr: usize, len: usize, prot: usize, flags: usize, fd: isize, offset: usize) -> isize {
+    sys_mmap(addr, len, prot, flags, fd, offset)
+}
+pub fn munmap(addr: usize, len: usize) -> isize {
+    sys_munmap(addr, len)
 }
 pub fn pipe(pipefd: &mut [i32; 2]) -> isize {
     sys_pipe2(pipefd, 0)
@@ -204,6 +263,21 @@ pub fn stat(path: &str, stat: &mut Stat) -> isize {
 }
 pub fn fstat(fd: usize, stat: &mut Stat) -> isize {
     sys_fstat(fd, stat)
+}
+pub fn fsync(fd: usize) -> isize {
+    sys_fsync(fd)
+}
+pub fn fdatasync(fd: usize) -> isize {
+    sys_fdatasync(fd)
+}
+pub fn sync_file_range(fd: usize, offset: isize, nbytes: isize, flags: usize) -> isize {
+    sys_sync_file_range(fd, offset, nbytes, flags)
+}
+pub fn timerfd_create(clockid: usize, flags: usize) -> isize {
+    sys_timerfd_create(clockid, flags)
+}
+pub fn memfd_create(name: &str, flags: usize) -> isize {
+    sys_memfd_create(name, flags)
 }
 pub fn exit(exit_code: i32) -> isize {
     sys_exit(exit_code)

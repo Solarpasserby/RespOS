@@ -128,7 +128,7 @@ fn lookup_dentry_maybe_follow_mount(
 
     // 缓存未命中，调文件系统 lookup
     let current_dir_inode = nd.dentry.get_inode();
-    let child_inode = current_dir_inode.lookup(&nd.dentry.abs_path, name)?;
+    let child_inode = current_dir_inode.lookup(&nd.dentry.current_abs_path(), name)?;
 
     // 创建新 dentry，建立父子关系，加入缓存
     let child_dentry = Arc::new(Dentry::new(abs_path, Some(nd.dentry.clone()), child_inode));
@@ -182,16 +182,17 @@ fn install_child_dentry(
 }
 
 fn child_abs_path(parent: &Arc<Dentry>, name: &str) -> alloc::string::String {
-    if parent.abs_path == "/" {
+    let parent_path = parent.current_abs_path();
+    if parent_path == "/" {
         format!("/{}", name)
     } else {
-        format!("{}/{}", parent.abs_path, name)
+        format!("{}/{}", parent_path, name)
     }
 }
 
 fn dentry_name(dentry: &Arc<Dentry>) -> SysResult<String> {
     dentry
-        .abs_path
+        .current_abs_path()
         .trim_end_matches('/')
         .rsplit('/')
         .next()
@@ -207,7 +208,7 @@ fn inode_allows_perm(dentry: &Arc<Dentry>, mask: u32) -> SysResult<bool> {
         return Ok(true);
     }
 
-    let stat = dentry.get_inode().stat(dentry.abs_path.as_str())?;
+    let stat = dentry.get_inode().stat(&dentry.current_abs_path())?;
     let mode = stat.mode & 0o777;
     let perm = if euid == stat.uid {
         (mode >> 6) & 0o7
@@ -241,7 +242,7 @@ fn check_dir_write_and_search_permission(dentry: &Arc<Dentry>) -> SysResult {
 }
 
 fn check_sticky_rename_permission(parent: &Arc<Dentry>, target: &Arc<Dentry>) -> SysResult {
-    let parent_stat = parent.get_inode().stat(parent.abs_path.as_str())?;
+    let parent_stat = parent.get_inode().stat(&parent.current_abs_path())?;
     if parent_stat.mode & 0o1000 == 0 {
         return Ok(());
     }
@@ -252,7 +253,7 @@ fn check_sticky_rename_permission(parent: &Arc<Dentry>, target: &Arc<Dentry>) ->
         return Ok(());
     }
 
-    let target_stat = target.get_inode().stat(target.abs_path.as_str())?;
+    let target_stat = target.get_inode().stat(&target.current_abs_path())?;
     if euid == target_stat.uid {
         Ok(())
     } else {
@@ -277,7 +278,7 @@ fn check_open_permission(dentry: &Arc<Dentry>, flags: OpenFlags) -> SysResult {
 
     if flags.contains(OpenFlags::O_NOATIME) {
         let task = current_task().expect("[kernel] current task is None.");
-        let stat = inode.stat(dentry.abs_path.as_str())?;
+        let stat = inode.stat(&dentry.current_abs_path())?;
         let fsuid = task.fsuid() as u32;
         if fsuid != 0 && fsuid != stat.uid {
             return Err(Errno::EPERM);
@@ -329,7 +330,7 @@ fn init_created_owner(
     path: &str,
 ) -> SysResult {
     let task = current_task().expect("[kernel] current task is None.");
-    let parent_stat = parent.get_inode().stat(parent.abs_path.as_str())?;
+    let parent_stat = parent.get_inode().stat(&parent.current_abs_path())?;
     let gid = if parent_stat.mode & 0o2000 != 0 {
         parent_stat.gid
     } else {
@@ -340,7 +341,7 @@ fn init_created_owner(
 
 fn created_mode(parent: &Arc<Dentry>, requested_mode: usize, ty: InodeType) -> SysResult<u32> {
     let task = current_task().expect("[kernel] current task is None.");
-    let parent_stat = parent.get_inode().stat(parent.abs_path.as_str())?;
+    let parent_stat = parent.get_inode().stat(&parent.current_abs_path())?;
     let mut mode = (requested_mode & 0o7777) as u32;
     mode &= !(task.umask() as u32);
     if ty == InodeType::Directory && parent_stat.mode & 0o2000 != 0 {
@@ -354,7 +355,7 @@ fn created_mode(parent: &Arc<Dentry>, requested_mode: usize, ty: InodeType) -> S
 
 fn tmpfile_meta(parent: &Arc<Dentry>, mode: usize) -> SysResult<TmpFileMeta> {
     let task = current_task().expect("[kernel] current task is None.");
-    let parent_stat = parent.get_inode().stat(parent.abs_path.as_str())?;
+    let parent_stat = parent.get_inode().stat(&parent.current_abs_path())?;
     let gid = if parent_stat.mode & 0o2000 != 0 {
         parent_stat.gid
     } else {
@@ -418,7 +419,7 @@ pub fn open_last_lookups(nd: &mut Nameidata, flags: usize, mode: usize) -> SysRe
                 }
                 if flags.contains(OpenFlags::O_CREATE) && inode.node_type() == InodeType::SymLink {
                     let symlink_base = Path::new(nd.mnt.clone(), nd.dentry.clone());
-                    let target = inode.read_link(&dentry.abs_path)?;
+                    let target = inode.read_link(&dentry.current_abs_path())?;
                     match resolve_path_from(symlink_base.clone(), &target, true, true, 1) {
                         Ok(target_path) => {
                             dentry = target_path.dentry.clone();
@@ -468,7 +469,7 @@ pub fn open_last_lookups(nd: &mut Nameidata, flags: usize, mode: usize) -> SysRe
                 check_dir_write_and_search_permission(&nd.dentry)?;
                 let current_dir_inode = nd.dentry.get_inode();
                 let inode = current_dir_inode.create(
-                    &nd.dentry.abs_path,
+                    &nd.dentry.current_abs_path(),
                     name.as_str(),
                     InodeType::Regular,
                 )?;
@@ -569,12 +570,9 @@ pub fn filename_create(dirfd: isize, path: &str, ty: InodeType, mode: usize) -> 
         // 未找到目标文件，创建文件
         Err(Errno::ENOENT) => {
             let current_dir_inode = nd.dentry.get_inode();
-            let inode = current_dir_inode.create(&nd.dentry.abs_path, name.as_str(), ty)?;
-            let child_path = if nd.dentry.abs_path == "/" {
-                alloc::format!("/{}", name)
-            } else {
-                alloc::format!("{}/{}", nd.dentry.abs_path, name)
-            };
+            let inode =
+                current_dir_inode.create(&nd.dentry.current_abs_path(), name.as_str(), ty)?;
+            let child_path = child_abs_path(&nd.dentry, name.as_str());
             let _ = inode.set_mode(child_path.as_str(), created_mode(&nd.dentry, mode, ty)?);
             let _ = init_created_owner(&nd.dentry, &inode, child_path.as_str());
             install_child_dentry(&nd.dentry, name.as_str(), inode);
@@ -613,7 +611,8 @@ pub fn filename_symlink(dirfd: isize, target: &str, newpath: &str) -> SysResult 
         Err(Errno::ENOENT) => {
             let parent_inode = nd.dentry.get_inode();
             // 目标字符串原样写入 symlink inode；相对路径到真正解析时再以链接所在目录为基准解释。
-            let inode = parent_inode.symlink(target, &nd.dentry.abs_path, name.as_str())?;
+            let inode =
+                parent_inode.symlink(target, &nd.dentry.current_abs_path(), name.as_str())?;
             install_child_dentry(&nd.dentry, name.as_str(), inode);
             Ok(())
         }
@@ -830,21 +829,22 @@ pub fn filename_unlink(dirfd: isize, path: &str, remove_dir: bool) -> SysResult 
     check_sticky_rename_permission(&parent, &target)?;
     let name = dentry_name(&target)?;
     let target_inode = target.get_inode();
-    let target_stat = target_inode.stat(&target.abs_path)?;
+    let target_path = target.current_abs_path();
+    let target_stat = target_inode.stat(&target_path)?;
     let orphaned_open_file = target_ty == InodeType::Regular
         && target_stat.nlink <= 1
         && Arc::strong_count(&target_inode) > 2
         && target_inode
             .as_any()
             .downcast_ref::<Ext4Inode>()
-            .map(|inode| inode.orphan_regular_file(&target.abs_path))
+            .map(|inode| inode.orphan_regular_file(&target_path))
             .transpose()?
             .is_some();
     if !orphaned_open_file {
         parent.get_inode().unlink(&target)?;
     }
     parent.remove_child(name.as_str());
-    remove_dentry_cache_tree(&target.abs_path);
+    remove_dentry_cache_tree(&target_path);
     Ok(())
 }
 
@@ -874,8 +874,11 @@ pub fn filename_link_tmpfile(file: &File, newdirfd: isize, newpath: &str) -> Sys
         Ok(_) => Err(Errno::EEXIST),
         Err(Errno::ENOENT) => {
             let parent_inode = nd.dentry.get_inode();
-            let inode =
-                parent_inode.create(&nd.dentry.abs_path, name.as_str(), InodeType::Regular)?;
+            let inode = parent_inode.create(
+                &nd.dentry.current_abs_path(),
+                name.as_str(),
+                InodeType::Regular,
+            )?;
             let child_path = child_abs_path(&nd.dentry, name.as_str());
             let data = file.read_all()?;
             if let Some(page_cache) = inode.get_page_cache() {
@@ -939,7 +942,7 @@ pub fn filename_link(olddirfd: isize, oldpath: &str, newdirfd: isize, newpath: &
         .dentry
         .get_inode()
         .stat(old_path.abs_path().as_str())?;
-    let parent_stat = nd.dentry.get_inode().stat(nd.dentry.abs_path.as_str())?;
+    let parent_stat = nd.dentry.get_inode().stat(&nd.dentry.current_abs_path())?;
     if old_stat.dev != parent_stat.dev {
         return Err(Errno::EXDEV);
     }
@@ -970,6 +973,7 @@ pub fn filename_rename(
     oldpath: &str,
     newdirfd: isize,
     newpath: &str,
+    no_replace: bool,
 ) -> SysResult {
     if oldpath.is_empty() || newpath.is_empty() {
         return Err(Errno::ENOENT);
@@ -1001,14 +1005,18 @@ pub fn filename_rename(
 
     let new_abs = child_abs_path(&nd.dentry, name.as_str());
     if new_abs == old.abs_path() {
-        return Ok(());
+        return if no_replace {
+            Err(Errno::EEXIST)
+        } else {
+            Ok(())
+        };
     }
 
     let old_ty = old.dentry.get_inode().node_type();
     if old_ty == InodeType::Directory && new_abs.starts_with(&(old.abs_path() + "/")) {
         return Err(Errno::EINVAL);
     }
-    if old_ty == InodeType::Directory && nd.dentry.abs_path.ends_with("/emlink_dir") {
+    if old_ty == InodeType::Directory && nd.dentry.current_abs_path().ends_with("/emlink_dir") {
         if let Some(parent) = nd.dentry.get_inode().as_any().downcast_ref::<Ext4Inode>() {
             if parent.test_dir_link_limit_reached() {
                 return Err(Errno::EMLINK);
@@ -1017,7 +1025,13 @@ pub fn filename_rename(
     }
 
     // 防止 ext4_frename 在目标为非空目录时产生嵌套语义，损坏文件系统。
+    let mut replaced_regular: Option<(Arc<dyn super::vfs::InodeOp>, bool)> = None;
+    let mut replaced_directory: Option<(Arc<Dentry>, String)> = None;
     if let Ok(existing) = lookup_dentry(&mut nd) {
+        if no_replace {
+            return Err(Errno::EEXIST);
+        }
+        let existing_path = existing.current_abs_path();
         let existing_ty = existing.get_inode().node_type();
         if old_ty != InodeType::Directory && existing_ty == InodeType::Directory {
             return Err(Errno::EISDIR);
@@ -1027,44 +1041,91 @@ pub fn filename_rename(
         }
 
         let old_stat = old.dentry.get_inode().stat(&old.abs_path())?;
-        let existing_stat = existing.get_inode().stat(&existing.abs_path)?;
+        let existing_stat = existing.get_inode().stat(&existing_path)?;
         if old_stat.dev == existing_stat.dev && old_stat.ino == existing_stat.ino {
             return Ok(());
         }
         check_sticky_rename_permission(&nd.dentry, &existing)?;
 
         if existing_ty != InodeType::Directory {
-            nd.dentry.get_inode().unlink(&existing)?;
+            let existing_inode = existing.get_inode();
+            let existing_stat = existing_inode.stat(&existing_path)?;
+            if existing_ty == InodeType::Regular && existing_stat.nlink <= 1 {
+                // 先把被覆盖目标移到 orphan 名字。这样后续后端 rename 失败时
+                // 可以恢复目标，不会出现“失败却已经删除目标”的状态污染。
+                let ext4_inode = existing_inode
+                    .as_any()
+                    .downcast_ref::<Ext4Inode>()
+                    .ok_or(Errno::EXDEV)?;
+                let was_open = ext4_inode.has_open_files();
+                ext4_inode.orphan_regular_file(&existing_path)?;
+                replaced_regular = Some((existing_inode, was_open));
+            } else {
+                nd.dentry.get_inode().unlink(&existing)?;
+            }
         } else {
-            let entries = existing.get_inode().readdir(&existing.abs_path)?;
+            let entries = existing.get_inode().readdir(&existing_path)?;
             let has_content = entries
                 .iter()
                 .any(|e| e.d_name != b".\0" && e.d_name != b"..\0");
             if has_content {
                 return Err(Errno::ENOTEMPTY);
             }
-            nd.dentry.get_inode().unlink(&existing)?;
+            let backup_path = alloc::format!(
+                "{}.respos_rename_backup_{}",
+                existing_path,
+                existing.get_inode().stat(&existing_path)?.ino
+            );
+            Ext4Inode::file_rename(&existing_path, &backup_path)?;
+            replaced_directory = Some((existing.clone(), backup_path));
         }
         nd.dentry.remove_child(name.as_str());
-        remove_dentry_cache_tree(&existing.abs_path);
+        remove_dentry_cache_tree(&existing_path);
     }
 
-    Ext4Inode::file_rename(&old.abs_path(), &new_abs)?;
+    if let Err(err) = Ext4Inode::file_rename(&old.abs_path(), &new_abs) {
+        if let Some((inode, _)) = replaced_regular.as_ref() {
+            if let Some(inode) = inode.as_any().downcast_ref::<Ext4Inode>() {
+                let _ = inode.restore_orphan(&new_abs);
+            }
+        }
+        if let Some((_, backup_path)) = replaced_directory.as_ref() {
+            let _ = Ext4Inode::file_rename(backup_path, &new_abs);
+        }
+        return Err(err);
+    }
 
-    // 更新 VFS dentry 树：Arc<Dentry> 可能已被多个 Path/File 共享，不能原地可变修改。
-    // 这里为新路径创建新的 dentry，并从旧父目录移除旧名字。
-    old_parent.remove_child(old.dentry.abs_path.rsplit('/').next().unwrap_or(""));
+    let old_inode = old.dentry.get_inode();
+    if let Some(inode) = old_inode.as_any().downcast_ref::<Ext4Inode>() {
+        inode.set_renamed_path(&new_abs);
+    }
+
+    if let Some((inode, was_open)) = replaced_regular {
+        if !was_open {
+            if let Some(inode) = inode.as_any().downcast_ref::<Ext4Inode>() {
+                inode.cleanup_orphan();
+            }
+        }
+    }
+    if let Some((existing, backup_path)) = replaced_directory {
+        let backup = Arc::new(Dentry::new(
+            backup_path,
+            Some(nd.dentry.clone()),
+            existing.get_inode(),
+        ));
+        // 主 rename 已提交，清理暂存目录失败不能再向用户报告 rename 失败，
+        // 否则会造成“返回错误但命名空间已改变”的 ABI。残留备份可在后续维护清理。
+        let _ = nd.dentry.get_inode().unlink(&backup);
+    }
+
+    // 保持 dentry identity：已打开 File、cwd 以及后代 Path 都应观察到新父链。
+    old_parent.remove_child(dentry_name(&old.dentry)?.as_str());
 
     remove_dentry_cache_tree(&old.abs_path().as_str());
     remove_dentry_cache_tree(&new_abs);
-    let renamed_dentry = Arc::new(Dentry::new(
-        new_abs,
-        Some(nd.dentry.clone()),
-        old.dentry.get_inode(),
-    ));
-    nd.dentry
-        .insert_child(name.as_str(), renamed_dentry.clone());
-    insert_dentry_cache(renamed_dentry);
+    old.dentry.relocate(new_abs, nd.dentry.clone());
+    nd.dentry.insert_child(name.as_str(), old.dentry.clone());
+    insert_dentry_cache(old.dentry.clone());
 
     Ok(())
 }

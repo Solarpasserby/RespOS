@@ -49,6 +49,14 @@ pub trait FileOp: Any + Send + Sync {
     fn read<'a>(&'a self, buf: &'a mut [u8]) -> SysResult<usize>;
     /// 写入数据到 buf 中，返回写入的字节数，同时更新文件偏移量
     fn write<'a>(&'a self, buf: &'a [u8]) -> SysResult<usize>;
+    /// 在指定位置读取，不读取或修改共享 open-file offset。
+    fn read_at_offset(&self, _offset: usize, _buf: &mut [u8]) -> SysResult<usize> {
+        Err(Errno::ESPIPE)
+    }
+    /// 在指定位置写入，不读取或修改共享 open-file offset。
+    fn write_at_offset(&self, _offset: usize, _buf: &[u8]) -> SysResult<usize> {
+        Err(Errno::ESPIPE)
+    }
     /// 检查文件对象是否支持偏移移动。
     fn can_seek(&self) -> SysResult;
     // 移动文件偏移
@@ -57,6 +65,10 @@ pub trait FileOp: Any + Send + Sync {
     fn get_offset(&self) -> usize;
     // 获得文件打开标志
     fn get_flags(&self) -> OpenFlags;
+    /// 修改共享 open-file status flags。descriptor flags（如 CLOEXEC）不在这里处理。
+    fn set_status_flags(&self, _flags: OpenFlags) -> SysResult {
+        Err(Errno::EINVAL)
+    }
     fn get_stat(&self) -> SysResult<KStat>;
     fn readable(&self) -> bool;
     fn writable(&self) -> bool;
@@ -64,8 +76,11 @@ pub trait FileOp: Any + Send + Sync {
         if !self.readable() {
             return Err(Errno::EACCES);
         }
-        if shared && writable && !self.writable() {
-            return Err(Errno::EACCES);
+        if shared && writable {
+            // MM 当前在持有 MemorySet 写锁时写回 shared frame，且 munmap
+            // 会吞掉底层写回错误。在 B 提供 prepare/writeback/commit 接口前，
+            // 不宣称支持可写 MAP_SHARED。
+            return Err(Errno::EOPNOTSUPP);
         }
         Ok(())
     }
@@ -113,6 +128,9 @@ impl File {
     }
 
     pub fn new(path: Arc<Path>, inode: Arc<dyn InodeOp>, flags: OpenFlags) -> Self {
+        if let Some(ext4_inode) = inode.as_any().downcast_ref::<Ext4Inode>() {
+            ext4_inode.open_file();
+        }
         let abs_path = path.abs_path();
         let ty = inode.node_type();
         let page_cache = inode.get_page_cache();
@@ -159,6 +177,9 @@ impl File {
         flags: OpenFlags,
         meta: TmpFileMeta,
     ) -> Self {
+        if let Some(ext4_inode) = inode.as_any().downcast_ref::<Ext4Inode>() {
+            ext4_inode.open_file();
+        }
         let page_cache = Some(PageCache::new(0));
         Self {
             inode,
@@ -360,9 +381,14 @@ impl File {
         inner.ctime_override = Some(now);
     }
 
-    fn sync_cached_write_times(&self, inner: &FileInner, path: &str) -> SysResult {
-        if inner.tmpfile_meta.is_none() {
-            if let Some(mtime) = inner.mtime_override {
+    fn sync_cached_write_time(
+        &self,
+        tmpfile: bool,
+        mtime: Option<TimeSpec>,
+        path: &str,
+    ) -> SysResult {
+        if !tmpfile {
+            if let Some(mtime) = mtime {
                 self.inode.set_times(path, None, Some(mtime))?;
             }
         }
@@ -394,7 +420,11 @@ impl File {
                 }
                 let now = Self::now_timespec();
                 Self::update_cached_write_times(&mut inner, now);
-                self.sync_cached_write_times(&inner, &path)?;
+                self.sync_cached_write_time(
+                    inner.tmpfile_meta.is_some(),
+                    inner.mtime_override,
+                    &path,
+                )?;
             }
         } else {
             self.inode.truncate(&path, size)?;
@@ -407,18 +437,23 @@ impl File {
     }
 
     pub fn read_at_offset(&self, offset: usize, buf: &mut [u8]) -> SysResult<usize> {
-        let inner = self.inner.lock();
-        let visible_path = inner.path.abs_path();
-        let path = self.storage_path(&visible_path);
-        let file_path = inner.path.clone();
+        let (path, file_path, page_cache, write_back) = {
+            let inner = self.inner.lock();
+            let visible_path = inner.path.abs_path();
+            (
+                self.storage_path(&visible_path),
+                inner.path.clone(),
+                inner.page_cache.clone(),
+                inner.write_back,
+            )
+        };
         let ty = self.inode.node_type();
-        let n = if let Some(ref pc) = inner.page_cache {
-            let lower = inner.write_back.then_some((&self.inode, path.as_str()));
+        let n = if let Some(ref pc) = page_cache {
+            let lower = write_back.then_some((&self.inode, path.as_str()));
             pc.read_at(offset, buf, lower)
         } else {
             self.inode.read_at(&path, offset, buf)
         }?;
-        drop(inner);
         if let Some(atime) = self.touch_atime_if_needed(&file_path, ty)? {
             self.inner.lock().atime_override = Some(atime);
         }
@@ -426,33 +461,44 @@ impl File {
     }
 
     pub fn write_at_offset(&self, offset: usize, buf: &[u8]) -> SysResult<usize> {
-        let mut inner = self.inner.lock();
-        let visible_path = inner.path.abs_path();
-        let path = self.storage_path(&visible_path);
-        let old_size = if let Some(ref pc) = inner.page_cache {
+        let (path, file_path, page_cache, write_back, flags, tmpfile) = {
+            let inner = self.inner.lock();
+            let visible_path = inner.path.abs_path();
+            (
+                self.storage_path(&visible_path),
+                inner.path.clone(),
+                inner.page_cache.clone(),
+                inner.write_back,
+                inner.flags,
+                inner.tmpfile_meta.is_some(),
+            )
+        };
+        let old_size = if let Some(ref pc) = page_cache {
             pc.len()
         } else {
             self.inode.stat(&path)?.size
         };
         if !buf.is_empty() {
             let requested_end = offset.checked_add(buf.len()).ok_or(Errno::EINVAL)?;
-            check_mount_file_growth(&inner.path, old_size, requested_end)?;
+            check_mount_file_growth(&file_path, old_size, requested_end)?;
         }
-        if let Some(pc) = inner.page_cache.clone() {
-            let lower = inner.write_back.then_some((&self.inode, path.as_str()));
+        if let Some(pc) = page_cache {
+            let lower = write_back.then_some((&self.inode, path.as_str()));
             let n = pc.write_at(offset, buf, lower)?;
             let end = offset.checked_add(n).ok_or(Errno::EINVAL)?;
             if end > pc.len() {
                 pc.resize(end);
             }
-            if inner.write_back && n != 0 {
-                let force = inner
-                    .flags
-                    .intersects(OpenFlags::O_DSYNC | OpenFlags::O_SYNC);
+            if write_back && n != 0 {
+                let force = flags.intersects(OpenFlags::O_DSYNC | OpenFlags::O_SYNC);
                 let now = Self::now_timespec();
-                Self::update_cached_write_times(&mut inner, now);
+                let mtime = {
+                    let mut inner = self.inner.lock();
+                    Self::update_cached_write_times(&mut inner, now);
+                    inner.mtime_override
+                };
                 if self.flush_page_cache_if_needed(&pc, &path, force)? {
-                    self.sync_cached_write_times(&inner, &path)?;
+                    self.sync_cached_write_time(tmpfile, mtime, &path)?;
                 }
             }
             Ok(n)
@@ -530,7 +576,9 @@ impl Drop for File {
     fn drop(&mut self) {
         let _ = <Self as FileOp>::fsync(self);
         if let Some(inode) = self.inode.as_any().downcast_ref::<Ext4Inode>() {
-            inode.cleanup_orphan();
+            if inode.close_file() {
+                inode.cleanup_orphan();
+            }
         }
     }
 }
@@ -602,7 +650,11 @@ impl FileOp for File {
                 let now = Self::now_timespec();
                 Self::update_cached_write_times(&mut inner, now);
                 if self.flush_page_cache_if_needed(&pc, &path, force)? {
-                    self.sync_cached_write_times(&inner, &path)?;
+                    self.sync_cached_write_time(
+                        inner.tmpfile_meta.is_some(),
+                        inner.mtime_override,
+                        &path,
+                    )?;
                 }
             }
             n
@@ -611,6 +663,14 @@ impl FileOp for File {
         };
         inner.offset += n;
         Ok(n)
+    }
+
+    fn read_at_offset(&self, offset: usize, buf: &mut [u8]) -> SysResult<usize> {
+        File::read_at_offset(self, offset, buf)
+    }
+
+    fn write_at_offset(&self, offset: usize, buf: &[u8]) -> SysResult<usize> {
+        File::write_at_offset(self, offset, buf)
     }
 
     fn seek(&self, offset: isize) -> SysResult<usize> {
@@ -638,6 +698,14 @@ impl FileOp for File {
 
     fn get_flags(&self) -> OpenFlags {
         self.inner.lock().flags
+    }
+
+    fn set_status_flags(&self, flags: OpenFlags) -> SysResult {
+        let status_flags = OpenFlags::O_APPEND | OpenFlags::O_NONBLOCK | OpenFlags::O_DIRECT;
+        let mut inner = self.inner.lock();
+        inner.flags.remove(status_flags);
+        inner.flags |= flags & status_flags;
+        Ok(())
     }
 
     fn get_stat(&self) -> SysResult<KStat> {
@@ -699,15 +767,25 @@ impl FileOp for File {
     }
 
     fn fsync(&self) -> SysResult<usize> {
-        let inner = self.inner.lock();
-        if let Some(ref pc) = inner.page_cache {
-            if inner.write_back {
-                let visible_path = inner.path.abs_path();
-                let path = self.storage_path(&visible_path);
+        let (superblock, page_cache, write_back, path, tmpfile, mtime) = {
+            let inner = self.inner.lock();
+            let visible_path = inner.path.abs_path();
+            (
+                inner.path.mnt.fs.clone(),
+                inner.page_cache.clone(),
+                inner.write_back,
+                self.storage_path(&visible_path),
+                inner.tmpfile_meta.is_some(),
+                inner.mtime_override,
+            )
+        };
+        if let Some(ref pc) = page_cache {
+            if write_back {
                 self.flush_page_cache_if_needed(pc, &path, true)?;
-                self.sync_cached_write_times(&inner, &path)?;
+                self.sync_cached_write_time(tmpfile, mtime, &path)?;
             }
         }
+        superblock.sync()?;
         Ok(0)
     }
 

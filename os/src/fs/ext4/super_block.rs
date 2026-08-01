@@ -31,18 +31,24 @@ impl Ext4SuperBlock {
         }
     }
 
-    pub fn shutdown(&self) {
-        let mut inner = self.inner.lock();
-        if inner.is_some() {
-            if let Ok(path) = CString::new("/") {
-                unsafe {
-                    bindings::ext4_cache_flush(path.as_ptr());
-                }
-            }
+    fn flush_cache(&self) -> SysResult {
+        let inner = self.inner.lock();
+        if inner.is_none() {
+            return Err(Errno::EIO);
         }
+        let path = CString::new("/").map_err(|_| Errno::EINVAL)?;
+        let rc = unsafe { bindings::ext4_cache_flush(path.as_ptr()) };
+        drop(inner);
+        if rc == 0 { Ok(()) } else { Err(Errno::EIO) }
+    }
+
+    pub fn shutdown(&self) -> SysResult {
+        self.flush_cache()?;
+        let mut inner = self.inner.lock();
         let wrapper = inner.take();
         drop(inner);
         drop(wrapper);
+        Ok(())
     }
 }
 
@@ -50,8 +56,8 @@ impl SuperBlockOp for Ext4SuperBlock {
     fn root_inode(&self) -> Arc<dyn InodeOp> {
         self.root.clone()
     }
-    fn sync(&self) {
-        todo!()
+    fn sync(&self) -> SysResult {
+        self.flush_cache()
     }
 
     fn statfs(&self) -> SysResult<Statfs64> {

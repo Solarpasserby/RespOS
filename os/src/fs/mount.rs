@@ -95,7 +95,9 @@ impl SuperBlockOp for FakeSuperBlock {
     fn root_inode(&self) -> Arc<dyn super::vfs::InodeOp> {
         unreachable!()
     }
-    fn sync(&self) {}
+    fn sync(&self) -> SysResult {
+        Ok(())
+    }
 }
 
 impl VfsMount {
@@ -230,23 +232,23 @@ pub fn root_path() -> Arc<Path> {
 }
 
 pub fn path_global_abs_path(path: &Path) -> alloc::string::String {
+    let dentry_path = path.dentry.current_abs_path();
     let Some(mount) = get_mount_by_vfsmount(&path.mnt) else {
-        return path.dentry.abs_path.clone();
+        return dentry_path;
     };
 
     let Some(parent) = mount.parent.as_ref().and_then(Weak::upgrade) else {
-        return path.dentry.abs_path.clone();
+        return dentry_path;
     };
 
     let mountpoint_path = Path::new(parent.vfs_mount.clone(), mount.mountpoint.clone());
     let prefix = path_global_abs_path(&mountpoint_path);
-    if Arc::ptr_eq(&path.dentry, &path.mnt.root) || path.dentry.abs_path == "/" {
+    if Arc::ptr_eq(&path.dentry, &path.mnt.root) || dentry_path == "/" {
         return prefix;
     }
-    if let Some(local) = path
-        .dentry
-        .abs_path
-        .strip_prefix(path.mnt.root.abs_path.as_str())
+    let root_path = path.mnt.root.current_abs_path();
+    if let Some(local) = dentry_path
+        .strip_prefix(root_path.as_str())
         .filter(|local| local.starts_with('/'))
     {
         if prefix == "/" {
@@ -255,9 +257,9 @@ pub fn path_global_abs_path(path: &Path) -> alloc::string::String {
         return alloc::format!("{}{}", prefix, local);
     }
     if prefix == "/" {
-        path.dentry.abs_path.clone()
+        dentry_path
     } else {
-        alloc::format!("{}{}", prefix, path.dentry.abs_path)
+        alloc::format!("{}{}", prefix, dentry_path)
     }
 }
 

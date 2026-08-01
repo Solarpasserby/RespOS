@@ -22,6 +22,31 @@ pub struct Dentry {
 }
 
 impl Dentry {
+    /// 当前后端路径。rename 保持 dentry identity，后代通过父链继承新前缀。
+    pub fn current_abs_path(&self) -> String {
+        let (alias, parent) = {
+            let inner = self.inner.lock();
+            (inner.alias_path.clone(), inner.parent.clone())
+        };
+        let Some(parent) = parent else {
+            return alias.unwrap_or_else(|| self.abs_path.clone());
+        };
+        let name_source = alias.as_deref().unwrap_or(self.abs_path.as_str());
+        let name = name_source.rsplit('/').next().unwrap_or("");
+        let parent_path = parent.current_abs_path();
+        if parent_path == "/" {
+            alloc::format!("/{}", name)
+        } else {
+            alloc::format!("{}/{}", parent_path, name)
+        }
+    }
+
+    pub fn relocate(&self, new_abs_path: String, parent: Arc<Dentry>) {
+        let mut inner = self.inner.lock();
+        inner.parent = Some(parent);
+        inner.alias_path = Some(new_abs_path);
+    }
+
     // 获取内部数据
     pub fn try_get_inode(&self) -> Option<Arc<dyn InodeOp>> {
         self.inner.lock().inode.clone()
@@ -74,7 +99,7 @@ impl Dentry {
 
     /// 是否为根目录项
     pub fn is_root(&self) -> bool {
-        self.abs_path == "/" && self.get_parent().is_none()
+        self.current_abs_path() == "/" && self.get_parent().is_none()
     }
 }
 
@@ -107,6 +132,7 @@ pub struct DentryInner {
     pub inode: Option<Arc<dyn InodeOp>>,
     pub parent: Option<Arc<Dentry>>,
     pub children: HashMap<String, Weak<Dentry>>,
+    alias_path: Option<String>,
 }
 
 impl DentryInner {
@@ -115,6 +141,7 @@ impl DentryInner {
             inode: Some(inode),
             parent: parent_dentry,
             children: HashMap::new(),
+            alias_path: None,
         }
     }
     // 负目录项
@@ -123,6 +150,7 @@ impl DentryInner {
             inode: None,
             parent: parent_dentry,
             children: HashMap::new(),
+            alias_path: None,
         }
     }
 }

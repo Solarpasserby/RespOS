@@ -6,7 +6,7 @@ use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::any::Any;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use hashbrown::HashMap;
 use lazy_static::lazy_static;
 use lwext4_rust::{Ext4File, InodeTypes as Ext4InodeTypes, bindings};
@@ -36,6 +36,8 @@ pub struct Ext4Inode {
     owner_override: Mutex<Option<(u32, u32)>>,
     nlink_override: Mutex<Option<u32>>,
     orphan_path: Mutex<Option<String>>,
+    renamed_path: Mutex<Option<String>>,
+    open_files: AtomicUsize,
     /// 共享页缓存，挂载在 inode 上，同一 inode 的所有 File 共享
     page_cache: Arc<PageCache>,
     xattrs: Mutex<HashMap<String, Vec<u8>>>,
@@ -61,6 +63,8 @@ impl Ext4Inode {
             owner_override: Mutex::new(None),
             nlink_override: Mutex::new(None),
             orphan_path: Mutex::new(None),
+            renamed_path: Mutex::new(None),
+            open_files: AtomicUsize::new(0),
             page_cache: PageCache::new(0),
             xattrs: Mutex::new(HashMap::new()),
         }
@@ -193,7 +197,26 @@ impl Ext4Inode {
         self.orphan_path
             .lock()
             .clone()
+            .or_else(|| self.renamed_path.lock().clone())
             .unwrap_or_else(|| String::from(path))
+    }
+
+    /// 记录 inode 当前可用的后端名字，使 rename 前已经打开的 File 不再访问旧路径。
+    pub fn set_renamed_path(&self, path: &str) {
+        *self.renamed_path.lock() = Some(String::from(path));
+    }
+
+    pub fn open_file(&self) {
+        self.open_files.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn has_open_files(&self) -> bool {
+        self.open_files.load(Ordering::Acquire) != 0
+    }
+
+    /// 返回关闭后是否已没有 File 对象引用该 inode。
+    pub fn close_file(&self) -> bool {
+        self.open_files.fetch_sub(1, Ordering::AcqRel) == 1
     }
 
     pub fn cleanup_orphan(&self) {
@@ -204,10 +227,18 @@ impl Ext4Inode {
 
     pub fn orphan_regular_file(&self, old_path: &str) -> SysResult {
         let orphan_path = alloc::format!("{}.respos_orphan_{}", old_path, self.ino);
-        let _ = Self::file_remove(&orphan_path, InodeType::Regular);
         Self::file_rename(old_path, &orphan_path)?;
         *self.orphan_path.lock() = Some(orphan_path);
         *self.nlink_override.lock() = Some(0);
+        Ok(())
+    }
+
+    /// rename 覆盖目标后端失败时，把暂存的目标恢复到原名字。
+    pub fn restore_orphan(&self, original_path: &str) -> SysResult {
+        let orphan_path = self.orphan_path.lock().clone().ok_or(Errno::EINVAL)?;
+        Self::file_rename(&orphan_path, original_path)?;
+        *self.orphan_path.lock() = None;
+        *self.nlink_override.lock() = None;
         Ok(())
     }
 
@@ -882,9 +913,10 @@ impl InodeOp for Ext4Inode {
         // 调用者保证参数合法
         // self.check_type(InodeType::Directory)?;
 
-        info!("[kernel] unlink: {}", valid_dentry.abs_path);
+        let current_path = valid_dentry.current_abs_path();
+        info!("[kernel] unlink: {}", current_path);
 
-        let child_abs_path = &valid_dentry.abs_path;
+        let child_abs_path = &current_path;
         let child_inode = valid_dentry.try_get_inode().ok_or(Errno::ENOENT)?;
         if child_inode.node_type() == InodeType::Directory {
             let entries = child_inode.readdir(child_abs_path)?;
@@ -897,7 +929,7 @@ impl InodeOp for Ext4Inode {
             let _guard = EXT4_OP_LOCK.lock();
             let file = &mut Ext4File::new(child_abs_path, self.ty.clone());
             file.dir_rm(child_abs_path).map_err(Self::map_lwext4_err)?;
-            if valid_dentry.abs_path.contains("/emlink_dir/testdir") {
+            if current_path.contains("/emlink_dir/testdir") {
                 self.drop_cached_dir_nlink();
             }
         } else {

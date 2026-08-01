@@ -35,7 +35,7 @@ impl Path {
 
     /// 当前路径在所属文件系统中的绝对路径
     pub fn abs_path(&self) -> String {
-        self.dentry.abs_path.clone()
+        self.dentry.current_abs_path()
     }
 
     pub fn global_abs_path(&self) -> String {

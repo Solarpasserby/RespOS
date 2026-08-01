@@ -13,7 +13,7 @@ const F_SEAL_WRITE: usize = 0x0008;
 const F_SEAL_MASK: usize = F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE;
 
 pub struct SpecialFd {
-    flags: OpenFlags,
+    flags: Mutex<OpenFlags>,
     ty: InodeType,
     mode: u32,
     offset: Mutex<usize>,
@@ -25,7 +25,7 @@ pub struct SpecialFd {
 impl SpecialFd {
     pub fn new(flags: OpenFlags, ty: InodeType) -> Self {
         Self {
-            flags,
+            flags: Mutex::new(flags),
             ty,
             mode: match ty {
                 InodeType::Regular => 0o600,
@@ -40,7 +40,7 @@ impl SpecialFd {
 
     pub fn new_memfd(flags: OpenFlags, allow_sealing: bool) -> Self {
         Self {
-            flags,
+            flags: Mutex::new(flags),
             ty: InodeType::Regular,
             mode: 0o600,
             offset: Mutex::new(0),
@@ -52,7 +52,7 @@ impl SpecialFd {
 
     pub fn reopen(&self, flags: OpenFlags) -> Option<Self> {
         Some(Self {
-            flags,
+            flags: Mutex::new(flags),
             ty: self.ty,
             mode: self.mode,
             offset: Mutex::new(0),
@@ -112,6 +112,9 @@ impl FileOp for SpecialFd {
         }
         let mut data = self.data.as_ref().ok_or(Errno::EINVAL)?.lock();
         let mut offset = self.offset.lock();
+        if self.flags.lock().contains(OpenFlags::O_APPEND) {
+            *offset = data.len();
+        }
         let end = offset.checked_add(buf.len()).ok_or(Errno::EINVAL)?;
         if end > data.len() {
             if self.seals() & F_SEAL_GROW != 0 {
@@ -121,6 +124,32 @@ impl FileOp for SpecialFd {
         }
         data[*offset..end].copy_from_slice(buf);
         *offset = end;
+        Ok(buf.len())
+    }
+
+    fn read_at_offset(&self, offset: usize, buf: &mut [u8]) -> SysResult<usize> {
+        let data = self.data.as_ref().ok_or(Errno::ESPIPE)?.lock();
+        if offset >= data.len() {
+            return Ok(0);
+        }
+        let n = buf.len().min(data.len() - offset);
+        buf[..n].copy_from_slice(&data[offset..offset + n]);
+        Ok(n)
+    }
+
+    fn write_at_offset(&self, offset: usize, buf: &[u8]) -> SysResult<usize> {
+        if self.seals() & F_SEAL_WRITE != 0 {
+            return Err(Errno::EPERM);
+        }
+        let mut data = self.data.as_ref().ok_or(Errno::ESPIPE)?.lock();
+        let end = offset.checked_add(buf.len()).ok_or(Errno::EINVAL)?;
+        if end > data.len() {
+            if self.seals() & F_SEAL_GROW != 0 {
+                return Err(Errno::EPERM);
+            }
+            data.resize(end, 0);
+        }
+        data[offset..end].copy_from_slice(buf);
         Ok(buf.len())
     }
 
@@ -144,7 +173,15 @@ impl FileOp for SpecialFd {
     }
 
     fn get_flags(&self) -> OpenFlags {
-        self.flags
+        *self.flags.lock()
+    }
+
+    fn set_status_flags(&self, flags: OpenFlags) -> SysResult {
+        let status_flags = OpenFlags::O_APPEND | OpenFlags::O_NONBLOCK | OpenFlags::O_DIRECT;
+        let mut current = self.flags.lock();
+        current.remove(status_flags);
+        *current |= flags & status_flags;
+        Ok(())
     }
 
     fn get_stat(&self) -> SysResult<KStat> {
@@ -162,13 +199,14 @@ impl FileOp for SpecialFd {
     }
 
     fn readable(&self) -> bool {
-        self.data.is_some() && !self.flags.contains(OpenFlags::O_WRONLY)
+        self.data.is_some() && !self.flags.lock().contains(OpenFlags::O_WRONLY)
     }
 
     fn writable(&self) -> bool {
         self.data.is_some()
             && self
                 .flags
+                .lock()
                 .intersects(OpenFlags::O_WRONLY | OpenFlags::O_RDWR)
     }
 

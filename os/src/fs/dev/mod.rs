@@ -308,7 +308,9 @@ impl SuperBlockOp for DevSuperBlock {
         Arc::new(DevDirInode)
     }
 
-    fn sync(&self) {}
+    fn sync(&self) -> SysResult {
+        Ok(())
+    }
 
     fn statfs(&self) -> SysResult<Statfs64> {
         Ok(Statfs64 {

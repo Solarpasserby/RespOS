@@ -33,7 +33,7 @@ pub fn insert_dentry_cache(dentry: Arc<Dentry>) {
             cache.remove(&key);
         }
     }
-    cache.insert(dentry.abs_path.clone(), dentry);
+    cache.insert(dentry.current_abs_path(), dentry);
 }
 
 /// 将 dentry 加入固有锚点列表，使其永不被淘汰

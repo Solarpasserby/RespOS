@@ -202,7 +202,7 @@ pub fn sys_personality(persona: usize) -> SysResult<usize> {
 }
 
 pub fn sys_reboot() -> SysResult<usize> {
-    ext4::shutdown();
+    ext4::shutdown()?;
     sbi::shutdown(false);
 }
 

@@ -27,6 +27,6 @@ pub fn super_block() -> Arc<dyn SuperBlockOp> {
     SUPER_BLOCK.clone()
 }
 
-pub fn shutdown() {
-    SUPER_BLOCK.shutdown();
+pub fn shutdown() -> crate::syscall::SysResult {
+    SUPER_BLOCK.shutdown()
 }

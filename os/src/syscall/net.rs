@@ -151,7 +151,7 @@ impl SockAddrIn6 {
 fn socket_from_fd(fd: usize) -> SysResult<Arc<dyn FileOp>> {
     let task = current_task().ok_or(Errno::ESRCH)?;
     let fd_entry = task.get_fd_entry(fd)?;
-    if fd_entry.flags.contains(OpenFlags::O_PATH) {
+    if fd_entry.file.get_flags().contains(OpenFlags::O_PATH) {
         return Err(Errno::EBADF);
     }
     let file = fd_entry.file;

@@ -17,7 +17,6 @@ use crate::mm::{
     copy_from_user, copy_to_user,
 };
 use crate::mutex::SpinLock;
-use crate::net::socket::Socket;
 use crate::signal::sig_struct::{Sig, SigSet};
 use crate::signal::{SiField, SigInfo};
 use crate::task::{
@@ -380,14 +379,14 @@ pub fn sys_read(fd: usize, buf: *mut u8, len: usize) -> SysResult<usize> {
     if !file.readable() {
         return Err(Errno::EBADF);
     }
-    if fd_entry.get_flags().contains(OpenFlags::O_NONBLOCK) && !file.read_ready() {
+    if file.get_flags().contains(OpenFlags::O_NONBLOCK) && !file.read_ready() {
         return Err(Errno::EAGAIN);
     }
 
     let mut kbuf = alloc::vec![0u8; len.min(IO_CHUNK_SIZE)];
     let mut total = 0usize;
     while total < len {
-        if fd_entry.get_flags().contains(OpenFlags::O_NONBLOCK) && !file.read_ready() {
+        if file.get_flags().contains(OpenFlags::O_NONBLOCK) && !file.read_ready() {
             if total == 0 {
                 return Err(Errno::EAGAIN);
             }
@@ -422,34 +421,37 @@ pub fn sys_pread64(fd: usize, buf: *mut u8, len: usize, offset: isize) -> SysRes
         return Err(Errno::EBADF);
     }
     file.can_seek()?;
-    let old_offset = file.get_offset();
-    file.seek(offset)?;
     let mut kbuf = alloc::vec![0u8; len.min(IO_CHUNK_SIZE)];
     let mut total = 0usize;
-    let mut ret = Ok(0usize);
+    let mut positioned_offset = offset as usize;
     while total < len {
         let chunk_len = (len - total).min(kbuf.len());
-        ret = file.read(&mut kbuf[..chunk_len]);
-        let read_len = match ret {
+        let read_len = match file.read_at_offset(positioned_offset, &mut kbuf[..chunk_len]) {
             Ok(read_len) => read_len,
-            Err(_) => break,
+            Err(err) => return if total == 0 { Err(err) } else { Ok(total) },
         };
         if read_len == 0 {
             break;
         }
-        copy_to_user(unsafe { buf.add(total) }, kbuf.as_ptr(), read_len)?;
+        if let Err(err) = copy_to_user(unsafe { buf.add(total) }, kbuf.as_ptr(), read_len) {
+            return if total == 0 { Err(err) } else { Ok(total) };
+        }
         total += read_len;
+        positioned_offset = match positioned_offset.checked_add(read_len) {
+            Some(offset) => offset,
+            None => {
+                return if total == 0 {
+                    Err(Errno::EINVAL)
+                } else {
+                    Ok(total)
+                };
+            }
+        };
         if read_len < chunk_len {
             break;
         }
     }
-    let restore_ret = file.seek(old_offset as isize);
-
-    match (ret, restore_ret) {
-        (Ok(_), Ok(_)) => Ok(total),
-        (Err(err), _) => Err(err),
-        (_, Err(err)) => Err(err),
-    }
+    Ok(total)
 }
 
 pub fn sys_pwrite64(fd: usize, buf: *mut u8, len: usize, offset: isize) -> SysResult<usize> {
@@ -466,55 +468,49 @@ pub fn sys_pwrite64(fd: usize, buf: *mut u8, len: usize, offset: isize) -> SysRe
     if !file.writable() {
         return Err(Errno::EBADF);
     }
-    if fd_entry.get_flags().contains(OpenFlags::O_NONBLOCK) && !file.write_ready() {
+    if file.get_flags().contains(OpenFlags::O_NONBLOCK) && !file.write_ready() {
         return Err(Errno::EAGAIN);
     }
     file.can_seek()?;
 
-    let old_offset = file.get_offset();
-    file.seek(offset)?;
-
     let mut kbuf = alloc::vec![0u8; len.min(IO_CHUNK_SIZE)];
     let mut total = 0usize;
-    let mut ret = Ok(0usize);
+    let mut positioned_offset = offset as usize;
     while total < len {
         let requested = (len - total).min(kbuf.len());
         let chunk_len = match limit_regular_file_write(
             &file,
             OpenFlags::empty(),
-            Some(offset as usize + total),
+            Some(positioned_offset),
             requested,
         ) {
             Ok(0) => break,
             Ok(chunk_len) => chunk_len,
-            Err(err) => {
-                ret = Err(err);
-                break;
-            }
+            Err(err) => return if total == 0 { Err(err) } else { Ok(total) },
         };
         if let Err(err) = copy_from_user(kbuf.as_mut_ptr(), unsafe { buf.add(total) }, chunk_len) {
-            ret = Err(err);
-            break;
+            return if total == 0 { Err(err) } else { Ok(total) };
         }
-        ret = file.write(&kbuf[..chunk_len]);
-        let written = match ret {
+        let written = match file.write_at_offset(positioned_offset, &kbuf[..chunk_len]) {
             Ok(written) => written,
-            Err(_) => break,
+            Err(err) => return if total == 0 { Err(err) } else { Ok(total) },
         };
         total += written;
+        positioned_offset = match positioned_offset.checked_add(written) {
+            Some(offset) => offset,
+            None => {
+                return if total == 0 {
+                    Err(Errno::EINVAL)
+                } else {
+                    Ok(total)
+                };
+            }
+        };
         if written < chunk_len {
             break;
         }
     }
-
-    let restore_ret = file.seek(old_offset as isize);
-    match (ret, restore_ret) {
-        (Ok(_), Ok(_)) => Ok(total),
-        (Err(err), _) if total == 0 => Err(err),
-        (Err(_), _) => Ok(total),
-        (_, Err(err)) if total == 0 => Err(err),
-        (_, Err(_)) => Ok(total),
-    }
+    Ok(total)
 }
 
 fn copy_file_data(
@@ -688,15 +684,14 @@ pub fn sys_write(fd: usize, buf: *mut u8, len: usize) -> SysResult<usize> {
     let mut kbuf = alloc::vec![0u8; len.min(IO_CHUNK_SIZE)];
     let mut total = 0usize;
     while total < len {
-        if fd_entry.get_flags().contains(OpenFlags::O_NONBLOCK) && !file.write_ready() {
+        if file.get_flags().contains(OpenFlags::O_NONBLOCK) && !file.write_ready() {
             if total == 0 {
                 return Err(Errno::EAGAIN);
             }
             break;
         }
         let requested = (len - total).min(kbuf.len());
-        let chunk_len = match limit_regular_file_write(&file, fd_entry.get_flags(), None, requested)
-        {
+        let chunk_len = match limit_regular_file_write(&file, file.get_flags(), None, requested) {
             Ok(0) => break,
             Ok(chunk_len) => chunk_len,
             Err(err) if total == 0 => return Err(err),
@@ -856,6 +851,8 @@ fn splice_copy(
     output: &alloc::sync::Arc<dyn FileOp>,
     len: usize,
     flags: usize,
+    mut input_offset: Option<&mut usize>,
+    mut output_offset: Option<&mut usize>,
 ) -> SysResult<usize> {
     if len == 0 {
         return Ok(0);
@@ -877,19 +874,53 @@ fn splice_copy(
             let writable = out_pipe.writable_bytes();
             chunk_len = chunk_len.min(if writable == 0 { 1 } else { writable });
         }
-        let read_len = match input.read(&mut kbuf[..chunk_len]) {
+        let read_result = if let Some(offset) = input_offset.as_deref_mut() {
+            input.read_at_offset(*offset, &mut kbuf[..chunk_len])
+        } else {
+            input.read(&mut kbuf[..chunk_len])
+        };
+        let read_len = match read_result {
             Ok(0) => break,
             Ok(read_len) => read_len,
             Err(err) => return if total > 0 { Ok(total) } else { Err(err) },
         };
+        if let Some(offset) = input_offset.as_deref_mut() {
+            *offset = match offset.checked_add(read_len) {
+                Some(offset) => offset,
+                None => {
+                    return if total > 0 {
+                        Ok(total)
+                    } else {
+                        Err(Errno::EINVAL)
+                    };
+                }
+            };
+        }
         let mut written_total = 0usize;
         while written_total < read_len {
-            let written = match output.write(&kbuf[written_total..read_len]) {
+            let write_result = if let Some(offset) = output_offset.as_deref_mut() {
+                output.write_at_offset(*offset, &kbuf[written_total..read_len])
+            } else {
+                output.write(&kbuf[written_total..read_len])
+            };
+            let written = match write_result {
                 Ok(0) => break,
                 Ok(written) => written,
                 Err(err) => return if total > 0 { Ok(total) } else { Err(err) },
             };
             written_total += written;
+            if let Some(offset) = output_offset.as_deref_mut() {
+                *offset = match offset.checked_add(written) {
+                    Some(offset) => offset,
+                    None => {
+                        return if total > 0 {
+                            Ok(total)
+                        } else {
+                            Err(Errno::EINVAL)
+                        };
+                    }
+                };
+            }
         }
         total += written_total;
         if written_total < read_len || read_len < chunk_len {
@@ -919,8 +950,8 @@ pub fn sys_splice(
     let in_is_pipe = is_pipe(&input);
     let out_is_pipe = is_pipe(&output);
 
-    if in_entry.get_flags().contains(OpenFlags::O_PATH)
-        || out_entry.get_flags().contains(OpenFlags::O_PATH)
+    if input.get_flags().contains(OpenFlags::O_PATH)
+        || output.get_flags().contains(OpenFlags::O_PATH)
     {
         return Err(Errno::EBADF);
     }
@@ -936,7 +967,7 @@ pub fn sys_splice(
     if out_is_pipe && !off_out.is_null() {
         return Err(Errno::ESPIPE);
     }
-    if !input.readable() || in_entry.get_flags().contains(OpenFlags::O_WRONLY) {
+    if !input.readable() || input.get_flags().contains(OpenFlags::O_WRONLY) {
         return Err(Errno::EBADF);
     }
     if !in_is_pipe && input.get_stat()?.ty == InodeType::Directory {
@@ -945,39 +976,40 @@ pub fn sys_splice(
     if !output.writable() {
         return Err(Errno::EBADF);
     }
-    if out_entry.get_flags().contains(OpenFlags::O_APPEND) {
+    if output.get_flags().contains(OpenFlags::O_APPEND) {
         return Err(Errno::EINVAL);
     }
 
-    let old_in_offset = input.get_offset();
-    let old_out_offset = output.get_offset();
-    let explicit_in_offset = read_user_offset(off_in)?;
-    let explicit_out_offset = read_user_offset(off_out)?;
-
-    if let Some(offset) = explicit_in_offset {
-        input.can_seek()?;
-        input.seek(offset as isize)?;
+    if !off_in.is_null() {
+        check_user_writable(off_in.cast::<u8>(), core::mem::size_of::<i64>())?;
     }
-    if let Some(offset) = explicit_out_offset {
-        output.can_seek()?;
-        output.seek(offset as isize)?;
+    if !off_out.is_null() {
+        check_user_writable(off_out.cast::<u8>(), core::mem::size_of::<i64>())?;
     }
-
-    let ret = splice_copy(&input, &output, len, flags);
-    let new_in_offset = input.get_offset();
-    let new_out_offset = output.get_offset();
+    let mut explicit_in_offset = read_user_offset(off_in)?;
+    let mut explicit_out_offset = read_user_offset(off_out)?;
 
     if explicit_in_offset.is_some() {
-        let _ = input.seek(old_in_offset as isize);
-        if ret.is_ok() {
-            write_user_offset(off_in, new_in_offset)?;
-        }
+        input.can_seek()?;
     }
     if explicit_out_offset.is_some() {
-        let _ = output.seek(old_out_offset as isize);
-        if ret.is_ok() {
-            write_user_offset(off_out, new_out_offset)?;
-        }
+        output.can_seek()?;
+    }
+
+    let ret = splice_copy(
+        &input,
+        &output,
+        len,
+        flags,
+        explicit_in_offset.as_mut(),
+        explicit_out_offset.as_mut(),
+    );
+
+    if let (Ok(_), Some(offset)) = (&ret, explicit_in_offset) {
+        write_user_offset(off_in, offset)?;
+    }
+    if let (Ok(_), Some(offset)) = (&ret, explicit_out_offset) {
+        write_user_offset(off_out, offset)?;
     }
 
     ret
@@ -1108,6 +1140,7 @@ pub fn sys_vmsplice(fd: usize, iov: *const IoVec, iovcnt: usize, flags: usize) -
 
 /// 系统调用 sys-open
 pub fn sys_openat(dirfd: isize, path: *const u8, flags: usize, mode: usize) -> SysResult<usize> {
+    validate_open_flags(flags)?;
     let task = current_task().expect("[kernel] current task is None.");
     let path = copy_cstr_from_user(path)?;
     let open_flags = OpenFlags::from(flags);
@@ -1138,6 +1171,20 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: usize, mode: usize) -> S
     };
     let fd = task.alloc_fd(FdEntry::new(file, open_flags))?;
     Ok(fd)
+}
+
+fn validate_open_flags(flags: usize) -> SysResult {
+    const O_ACCMODE: usize = 0o3;
+    const O_LARGEFILE: usize = 0o100000;
+    const O_DIRECT: usize = 0o40000;
+    let known = OpenFlags::all().bits() as usize | O_LARGEFILE;
+    if flags & !known != 0 || flags & O_ACCMODE == O_ACCMODE {
+        return Err(Errno::EINVAL);
+    }
+    if flags & O_DIRECT != 0 {
+        return Err(Errno::EOPNOTSUPP);
+    }
+    Ok(())
 }
 
 #[repr(C)]
@@ -1192,6 +1239,8 @@ pub fn sys_openat2(
     if khow.resolve & !RESOLVE_ALLOWED != 0 || khow.mode & !0o7777 != 0 {
         return Err(Errno::EINVAL);
     }
+    let how_flags = usize::try_from(khow.flags).map_err(|_| Errno::EINVAL)?;
+    validate_open_flags(how_flags)?;
     let has_create_mode = khow.flags & (O_CREAT | O_TMPFILE) != 0;
     if !has_create_mode && khow.mode != 0 {
         return Err(Errno::EINVAL);
@@ -2107,10 +2156,10 @@ pub fn sys_fallocate(fd: usize, mode: usize, offset: isize, len: isize) -> SysRe
     if mode & FALLOC_FL_PUNCH_HOLE != 0 {
         return file.punch_hole(offset as usize, len as usize);
     }
-    if mode & FALLOC_FL_KEEP_SIZE == 0 && file.get_stat()?.size < end {
-        file.truncate(end)?;
-    }
-    Ok(0)
+    let _ = end;
+    // truncate 只能改变逻辑长度，不能兑现 fallocate 的空间预留承诺。
+    // KEEP_SIZE 更不能作为无操作返回成功。
+    Err(Errno::EOPNOTSUPP)
 }
 
 /// 系统调用 sys-faccessat
@@ -2324,14 +2373,13 @@ pub fn sys_sync_file_range(
     let task = current_task().expect("[kernel] current task is None.");
     let file = task.get_fd_entry(fd as usize)?.file;
     file.can_seek()?;
-    if flags == 0 || nbytes == 0 {
+    if flags == 0 {
         return Ok(0);
     }
-    if flags & SYNC_FILE_RANGE_WRITE != 0 {
-        file.fsync()
-    } else {
-        Ok(0)
-    }
+    // 当前没有范围级 writeback/wait 队列。整文件同步比请求范围更强，
+    // 但保证 WAIT_BEFORE/WAIT_AFTER 不会在未等待任何 I/O 时假成功。
+    let _ = (offset, nbytes);
+    file.fsync()
 }
 
 #[repr(C)]
@@ -2367,7 +2415,6 @@ struct RtcTime {
 /// 需要下沉到具体 FileOp/设备驱动中实现，不能长期放在 syscall 层硬编码。
 pub fn sys_ioctl(fd: usize, request: usize, arg: usize) -> SysResult<usize> {
     const TIOCGWINSZ: usize = 0x5413;
-    const TIOCNOTTY: usize = 0x5422;
     const FIONREAD: usize = 0x541b;
     const RTC_RD_TIME: usize = 0x8024_7009;
 
@@ -2385,7 +2432,6 @@ pub fn sys_ioctl(fd: usize, request: usize, arg: usize) -> SysResult<usize> {
             copy_to_user(arg as *mut WinSize, &winsize as *const WinSize, 1)?;
             Ok(0)
         }
-        TIOCNOTTY if fd_entry.file.is_tty() => Ok(0),
         FIONREAD => {
             if let Some(pipe) = fd_entry.file.as_any().downcast_ref::<Pipe>() {
                 let nbytes = pipe.available_bytes() as i32;
@@ -2395,7 +2441,7 @@ pub fn sys_ioctl(fd: usize, request: usize, arg: usize) -> SysResult<usize> {
                 Err(Errno::ENOTTY)
             }
         }
-        request if is_rtc_file(&fd_entry.file) && request & 0xffff == RTC_RD_TIME & 0xffff => {
+        RTC_RD_TIME if is_rtc_file(&fd_entry.file) => {
             let rtc_time = rtc_time_from_unix(get_time_ms() / 1000);
             copy_to_user(arg as *mut RtcTime, &rtc_time as *const RtcTime, 1)?;
             Ok(0)
@@ -2537,18 +2583,19 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SysResult<usize> {
             task.set_fd(fd, entry)?;
             Ok(0)
         }
-        F_GETFL => Ok(fd_entry.get_flags().bits() as usize),
+        F_GETFL => {
+            let mut flags = fd_entry.file.get_flags();
+            flags.remove(OpenFlags::O_CLOEXEC);
+            Ok(flags.bits() as usize)
+        }
         F_SETFL => {
-            let mut entry = fd_entry;
-            let mut flags = entry.get_flags();
-            let status_flags = OpenFlags::O_APPEND | OpenFlags::O_NONBLOCK | OpenFlags::O_DIRECT;
-            flags.remove(status_flags);
-            flags |= OpenFlags::from(arg) & status_flags;
-            entry.set_flags(flags);
-            if let Some(socket) = entry.file.as_any().downcast_ref::<Socket>() {
-                socket.set_nonblocking(flags.contains(OpenFlags::O_NONBLOCK));
+            const O_ASYNC: usize = 0o20000;
+            if arg & (OpenFlags::O_DIRECT.bits() as usize | O_ASYNC) != 0 {
+                return Err(Errno::EOPNOTSUPP);
             }
-            task.set_fd(fd, entry)?;
+            let status_flags = OpenFlags::O_APPEND | OpenFlags::O_NONBLOCK | OpenFlags::O_DIRECT;
+            let flags = OpenFlags::from(arg) & status_flags;
+            fd_entry.file.set_status_flags(flags)?;
             Ok(0)
         }
         F_GETPIPE_SZ => {
@@ -2751,7 +2798,13 @@ pub fn sys_renameat2(
 
     let oldpath = copy_cstr_from_user(oldpath)?;
     let newpath = copy_cstr_from_user(newpath)?;
-    filename_rename(olddirfd, oldpath.as_str(), newdirfd, newpath.as_str())?;
+    filename_rename(
+        olddirfd,
+        oldpath.as_str(),
+        newdirfd,
+        newpath.as_str(),
+        flags & RENAME_NOREPLACE != 0,
+    )?;
     Ok(0)
 }
 
@@ -2858,6 +2911,8 @@ pub fn sys_pipe2(pipefd: *mut [i32; 2], flags: usize) -> SysResult<usize> {
     let (pipe_read, pipe_write) = make_pipe();
     let mut fds = [0usize; 2];
     let pipe_flags = OpenFlags::from(flags);
+    pipe_read.set_status_flags(pipe_flags)?;
+    pipe_write.set_status_flags(pipe_flags)?;
 
     fds[0] = match task.alloc_fd(FdEntry::new(pipe_read, OpenFlags::O_RDONLY | pipe_flags)) {
         Ok(fd) => fd,
@@ -3462,8 +3517,7 @@ pub fn sys_pselect6(
     result
 }
 
-/// 系统调用 sys-fsync — 将文件缓冲数据刷入存储介质。
-/// 当前文件系统实现在内存中，直接返回成功。
+/// 系统调用 sys-fsync — 写回文件页缓存并刷新对应文件系统的后端缓存。
 pub fn sys_fsync(fd: usize) -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
     let file = task.get_fd_entry(fd)?.file;
@@ -3478,9 +3532,8 @@ pub fn sys_fdatasync(fd: usize) -> SysResult<usize> {
 /// 系统调用 sys-msync — 同步 mmap 映射区域与文件。
 ///
 /// 支持的 flags：
-/// - MS_ASYNC (1)：异步写回。当前无操作。
-/// - MS_INVALIDATE (2)：当前无页缓存失效实现，仅做参数与地址校验。
-/// - MS_SYNC (4)：同步写回。当前无操作。
+/// 当前 C 侧没有在不持有 MemorySet 锁的情况下枚举并写回 file-backed VMA 的接口。
+/// 对非空范围显式返回 EOPNOTSUPP，避免仅校验映射后假成功。
 ///
 /// MS_ASYNC 和 MS_SYNC 互斥。
 pub fn sys_msync(addr: usize, len: usize, flags: i32) -> SysResult<usize> {
@@ -3510,7 +3563,7 @@ pub fn sys_msync(addr: usize, len: usize, flags: i32) -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
     task.op_memory_set_read(|memory_set| memory_set.check_user_mapped_range(vpn_range))?;
 
-    Ok(0)
+    Err(Errno::EOPNOTSUPP)
 }
 
 /// 系统调用 preadv — 从指定文件偏移处读取数据，分散写入多个用户缓冲区。
@@ -3538,30 +3591,44 @@ pub fn sys_preadv(
     }
     file.can_seek()?;
 
-    let old_offset = file.get_offset(); // 保存原偏移
-    file.seek(offset)?; // 定位到写入起点
-
     let mut total: usize = 0;
+    let mut positioned_offset = offset as usize;
     for item in items {
         if item.len == 0 {
             continue;
         }
-        // 复用 sys_read 完成单段读取（内部走 file.read()，偏移自动推进）
-        match sys_read(fd, item.base, item.len) {
+        let call_offset = match isize::try_from(positioned_offset) {
+            Ok(offset) => offset,
+            Err(_) => {
+                return if total > 0 {
+                    Ok(total)
+                } else {
+                    Err(Errno::EINVAL)
+                };
+            }
+        };
+        match sys_pread64(fd, item.base, item.len, call_offset) {
             Ok(read) => {
                 total = total.checked_add(read).ok_or(Errno::EINVAL)?;
+                positioned_offset = match positioned_offset.checked_add(read) {
+                    Some(offset) => offset,
+                    None => {
+                        return if total > 0 {
+                            Ok(total)
+                        } else {
+                            Err(Errno::EINVAL)
+                        };
+                    }
+                };
                 if read < item.len {
-                    break; // 短读：文件已读完，不再续读后续 iov
+                    break;
                 }
             }
             Err(err) => {
-                let _ = file.seek(old_offset as isize);
                 return if total > 0 { Ok(total) } else { Err(err) };
             }
         }
     }
-
-    let _ = file.seek(old_offset as isize); // 恢复原偏移
     Ok(total)
 }
 
@@ -3593,30 +3660,44 @@ pub fn sys_pwritev(
         return Err(Errno::EBADF);
     }
 
-    let old_offset = file.get_offset(); // 保存原偏移
-    file.seek(offset)?; // 定位到写入起点
-
     let mut total: usize = 0;
+    let mut positioned_offset = offset as usize;
     for item in items {
         if item.len == 0 {
             continue;
         }
-        // 复用 sys_write 完成单段写入（内部走 file.write()，偏移自动推进）
-        match sys_write(fd, item.base, item.len) {
+        let call_offset = match isize::try_from(positioned_offset) {
+            Ok(offset) => offset,
+            Err(_) => {
+                return if total > 0 {
+                    Ok(total)
+                } else {
+                    Err(Errno::EINVAL)
+                };
+            }
+        };
+        match sys_pwrite64(fd, item.base, item.len, call_offset) {
             Ok(written) => {
                 total = total.checked_add(written).ok_or(Errno::EINVAL)?;
+                positioned_offset = match positioned_offset.checked_add(written) {
+                    Some(offset) => offset,
+                    None => {
+                        return if total > 0 {
+                            Ok(total)
+                        } else {
+                            Err(Errno::EINVAL)
+                        };
+                    }
+                };
                 if written < item.len {
-                    break; // 短写：文件空间不足，不再续写后续 iov
+                    break;
                 }
             }
             Err(err) => {
-                let _ = file.seek(old_offset as isize);
                 return if total > 0 { Ok(total) } else { Err(err) };
             }
         }
     }
-
-    let _ = file.seek(old_offset as isize); // 恢复原偏移
     Ok(total)
 }
 
