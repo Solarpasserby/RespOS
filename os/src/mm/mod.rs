@@ -226,6 +226,44 @@ pub fn check_user_readable<T>(src: *const T, len: usize) -> SysResult {
     check_user_buffer(src as usize, byte_len, MapPermission::READ)
 }
 
+/// Read one aligned futex word without resolving a lazy page.
+///
+/// The caller must first use [`check_user_readable`] outside any global
+/// spin lock. This second read only takes the address-space read lock and
+/// translates an already-present PTE, so it cannot allocate or handle a page
+/// fault while the futex queue lock is held.
+pub fn read_user_u32_nofault(src: *const u32) -> SysResult<u32> {
+    let addr = src as usize;
+    if src.is_null() {
+        return Err(Errno::EFAULT);
+    }
+    if !addr.is_multiple_of(core::mem::align_of::<u32>()) {
+        return Err(Errno::EINVAL);
+    }
+
+    let va = VirtAddr::from(addr);
+    let vpn = va.floor();
+    let page_offset = va.page_offset();
+    if page_offset > PAGE_SIZE - core::mem::size_of::<u32>() {
+        return Err(Errno::EFAULT);
+    }
+    let task = current_task().ok_or(Errno::ESRCH)?;
+    task.op_memory_set_read(|memory_set| {
+        memory_set.check_user_access_range(
+            VPNRange::new(vpn, VirtPageNum::from(usize::from(vpn) + 1)),
+            MapPermission::READ,
+        )?;
+        let pte = memory_set.page_table.translate(vpn).ok_or(Errno::EFAULT)?;
+        if !pte.is_valid() {
+            return Err(Errno::EFAULT);
+        }
+        let bytes = &pte.ppn().get_bytes_array()[page_offset..page_offset + 4];
+        let mut value = [0; core::mem::size_of::<u32>()];
+        value.copy_from_slice(bytes);
+        Ok(u32::from_ne_bytes(value))
+    })
+}
+
 pub fn check_user_writable<T>(dst: *mut T, len: usize) -> SysResult {
     if dst.is_null() {
         return Err(Errno::EFAULT);

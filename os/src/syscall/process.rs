@@ -809,7 +809,9 @@ pub fn sys_prlimit64(
     let (cur, max) = task.rlimit(resource).ok_or(Errno::EINVAL)?;
     let old = RLimit { cur, max };
 
-    if !new_limit.is_null() {
+    let prepared_limit = if new_limit.is_null() {
+        None
+    } else {
         let mut limit = RLimit { cur: 0, max: 0 };
         copy_from_user(&mut limit as *mut RLimit, new_limit, 1)?;
         if limit.cur > limit.max {
@@ -818,11 +820,16 @@ pub fn sys_prlimit64(
         if limit.max > old.max && current.euid() != 0 {
             return Err(Errno::EPERM);
         }
-        task.set_rlimit(resource, limit.cur, limit.max)?;
-    }
+        task.validate_rlimit(resource, limit.cur, limit.max)?;
+        Some(limit)
+    };
 
     if !old_limit.is_null() {
         copy_to_user(old_limit, &old as *const RLimit, 1)?;
+    }
+
+    if let Some(limit) = prepared_limit {
+        task.set_rlimit(resource, limit.cur, limit.max)?;
     }
 
     Ok(0)
@@ -1217,7 +1224,7 @@ pub fn sys_wait4(
                             || (code == SigInfo::CLD_CONTINUED
                                 && options.contains(WaitOption::WCONTINUED))
                         {
-                            return Some((*child_tid, wait4_event_status(code, status), false));
+                            return Some((*child_tid, wait4_event_status(code, status), None));
                         }
                     }
                     None
@@ -1228,49 +1235,41 @@ pub fn sys_wait4(
 
             let queued = exited_child_ids.iter().find_map(|child_tid| {
                 children.get(child_tid).and_then(|child| {
-                    (matches_child(*child_tid, child) && child.is_exited())
-                        .then(|| (*child_tid, child.wait_status(), true))
+                    (matches_child(*child_tid, child) && child.is_exited()).then(|| {
+                        let ticks = child.elapsed_ticks();
+                        (*child_tid, child.wait_status(), Some((ticks, ticks)))
+                    })
                 })
             });
             Ok(queued.or_else(|| {
                 children.iter().find_map(|(child_tid, child)| {
-                    (matches_child(*child_tid, child) && child.is_exited())
-                        .then(|| (*child_tid, child.wait_status(), true))
+                    (matches_child(*child_tid, child) && child.is_exited()).then(|| {
+                        let ticks = child.elapsed_ticks();
+                        (*child_tid, child.wait_status(), Some((ticks, ticks)))
+                    })
                 })
             }))
         })?;
 
-        if let Some((child_tid, wait_status, exited)) = wait_result {
+        if let Some((child_tid, wait_status, child_ticks)) = wait_result {
             if !exit_code_ptr.is_null() {
                 copy_to_user(exit_code_ptr, &wait_status as *const i32, 1)?;
             }
 
-            if exited {
-                let (child_utime, child_stime) = task.op_children_mut(|children| {
-                    let child = children.get(&child_tid).unwrap();
-                    let ticks = child.elapsed_ticks();
-                    (ticks, ticks)
-                });
-                task.add_child_ticks(child_utime, child_stime);
-
+            if let Some((child_utime, child_stime)) = child_ticks {
                 if !rusage.is_null() {
-                    let usage = RUsage {
-                        ru_utime: TimeVal {
-                            sec: child_utime / CLK_TCK,
-                            usec: (child_utime % CLK_TCK) * (1_000_000 / CLK_TCK),
-                        },
-                        ru_stime: TimeVal {
-                            sec: child_stime / CLK_TCK,
-                            usec: (child_stime % CLK_TCK) * (1_000_000 / CLK_TCK),
-                        },
-                        ..RUsage::default()
-                    };
+                    let usage = rusage_from_ticks(child_utime, child_stime);
                     copy_to_user(rusage, &usage as *const RUsage, 1)?;
                 }
 
-                task.op_children_mut(|children| {
-                    children.remove(&child_tid).unwrap();
-                });
+                // All user-visible output is complete. Only now commit the
+                // parent accounting and Zombie removal.
+                let removed =
+                    task.op_children_mut(|children| children.remove(&child_tid).is_some());
+                if !removed {
+                    return Err(Errno::ECHILD);
+                }
+                task.add_child_ticks(child_utime, child_stime);
                 task.remove_exited_child(child_tid);
             } else {
                 task.op_children_mut(|children| {
@@ -1426,9 +1425,11 @@ pub fn sys_waitid(
             }
             if !nowait {
                 if exited {
-                    task.op_children_mut(|children| {
-                        children.remove(&child_tid).unwrap();
-                    });
+                    let removed =
+                        task.op_children_mut(|children| children.remove(&child_tid).is_some());
+                    if !removed {
+                        return Err(Errno::ECHILD);
+                    }
                     task.remove_exited_child(child_tid);
                 } else {
                     task.op_children_mut(|children| {
@@ -1557,7 +1558,13 @@ pub fn sys_getpid() -> SysResult<usize> {
 /// 系统调用 sys-getppid
 pub fn sys_getppid() -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
-    Ok(task.op_parent(|parent| parent.as_ref().unwrap().upgrade().unwrap().tid()))
+    Ok(task.op_parent(|parent| {
+        parent
+            .as_ref()
+            .and_then(|parent| parent.upgrade())
+            .map(|parent| parent.tid())
+            .unwrap_or(0)
+    }))
 }
 
 /// 系统调用 sys_set_tid_address

@@ -7,6 +7,8 @@
 use super::processor::{PROCESSOR, current_task};
 use super::task::{TaskControlBlock, task_exit, task_exit_by_signal, task_group_exit};
 use crate::{arch::task::__switch, mutex::SpinNoIrqLock};
+#[cfg(debug_assertions)]
+use alloc::collections::BTreeSet;
 use alloc::{collections::vec_deque::VecDeque, sync::Arc, vec::Vec};
 use bitflags::bitflags;
 use core::sync::atomic::{Ordering, compiler_fence};
@@ -105,16 +107,14 @@ pub fn wakeup_stopped_task(task: Arc<TaskControlBlock>) {
 
 /// 将当前任务标记为阻塞并加入阻塞队列，但暂不切换。
 ///
-/// 返回 `false` 表示当前没有可运行任务，调用者不应让当前任务睡眠。
+/// 返回 `false` 仅表示当前任务不存在。即使就绪队列暂时为空，也必须允许
+/// 当前任务睡眠；定时器或中断可能稍后唤醒另一个任务。
 pub fn prepare_current_task_blocked() -> bool {
     let Some(task) = current_task() else {
         return false;
     };
 
     let mut scheduler = SCHEDULER.lock();
-    if scheduler.is_ready_empty() {
-        return false;
-    }
     task.set_blocked();
     scheduler.block(task);
     true
@@ -140,26 +140,26 @@ pub fn switch_to_next_task() {
         crate::arch::idle();
     };
 
-    if let Some(next_task) = fetch_task() {
-        if Arc::ptr_eq(&current, &next_task) {
-            current.set_running();
+    loop {
+        // A timer interrupt may have switched away from this blocked context.
+        // Once a real wake schedules it again, resume the syscall that blocked.
+        if current.is_running() {
             cleanup_dead_tasks();
             return;
         }
-        let next_task_kernel_stack = next_task.kstack();
-        let current_task_ptr = Arc::as_ptr(&current) as usize;
-        next_task.set_running();
-        PROCESSOR.lock().switch_to(next_task);
-        schedule_barrier();
-        unsafe {
-            __switch(next_task_kernel_stack, current_task_ptr);
-        }
-        schedule_barrier();
-        cleanup_dead_tasks();
-        return;
-    }
 
-    crate::arch::idle();
+        if let Some(next_task) = fetch_task() {
+            switch_to_task(current.clone(), next_task);
+            cleanup_dead_tasks();
+            return;
+        }
+
+        // There may be no runnable task while every process is waiting on a
+        // timeout. Keep the scheduling context alive until a timer makes one
+        // ready instead of entering the architecture's non-returning idle loop.
+        crate::syscall::check_all_task_timers();
+        core::hint::spin_loop();
+    }
 }
 
 fn switch_to_task(current: Arc<TaskControlBlock>, next_task: Arc<TaskControlBlock>) {
@@ -219,6 +219,18 @@ pub fn preempt_current_task() {
     let Some(task) = current_task() else {
         return;
     };
+
+    // A timer interrupt can arrive while switch_to_next_task is waiting for
+    // the first runnable task. Do not turn that blocked/stopped/exited current
+    // context back into a ready task; only dispatch work that was genuinely
+    // woken. If the current task itself was woken, fetching it below restores
+    // Running and the interrupted scheduling loop returns to its caller.
+    if !task.is_running() {
+        if let Some(next_task) = fetch_task() {
+            switch_to_task(task, next_task);
+        }
+        return;
+    }
 
     task.set_ready();
     add_task(task.clone());
@@ -377,6 +389,7 @@ impl Scheduler {
             }
             ReadyQueue::Idle => self.idle_queue.push_back(task),
         }
+        self.debug_assert_invariants();
     }
 
     /// 取出最高优先级队列中的队首任务。
@@ -390,6 +403,7 @@ impl Scheduler {
                     if self.rt_queues[idx].is_empty() {
                         self.rt_bitmap &= !(1u128 << bit);
                     }
+                    self.debug_assert_invariants();
                     return Some(task);
                 }
             }
@@ -404,20 +418,19 @@ impl Scheduler {
                     if self.normal_queues[idx].is_empty() {
                         self.normal_bitmap &= !(1u64 << idx);
                     }
+                    self.debug_assert_invariants();
                     return Some(task);
                 }
             }
             self.normal_bitmap &= !(1u64 << idx);
         }
 
-        let task = self.idle_queue.pop_front()?;
-        self.task_index.remove(&task.tid());
-        Some(task)
-    }
-
-    /// 是否没有可运行任务。
-    pub fn is_ready_empty(&self) -> bool {
-        self.rt_bitmap == 0 && self.normal_bitmap == 0 && self.idle_queue.is_empty()
+        let task = self.idle_queue.pop_front();
+        if let Some(task) = &task {
+            self.task_index.remove(&task.tid());
+        }
+        self.debug_assert_invariants();
+        task
     }
 
     /// 从调度器就绪队列中移除任务。
@@ -426,6 +439,7 @@ impl Scheduler {
             self.remove_from_ready_queue(tid, queue);
         }
         self.blocked_tasks.remove(&tid);
+        self.debug_assert_invariants();
     }
 
     /// 从调度器就绪队列中移除线程组。
@@ -469,6 +483,7 @@ impl Scheduler {
             self.task_index.remove(&tid);
         }
         self.blocked_tasks.retain(|_, task| task.tgid() != tgid);
+        self.debug_assert_invariants();
     }
 
     /// 阻塞任务。
@@ -479,11 +494,14 @@ impl Scheduler {
             "task {tid} is already blocked"
         );
         self.blocked_tasks.insert(tid, task);
+        self.debug_assert_invariants();
     }
 
     /// 从阻塞队列中移除指定 tid 的任务。
     pub fn wake(&mut self, tid: usize) -> Option<Arc<TaskControlBlock>> {
-        self.blocked_tasks.remove(&tid)
+        let task = self.blocked_tasks.remove(&tid);
+        self.debug_assert_invariants();
+        task
     }
 
     fn remove_from_ready_queue(&mut self, tid: usize, queue: ReadyQueue) {
@@ -504,6 +522,129 @@ impl Scheduler {
                 self.idle_queue.retain(|task| task.tid() != tid);
             }
         }
+    }
+
+    #[inline(always)]
+    fn debug_assert_invariants(&self) {
+        #[cfg(debug_assertions)]
+        self.assert_invariants();
+    }
+
+    #[cfg(debug_assertions)]
+    fn assert_invariants(&self) {
+        assert!(
+            self.rt_queues[0].is_empty(),
+            "unused RT queue 0 must remain empty"
+        );
+
+        let mut ready_tids = BTreeSet::new();
+        let mut expected_rt_bitmap = 0u128;
+        for idx in 1..RT_QUEUE_COUNT {
+            let queue = &self.rt_queues[idx];
+            if !queue.is_empty() {
+                expected_rt_bitmap |= 1u128 << (idx - 1);
+            }
+            for task in queue {
+                self.assert_ready_task(task, ReadyQueue::Rt(idx), &mut ready_tids);
+            }
+        }
+        assert_eq!(
+            self.rt_bitmap, expected_rt_bitmap,
+            "RT bitmap does not match non-empty queues"
+        );
+
+        let mut expected_normal_bitmap = 0u64;
+        for idx in 0..NORMAL_QUEUE_COUNT {
+            let queue = &self.normal_queues[idx];
+            if !queue.is_empty() {
+                expected_normal_bitmap |= 1u64 << idx;
+            }
+            for task in queue {
+                self.assert_ready_task(task, ReadyQueue::Normal(idx), &mut ready_tids);
+            }
+        }
+        assert_eq!(
+            self.normal_bitmap, expected_normal_bitmap,
+            "normal bitmap does not match non-empty queues"
+        );
+
+        for task in &self.idle_queue {
+            self.assert_ready_task(task, ReadyQueue::Idle, &mut ready_tids);
+        }
+
+        assert_eq!(
+            self.task_index.len(),
+            ready_tids.len(),
+            "task_index and ready queues have different sizes"
+        );
+        for (tid, queue) in &self.task_index {
+            assert!(
+                ready_tids.contains(tid),
+                "task_index contains tid {tid} absent from ready queues"
+            );
+            let actual_queue = self
+                .ready_queue_for_tid(*tid)
+                .expect("indexed task must exist in a ready queue");
+            assert_eq!(
+                *queue, actual_queue,
+                "task_index points tid {tid} at the wrong ready queue"
+            );
+        }
+
+        for (tid, task) in &self.blocked_tasks {
+            assert_eq!(*tid, task.tid(), "blocked_tasks key/tid mismatch");
+            assert!(task.is_blocked(), "blocked task {tid} is not Blocked");
+            assert!(
+                !ready_tids.contains(tid),
+                "task {tid} appears in both ready and blocked sets"
+            );
+            assert!(!task.is_exited(), "exited task {tid} remains blocked");
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    fn assert_ready_task(
+        &self,
+        task: &TaskControlBlock,
+        queue: ReadyQueue,
+        ready_tids: &mut BTreeSet<usize>,
+    ) {
+        let tid = task.tid();
+        assert!(ready_tids.insert(tid), "duplicate ready tid {tid}");
+        assert!(task.is_ready(), "ready-queued task {tid} is not Ready");
+        assert!(!task.is_exited(), "exited task {tid} remains ready");
+        assert_eq!(
+            ready_queue_for(task),
+            queue,
+            "task {tid} is in the wrong ready queue"
+        );
+        assert_eq!(
+            self.task_index.get(&tid),
+            Some(&queue),
+            "ready task {tid} is missing or misindexed"
+        );
+        assert!(
+            !self.blocked_tasks.contains_key(&tid),
+            "task {tid} appears in both ready and blocked sets"
+        );
+    }
+
+    #[cfg(debug_assertions)]
+    fn ready_queue_for_tid(&self, tid: usize) -> Option<ReadyQueue> {
+        for idx in 1..RT_QUEUE_COUNT {
+            if self.rt_queues[idx].iter().any(|task| task.tid() == tid) {
+                return Some(ReadyQueue::Rt(idx));
+            }
+        }
+        for idx in 0..NORMAL_QUEUE_COUNT {
+            if self.normal_queues[idx].iter().any(|task| task.tid() == tid) {
+                return Some(ReadyQueue::Normal(idx));
+            }
+        }
+        self.idle_queue
+            .iter()
+            .any(|task| task.tid() == tid)
+            .then_some(ReadyQueue::Idle)
     }
 }
 
