@@ -62,6 +62,7 @@ B 的 copyout-to-COW、相邻 VMA、范围溢出校验与 A 的失败注入探�
 | 验证项 | RISC-V | LoongArch |
 | --- | --- | --- |
 | debug build | PASS | PASS |
+| release build | PASS | PASS |
 | 启动时 MM split self-test / invariant | PASS | PASS |
 | `fs_day4_freeze` | PASS | PASS |
 | `fs_day3_regression` | PASS | PASS |
@@ -77,7 +78,34 @@ B 的 copyout-to-COW、相邻 VMA、范围溢出校验与 A 的失败注入探�
 `TASK_A_FUTEX_CMP_REQUEUE_TEST_YIELD=1` 构建；默认内核直接运行该探针不形成有效测试。专项验证后
 已重新进行两架构默认 debug build，最终产物不带强制竞态窗口。
 
-## 5. 审查结论与剩余风险
+## 5. 对照初始要求的完成度判断
+
+结论是：**三个分支已经完成了初始方案要求中的核心功能优化重构，具备进入集成分支和扩大回归的
+条件，但尚未满足“所有最终验收项 100% 关闭”的标准。**
+
+| 初始要求 | 判断 | 依据或缺口 |
+| --- | --- | --- |
+| ABI 诚实化与假成功治理 | 基本完成 | 三组触及 syscall 已做支持/受限/拒绝分级，高风险 flags 和空壳 fd 已收紧 |
+| prepare/copyout/commit 与失败原子性 | 核心完成 | wait4、timer、prlimit、COW、shmat、rename 主路径均有修复和代表性失败注入 |
+| task/MM/FS 不变量 | 核心完成 | scheduler 与 VMA debug invariant、page-cache version、fd/open-file identity 已建立 |
+| 双架构一致性 | 完成当前合并门槛 | RV/LA debug/release build、启动和代表性专项均通过 |
+| 性能优化与量化 | 部分完成 | A 有修改前后 7 轮中位数；B 有 frame 数据；C 缺同配置修改前基线，整合后 debug FS 数据受 MM invariant 开销影响，不能宣称全面提速 |
+| 完整测试体系 | 部分完成 | 专项 probe 与 FS 回归充分，但本次未跑最终镜像完整 LTP、真正 SMP 和全部 ENOMEM 注入 |
+| 可独立回退 | 部分完成 | A 有语义拆分；B/C 提交粒度偏大，整合 merge 可回退但不等于每个语义点可单独回退 |
+
+因此更准确的表述是“正确性和 ABI 边界显著优化，热点锁与状态机得到结构性重构，性能证据部分
+完成”，而不是“整个系统功能与性能已全部优化完毕”。
+
+## 6. 整合后补充的小风险修复
+
+本轮复审又完成两处不扩大架构边界的修复：
+
+1. read-only `MAP_SHARED` 在 `munmap` 时不再进入 writable file writeback，避免只读映射触发
+   无意义的底层写入或 mtime 变化；Day4 增加 mtime 不变回归，RV/LA 均通过；
+2. unlink 判断“是否仍有打开文件”不再依赖 `Arc::strong_count` 猜测，改用 ext4 inode 已有的
+   `open_files` 精确计数，避免 dentry/cache 引用造成误 orphan；Day3 生命周期回归双架构通过。
+
+## 7. 审查结论与保留的大问题
 
 本次整合未发现阻止合并到个人工作分支的问题。A/B/C 的关键接口没有因自动合并丢失，双架构
 构建和代表性 runtime/MM/FS 回归通过。
@@ -87,7 +115,16 @@ B 的 copyout-to-COW、相邻 VMA、范围溢出校验与 A 的失败注入探�
 - 真正 SMP 下的 futex queue、页表替换和 scheduler contention 尚无本轮整合压力证据；
 - `MAP_FIXED`/部分 `mremap` 的极端 ENOMEM 回滚仍缺完整失败注入；
 - writable file `MAP_SHARED`、`msync/munmap` 错误传播和 truncate mapped-page 契约未完成；
+- file fault 仍可能在持有 `MemorySet` 写锁时执行后端慢 I/O，开放 writable shared 前必须设计
+  prepare/writeback/commit 或等价的锁外协议；
+- rename 覆盖多硬链接 regular target 时，后端 unlink 与 source rename 仍不是完整事务；要彻底
+  修复需要 inode-handle/统一 backup 方案，不适合在冻结后用局部特判处理；
+- inode 的后端路径仍以 `renamed_path/orphan_path` 兼容 ext4 path API，多硬链接叠加 rename/unlink
+  的任意别名语义尚未实现为真正 inode handle；
 - epoll 跨进程共享实例的最后 close 通知仍不是完整 Linux 语义；
+- pipe/poll/epoll waiter 与 scheduler 的完整 close/signal/timeout 竞争矩阵未全部联合压力验证；
 - A 的性能数据表明正确性状态机使 thread create/join 和竞争 futex 有明显开销，后续优化不得
   回退 single-winner 与退出清理不变量；
+- C 的关键 FS 回归源文件当前按此前提交要求未进入 Git，虽然本地验证通过，但合入 `main` 前应
+  决定是否以测试资产形式纳入，否则关键语义缺少仓库内可复验入口；
 - 合并前应在最终比赛镜像上再跑一次完整 LTP/目标 workload，而不仅是本次代表性回归。

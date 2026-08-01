@@ -2605,7 +2605,11 @@ impl MapArea {
     pub fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
         match self.map_type {
             MapType::Framed => {
-                if self.shared {
+                // Read-only MAP_SHARED pages are never dirty and must not call a
+                // writable file path during unmap. Writable shared mappings are
+                // currently rejected by FileOp::mmap_allowed until writeback can
+                // report errors outside the MemorySet lock.
+                if self.shared && self.map_perm.contains(MapPermission::WRITE) {
                     if let (Some(backing), Some(frame)) =
                         (&self.file_backing, self.data_frames.get(&vpn))
                     {

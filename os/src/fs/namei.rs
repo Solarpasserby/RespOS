@@ -831,15 +831,17 @@ pub fn filename_unlink(dirfd: isize, path: &str, remove_dir: bool) -> SysResult 
     let target_inode = target.get_inode();
     let target_path = target.current_abs_path();
     let target_stat = target_inode.stat(&target_path)?;
-    let orphaned_open_file = target_ty == InodeType::Regular
-        && target_stat.nlink <= 1
-        && Arc::strong_count(&target_inode) > 2
-        && target_inode
+    let orphaned_open_file = if target_ty == InodeType::Regular && target_stat.nlink <= 1 {
+        target_inode
             .as_any()
             .downcast_ref::<Ext4Inode>()
+            .filter(|inode| inode.has_open_files())
             .map(|inode| inode.orphan_regular_file(&target_path))
             .transpose()?
-            .is_some();
+            .is_some()
+    } else {
+        false
+    };
     if !orphaned_open_file {
         parent.get_inode().unlink(&target)?;
     }
