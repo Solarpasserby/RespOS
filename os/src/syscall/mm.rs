@@ -1,10 +1,40 @@
 // os/src/syscall/mm.rs
 
 use super::{Errno, SysResult};
-use crate::config::{MMAP_MIN_ADDR, PAGE_SIZE};
+use crate::config::{MMAP_MIN_ADDR, PAGE_SIZE, TRAMPOLINE};
 use crate::mm::{MapPermission, MmapBacking, VPNRange, VirtAddr, copy_to_user, mmap_file_backing};
 use crate::task::current_task;
 use bitflags::bitflags;
+
+#[derive(Clone, Copy)]
+enum AddressAlignment {
+    PageAligned,
+    Any,
+}
+
+/// Convert an ABI byte range into the page range used by MemorySet without
+/// allowing arithmetic overflow or VirtAddr's canonical-address masking.
+fn checked_user_page_range(
+    addr: usize,
+    len: usize,
+    alignment: AddressAlignment,
+) -> SysResult<VPNRange> {
+    if len == 0 {
+        return Err(Errno::EINVAL);
+    }
+    if matches!(alignment, AddressAlignment::PageAligned) && addr % PAGE_SIZE != 0 {
+        return Err(Errno::EINVAL);
+    }
+    let end = addr.checked_add(len).ok_or(Errno::EINVAL)?;
+    let rounded_end = end.checked_add(PAGE_SIZE - 1).ok_or(Errno::EINVAL)? & !(PAGE_SIZE - 1);
+    if addr >= TRAMPOLINE || rounded_end > TRAMPOLINE {
+        return Err(Errno::EINVAL);
+    }
+    Ok(VPNRange::new(
+        VirtAddr::from(addr).floor(),
+        VirtAddr::from(rounded_end).floor(),
+    ))
+}
 
 /// 系统调用 sys-brk
 pub fn sys_brk(addr: usize) -> SysResult<usize> {
@@ -57,11 +87,14 @@ pub fn sys_mmap(
     fd: isize,
     offset: usize,
 ) -> SysResult<usize> {
-    let raw_flags = flags as u32;
+    let raw_flags = u32::try_from(flags).map_err(|_| Errno::EINVAL)?;
     let shared_validate =
         raw_flags & MMAPFLAGS::MAP_SHARED_VALIDATE.bits() == MMAPFLAGS::MAP_SHARED_VALIDATE.bits();
     if shared_validate && raw_flags & !MMAPFLAGS::all().bits() != 0 {
         return Err(Errno::EOPNOTSUPP);
+    }
+    if !shared_validate && raw_flags & !MMAPFLAGS::all().bits() != 0 {
+        return Err(Errno::EINVAL);
     }
     let flags = MMAPFLAGS::from_bits_truncate(raw_flags);
     let task = current_task().expect("[kernel] current task is None.");
@@ -79,7 +112,8 @@ pub fn sys_mmap(
     }
     let map_len = len.checked_add(PAGE_SIZE - 1).ok_or(Errno::ENOMEM)? & !(PAGE_SIZE - 1);
 
-    let prot = MMapProt::from_bits(prot as u32).ok_or(Errno::EINVAL)?;
+    let raw_prot = u32::try_from(prot).map_err(|_| Errno::EINVAL)?;
+    let prot = MMapProt::from_bits(raw_prot).ok_or(Errno::EINVAL)?;
     let has_shared = flags.contains(MMAPFLAGS::MAP_SHARED) || shared_validate;
     let has_private = flags.contains(MMAPFLAGS::MAP_PRIVATE) && !shared_validate;
     if has_shared == has_private {
@@ -99,6 +133,20 @@ pub fn sys_mmap(
     } else {
         None
     };
+    if locked && task.euid() != 0 {
+        let limit = task.memlock_limit().0;
+        if limit == 0 {
+            return Err(Errno::EPERM);
+        }
+        let already_locked = task.op_memory_set_read(|memory_set| memory_set.locked_bytes());
+        if already_locked
+            .checked_add(map_len)
+            .filter(|total| *total <= limit)
+            .is_none()
+        {
+            return Err(Errno::ENOMEM);
+        }
+    }
 
     let mut permission = MapPermission::from(prot);
     permission |= MapPermission::USER;
@@ -154,10 +202,11 @@ pub fn sys_mmap(
 /// 系统调用 sys-munmap
 /// TODO: 同样目前只做了做基础实现
 pub fn sys_munmap(addr: usize, len: usize) -> SysResult<usize> {
-    if addr % PAGE_SIZE != 0 || len == 0 || addr < MMAP_MIN_ADDR {
+    if addr < MMAP_MIN_ADDR {
         return Err(Errno::EINVAL);
     }
-    let map_len = len.checked_add(PAGE_SIZE - 1).ok_or(Errno::EINVAL)? & !(PAGE_SIZE - 1);
+    let range = checked_user_page_range(addr, len, AddressAlignment::PageAligned)?;
+    let map_len = (range.get_end() - range.get_start()) * PAGE_SIZE;
     let task = current_task().expect("[kernel] current task is None.");
     task.op_memory_set_write(|memory_set| {
         memory_set.munmap_range(addr, map_len)?;
@@ -178,9 +227,8 @@ pub fn sys_mremap(
     const MREMAP_DONTUNMAP: usize = 4;
     const MREMAP_KNOWN_MASK: usize = MREMAP_MAYMOVE | MREMAP_FIXED | MREMAP_DONTUNMAP;
 
-    if old_addr % PAGE_SIZE != 0 || old_size == 0 || new_size == 0 {
-        return Err(Errno::EINVAL);
-    }
+    let old_range = checked_user_page_range(old_addr, old_size, AddressAlignment::PageAligned)?;
+    let new_range = checked_user_page_range(old_addr, new_size, AddressAlignment::PageAligned)?;
     if flags & !MREMAP_KNOWN_MASK != 0 {
         return Err(Errno::EINVAL);
     }
@@ -190,9 +238,12 @@ pub fn sys_mremap(
     if flags & MREMAP_FIXED != 0 && (flags & MREMAP_MAYMOVE == 0 || new_addr % PAGE_SIZE != 0) {
         return Err(Errno::EINVAL);
     }
+    if flags & MREMAP_FIXED != 0 {
+        checked_user_page_range(new_addr, new_size, AddressAlignment::PageAligned)?;
+    }
 
-    let old_len = old_size.checked_add(PAGE_SIZE - 1).ok_or(Errno::ENOMEM)? & !(PAGE_SIZE - 1);
-    let new_len = new_size.checked_add(PAGE_SIZE - 1).ok_or(Errno::ENOMEM)? & !(PAGE_SIZE - 1);
+    let old_len = (old_range.get_end() - old_range.get_start()) * PAGE_SIZE;
+    let new_len = (new_range.get_end() - new_range.get_start()) * PAGE_SIZE;
     let maymove = flags & MREMAP_MAYMOVE != 0;
     let fixed_addr = (flags & MREMAP_FIXED != 0).then_some(new_addr);
 
@@ -209,16 +260,8 @@ pub fn sys_mremap(
 /// 修改指定地址范围的页表权限 (PROT_READ / PROT_WRITE / PROT_EXEC)。
 /// addr 必须页对齐, len 向上取整到页边界。
 pub fn sys_mprotect(addr: usize, len: usize, prot: u32) -> SysResult<usize> {
-    if addr % PAGE_SIZE != 0 || len == 0 {
-        return Err(Errno::EINVAL);
-    }
-
     let prot = MMapProt::from_bits(prot).ok_or(Errno::EINVAL)?;
-    let map_len = len.checked_add(PAGE_SIZE - 1).ok_or(Errno::EINVAL)? & !(PAGE_SIZE - 1);
-    let end = addr.checked_add(map_len).ok_or(Errno::EINVAL)?;
-    let start_vpn = VirtAddr::from(addr).floor();
-    let end_vpn = VirtAddr::from(end).floor();
-    let remap_vpn_range = VPNRange::new(start_vpn, end_vpn);
+    let remap_vpn_range = checked_user_page_range(addr, len, AddressAlignment::PageAligned)?;
     let map_perm = MapPermission::from(prot);
 
     let task = current_task().expect("[kernel] current task is None.");
@@ -229,15 +272,12 @@ pub fn sys_mprotect(addr: usize, len: usize, prot: u32) -> SysResult<usize> {
     })
 }
 
-fn mlock_vpn_range(addr: usize, len: usize) -> SysResult<Option<(VPNRange, usize)>> {
+fn mlock_vpn_range(addr: usize, len: usize) -> SysResult<Option<VPNRange>> {
     if len == 0 {
         return Ok(None);
     }
-    let end = addr.checked_add(len).ok_or(Errno::EINVAL)?;
-    let start_vpn = VirtAddr::from(addr).floor();
-    let end_vpn = VirtAddr::from(end).ceil();
-    let locked_len = end_vpn.0.saturating_sub(start_vpn.0) * PAGE_SIZE;
-    Ok(Some((VPNRange::new(start_vpn, end_vpn), locked_len)))
+    let range = checked_user_page_range(addr, len, AddressAlignment::Any)?;
+    Ok(Some(range))
 }
 
 /// 系统调用 sys_mlock
@@ -245,7 +285,7 @@ fn mlock_vpn_range(addr: usize, len: usize) -> SysResult<Option<(VPNRange, usize
 /// 当前内核没有换出机制，锁页成功不需要额外状态；仍按 Linux ABI 校验地址区间和
 /// RLIMIT_MEMLOCK，并在失败时返回 ENOMEM/EPERM。
 pub fn sys_mlock(addr: usize, len: usize) -> SysResult<usize> {
-    let Some((vpn_range, locked_len)) = mlock_vpn_range(addr, len)? else {
+    let Some(vpn_range) = mlock_vpn_range(addr, len)? else {
         return Ok(0);
     };
 
@@ -264,7 +304,14 @@ pub fn sys_mlock(addr: usize, len: usize) -> SysResult<usize> {
         if limit == 0 {
             return Err(Errno::EPERM);
         }
-        if locked_len > limit {
+        let already_locked = task.op_memory_set_read(|memory_set| memory_set.locked_bytes());
+        let newly_locked =
+            task.op_memory_set_read(|memory_set| memory_set.unlocked_bytes_in_range(vpn_range));
+        if already_locked
+            .checked_add(newly_locked)
+            .filter(|total| *total <= limit)
+            .is_none()
+        {
             return Err(Errno::ENOMEM);
         }
     }
@@ -275,7 +322,7 @@ pub fn sys_mlock(addr: usize, len: usize) -> SysResult<usize> {
 
 /// 系统调用 sys_munlock
 pub fn sys_munlock(addr: usize, len: usize) -> SysResult<usize> {
-    let Some((vpn_range, _)) = mlock_vpn_range(addr, len)? else {
+    let Some(vpn_range) = mlock_vpn_range(addr, len)? else {
         return Ok(0);
     };
     let task = current_task().expect("[kernel] current task is None.");
@@ -304,16 +351,19 @@ pub fn sys_get_mempolicy(
     if flags & !(MPOL_F_NODE | MPOL_F_ADDR) != 0 {
         return Err(Errno::EINVAL);
     }
+    if !nodemask.is_null() && maxnode > usize::BITS as usize {
+        return Err(Errno::EINVAL);
+    }
     if !mode.is_null() {
         let default_policy = 0i32;
         copy_to_user(mode, &default_policy as *const i32, 1)?;
     }
     if !nodemask.is_null() && maxnode > 0 {
         let zero = 0usize;
-        let words = maxnode.div_ceil(usize::BITS as usize);
-        for idx in 0..words {
-            copy_to_user(unsafe { nodemask.add(idx) }, &zero as *const usize, 1)?;
-        }
+        // RespOS exposes one memory node.  Bounding maxnode prevents an
+        // attacker-controlled copyout loop while remaining truthful about the
+        // supported policy domain.
+        copy_to_user(nodemask, &zero as *const usize, 1)?;
     }
     Ok(0)
 }
@@ -324,21 +374,15 @@ pub fn sys_get_mempolicy(
 /// MADV_DONTNEED 会按 Linux 私有映射语义丢弃当前驻留页，后续访问重新缺页填充。
 /// MADV_WIPEONFORK/MADV_KEEPONFORK 会记录到 VMA，fork 时按 Linux 语义处理。
 pub fn sys_madvise(addr: usize, len: usize, advice: i32) -> SysResult<usize> {
-    if addr % PAGE_SIZE != 0 {
-        return Err(Errno::EINVAL);
-    }
     if len == 0 {
         return Ok(0);
     }
-    let end = addr.checked_add(len).ok_or(Errno::EINVAL)?;
-    let start_vpn = VirtAddr::from(addr).floor();
-    let end_vpn = VirtAddr::from(end).ceil();
+    let vpn_range = checked_user_page_range(addr, len, AddressAlignment::PageAligned)?;
 
     match advice {
         4 => {
             let task = current_task().expect("[kernel] current task is None.");
             task.op_memory_set_write(|memory_set| {
-                let vpn_range = VPNRange::new(start_vpn, end_vpn);
                 memory_set.check_madvise_range(vpn_range.clone(), advice)?;
                 memory_set.discard_private_pages_for_madvise(vpn_range);
                 memory_set.flush_tlb();
@@ -348,7 +392,14 @@ pub fn sys_madvise(addr: usize, len: usize, advice: i32) -> SysResult<usize> {
         18 | 19 => {
             let task = current_task().expect("[kernel] current task is None.");
             task.op_memory_set_write(|memory_set| {
-                memory_set.advise_fork_behavior(VPNRange::new(start_vpn, end_vpn), advice == 18)
+                memory_set.advise_fork_behavior(vpn_range, advice == 18)
+            })?;
+            Ok(0)
+        }
+        10 | 11 => {
+            let task = current_task().expect("[kernel] current task is None.");
+            task.op_memory_set_write(|memory_set| {
+                memory_set.advise_dontfork(vpn_range, advice == 10)
             })?;
             Ok(0)
         }
@@ -357,8 +408,6 @@ pub fn sys_madvise(addr: usize, len: usize, advice: i32) -> SysResult<usize> {
         | 2  // MADV_SEQUENTIAL
         | 3  // MADV_WILLNEED
         | 8  // MADV_FREE
-        | 10 // MADV_DONTFORK
-        | 11 // MADV_DOFORK
         | 12 // MADV_MERGEABLE
         | 13 // MADV_UNMERGEABLE
         | 14 // MADV_HUGEPAGE
@@ -367,17 +416,17 @@ pub fn sys_madvise(addr: usize, len: usize, advice: i32) -> SysResult<usize> {
         | 17 // MADV_DODUMP
         | 20 // MADV_COLD
         | 21 // MADV_PAGEOUT
-        | 22 // MADV_POPULATE_READ
-        | 23 // MADV_POPULATE_WRITE
         | 25 // MADV_COLLAPSE
-        | 26 // MADV_GUARD_INSTALL
-        | 27 => {
+        => {
             let task = current_task().expect("[kernel] current task is None.");
             task.op_memory_set_read(|memory_set| {
-                memory_set.check_madvise_range(VPNRange::new(start_vpn, end_vpn), advice)
+                memory_set.check_madvise_range(vpn_range, advice)
             })?;
             Ok(0)
-        } // MADV_GUARD_REMOVE
+        }
+        // These advices change subsequent fault/access behavior.  Until they
+        // are implemented, reporting success would be observably incorrect.
+        22 | 23 | 26 | 27 => Err(Errno::EINVAL),
         _ => Err(Errno::EINVAL),
     }
 }

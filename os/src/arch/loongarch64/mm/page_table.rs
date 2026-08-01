@@ -248,6 +248,22 @@ impl PageTable {
         *pte = PageTableEntry::new(pte.ppn(), flags | PTEFlags::VALID | PTEFlags::ACCESSED);
     }
 
+    /// Atomically replace an existing leaf mapping without allocating page-table
+    /// pages. Used by COW after the replacement frame has been fully prepared.
+    pub fn replace_pte(
+        &mut self,
+        vpn: VirtPageNum,
+        ppn: PhysPageNum,
+        flags: PTEFlags,
+    ) -> SysResult {
+        let pte = self.find_pte(vpn).ok_or(Errno::EFAULT)?;
+        if !pte.is_valid() {
+            return Err(Errno::EFAULT);
+        }
+        *pte = PageTableEntry::new(ppn, flags | PTEFlags::VALID | PTEFlags::ACCESSED);
+        Ok(())
+    }
+
     pub fn set_pte_cow(&mut self, vpn: VirtPageNum) {
         let pte = self.find_pte(vpn).unwrap();
         pte.set_cow_bit();

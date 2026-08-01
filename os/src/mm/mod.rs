@@ -12,7 +12,7 @@ mod heap_allocator;
 mod memory_set;
 
 use crate::arch::mm::{PTEFlags, PageTable, PageTableEntry};
-use crate::config::{PAGE_SIZE, USER_ARG_MAX_COUNT, USER_CSTR_MAX_LEN};
+use crate::config::{PAGE_SIZE, TRAMPOLINE, USER_ARG_MAX_COUNT, USER_CSTR_MAX_LEN};
 use crate::syscall::{Errno, SysResult};
 use crate::task::current_task;
 pub use address::*;
@@ -50,6 +50,8 @@ pub fn init() {
     crate::arch::enable_boot_paging();
     init_heap();
     init_frame_allocator();
+    #[cfg(debug_assertions)]
+    memory_set::run_split_self_tests();
     KERNEL_SPACE.lock().activate();
     #[cfg(target_arch = "loongarch64")]
     crate::arch::disable_low_direct_map();
@@ -99,7 +101,10 @@ pub fn extract_cstrings_from_user(mut ptr: *const usize) -> SysResult<Vec<String
         ret.push(copy_cstr_from_user(str_ptr)?);
 
         count += 1;
-        ptr = unsafe { ptr.add(1) };
+        let next = (ptr as usize)
+            .checked_add(core::mem::size_of::<usize>())
+            .ok_or(Errno::EFAULT)?;
+        ptr = next as *const usize;
     }
 
     Ok(ret)
@@ -109,16 +114,19 @@ pub fn extract_cstrings_from_user(mut ptr: *const usize) -> SysResult<Vec<String
 ///
 /// 内部实现对数据有效性的检验
 pub fn copy_from_user<T: Copy>(dst: *mut T, src: *const T, len: usize) -> SysResult<usize> {
-    if dst.is_null() || src.is_null() {
-        return Err(Errno::EFAULT);
-    }
     if len == 0 {
         return Ok(0);
+    }
+    if dst.is_null() || src.is_null() {
+        return Err(Errno::EFAULT);
     }
 
     let byte_len = len
         .checked_mul(core::mem::size_of::<T>())
         .ok_or(Errno::EFAULT)?;
+    if byte_len > isize::MAX as usize || (dst as usize).checked_add(byte_len).is_none() {
+        return Err(Errno::EFAULT);
+    }
     let dst_bytes = unsafe { core::slice::from_raw_parts_mut(dst as *mut u8, byte_len) };
     copy_user_bytes_to_kernel(src as usize, dst_bytes)?;
     Ok(len)
@@ -128,16 +136,19 @@ pub fn copy_from_user<T: Copy>(dst: *mut T, src: *const T, len: usize) -> SysRes
 ///
 /// 内部实现对数据有效性的检验
 pub fn copy_to_user<T: Copy>(dst: *mut T, src: *const T, len: usize) -> SysResult<usize> {
-    if dst.is_null() || src.is_null() {
-        return Err(Errno::EFAULT);
-    }
     if len == 0 {
         return Ok(0);
+    }
+    if dst.is_null() || src.is_null() {
+        return Err(Errno::EFAULT);
     }
 
     let byte_len = len
         .checked_mul(core::mem::size_of::<T>())
         .ok_or(Errno::EFAULT)?;
+    if byte_len > isize::MAX as usize || (src as usize).checked_add(byte_len).is_none() {
+        return Err(Errno::EFAULT);
+    }
     let src_bytes = unsafe { core::slice::from_raw_parts(src as *const u8, byte_len) };
     copy_kernel_bytes_to_user(dst as usize, src_bytes)?;
     Ok(len)
@@ -152,11 +163,7 @@ pub fn copy_to_user<T: Copy>(dst: *mut T, src: *const T, len: usize) -> SysResul
 fn copy_user_bytes_to_kernel(user_start: usize, dst: &mut [u8]) -> SysResult {
     let mut copied = 0usize;
     let mut cur = user_start;
-    let end = user_start.checked_add(dst.len()).ok_or(Errno::EFAULT)?;
-    let vpn_range = VPNRange::new(
-        VirtAddr::from(user_start).floor(),
-        VirtAddr::from(end).ceil(),
-    );
+    let vpn_range = checked_user_byte_range(user_start, dst.len())?;
     current_task()
         .expect("[kernel] current task is None.")
         .op_memory_set_write(|memory_set| {
@@ -188,11 +195,7 @@ fn copy_user_bytes_to_kernel(user_start: usize, dst: &mut [u8]) -> SysResult {
 fn copy_kernel_bytes_to_user(user_start: usize, src: &[u8]) -> SysResult {
     let mut copied = 0usize;
     let mut cur = user_start;
-    let end = user_start.checked_add(src.len()).ok_or(Errno::EFAULT)?;
-    let vpn_range = VPNRange::new(
-        VirtAddr::from(user_start).floor(),
-        VirtAddr::from(end).ceil(),
-    );
+    let vpn_range = checked_user_byte_range(user_start, src.len())?;
     current_task()
         .expect("[kernel] current task is None.")
         .op_memory_set_write(|memory_set| {
@@ -281,12 +284,7 @@ fn check_user_buffer(start: usize, byte_len: usize, perm: MapPermission) -> SysR
     if byte_len == 0 {
         return Ok(());
     }
-    let end = start // 防止溢出
-        .checked_add(byte_len)
-        .ok_or(Errno::EFAULT)?;
-    let start_vpn = VirtAddr::from(start).floor();
-    let end_vpn = VirtAddr::from(end).ceil();
-    let vpn_range = VPNRange::new(start_vpn, end_vpn);
+    let vpn_range = checked_user_byte_range(start, byte_len)?;
     current_task()
         .expect("[kernel] current task is None.")
         .op_memory_set_write(|memory_set| {
@@ -294,4 +292,22 @@ fn check_user_buffer(start: usize, byte_len: usize, perm: MapPermission) -> SysR
             memory_set.ensure_user_page_access(vpn_range, perm)
         })?;
     Ok(())
+}
+
+fn checked_user_byte_range(start: usize, byte_len: usize) -> SysResult<VPNRange> {
+    if byte_len == 0 {
+        return Ok(VPNRange::new(
+            VirtAddr::from(start).floor(),
+            VirtAddr::from(start).floor(),
+        ));
+    }
+    let end = start.checked_add(byte_len).ok_or(Errno::EFAULT)?;
+    let rounded_end = end.checked_add(PAGE_SIZE - 1).ok_or(Errno::EFAULT)? & !(PAGE_SIZE - 1);
+    if start == 0 || start >= TRAMPOLINE || rounded_end > TRAMPOLINE {
+        return Err(Errno::EFAULT);
+    }
+    Ok(VPNRange::new(
+        VirtAddr::from(start).floor(),
+        VirtAddr::from(rounded_end).floor(),
+    ))
 }
