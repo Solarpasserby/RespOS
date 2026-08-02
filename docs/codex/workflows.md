@@ -15,11 +15,15 @@
 
 ```bash
 bash scripts/get_img.sh
-ls -lh img/sdcard-rv.img img/sdcard-la.img
+ls -lh img/sdcard-rv.img img/sdcard-la.img \
+  img/sdcard-rv-pub.img img/sdcard-la-pub.img
 ```
 
-脚本优先复用 `img/*.img.xz`，解压时保留压缩包。运行中的内核会修改 ext4 镜像；需要干净
-基线时，应从保留的压缩包重新解压，而不是假定上一次运行后的镜像未变化。
+脚本从上游 `pre-20250615` Release 获取 `sdcard-rv.img`、`sdcard-la.img`，并从 RespOS 的
+`contest-images-2026` Release 获取 `sdcard-rv-pub.img`、`sdcard-la-pub.img`。脚本优先复用
+`img/` 中已有的 `.xz`/`.gz` 压缩包；LA pub 的 `.gz` 在 Release 中分为两个 `.part`，脚本会
+下载并合并后再解压。解压时保留压缩包及分卷。运行中的内核会修改 ext4 镜像；需要干净基线
+时，应从保留的压缩包重新解压，而不是假定上一次运行后的镜像未变化。
 
 - 后续影响：对比两次测试前记录镜像来源；不要把本地大镜像提交到 Git。
 

@@ -1,4 +1,4 @@
-FROM zhouzhouyi/os-contest:20260104
+FROM zhouzhouyi/os-contest:20260510
 
 USER root
 
