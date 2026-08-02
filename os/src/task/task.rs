@@ -9,7 +9,7 @@ use super::tid::{TidHandle, tid_alloc};
 use crate::config::CLK_TCK;
 use crate::fs::mount::init_root_fs;
 use crate::fs::{FdEntry, FdTable, Path};
-use crate::mm::{MemorySet, copy_from_user, copy_to_user};
+use crate::mm::{MemorySet, copy_from_user, copy_to_user, writeback_file_pages};
 use crate::mutex::SpinLock;
 use crate::signal::sig_handler::{ActionType, SigHandler};
 use crate::signal::sig_info::SigInfo;
@@ -1931,6 +1931,17 @@ fn exit_process_group(task: Arc<TaskControlBlock>, cause: ExitCause) {
     reparent_children_to_init(&task);
 
     if memory_set_owned_by_group {
+        let writebacks = task.op_memory_set_read(|mem| mem.prepare_file_writeback(None));
+        match writebacks {
+            Ok(writebacks) => {
+                if let Err(err) = writeback_file_pages(writebacks, false) {
+                    println!("[task-exit] shared file mmap writeback failed: {:?}", err);
+                }
+            }
+            Err(err) => {
+                println!("[task-exit] shared file mmap snapshot failed: {:?}", err);
+            }
+        }
         task.op_memory_set_write(|mem| {
             mem.recycle_data_pages();
         });

@@ -65,18 +65,21 @@
   纯 hint/no-op 只有在 ABI 允许且完成参数校验时才可受限接受。
 - 后续影响：恢复旧测例不能以重新引入假成功为代价；应修实现或证明用例依赖非目标行为。
 
-## 暂时拒绝 writable file `MAP_SHARED`
+## writable file `MAP_SHARED` 使用锁外快照写回
 
-- 状态：已确认，但需要替换
-- 适用范围：文件 mmap/msync/munmap/writeback
-- 最后验证：2026-08-01
-- 证据：`os/src/fs/file.rs::mmap_allowed`、`os/src/mm/memory_set.rs`、Git `cba8e24`；
-  当前 RV/LA 完整日志
-- 内容：为隔离持有 `MemorySet` 写锁执行后端 I/O、munmap 吞写回错误等风险，当前明确返回
-  `EOPNOTSUPP`。该决定提高了 ABI 诚实性，但阻断 basic、lmbench 和 LTP 框架，不能作为长期
-  完成状态。
-- 后续影响：正确替代方案是设计锁外 prepare/writeback/commit、错误传播和 truncate 失效
-  契约；不能仅删除检查后恢复旧的隐患实现。
+- 状态：已验证（受限 ABI 子集）
+- 适用范围：文件 mmap/msync/munmap/writeback；RV64/LA64
+- 最后验证：2026-08-02
+- 证据：`os/src/mm/memory_set.rs`、`os/src/syscall/mm.rs`、`os/src/syscall/fs.rs`、
+  `os/src/task/task.rs`；RV64/LA64 LTP `mmap001` 与 mmap/munmap 子集回归
+- 内容：可写 `MAP_SHARED` 不再被无条件拒绝。共享文件页在建立映射前锁外预取；写回时在
+  `MemorySet` 锁内复制 resident frame 快照，释放锁后通过 `FileOp` 写入页缓存；`MS_SYNC`
+  再执行 `fsync`。munmap、MAP_FIXED 替换、mremap 覆盖/收缩、mprotect 和进程退出复用同一
+  写回协议，写回失败可返回给 syscall，且不会在 MM 锁内执行后端 I/O。当前没有硬件 dirty bit，
+  所以对 resident writable shared file pages 保守写回。
+- 后续影响：`MS_INVALIDATE` 仍明确返回 `EOPNOTSUPP`，因为共享文件 frame 全局缓存没有
+  inode-wide 失效协议；文件截断后的 mapped-page `SIGBUS` 规则仍需单独实现，写回时不会因旧
+  映射重新扩展当前 EOF。
 
 ## 关键回归必须双架构并分析日志
 

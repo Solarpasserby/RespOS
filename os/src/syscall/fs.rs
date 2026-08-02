@@ -14,7 +14,7 @@ use crate::fs::{
 };
 use crate::mm::{
     VPNRange, VirtAddr, check_user_readable, check_user_writable, copy_cstr_from_user,
-    copy_from_user, copy_to_user,
+    copy_from_user, copy_to_user, writeback_file_pages,
 };
 use crate::mutex::SpinLock;
 use crate::signal::sig_struct::{Sig, SigSet};
@@ -3531,11 +3531,12 @@ pub fn sys_fdatasync(fd: usize) -> SysResult<usize> {
 
 /// 系统调用 sys-msync — 同步 mmap 映射区域与文件。
 ///
-/// 支持的 flags：
-/// 当前 C 侧没有在不持有 MemorySet 锁的情况下枚举并写回 file-backed VMA 的接口。
-/// 对非空范围显式返回 EOPNOTSUPP，避免仅校验映射后假成功。
-///
-/// MS_ASYNC 和 MS_SYNC 互斥。
+/// Resident writable shared file pages are snapshotted while holding the
+/// address-space read lock and written through FileOp after the lock is
+/// released. MS_ASYNC therefore leaves the data in the file page cache and
+/// returns without forcing the filesystem; MS_SYNC additionally calls fsync.
+/// MS_INVALIDATE is rejected because this kernel has no safe inode-wide
+/// invalidation protocol for the global shared file frame cache.
 pub fn sys_msync(addr: usize, len: usize, flags: i32) -> SysResult<usize> {
     const MS_ASYNC: i32 = 1;
     const MS_INVALIDATE: i32 = 2;
@@ -3551,19 +3552,28 @@ pub fn sys_msync(addr: usize, len: usize, flags: i32) -> SysResult<usize> {
     if flags & MS_ASYNC != 0 && flags & MS_SYNC != 0 {
         return Err(Errno::EINVAL);
     }
+    if flags & MS_INVALIDATE != 0 {
+        return Err(Errno::EOPNOTSUPP);
+    }
 
     if len == 0 {
         return Ok(0);
     }
 
     let end = addr.checked_add(len).ok_or(Errno::EINVAL)?;
+    if addr >= crate::config::TRAMPOLINE || end > crate::config::TRAMPOLINE {
+        return Err(Errno::EINVAL);
+    }
     let start_vpn = VirtAddr::from(addr).floor();
     let end_vpn = VirtAddr::from(end).ceil();
     let vpn_range = VPNRange::new(start_vpn, end_vpn);
     let task = current_task().expect("[kernel] current task is None.");
-    task.op_memory_set_read(|memory_set| memory_set.check_user_mapped_range(vpn_range))?;
-
-    Err(Errno::EOPNOTSUPP)
+    let writebacks = task.op_memory_set_read(|memory_set| {
+        memory_set.check_user_mapped_range(vpn_range.clone())?;
+        memory_set.prepare_file_writeback(Some(&vpn_range))
+    })?;
+    writeback_file_pages(writebacks, flags & MS_SYNC != 0)?;
+    Ok(0)
 }
 
 /// 系统调用 preadv — 从指定文件偏移处读取数据，分散写入多个用户缓冲区。

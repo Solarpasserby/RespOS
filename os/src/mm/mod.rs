@@ -22,7 +22,7 @@ use frame_allocator::init_frame_allocator;
 pub use frame_allocator::{FrameTracker, frame_alloc};
 use heap_allocator::init_heap;
 pub use memory_set::{KERNEL_SPACE, MapPermission, MemorySet};
-pub(crate) use memory_set::{MmapBacking, mmap_file_backing};
+pub(crate) use memory_set::{MmapBacking, mmap_file_backing, writeback_file_pages};
 
 pub fn free_frame_count() -> usize {
     frame_allocator::FRAME_ALLOCATOR.lock().free_frames()

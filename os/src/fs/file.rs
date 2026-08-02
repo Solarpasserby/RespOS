@@ -77,10 +77,11 @@ pub trait FileOp: Any + Send + Sync {
             return Err(Errno::EACCES);
         }
         if shared && writable {
-            // MM 当前在持有 MemorySet 写锁时写回 shared frame，且 munmap
-            // 会吞掉底层写回错误。在 B 提供 prepare/writeback/commit 接口前，
-            // 不宣称支持可写 MAP_SHARED。
-            return Err(Errno::EOPNOTSUPP);
+            // MAP_SHARED|PROT_WRITE needs a writable open-file description;
+            // MAP_PRIVATE remains valid on a read-only descriptor.
+            if !self.writable() {
+                return Err(Errno::EACCES);
+            }
         }
         Ok(())
     }

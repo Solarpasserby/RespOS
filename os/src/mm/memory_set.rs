@@ -131,6 +131,58 @@ fn write_file_at(file: Arc<dyn FileOp>, offset: usize, buf: &[u8]) -> SysResult<
     }
 }
 
+/// A lock-free snapshot of one resident page from a writable shared file
+/// mapping.  The snapshot is deliberately independent from `MemorySet`, so
+/// the actual FileOp write can happen after the address-space lock is
+/// released.
+pub(crate) struct FileWriteback {
+    pub file: Arc<dyn FileOp>,
+    pub offset: usize,
+    pub data: Vec<u8>,
+}
+
+pub(crate) fn writeback_file_pages(writebacks: Vec<FileWriteback>, sync: bool) -> SysResult {
+    let mut synced_files: Vec<Arc<dyn FileOp>> = Vec::new();
+
+    for writeback in writebacks {
+        // A file can be truncated after the mapping was created. Never let
+        // unmapping or msync re-extend it by writing past the current EOF;
+        // accesses beyond a truncated mapping are a separate SIGBUS boundary
+        // that this kernel does not yet model.
+        let current_size = writeback.file.get_stat()?.size;
+        let write_len = current_size
+            .saturating_sub(writeback.offset)
+            .min(writeback.data.len());
+        if write_len == 0 {
+            continue;
+        }
+        let written = write_file_at(
+            writeback.file.clone(),
+            writeback.offset,
+            &writeback.data[..write_len],
+        )?;
+        if written != write_len {
+            return Err(Errno::EIO);
+        }
+
+        if sync
+            && !synced_files
+                .iter()
+                .any(|file| Arc::ptr_eq(file, &writeback.file))
+        {
+            synced_files.push(writeback.file);
+        }
+    }
+
+    if sync {
+        for file in synced_files {
+            file.fsync()?;
+        }
+    }
+
+    Ok(())
+}
+
 fn shared_file_frame(backing: &FileBacking, page_offset: usize) -> SysResult<Arc<FrameTracker>> {
     let stat = backing.file.get_stat()?;
     let file_offset = backing.offset.checked_add(page_offset).ok_or(Errno::EIO)?;
@@ -215,10 +267,11 @@ pub(crate) enum MmapBacking<'a> {
         offset: usize,
         len: usize,
     },
-    SharedFile {
+    SharedFileFrames {
         file: Arc<dyn FileOp>,
         offset: usize,
         len: usize,
+        frames: Vec<Arc<FrameTracker>>,
     },
 }
 
@@ -238,10 +291,12 @@ pub(crate) fn mmap_file_backing(
 ) -> SysResult<MmapBacking<'static>> {
     let file_len = file.get_stat()?.size.saturating_sub(offset).min(map_len);
     if shared {
-        Ok(MmapBacking::SharedFile {
+        let frames = mmap_shared_file_frames(file.clone(), offset, file_len, map_len)?;
+        Ok(MmapBacking::SharedFileFrames {
             file,
             offset,
             len: file_len,
+            frames,
         })
     } else {
         Ok(MmapBacking::PrivateFile {
@@ -250,6 +305,20 @@ pub(crate) fn mmap_file_backing(
             len: file_len,
         })
     }
+}
+
+pub(crate) fn mmap_shared_file_frames(
+    file: Arc<dyn FileOp>,
+    offset: usize,
+    len: usize,
+    map_len: usize,
+) -> SysResult<Vec<Arc<FrameTracker>>> {
+    let backing = FileBacking { file, offset, len };
+    let mut frames = Vec::with_capacity(map_len / PAGE_SIZE);
+    for page in 0..(map_len / PAGE_SIZE) {
+        frames.push(shared_file_frame(&backing, page * PAGE_SIZE)?);
+    }
+    Ok(frames)
 }
 
 impl MemorySet {
@@ -729,9 +798,18 @@ impl MemorySet {
                 );
                 area.locked = placement.locked;
                 area.shm_attach_id = Some(attach_id);
+                let mut mapped_vpns = Vec::new();
                 for (vpn, frame) in area.vpn_range.into_iter().zip(frames.iter()) {
-                    self.page_table
-                        .map(vpn, frame.ppn(), PTEFlags::from(placement.map_perm))?;
+                    if let Err(err) =
+                        self.page_table
+                            .map(vpn, frame.ppn(), PTEFlags::from(placement.map_perm))
+                    {
+                        for mapped_vpn in mapped_vpns {
+                            self.page_table.try_unmap(mapped_vpn);
+                        }
+                        return Err(err);
+                    }
+                    mapped_vpns.push(vpn);
                     area.data_frames.insert(vpn, frame.clone());
                 }
                 self.areas.push(area);
@@ -748,7 +826,15 @@ impl MemorySet {
                     len,
                 ));
             }
-            MmapBacking::SharedFile { file, offset, len } => {
+            MmapBacking::SharedFileFrames {
+                file,
+                offset,
+                len,
+                frames,
+            } => {
+                if frames.len() != map_len / PAGE_SIZE {
+                    return Err(Errno::EINVAL);
+                }
                 let mut area = MapArea::new_file_backed(
                     VirtAddr::from(placement.start),
                     VirtAddr::from(placement.end),
@@ -759,7 +845,20 @@ impl MemorySet {
                     offset,
                     len,
                 );
-                area.map(&mut self.page_table)?;
+                let mut mapped_vpns = Vec::new();
+                for (vpn, frame) in area.vpn_range.into_iter().zip(frames.into_iter()) {
+                    if let Err(err) =
+                        self.page_table
+                            .map(vpn, frame.ppn(), PTEFlags::from(placement.map_perm))
+                    {
+                        for mapped_vpn in mapped_vpns {
+                            self.page_table.try_unmap(mapped_vpn);
+                        }
+                        return Err(err);
+                    }
+                    mapped_vpns.push(vpn);
+                    area.data_frames.insert(vpn, frame);
+                }
                 area.notify_mmap_open();
                 self.areas.push(area);
             }
@@ -1427,6 +1526,59 @@ impl MemorySet {
     /// 转译虚拟页号为物理页号
     pub fn translate(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
         self.page_table.translate(vpn)
+    }
+
+    /// Snapshot resident pages from writable shared file mappings.
+    ///
+    /// The current frame model does not carry hardware dirty bits, so a
+    /// resident page is conservatively written back. Only frame copying is
+    /// done while the MemorySet lock is held; FileOp I/O happens later through
+    /// `writeback_file_pages`.
+    pub(crate) fn prepare_file_writeback(
+        &self,
+        range: Option<&VPNRange>,
+    ) -> SysResult<Vec<FileWriteback>> {
+        let mut writebacks = Vec::new();
+
+        for area in &self.areas {
+            if !area.shared || !area.map_perm.contains(MapPermission::WRITE) {
+                continue;
+            }
+            let Some(backing) = &area.file_backing else {
+                continue;
+            };
+            if let Some(range) = range {
+                if !area.vpn_range.intersect_with(range) {
+                    continue;
+                }
+            }
+
+            let start = range
+                .map(|range| area.vpn_range.get_start().max(range.get_start()))
+                .unwrap_or(area.vpn_range.get_start());
+            let end = range
+                .map(|range| area.vpn_range.get_end().min(range.get_end()))
+                .unwrap_or(area.vpn_range.get_end());
+
+            for vpn in VPNRange::new(start, end) {
+                let Some(frame) = area.data_frames.get(&vpn) else {
+                    continue;
+                };
+                let page_offset = (vpn - area.vpn_range.get_start()) * PAGE_SIZE;
+                if page_offset >= backing.len {
+                    continue;
+                }
+                let write_len = (backing.len - page_offset).min(PAGE_SIZE);
+                let file_offset = backing.offset.checked_add(page_offset).ok_or(Errno::EIO)?;
+                writebacks.push(FileWriteback {
+                    file: backing.file.clone(),
+                    offset: file_offset,
+                    data: frame.ppn().get_bytes_array()[..write_len].to_vec(),
+                });
+            }
+        }
+
+        Ok(writebacks)
     }
 
     /// 遍历所有映射区域，供外部观察者（如 /proc/self/smaps）使用。
@@ -2605,26 +2757,9 @@ impl MapArea {
     pub fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
         match self.map_type {
             MapType::Framed => {
-                // Read-only MAP_SHARED pages are never dirty and must not call a
-                // writable file path during unmap. Writable shared mappings are
-                // currently rejected by FileOp::mmap_allowed until writeback can
-                // report errors outside the MemorySet lock.
-                if self.shared && self.map_perm.contains(MapPermission::WRITE) {
-                    if let (Some(backing), Some(frame)) =
-                        (&self.file_backing, self.data_frames.get(&vpn))
-                    {
-                        let page_offset = (vpn - self.vpn_range.get_start()) * PAGE_SIZE;
-                        if page_offset < backing.len {
-                            let file_offset = backing.offset.saturating_add(page_offset);
-                            let write_len = (backing.len - page_offset).min(PAGE_SIZE);
-                            let _ = write_file_at(
-                                backing.file.clone(),
-                                file_offset,
-                                &frame.ppn().get_bytes_array()[..write_len],
-                            );
-                        }
-                    }
-                }
+                // Shared file writeback is prepared while the address-space
+                // lock is held and executed by the syscall/task-exit owner
+                // after releasing it. Never perform FileOp I/O here.
                 self.data_frames.remove(&vpn);
             }
             _ => {}

@@ -14,6 +14,36 @@
   A/B/C 整合。tracked 工作树在本轮文档工作前无业务源码修改。
 - 后续影响：后续结果必须注明是否仍基于该提交；新增 Codex 文档尚未提交。
 
+## 2026-08-02 writable file `MAP_SHARED` 修复（当前工作树，未提交）
+
+### 实现范围
+
+- 状态：已验证（受限 ABI 子集）
+- 适用范围：文件 `MAP_SHARED`、`msync`、`munmap`、`mremap`、`mprotect`、进程退出；RV64/LA64
+- 最后验证：2026-08-02
+- 证据：`os/src/mm/memory_set.rs`、`os/src/syscall/mm.rs`、`os/src/syscall/fs.rs`、
+  `os/src/fs/file.rs`、`os/src/task/task.rs`；基线 `94a2598`
+- 内容：共享文件映射的 resident frame 在 `MemorySet` 锁内只做快照，文件读写在锁外执行；
+  共享文件页在建立 PTE 前锁外预取；`MS_ASYNC` 写入文件页缓存后返回，`MS_SYNC` 额外执行
+  `fsync`；munmap、固定映射替换、mremap 覆盖/收缩、mprotect 和进程退出均先处理共享写回。
+  当前没有硬件 dirty bit，因此 resident writable shared file page 采用保守写回。
+- 后续影响：`MS_INVALIDATE` 仍返回 `EOPNOTSUPP`，因为全局共享文件 frame 缓存尚无安全的
+  inode-wide 失效协议；文件截断后的访问也尚未实现 Linux `SIGBUS` 边界。
+
+### 针对性回归
+
+- 状态：已确认
+- 适用范围：LTP mmap/munmap 子集、两种 libc、两架构
+- 最后验证：2026-08-02
+- 证据：`/tmp/respos-rv-ltp-mmap-all.log`、`/tmp/respos-la-ltp-mmap.log`；命令分别为
+  `TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=... make rv RV_MODE=debug` 和
+  `TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=... make la LA_MODE=debug`
+- 内容：RV64 musl/glibc 各 `20 passed, 2 failed`，失败为已有的 `mmap13` SIGBUS 和
+  `mmap18` 栈边界语义；其余目标 mmap/munmap 测例通过。LA64 musl/glibc 各 `15 passed,
+  0 failed`。RV64/LA64 的 `mmap001`（1000 页映射、触碰、同步、解除映射）均通过，且不再
+  在 LTP harness 初始化阶段因 writable shared mmap 返回 `EOPNOTSUPP`。
+- 后续影响：这证明阻断已解除，但不代表完整 LTP 或文件截断/SIGBUS 语义全部完成。
+
 ## 2026-08-01 双架构完整运行
 
 ### release 构建、启动和关机

@@ -2,7 +2,10 @@
 
 use super::{Errno, SysResult};
 use crate::config::{MMAP_MIN_ADDR, PAGE_SIZE, TRAMPOLINE};
-use crate::mm::{MapPermission, MmapBacking, VPNRange, VirtAddr, copy_to_user, mmap_file_backing};
+use crate::mm::{
+    MapPermission, MmapBacking, VPNRange, VirtAddr, copy_to_user, mmap_file_backing,
+    writeback_file_pages,
+};
 use crate::task::current_task;
 use bitflags::bitflags;
 
@@ -133,6 +136,17 @@ pub fn sys_mmap(
     } else {
         None
     };
+
+    // MAP_FIXED replaces any existing mappings. Flush writable shared file
+    // pages before MemorySet removes them; the actual file I/O must not run
+    // under the MemorySet lock.
+    if replace {
+        let replace_range = checked_user_page_range(_addr, map_len, AddressAlignment::PageAligned)?;
+        let writebacks = task.op_memory_set_read(|memory_set| {
+            memory_set.prepare_file_writeback(Some(&replace_range))
+        })?;
+        writeback_file_pages(writebacks, false)?;
+    }
     if locked && task.euid() != 0 {
         let limit = task.memlock_limit().0;
         if limit == 0 {
@@ -175,7 +189,9 @@ pub fn sys_mmap(
             Ok(start)
         })
     } else {
-        // 文件映射：当前是假实现，只把文件内容读入一份私有物理页拷贝。
+        // 文件映射：private file pages remain lazy; shared file pages are
+        // prepared before taking the MemorySet lock so their initial read
+        // never performs backend I/O under that lock.
         if offset % PAGE_SIZE != 0 {
             return Err(Errno::EINVAL);
         }
@@ -208,6 +224,9 @@ pub fn sys_munmap(addr: usize, len: usize) -> SysResult<usize> {
     let range = checked_user_page_range(addr, len, AddressAlignment::PageAligned)?;
     let map_len = (range.get_end() - range.get_start()) * PAGE_SIZE;
     let task = current_task().expect("[kernel] current task is None.");
+    let writebacks =
+        task.op_memory_set_read(|memory_set| memory_set.prepare_file_writeback(Some(&range)))?;
+    writeback_file_pages(writebacks, false)?;
     task.op_memory_set_write(|memory_set| {
         memory_set.munmap_range(addr, map_len)?;
         memory_set.flush_tlb();
@@ -248,6 +267,22 @@ pub fn sys_mremap(
     let fixed_addr = (flags & MREMAP_FIXED != 0).then_some(new_addr);
 
     let task = current_task().expect("[kernel] current task is None.");
+    let writeback_range = if let Some(new_addr) = fixed_addr {
+        Some(checked_user_page_range(
+            new_addr,
+            new_len,
+            AddressAlignment::PageAligned,
+        )?)
+    } else if new_len < old_len {
+        Some(VPNRange::new(new_range.get_start(), old_range.get_end()))
+    } else {
+        None
+    };
+    if let Some(range) = writeback_range.as_ref() {
+        let writebacks =
+            task.op_memory_set_read(|memory_set| memory_set.prepare_file_writeback(Some(range)))?;
+        writeback_file_pages(writebacks, false)?;
+    }
     task.op_memory_set_write(|memory_set| {
         let start = memory_set.mremap_range(old_addr, old_len, new_len, maymove, fixed_addr)?;
         memory_set.flush_tlb();
@@ -265,6 +300,10 @@ pub fn sys_mprotect(addr: usize, len: usize, prot: u32) -> SysResult<usize> {
     let map_perm = MapPermission::from(prot);
 
     let task = current_task().expect("[kernel] current task is None.");
+    let writebacks = task.op_memory_set_read(|memory_set| {
+        memory_set.prepare_file_writeback(Some(&remap_vpn_range))
+    })?;
+    writeback_file_pages(writebacks, false)?;
     task.op_memory_set_write(|memory_set| {
         memory_set.remap_area_with_overlap_range(remap_vpn_range, map_perm)?;
         memory_set.flush_tlb();
