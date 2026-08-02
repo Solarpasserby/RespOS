@@ -3,6 +3,23 @@
 命令以当前仓库脚本为准。运行测试前先读 [current-status.md](./current-status.md) 和
 [pitfalls.md](./pitfalls.md)。
 
+## 队友接手入口
+
+题目一当前阶段的执行计划、三人责任边界和每日审查格式见
+[`docs/cagent/day1.md`](../cagent/day1.md)。队友应先恢复干净 pub 镜像，再按该计划使用
+`make run-rv-pub` 做 RV64 单核基线；不要直接用 `make rv`/`make la` 代替 pub 入口。
+
+CAgent 参考源码不随 RespOS 提交。若本地没有 `testsuit/cagent-test/`，从官方
+[`final-2026` 分支](https://github.com/oscomp/testsuits-for-oskernel/tree/final-2026) 获取：
+
+```bash
+git clone --branch final-2026 --depth 1 \
+  https://github.com/oscomp/testsuits-for-oskernel.git /tmp/testsuits-for-oskernel
+```
+
+源码位置为 `/tmp/testsuits-for-oskernel/cagent-test/`；官方启动脚本和评分器分别位于
+`scripts/cagent_testcode.sh` 与 `judge/judge_cagent-glibc.py`。
+
 ## 环境与镜像
 
 ### 准备比赛镜像
@@ -90,6 +107,34 @@ make la MEM=128M SMP=1 LA_OUTPUT=/tmp/respos-la.log
 ```
 
 - 后续影响：建议顺序运行；端口转发和共享构建配置使并行运行收益有限且更难诊断。
+
+### pub 镜像交互式启动
+
+- 状态：已验证（RV64 启动到交互式 shell）
+- 适用范围：决赛 pub 镜像的第一阶段检查
+- 最后验证：2026-08-02
+- 证据：顶层 `Makefile`、`user/src/bin/initproc.rs`、QEMU 直接启动日志
+- 内容：
+
+```bash
+make run-rv-pub       # RV pub 镜像，默认 256M、单核、串口 user_shell
+make run-la-pub       # LA pub 镜像，默认 256M、单核、串口 user_shell
+```
+
+这两个目标通过 virtio block 设备加载 ext4 镜像，不执行宿主机挂载。它们将用户程序的
+`eval` feature 清空，因此 `initproc` 启动 `user_shell`，不会自动运行初赛 `testrunner`。
+`make rv` 和 `make la` 仍保留 `FEATURES=eval` 及原初赛镜像，不能用来检查 pub 镜像。
+8 vCPU/8G 不是当前交互式入口的默认值；待 SMP 和决赛 launcher 明确后再单独增加决赛资源配置。
+
+- 2026-08-02 实测 `make run-rv-pub` 已完成用户程序、lwext4 和内核构建，QEMU 以 1 个
+  HART、256M 内存加载 `img/sdcard-rv-pub.img`，并显示 `Rust user shell` 的 `/>` 提示符；
+  未进入 `testrunner`。LA 入口已做同样的配置检查，但尚未完成本轮启动验证。
+
+题一 CAgent 的 guest 入口是 `/glibc/cagent_testcode.sh`，不是内置 `testrunner`。它会启动
+`simple_llm_server`，并行运行 10 个 `agent_lite`，最终由上游
+[`judge_cagent-glibc.py`](https://github.com/oscomp/testsuits-for-oskernel/blob/final-2026/judge/judge_cagent-glibc.py)
+解析 `testcase cagent ...` 记录。当前先在 `SMP=1` 下验证该脚本；上游规则中明确的 `-smp 8`
+属于题二 BuildStorm，不是题一的前置条件。
 
 ### GDB
 

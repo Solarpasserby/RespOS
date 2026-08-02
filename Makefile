@@ -8,6 +8,10 @@ MEM ?= 256M
 SMP ?= 1
 RV_FS_IMG ?= img/sdcard-rv.img
 LA_FS_IMG ?= img/sdcard-la.img
+PUB_INTERACTIVE_MEM ?= 256M
+PUB_INTERACTIVE_SMP ?= 1
+RV_PUB_FS_IMG ?= img/sdcard-rv-pub.img
+LA_PUB_FS_IMG ?= img/sdcard-la-pub.img
 RV_DISK_IMG ?= disk.img
 LA_DISK_IMG ?= disk-la.img
 QEMU_RV ?= qemu-system-riscv64
@@ -18,6 +22,10 @@ LA_TARGET := loongarch64-unknown-none
 
 RV_OUTPUT ?= rv-output.txt
 LA_OUTPUT ?= la-output.txt
+RV_PUB_OUTPUT ?= /tmp/respos-rv-pub-output.txt
+LA_PUB_OUTPUT ?= /tmp/respos-la-pub-output.txt
+RV_USER_FEATURES ?= eval
+LA_USER_FEATURES ?= eval
 
 ifeq ($(RV_MODE),debug)
 	RV_CARGO_TARGET_DIR := debug
@@ -62,7 +70,8 @@ LA_QEMU_DISK_ARGS += -drive file=$(LA_DISK_IMG),if=none,format=raw,id=x1 \
 	-device virtio-blk-pci,drive=x1
 endif
 
-.PHONY: all build-rv build-la rv la prepare-rv-cargo-config prepare-la-cargo-config clean check-submit
+.PHONY: all build-rv build-la rv la run-rv-pub run-la-pub check-pub-images \
+	prepare-rv-cargo-config prepare-la-cargo-config clean check-submit
 
 all: build-rv build-la
 
@@ -77,7 +86,7 @@ prepare-la-cargo-config:
 	cp user/cargo/config-loongarch64.toml user/.cargo/config.toml
 
 build-rv: prepare-rv-cargo-config
-	$(MAKE) -C user build ARCH=riscv64 MODE=$(RV_MODE) FEATURES=eval
+	$(MAKE) -C user build ARCH=riscv64 MODE=$(RV_MODE) FEATURES=$(RV_USER_FEATURES)
 	cd os && RESPOS_USER_PROFILE_DIR=$(RV_CARGO_TARGET_DIR) \
 		RESPOS_USER_TARGET=$(RV_TARGET) \
 		RESPOS_APP_REBUILD_STAMP=$$(date +%s%N) cargo build $(RV_CARGO_BUILD_ARG)
@@ -85,7 +94,7 @@ build-rv: prepare-rv-cargo-config
 	@rust-readobj -h -l $(KERNEL_RV) | awk '/Entry:/ || /VirtualAddress:/ || /PhysicalAddress:/ { print }'
 
 build-la: prepare-la-cargo-config
-	$(MAKE) -C user build ARCH=loongarch64 MODE=$(LA_MODE) FEATURES=eval
+	$(MAKE) -C user build ARCH=loongarch64 MODE=$(LA_MODE) FEATURES=$(LA_USER_FEATURES)
 	cd os && RESPOS_USER_PROFILE_DIR=$(LA_CARGO_TARGET_DIR) \
 		RESPOS_USER_TARGET=$(LA_TARGET) \
 		RESPOS_APP_REBUILD_STAMP=$$(date +%s%N) cargo build $(LA_CARGO_BUILD_ARG)
@@ -120,6 +129,30 @@ la: build-la
 		-netdev user,id=net0,hostfwd=tcp::5555-:5555,hostfwd=udp::5555-:5555 \
 		-rtc base=utc \
 		$(LA_QEMU_DISK_ARGS) |& tee $(LA_OUTPUT)
+
+# Pub-image interactive targets. The user `initproc` executes testrunner only
+# when the user crate is built with the `eval` feature. Clearing it makes
+# initproc start the embedded user_shell, which is the first step for examining
+# the pub images. Keep this path single-core until the kernel's SMP path is
+# implemented and the final-round guest launcher is known.
+run-rv-pub: RV_FS_IMG=$(RV_PUB_FS_IMG)
+run-rv-pub: RV_USER_FEATURES=
+run-rv-pub: MEM=$(PUB_INTERACTIVE_MEM)
+run-rv-pub: SMP=$(PUB_INTERACTIVE_SMP)
+run-rv-pub: RV_OUTPUT=$(RV_PUB_OUTPUT)
+run-rv-pub: check-pub-images rv
+
+run-la-pub: LA_FS_IMG=$(LA_PUB_FS_IMG)
+run-la-pub: LA_USER_FEATURES=
+run-la-pub: MEM=$(PUB_INTERACTIVE_MEM)
+run-la-pub: SMP=$(PUB_INTERACTIVE_SMP)
+run-la-pub: LA_OUTPUT=$(LA_PUB_OUTPUT)
+run-la-pub: check-pub-images la
+
+check-pub-images:
+	@test -r "$(RV_PUB_FS_IMG)" || { echo "missing $(RV_PUB_FS_IMG)" >&2; exit 1; }
+	@test -r "$(LA_PUB_FS_IMG)" || { echo "missing $(LA_PUB_FS_IMG)" >&2; exit 1; }
+	@file "$(RV_PUB_FS_IMG)" "$(LA_PUB_FS_IMG)"
 
 check-submit: all
 	@file $(KERNEL_RV)

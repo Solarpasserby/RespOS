@@ -3,6 +3,19 @@
 本文给未来维护者提供最短接手路径。稳定架构事实以当前源码为准，快速变化的状态统一放在
 [current-status.md](./current-status.md)，设计理由见 [decisions.md](./decisions.md)。
 
+## 队友接手入口
+
+队友同步仓库后，建议按以下顺序阅读：
+
+1. [current-status.md](./current-status.md)：当前提交、已验证结果和正在进行的阻断；
+2. [workflows.md](./workflows.md)：构建、镜像恢复和 QEMU 运行命令；
+3. [../cagent/day1.md](../cagent/day1.md)：题目一当天的三人分工、边界、命令和验收标准；
+4. [architecture.md](./architecture.md)：修改内核前需要遵守的调用链和不变量；
+5. [pitfalls.md](./pitfalls.md)：已知失败模式和排查顺序。
+
+当前协作目标是先在 `SMP=1` 下完成题目一的 CAgent 固定命令闭环；不要把题目二的 SMP 或
+BuildStorm 要求带入题目一的第一轮开发。
+
 ## 项目定位
 
 ### 教学与竞赛型 Linux ABI 兼容内核
@@ -46,7 +59,8 @@
 | `img/` | 比赛测试镜像 | 运行会修改镜像内容，必要时从 `.xz` 恢复 |
 | `judge/` | LTP 日志解析、Linux baseline 对比 | 不要用 QEMU 退出码替代日志分析 |
 | `scripts/` | 镜像下载、LTP 报告等辅助流程 | `scripts/get_img.sh` 保留下载压缩包 |
-| `docs/` | 设计、重构、比赛和调试记录 | 本目录只做经核验的 Codex 接手摘要 |
+| `docs/codex/` | Codex 接手摘要、状态和验证工作流 | 只保留经核验的项目知识 |
+| `docs/cagent/` | CAgent 题目执行计划和协作材料 | 队友按当前阶段文档执行，不放镜像或产物 |
 
 ## 当前开发基线与目标
 
