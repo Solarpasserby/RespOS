@@ -3,6 +3,7 @@ use std::fs::{File, read_dir};
 use std::io::{Result, Write};
 
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg(rust_analyzer)");
     println!("cargo:rerun-if-changed=../user/src/");
     println!("cargo:rerun-if-env-changed=PROFILE");
     println!("cargo:rerun-if-env-changed=RESPOS_USER_TARGET");

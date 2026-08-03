@@ -865,10 +865,17 @@ impl InodeOp for Ext4Inode {
             }
         }
 
-        // TODO[ABI-COMPAT]: lwext4 在 create 后立刻重新 open/lookup 新对象时可能阻塞。
-        // 创建已经成功，VFS 会把这个 inode 安装进新 dentry；后续 read/write/stat 仍携带
-        // 绝对路径访问底层 ext4。普通路径 lookup 不走这里，仍会复用真实 inode cache。
-        let inode = Self::synthetic_created_inode(ext4_ty);
+        // 目录必须绑定到真实的 ext4 inode。否则 mkdir 后紧接着解析
+        // "dir/file" 时，路径遍历会把 synthetic inode 当作父目录传给
+        // lwext4，后续创建会以 EINVAL 失败。普通文件仍使用 synthetic
+        // inode：其数据操作按绝对路径访问后端，避免 lwext4 create 后
+        // 立即重新打开文件的已知问题。
+        let inode = if ext4_ty == Ext4InodeTypes::EXT4_DE_DIR {
+            let (child_ino, child_ty) = Self::lookup_dirent(parent_path, name)?;
+            Self::get_or_create(child_ino, child_ty)
+        } else {
+            Self::synthetic_created_inode(ext4_ty)
+        };
         if let Some(inode) = inode.as_any().downcast_ref::<Ext4Inode>() {
             inode.init_inode_times();
         }

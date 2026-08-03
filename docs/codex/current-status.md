@@ -29,6 +29,24 @@
   `touch test_dir/file{1,2,3}` 报 `Invalid argument`，属于文件系统路径。LA64 release 构建和
   `make run-la-pub` 启动到 `Rust user shell` 均通过，`./busybox uname -r` 输出 `6.10.0-dev`；
   但官方 CAgent 脚本在输出测试组记录前退出 139，尚未证明 LA64 完整 CAgent 可运行。
+## 2026-08-02 题一任务 B 文件系统三项修复
+
+- 状态：已验证（RV64、SMP=1；三项固定命令和对应 agent 链路均通过）
+- 适用范围：`fs-create`、`fs-readwrite`、`fs-directory`；glibc pub 镜像
+- 证据：`os/src/fs/file.rs`、`os/src/fs/ext4/inode.rs`；`/tmp/respos-task-b-command-exact-fixed.log`、
+  `/tmp/respos-task-b-fs-create-agent-fixed.log`、`/tmp/respos-task-b-fs-agents-fixed2.log`；命令为
+  `make RV_MODE=debug RV_USER_FEATURES= build-rv` 后以 `kernel-rv`、`img/sdcard-rv-pub.img`、
+  `-smp 1` 启动 QEMU
+- 内容：glibc `touch` 会携带 Linux 合法的 `O_NOCTTY`（`1<<8`），此前
+  `validate_open_flags()` 将其误判为未知标志并返回 `EINVAL`；现在作为无副作用的合法 open
+  flag 接受。新建目录不再安装 synthetic inode，而是在 `mkdir` 后回读并绑定真实 ext4 inode，
+  避免随后创建 `dir/file` 时把 synthetic inode 作为父目录传入 lwext4。
+- 结果：固定命令 `mkdir -p test_dir && touch test_dir/file1 test_dir/file2 test_dir/file3 &&
+  ls test_dir | wc -l` 输出 `3`；fs-readwrite agent 得到 `15`，目录 agent 得到 `3`；fs-create
+  agent 已输出 `Hello OS` 并成功完成任务。
+- 边界：这不是完整 10 项 CAgent 回归；此前并发隔离运行还暴露了
+  `simple_llm_server`/runner 的并发连接问题，需要任务 A 单独定位。当前工作副本镜像已被
+  QEMU 和 `e2fsck` 修改，正式评分前仍须从保留压缩包恢复并记录镜像状态。
 
 ## 2026-08-02 决赛题一 CAgent 初步基线
 

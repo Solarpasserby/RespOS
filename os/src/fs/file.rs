@@ -802,6 +802,7 @@ bitflags::bitflags! {
         const O_RDWR   = 1 << 1;
         const O_CREATE = 1 << 6;
         const O_EXCL   = 1 << 7;
+        const O_NOCTTY = 1 << 8;
         const O_TRUNC  = 1 << 9;
         const O_NONBLOCK = 1 << 11;
         const O_DSYNC = 1 << 12;

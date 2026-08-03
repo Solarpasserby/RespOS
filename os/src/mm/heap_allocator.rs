@@ -18,7 +18,7 @@ pub fn init_heap() {
     }
 }
 
-#[alloc_error_handler]
+#[cfg_attr(not(rust_analyzer), alloc_error_handler)]
 pub fn handle_alloc_error(layout: core::alloc::Layout) -> ! {
     panic!("Heap allocation error, layout = {:?}", layout);
 }

@@ -1,9 +1,19 @@
 {
     // Rust-Analyzer
+    // RespOS intentionally keeps the kernel and user runtime as separate
+    // Cargo projects; the repository root is not a Cargo workspace.
+    "rust-analyzer.linkedProjects": [
+        "${workspaceFolder}/os/Cargo.toml",
+        "${workspaceFolder}/user/Cargo.toml"
+    ],
     "rust-analyzer.cargo.target": "riscv64gc-unknown-none-elf",
+    "rust-analyzer.cargo.cfgs": [
+        "rust_analyzer"
+    ],
     // "rust-analyzer.cargo.features": "all",
     // "rust-analyzer.cargo.target": "loongarch64-unknown-none",
     "rust-analyzer.cargo.allTargets": false,
+    "rust-analyzer.check.allTargets": false,
     "[rust]": {
         "editor.defaultFormatter": "rust-lang.rust-analyzer",
         "editor.formatOnSave": true

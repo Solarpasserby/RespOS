@@ -72,7 +72,19 @@
   改变后一轮失败形态。
 - 后续影响：难以解释的非确定性首先用保留的 `.xz` 恢复镜像，再比较；记录镜像版本和 hash。
 
-## 并发 loopback `Connection refused` 可能是 listener 补位窗口
+## glibc 工具会暴露未覆盖的合法 open flag
+
+- 状态：已确认
+- 适用范围：glibc pub 镜像中的 coreutils/CAgent 文件命令
+- 最后验证：2026-08-02
+- 证据：`os/src/fs/file.rs::OpenFlags`、`os/src/syscall/fs.rs::validate_open_flags()`、
+  glibc `/usr/bin/touch` 的 `EINVAL` 复现
+- 内容：BusyBox 和 glibc 工具的等价操作不一定使用相同的 open flag。此次 glibc `touch`
+  携带 Linux ABI 规定的 `O_NOCTTY`，旧实现因未声明该位在进入 namei 前返回 `EINVAL`。
+- 后续影响：遇到用户态工具特定失败时，先保存实际 syscall flags 并对照 Linux ABI；对纯兼容、
+  不改变普通文件状态的合法 flag 可接受为 no-op，不能按测试名添加特判。
+
+## 网络 `Connection refused` 可能是 ready 时序而非 ABI
 
 - 状态：已确认并修复（当前工作树）
 - 适用范围：多个 client 同时连接同一个 smoltcp TCP listener

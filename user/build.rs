@@ -83,6 +83,7 @@ fn read_ltp_list(path: &Path) -> Vec<(String, Vec<String>)> {
 }
 
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg(rust_analyzer)");
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let list_path = manifest_dir.join("oscomp_ltp_list.txt");
     println!("cargo:rerun-if-changed={}", list_path.display());
