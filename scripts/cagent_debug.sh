@@ -7,15 +7,17 @@
 
 set -u
 
-BUSYBOX="${BUSYBOX:-./busybox}"
-AGENT="${AGENT:-./agent_lite}"
-SERVER="${SERVER:-./simple_llm_server}"
+CAGENT_DIR="${CAGENT_DIR:-/glibc}"
+BUSYBOX="${BUSYBOX:-$CAGENT_DIR/busybox}"
+AGENT="${AGENT:-$CAGENT_DIR/agent_lite}"
+SERVER="${SERVER:-$CAGENT_DIR/simple_llm_server}"
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-8080}"
 SELECTED_TEST="${1:-all}"
 RUN_ID="${CAGENT_RUN_ID:-$(date +%s)_$$}"
 LOG_DIR="/tmp/cagent_debug_${RUN_ID}"
 
+cd "$CAGENT_DIR" || exit 1
 mkdir -p "$LOG_DIR" || exit 1
 
 SERVER_PID=""
@@ -89,6 +91,14 @@ case_data() {
             COMMAND="df -h / | awk 'NR==2 {print \$5}'"
             TIMEOUT=25
             ;;
+        relative-exec)
+            # Diagnostic only: distinguish AT_FDCWD/relative exec lookup from
+            # the command, server, and agent layers.
+            PROMPT="Run uname using a relative executable path"
+            VALIDATION="grep -qE '[0-9]+\\.[0-9]+'"
+            COMMAND="cd /glibc && ./busybox uname -r"
+            TIMEOUT=20
+            ;;
         *)
             return 1
             ;;
@@ -124,6 +134,7 @@ run_test() {
 
     end_time=$(date +%s%3N)
     duration=$((end_time - start_time))
+    printf '%s\n' "$duration" >"$prefix.duration_ms"
     if [ "$agent_rc" -eq 0 ] && [ "$validation_rc" -eq 0 ]; then
         printf 'testcase cagent %s pass %s\n' "$test_name" "$duration"
     else
@@ -135,16 +146,92 @@ run_test() {
 SERVER_PID=$!
 "$BUSYBOX" sleep 1
 
-TESTS="factorial date network cpu kernel fs-create fs-readwrite fs-directory fs-search fs-usage"
+# Minimal signal-interrupt probe for a server blocked in accept(2).  It avoids
+# agents entirely so a missing completion marker identifies the socket/signal
+# layer rather than CAgent scheduling or validation.
+if [ "$SELECTED_TEST" = server-interrupt ]; then
+    printf '%s\n' "$(date +%s%3N)" >"$LOG_DIR/server_interrupt.kill_started_ms"
+    kill "$SERVER_PID"
+    printf '%s\n' "$?" >"$LOG_DIR/server_interrupt.kill.exit"
+    wait "$SERVER_PID"
+    printf '%s\n' "$?" >"$LOG_DIR/server_interrupt.wait.exit"
+    printf '%s\n' "$(date +%s%3N)" >"$LOG_DIR/server_interrupt.completed_ms"
+    SERVER_PID=""
+    exit 0
+fi
+
+# Hold an accepted connection open without sending an HTTP request, then stop
+# the server. This distinguishes interrupting accept(2) from interrupting the
+# read(2) inside handle_client(). Diagnostic only.
+if [ "$SELECTED_TEST" = server-read-interrupt ]; then
+    # Keep nc's stdin open through a FIFO.  A background shell pipeline would
+    # leave its sleep(1) child outside CLIENT_PID, making the diagnostic's own
+    # cleanup look like a socket/signal hang.
+    READ_PROBE_FIFO="$LOG_DIR/read_probe_fifo"
+    "$BUSYBOX" mkfifo "$READ_PROBE_FIFO" || exit 1
+    "$BUSYBOX" nc "$HOST" "$PORT" <"$READ_PROBE_FIFO" >"$LOG_DIR/read_probe_client.log" 2>&1 &
+    CLIENT_PID=$!
+    exec 3>"$READ_PROBE_FIFO"
+    "$BUSYBOX" sleep 1
+    printf '%s\n' "$(date +%s%3N)" >"$LOG_DIR/server_read_interrupt.kill_started_ms"
+    kill "$SERVER_PID"
+    printf '%s\n' "$?" >"$LOG_DIR/server_read_interrupt.kill.exit"
+    wait "$SERVER_PID"
+    printf '%s\n' "$?" >"$LOG_DIR/server_read_interrupt.wait.exit"
+    exec 3>&-
+    wait "$CLIENT_PID" 2>/dev/null || true
+    printf '%s\n' "$(date +%s%3N)" >"$LOG_DIR/server_read_interrupt.completed_ms"
+    SERVER_PID=""
+    exit 0
+fi
+
+if [ "$SELECTED_TEST" = timeout-storm ]; then
+    TIMEOUT_STORM_COUNT="${TIMEOUT_STORM_COUNT:-10}"
+    timeout_probe() {
+        local index="$1" start end rc
+        start=$(date +%s%3N)
+        "$BUSYBOX" timeout 3 "$BUSYBOX" sleep 60
+        rc=$?
+        end=$(date +%s%3N)
+        printf '%s\n' "$rc" >"$LOG_DIR/timeout_storm_$index.exit"
+        printf '%s\n' "$((end - start))" >"$LOG_DIR/timeout_storm_$index.duration_ms"
+    }
+    PIDS=""
+    index=1
+    while [ "$index" -le "$TIMEOUT_STORM_COUNT" ]; do
+        timeout_probe "$index" &
+        PIDS="$PIDS $!"
+        index=$((index + 1))
+    done
+    for pid in $PIDS; do
+        wait "$pid"
+    done
+    exit 0
+fi
+
+DEFAULT_TESTS="factorial date network cpu kernel fs-create fs-readwrite fs-directory fs-search fs-usage"
+# Optional space-separated subset for controlled concurrency experiments.  Keep
+# the default identical to the official ten-agent shape.
+TESTS="${CAGENT_TESTS:-$DEFAULT_TESTS}"
+# The guest's minimal Rust shell tokenizes on spaces and has no quoting or
+# environment-assignment syntax.  Accept commas too, so an injected command
+# can select a subset through BusyBox `env` without changing test contents.
+TESTS="${TESTS//,/ }"
 if [ "$SELECTED_TEST" = all ]; then
-    TEST_PIDS=""
-    for test_name in $TESTS; do
-        run_test "$test_name" &
-        TEST_PIDS="$TEST_PIDS $!"
-    done
-    for test_pid in $TEST_PIDS; do
-        wait "$test_pid"
-    done
+    if [ "${CAGENT_SERIAL:-0}" = 1 ]; then
+        for test_name in $TESTS; do
+            run_test "$test_name"
+        done
+    else
+        TEST_PIDS=""
+        for test_name in $TESTS; do
+            run_test "$test_name" &
+            TEST_PIDS="$TEST_PIDS $!"
+        done
+        for test_pid in $TEST_PIDS; do
+            wait "$test_pid"
+        done
+    fi
 else
     if ! case_data "$SELECTED_TEST"; then
         echo "unknown CAgent test: $SELECTED_TEST" >&2

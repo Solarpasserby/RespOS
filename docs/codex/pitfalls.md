@@ -1,5 +1,19 @@
 # RespOS 已确认易错点
 
+## pub 镜像不能在 QEMU 运行时由宿主修改
+
+- 状态：已确认
+- 适用范围：`img/sdcard-*-pub.img`、QEMU、`debugfs`、`e2fsck`
+- 最后验证：2026-08-03
+- 证据：RV64 pub 镜像的正常 guest `quit` 后 `e2fsck -fn`；lwext4 卸载路径和
+  `/tmp/ext4-flush-pre-e2fsck.log`
+- 内容：guest 正常 reboot 会依次停止 journal、卸载 ext4 并等待 virtio-blk FLUSH；只有看到
+  QEMU 退出后，宿主才可运行 `e2fsck` 或 `debugfs -w`。强制终止 QEMU、在其持有 raw image
+  时修改镜像、或在 gzip 解压尚未完成时运行 fsck，都会造成 journal recovery、短读或元数据
+  不一致，不能归因于单个 CAgent syscall。
+- 后续影响：每轮写入诊断 runner 前先恢复完整镜像并 `e2fsck -pf`；测试后先正常 guest
+  `quit`、确认 QEMU 退出，再离线提取或修改文件。不可恢复的强制停止后应从压缩基线恢复镜像。
+
 ## `make rv/la` 返回 0 不等于测试通过
 
 - 状态：已确认
@@ -96,6 +110,21 @@
   会随机落到任意 agent，因而可能伪装成 `kernel`、`cpu` 或 FS 命令失败。
 - 后续影响：先保存 agent 原始日志和退出码；若是 connect 失败，不要修改 `uname`、`nproc` 等固定
   命令。监听实现必须按 backlog 提前提供容量，而不是在客户端硬编码重试。
+
+## CAgent 全量 reject 可能来自单线程 LLM server 排队
+
+- 状态：已初步定位，仍需并行/串行对照确认
+- 适用范围：题一 `/glibc/cagent_testcode.sh`，`SMP=1` 的 10 个并行 agent
+- 最后验证：2026-08-03
+- 证据：`testsuit/cagent-test/simple_llm_server.c` 的 `listen(server_fd, 10)`、主循环中的
+  `accept` 后直接 `handle_client(client_fd)`；`/tmp/respos-integrated-rv-cagent.log`；当前整合
+  提交的单 agent `kernel` 复现
+- 内容：官方 runner 同时 fork 10 个 `agent_lite`，但固定 server 不为每个连接创建线程或子进程，
+  请求处理是串行的。当前全量运行虽收到请求，却让各项耗时达到约 43–60 秒并超过官方
+  20–35 秒 timeout；单 agent `kernel` 能正常获得 `6.10.0-dev` 并以 exit 0 完成。
+- 后续影响：不能把这轮 10/10 reject 直接归因于 `uname`、文件系统或 TCP ABI。先用保留日志的
+  单项/串行 runner 复现，再单独测 server 并发；A 的 listener backlog 修复仍需保留，因为它
+  解决的是连接承载能力，不能消除 server 应用层串行排队。
 
 ## 在待恢复 journal 的镜像上写入 debug 文件会丢失
 

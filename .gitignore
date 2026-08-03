@@ -10,6 +10,8 @@ review/
 .claude/
 CLAUDE.md
 .claude/
+# Local learning notes are intentionally not part of the RespOS knowledge sync.
+docs/C组学习指南-文件系统与文件ABI.md
 os/src/link_app.S
 os/.cargo/
 user/.cargo/

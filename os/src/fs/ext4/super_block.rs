@@ -45,8 +45,11 @@ impl Ext4SuperBlock {
     pub fn shutdown(&self) -> SysResult {
         self.flush_cache()?;
         let mut inner = self.inner.lock();
-        let wrapper = inner.take();
+        let mut wrapper = inner.take();
         drop(inner);
+        if let Some(wrapper) = wrapper.as_mut() {
+            wrapper.shutdown().map_err(|_| Errno::EIO)?;
+        }
         drop(wrapper);
         Ok(())
     }

@@ -180,7 +180,12 @@ pub fn kernel_trap_handler(cx: &mut TrapContext) {
             panic!("UserEnvCall from kernel!");
         }
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
-            info!("SupervisorTimer in kernel mode");
+            // SBI timer interrupts remain pending until a later deadline is
+            // programmed. Long syscall paths can legitimately cross a tick;
+            // acknowledge it by arming the next tick and process expirations.
+            // Scheduling remains at explicit safe points in kernel code.
+            set_next_ti_trigger();
+            check_all_task_timers();
         }
         _ => {
             panic!(

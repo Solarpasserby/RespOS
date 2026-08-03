@@ -27,6 +27,7 @@ pub struct Ext4BlockWrapper<K: KernelDevOp> {
     //block_dev: K::DevType,
     name: [u8; 16],
     mount_point: [u8; 32],
+    mounted: bool,
     pd: core::marker::PhantomData<K>,
 }
 
@@ -86,6 +87,7 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
             //block_dev,
             name,
             mount_point,
+            mounted: false,
             pd: core::marker::PhantomData,
         };
 
@@ -100,6 +102,7 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
                 .lwext4_mount()
                 .expect("Failed to mount the ext4 file system, perhaps the disk is not an EXT4 file system.");
         }
+        ext4bd.mounted = true;
 
         ext4bd.lwext4_dir_ls();
         ext4bd.print_lwext4_mp_stats();
@@ -273,15 +276,43 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
                 error!("ext4_umount: fail {}", r);
                 return Err(r);
             }
+            // From this point lwext4 no longer owns a mounted filesystem.
+            // Keep that state even if the subsequent hardware flush fails, so
+            // Drop cannot try to stop the already-stopped journal again.
+            self.mounted = false;
+
+            // ext4's block-device interface has no flush callback.  Its cache
+            // and journal writes have reached the virtio driver at this point,
+            // but they are not durable until the device's FLUSH request has
+            // completed.  Keep the backing device alive until that barrier.
+            let devt = &mut *((*(*self.value).bdif).p_user as *mut K::DevType);
+            let flush_failed = K::flush(devt).is_err();
+            if flush_failed {
+                error!("block device flush during ext4 unmount failed");
+            }
 
             let r = ext4_device_unregister(c_name);
             if r != EOK as i32 {
                 error!("ext4_device_unregister: fail {}", r);
                 return Err(r);
             }
+            if flush_failed {
+                return Err(EIO as i32);
+            }
         }
 
         info!("lwext4 umount Okay");
+        Ok(0)
+    }
+
+    /// Flush journal/cache state and issue the backing-device durability
+    /// barrier exactly once.  This is used by the reboot path, where failure
+    /// must be reported before power is removed.
+    pub fn shutdown(&mut self) -> Result<usize, i32> {
+        if !self.mounted {
+            return Ok(0);
+        }
+        self.lwext4_umount()?;
         Ok(0)
     }
 
@@ -379,7 +410,15 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
 impl<K: KernelDevOp> Drop for Ext4BlockWrapper<K> {
     fn drop(&mut self) {
         info!("Drop struct Ext4BlockWrapper");
-        self.lwext4_umount().unwrap();
+        if self.mounted {
+            if let Err(err) = self.shutdown() {
+                // lwext4 may still retain bdif.p_user after a failed unmount.
+                // Leaking the raw device is preferable to freeing memory that
+                // the registered filesystem can still dereference.
+                error!("ext4 unmount during drop failed: {}; leaking block device", err);
+                return;
+            }
+        }
         let devtype = unsafe { Box::from_raw((*(&self.value).bdif).p_user as *mut K::DevType) };
         drop(devtype);
     }

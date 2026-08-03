@@ -120,9 +120,22 @@ fn set_process_sid(task: &Arc<TaskControlBlock>, sid: usize) {
     });
 }
 
-fn wait_block_current(task: &Arc<TaskControlBlock>) {
+/// Sleep in wait(2) and report whether a deliverable signal prevented sleep.
+fn wait_block_current(task: &Arc<TaskControlBlock>) -> bool {
+    // wait(2) is an interruptible sleep.  In particular, userspace timeout
+    // implementations arm ITIMER_REAL and then wait for their child; leaving
+    // this task uninterruptible makes SIGALRM unable to wake the wait.
+    task.set_interruptible(true);
+    if task.check_signal_interrupt() || task.is_interrupted() {
+        task.set_interruptible(false);
+        return true;
+    }
+
     if prepare_current_task_blocked() {
-        if task.is_ready() {
+        // A signal can arrive between the first check and publishing Blocked.
+        // It then records `interrupted` before there is a blocked-queue entry
+        // to wake, so consume that race here instead of sleeping indefinitely.
+        if task.is_ready() || task.is_interrupted() || task.check_signal_interrupt() {
             remove_task(task.tid());
             task.set_running();
         } else {
@@ -131,6 +144,9 @@ fn wait_block_current(task: &Arc<TaskControlBlock>) {
     } else {
         yield_current_task();
     }
+    let interrupted = task.is_interrupted() || task.check_signal_interrupt();
+    task.set_interruptible(false);
+    interrupted
 }
 
 // 判断执行文件是否为 shell 脚本，若为 shell 脚本，则更改执行环境和参数
@@ -1286,7 +1302,18 @@ pub fn sys_wait4(
             return Ok(0);
         }
 
-        wait_block_current(&task);
+        // Re-check children before this point on every loop iteration.  A
+        // SIGCHLD that accompanies an exited child is therefore consumed by
+        // the successful wait above; other interrupting signals follow the
+        // Linux wait4(2) EINTR contract.
+        if task.is_interrupted() {
+            task.clear_interrupted();
+            return Err(Errno::EINTR);
+        }
+        if wait_block_current(&task) {
+            task.clear_interrupted();
+            return Err(Errno::EINTR);
+        }
     }
 }
 
@@ -1446,7 +1473,14 @@ pub fn sys_waitid(
             return Ok(0);
         }
 
-        wait_block_current(&task);
+        if task.is_interrupted() {
+            task.clear_interrupted();
+            return Err(Errno::EINTR);
+        }
+        if wait_block_current(&task) {
+            task.clear_interrupted();
+            return Err(Errno::EINTR);
+        }
     }
 }
 

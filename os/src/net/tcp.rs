@@ -9,7 +9,7 @@
 //! ```
 //!
 //! 所有状态转换通过 `AtomicU8` 的 CAS 操作实现，确保单核环境下的并发安全。
-//! 阻塞操作使用 `block_on` 模式：poll 接口 → 尝试操作 → EAGAIN 则 yield。
+//! 阻塞操作使用 `block_on` 模式：poll 接口 → 尝试操作 → EAGAIN 则短暂阻塞后重试。
 
 use core::{
     cell::UnsafeCell,
@@ -25,8 +25,12 @@ use spin::Mutex;
 
 use crate::{
     net::addr::{LOOP_BACK_IP, UNSPECIFIED_ENDPOINT, from_sockaddr_to_ipendpoint, is_unspecified},
-    syscall::{Errno, SysResult},
-    task::{current_task, yield_current_task},
+    syscall::{Errno, SysResult, finish_task_timeout, register_task_timeout},
+    task::{
+        current_task, prepare_current_task_blocked, remove_task, switch_to_next_task,
+        yield_current_task,
+    },
+    timer::get_timeout_ms,
 };
 
 use super::{LISTEN_TABLE, SocketSetWrapper, poll_interfaces, socket_set};
@@ -222,7 +226,7 @@ impl TcpSocket {
         }
     }
 
-    /// 阻塞循环：poll → 尝试操作 → 成功返回 / EAGAIN 则 yield 让出 CPU。
+    /// 阻塞循环：poll → 尝试操作 → 成功返回 / EAGAIN 则在短 poll tick 后重试。
     fn block_on<F, T>(&self, mut f: F) -> Result<T, Errno>
     where
         F: FnMut() -> Result<T, Errno>,
@@ -243,7 +247,34 @@ impl TcpSocket {
                     Ok(res) => break Ok(res),
                     Err(res) => {
                         if res == Errno::EAGAIN {
-                            yield_current_task();
+                            // Do not spin in a syscall while no other task is
+                            // runnable.  Such a loop prevents the scheduler's
+                            // idle path from advancing timer waits, starving
+                            // unrelated sleep(2)/timeout(1) users whenever a
+                            // listener waits for its first connection.
+                            let deadline = get_timeout_ms().saturating_add(1);
+                            register_task_timeout(task.tid(), deadline);
+                            if prepare_current_task_blocked() {
+                                // A signal can be queued after the check above
+                                // but before Blocked is visible to its sender.
+                                // In that window the sender records
+                                // `interrupted` but cannot wake a blocked-queue
+                                // entry yet.  Do not switch away in that case:
+                                // consume the pending EINTR in this syscall,
+                                // just as wait(2) does.
+                                if task.is_ready()
+                                    || task.is_interrupted()
+                                    || task.check_signal_interrupt()
+                                {
+                                    remove_task(task.tid());
+                                    task.set_running();
+                                } else {
+                                    switch_to_next_task();
+                                }
+                            } else {
+                                yield_current_task();
+                            }
+                            let _ = finish_task_timeout(task.tid());
                             task.check_real_timer();
                             if task.check_signal_interrupt() || task.is_interrupted() {
                                 task.clear_interrupted();
