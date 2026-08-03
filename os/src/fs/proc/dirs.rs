@@ -12,6 +12,7 @@ use super::smaps::SmapsInode;
 use super::stat::{ProcStatInode, TaskStatInode};
 use super::version::VersionInode;
 use crate::fs::pipe::{pipe_max_size_string, set_pipe_max_size};
+use crate::net::proc_net_tcp;
 use crate::syscall::ipc::{
     set_shmall_value, set_shmmax_value, set_shmmni_value, shmall_value, shmmax_value, shmmni_value,
 };
@@ -62,6 +63,8 @@ const PROC_SYS_NET_IPV4_CONF_LO_TAG_INO: u64 = 32;
 const PROC_SYS_NET_IPV4_CONF_DEFAULT_TAG_INO: u64 = 33;
 const PROC_SYS_KERNEL_SCHED_RR_TIMESLICE_MS_INO: u64 = 34;
 const PROC_HEALTH_INO: u64 = 35;
+const PROC_NET_INO: u64 = 36;
+const PROC_NET_TCP_INO: u64 = 37;
 const PROC_PID_DIR_INO_BASE: u64 = 0x10000;
 const PROC_PID_STAT_INO_BASE: u64 = 0x20000;
 const PROC_DEV: u64 = 0x100;
@@ -119,6 +122,8 @@ impl InodeOp for ProcDirInode {
             Ok(Arc::new(CpuinfoInode))
         } else if name == "version" {
             Ok(Arc::new(VersionInode))
+        } else if name == "net" {
+            Ok(Arc::new(ProcNetInode))
         } else if name == "sys" {
             Ok(Arc::new(ProcSysInode))
         } else if name == "config.gz" {
@@ -147,9 +152,10 @@ impl InodeOp for ProcDirInode {
             entry(PROC_STAT_INO, InodeType::Regular, 6, b"stat\0"),
             entry(PROC_CPUINFO_INO, InodeType::Regular, 7, b"cpuinfo\0"),
             entry(PROC_VERSION_INO, InodeType::Regular, 8, b"version\0"),
-            entry(PROC_SYS_INO, InodeType::Directory, 9, b"sys\0"),
-            entry(PROC_CONFIG_GZ_INO, InodeType::Regular, 10, b"config.gz\0"),
-            entry(PROC_HEALTH_INO, InodeType::Regular, 11, b"respos_health\0"),
+            entry(PROC_NET_INO, InodeType::Directory, 9, b"net\0"),
+            entry(PROC_SYS_INO, InodeType::Directory, 10, b"sys\0"),
+            entry(PROC_CONFIG_GZ_INO, InodeType::Regular, 11, b"config.gz\0"),
+            entry(PROC_HEALTH_INO, InodeType::Regular, 12, b"respos_health\0"),
         ];
         let pids = core::cell::RefCell::new(Vec::new());
         TASK_MANAGER.for_each(|task| {
@@ -158,7 +164,7 @@ impl InodeOp for ProcDirInode {
                 pids.borrow_mut().push(task.tid());
             }
         });
-        let mut off: i64 = 12;
+        let mut off: i64 = 13;
         for pid in pids.into_inner() {
             let name = alloc::format!("{}\0", pid).into_bytes();
             entries.push(entry(
@@ -1221,6 +1227,122 @@ impl InodeOp for ProcNetDefaultTagInode {
         Ok(0)
     }
 
+    fn lookup(&self, _parent_path: &str, _name: &str) -> SysResult<Arc<dyn InodeOp>> {
+        Err(Errno::ENOTDIR)
+    }
+    fn readdir(&self, _path: &str) -> SysResult<Vec<LinuxDirent64>> {
+        Err(Errno::ENOTDIR)
+    }
+    fn create(
+        &self,
+        _parent_path: &str,
+        _name: &str,
+        _ty: InodeType,
+    ) -> SysResult<Arc<dyn InodeOp>> {
+        Err(Errno::EACCES)
+    }
+    fn link(&self, _old_path: &str, _bare_dentry: Arc<Dentry>) -> SysResult {
+        Err(Errno::EACCES)
+    }
+    fn unlink(&self, _valid_dentry: &Arc<Dentry>) -> SysResult {
+        Err(Errno::EACCES)
+    }
+}
+
+pub(super) struct ProcNetInode;
+
+impl InodeOp for ProcNetInode {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn node_type(&self) -> InodeType {
+        InodeType::Directory
+    }
+
+    fn stat(&self, _path: &str) -> SysResult<KStat> {
+        Ok(KStat::minimal(0, InodeType::Directory)
+            .with_dev(PROC_DEV)
+            .with_ino(PROC_NET_INO)
+            .with_mode(0o555)
+            .with_nlink(2))
+    }
+
+    fn lookup(&self, _parent_path: &str, name: &str) -> SysResult<Arc<dyn InodeOp>> {
+        match name {
+            "tcp" => Ok(Arc::new(ProcNetTcpInode)),
+            _ => Err(Errno::ENOENT),
+        }
+    }
+
+    fn readdir(&self, _path: &str) -> SysResult<Vec<LinuxDirent64>> {
+        Ok(vec![
+            dir_entry(PROC_NET_INO, 1, b".\0"),
+            dir_entry(PROC_ROOT_INO, 2, b"..\0"),
+            entry(PROC_NET_TCP_INO, InodeType::Regular, 3, b"tcp\0"),
+        ])
+    }
+
+    fn read_at(&self, _path: &str, _off: usize, _buf: &mut [u8]) -> SysResult<usize> {
+        Err(Errno::EISDIR)
+    }
+    fn write_at(&self, _path: &str, _off: usize, _buf: &[u8]) -> SysResult<usize> {
+        Err(Errno::EACCES)
+    }
+    fn truncate(&self, _path: &str, _size: usize) -> SysResult<usize> {
+        Err(Errno::EACCES)
+    }
+    fn create(
+        &self,
+        _parent_path: &str,
+        _name: &str,
+        _ty: InodeType,
+    ) -> SysResult<Arc<dyn InodeOp>> {
+        Err(Errno::EACCES)
+    }
+    fn link(&self, _old_path: &str, _bare_dentry: Arc<Dentry>) -> SysResult {
+        Err(Errno::EACCES)
+    }
+    fn unlink(&self, _valid_dentry: &Arc<Dentry>) -> SysResult {
+        Err(Errno::EACCES)
+    }
+}
+
+pub(super) struct ProcNetTcpInode;
+
+impl InodeOp for ProcNetTcpInode {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn node_type(&self) -> InodeType {
+        InodeType::Regular
+    }
+
+    fn stat(&self, _path: &str) -> SysResult<KStat> {
+        Ok(KStat::minimal(proc_net_tcp().len(), InodeType::Regular)
+            .with_dev(PROC_DEV)
+            .with_ino(PROC_NET_TCP_INO)
+            .with_mode(0o444))
+    }
+
+    fn read_at(&self, _path: &str, off: usize, buf: &mut [u8]) -> SysResult<usize> {
+        let content = proc_net_tcp();
+        let bytes = content.as_bytes();
+        if off >= bytes.len() {
+            return Ok(0);
+        }
+        let n = buf.len().min(bytes.len() - off);
+        buf[..n].copy_from_slice(&bytes[off..off + n]);
+        Ok(n)
+    }
+
+    fn write_at(&self, _path: &str, _off: usize, _buf: &[u8]) -> SysResult<usize> {
+        Err(Errno::EACCES)
+    }
+    fn truncate(&self, _path: &str, _size: usize) -> SysResult<usize> {
+        Err(Errno::EACCES)
+    }
     fn lookup(&self, _parent_path: &str, _name: &str) -> SysResult<Arc<dyn InodeOp>> {
         Err(Errno::ENOTDIR)
     }

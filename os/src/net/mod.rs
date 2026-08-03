@@ -23,15 +23,17 @@
 //! - `LOOPBACK_IFACE` / `LOOPBACK_DEV` — 回环接口及设备
 //! - `LISTEN_TABLE` — TCP 端口监听表
 
-use alloc::vec;
+use alloc::{string::String, vec};
+use core::fmt::Write;
 use lazy_static::lazy_static;
 use smoltcp::{
     iface::{Config, Interface, SocketHandle, SocketSet},
     phy::Medium,
+    socket::tcp::State as TcpState,
     socket::{AnySocket, tcp::SocketBuffer, udp::PacketBuffer},
     storage::PacketMetadata,
     time::Instant as SmolInstant,
-    wire::{HardwareAddress, IpAddress, IpCidr},
+    wire::{HardwareAddress, IpAddress, IpCidr, IpEndpoint},
 };
 
 use crate::arch::timer::get_time_ms;
@@ -214,4 +216,92 @@ impl<'a> SocketSetWrapper<'a> {
 /// 在 `block_on` 循环中被频繁调用，确保 smoltcp 状态机持续前进。
 pub fn poll_interfaces() {
     SOCKET_SET_INNER.lock().poll_interfaces();
+}
+
+pub(crate) struct TcpProcEntry {
+    local: IpEndpoint,
+    remote: IpEndpoint,
+    state: TcpState,
+}
+
+impl TcpProcEntry {
+    pub(crate) fn new(local: IpEndpoint, remote: IpEndpoint, state: TcpState) -> Self {
+        Self {
+            local,
+            remote,
+            state,
+        }
+    }
+}
+
+pub fn proc_net_tcp() -> String {
+    poll_interfaces();
+
+    let mut entries = LISTEN_TABLE.lock().proc_entries();
+    {
+        use smoltcp::socket::Socket;
+
+        let socket_set = SOCKET_SET_INNER.lock();
+        let mut sockets = socket_set.0.lock();
+        for (_, socket) in sockets.iter_mut() {
+            let Socket::Tcp(socket) = socket else {
+                continue;
+            };
+            let Some(local) = socket.local_endpoint() else {
+                continue;
+            };
+            let remote = socket
+                .remote_endpoint()
+                .unwrap_or(IpEndpoint::new(IpAddress::v4(0, 0, 0, 0), 0));
+            entries.push(TcpProcEntry::new(local, remote, socket.state()));
+        }
+    }
+
+    let mut content = String::from(
+        "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n",
+    );
+    for (idx, entry) in entries.iter().enumerate() {
+        let _ = writeln!(
+            content,
+            "{:4}: {:08X}:{:04X} {:08X}:{:04X} {:02X} 00000000:00000000 00:00000000 00000000 {:5} {:8} {}",
+            idx,
+            proc_ipv4_hex(entry.local.addr),
+            entry.local.port,
+            proc_ipv4_hex(entry.remote.addr),
+            entry.remote.port,
+            proc_tcp_state(entry.state),
+            0,
+            0,
+            idx + 1,
+        );
+    }
+    content
+}
+
+fn proc_ipv4_hex(addr: IpAddress) -> u32 {
+    let bytes = addr.as_bytes();
+    if bytes.len() == 4 {
+        (bytes[0] as u32)
+            | ((bytes[1] as u32) << 8)
+            | ((bytes[2] as u32) << 16)
+            | ((bytes[3] as u32) << 24)
+    } else {
+        0
+    }
+}
+
+fn proc_tcp_state(state: TcpState) -> u8 {
+    match state {
+        TcpState::Established => 0x01,
+        TcpState::SynSent => 0x02,
+        TcpState::SynReceived => 0x03,
+        TcpState::FinWait1 => 0x04,
+        TcpState::FinWait2 => 0x05,
+        TcpState::TimeWait => 0x06,
+        TcpState::Closed => 0x07,
+        TcpState::CloseWait => 0x08,
+        TcpState::LastAck => 0x09,
+        TcpState::Listen => 0x0A,
+        TcpState::Closing => 0x0B,
+    }
 }

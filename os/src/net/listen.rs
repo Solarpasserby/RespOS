@@ -2,13 +2,13 @@ use alloc::{boxed::Box, collections::vec_deque::VecDeque, vec::Vec};
 use smoltcp::{
     iface::SocketHandle,
     socket::tcp::{self, State},
-    wire::{IpEndpoint, IpListenEndpoint},
+    wire::{IpAddress, IpEndpoint, IpListenEndpoint},
 };
 
 use crate::mutex::SpinLock;
 use crate::syscall::{Errno, SysResult};
 
-use super::{SocketSetWrapper, socket_set};
+use super::{SocketSetWrapper, TcpProcEntry, socket_set};
 
 const LISTEN_QUEUE_SIZE: usize = 512;
 
@@ -138,6 +138,31 @@ impl ListenTable {
                 return;
             }
         }
+    }
+
+    pub(crate) fn proc_entries(&self) -> Vec<TcpProcEntry> {
+        let mut entries = Vec::new();
+        for slot in self.table.iter() {
+            let guard = slot.lock();
+            let Some(entry) = guard.as_ref() else {
+                continue;
+            };
+            let local_addr = entry
+                .listen_endpoint
+                .addr
+                .unwrap_or(IpAddress::v4(0, 0, 0, 0));
+            entries.push(TcpProcEntry::new(
+                IpEndpoint::new(local_addr, entry.listen_endpoint.port),
+                IpEndpoint::new(IpAddress::v4(0, 0, 0, 0), 0),
+                State::Listen,
+            ));
+            for &handle in entry.accept_queue.iter() {
+                if let Some((local, remote)) = get_addr_tuple(handle) {
+                    entries.push(TcpProcEntry::new(local, remote, State::Established));
+                }
+            }
+        }
+        entries
     }
 }
 
