@@ -136,6 +136,37 @@ make run-la-pub       # LA pub 镜像，默认 256M、单核、串口 user_shell
 解析 `testcase cagent ...` 记录。当前先在 `SMP=1` 下验证该脚本；上游规则中明确的 `-smp 8`
 属于题二 BuildStorm，不是题一的前置条件。
 
+### CAgent 保留日志的单项诊断
+
+- 状态：已验证（RV64）
+- 适用范围：CAgent 固定命令、agent/popen/validation 分层诊断
+- 最后验证：2026-08-03
+- 证据：`scripts/cagent_debug.sh`；RV64 `kernel` 单项和全量 debug 运行
+- 内容：runner 应位于 guest 的 `/glibc` 并从该目录运行。它接受测试名或 `all`，结果保存在
+  `/tmp/cagent_debug_<run-id>/`，不会像官方脚本一样删除日志。若用 `debugfs` 把 runner 临时写入
+  刚恢复的镜像，必须先回放 journal，否则启动时的 journal recovery 可能覆盖新 inode：
+
+```bash
+gzip -dkf img/sdcard-rv-pub.img.gz
+e2fsck -pf img/sdcard-rv-pub.img || test $? -eq 1
+debugfs -w -R \
+  'write scripts/cagent_debug.sh /glibc/cagent_debug.sh' \
+  img/sdcard-rv-pub.img
+debugfs -w -R \
+  'set_inode_field /glibc/cagent_debug.sh mode 0100755' \
+  img/sdcard-rv-pub.img
+```
+
+guest 中运行：
+
+```bash
+cd /glibc
+./cagent_debug.sh kernel
+```
+
+- 后续影响：正式评分回归仍使用镜像原有 `/glibc/cagent_testcode.sh`；debug runner 和日志不写入
+  官方测例、不提交进镜像。
+
 ### GDB
 
 - 状态：已确认

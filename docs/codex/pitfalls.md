@@ -72,15 +72,43 @@
   改变后一轮失败形态。
 - 后续影响：难以解释的非确定性首先用保留的 `.xz` 恢复镜像，再比较；记录镜像版本和 hash。
 
-## 网络 `Connection refused` 可能是 ready 时序而非 ABI
+## 并发 loopback `Connection refused` 可能是 listener 补位窗口
 
-- 状态：暂定
-- 适用范围：iperf/netperf loopback
-- 最后验证：2026-08-01
-- 证据：RV 在 musl 组失败、LA 在 glibc 组失败，而相邻/对应组可成功
-- 内容：当前失败没有固定在单一架构或 libc，形态为并行 client 建连时服务端尚未接受连接。
-- 后续影响：先给 runner 增加 server-ready handshake、有限重试和进程清理日志，再判断是否为 listen
-  backlog/socket 状态机缺陷。
+- 状态：已确认并修复（当前工作树）
+- 适用范围：多个 client 同时连接同一个 smoltcp TCP listener
+- 最后验证：2026-08-03
+- 证据：CAgent debug 的 agent exit 255 与 `Connection failed to 127.0.0.1:8080`；
+  `os/src/net/listen.rs`；修复后 RV64 三轮官方 CAgent 日志
+- 内容：服务端已经 listen 不代表单个 smoltcp listener 能承接同一轮 poll 中的全部 SYN。旧实现等
+  userspace `accept` 时才补 listener，第一个握手占用 listener 后，其余并发 SYN 会被 reset。该错误
+  会随机落到任意 agent，因而可能伪装成 `kernel`、`cpu` 或 FS 命令失败。
+- 后续影响：先保存 agent 原始日志和退出码；若是 connect 失败，不要修改 `uname`、`nproc` 等固定
+  命令。监听实现必须按 backlog 提前提供容量，而不是在客户端硬编码重试。
+
+## 在待恢复 journal 的镜像上写入 debug 文件会丢失
+
+- 状态：已确认
+- 适用范围：从 `.gz` 恢复 pub ext4 镜像后使用 `debugfs -w`
+- 最后验证：2026-08-03
+- 证据：RV64 镜像注入的 `/glibc/cagent_debug.sh` host/image SHA-256 一致，但首次启动 journal
+  recovery 后 guest 中变为 0 字节；先运行 `e2fsck -pf` 后重新注入可正常执行
+- 内容：压缩包中的 ext4 可能带 `needs journal recovery`。在回放旧 journal 前直接写新 inode，启动
+  时的恢复会用旧元数据覆盖该写入。
+- 后续影响：只读查看不受影响；临时写镜像前先恢复 journal 并再次校验内容。正式干净回归不要
+  注入 debug 文件。
+
+## lwext4 的 CMake 生成目录也跨架构共享
+
+- 状态：已确认
+- 适用范围：RV64/LA64 快速切换构建
+- 最后验证：2026-08-03
+- 证据：`vendor/lwext4_rust/build.rs`、`c/lwext4/Makefile`；失败日志中 LA C compiler 配合 RV
+  `ar/ranlib`，手动顺序执行目标架构 `make musl-generic ARCH=...` 后重试成功
+- 内容：除了活动 Cargo config，lwext4 两架构还共用 `c/lwext4/build_musl-generic`。切换架构时
+  可能出现 C compiler 已切换但 archive 工具仍来自上一架构的混合配置。
+- 后续影响：不要并行构建两架构。若顶层构建在 archive 阶段出现交叉工具混用，先顺序执行
+  `make musl-generic ARCH=riscv64|loongarch64 -C vendor/lwext4_rust/c/lwext4` 再重试；长期应把
+  CMake build dir 按架构拆分。
 
 ## libctest wrapper 的 256 需要解码
 

@@ -513,7 +513,7 @@ impl Socket {
     }
 
     /// 开始监听（仅 TCP）。
-    pub fn listen(&self) -> SysResult {
+    pub fn listen(&self, backlog: usize) -> SysResult {
         if !matches!(
             self.kind,
             SocketKind::SOCK_STREAM | SocketKind::SOCK_SEQPACKET
@@ -521,7 +521,7 @@ impl Socket {
             return Err(Errno::EOPNOTSUPP);
         }
         match &self.inner {
-            SocketInner::Tcp(tcp) => tcp.listen(),
+            SocketInner::Tcp(tcp) => tcp.listen(backlog),
             SocketInner::Unix(unix) => unix.listen(),
             SocketInner::Udp(_) => Err(Errno::EOPNOTSUPP),
         }

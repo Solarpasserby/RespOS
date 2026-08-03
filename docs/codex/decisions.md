@@ -100,3 +100,17 @@
 - 内容：结构优化应尽量保持已有有效 ABI 测例；如果旧测例依赖取巧实现，可以排除，但必须
   给出源码级原因和替代验证，不能仅因失败就标记为“无效”。
 - 后续影响：下一阶段先恢复 LTP harness 可运行性，再以真实失败驱动窄范围修复。
+
+## smoltcp TCP 使用受限 backlog listener 池
+
+- 状态：已验证（当前工作树）
+- 适用范围：loopback TCP listen/accept 与并发连接
+- 最后验证：2026-08-03
+- 证据：`os/src/net/listen.rs`、`os/src/net/mod.rs`、`os/src/net/tcp.rs`；
+  `/tmp/cagent-a-rv-run{1,2,3}.log`
+- 内容：不在 `connect` 上用测试相关重试掩盖 `ECONNREFUSED`。由于一个 smoltcp listener 同时
+  只能承接一个握手，内核按传入 backlog（上限 128、下限 1）预建 listener handle；完成握手的
+  handle 进入 accept queue，协议 poll 和 accept 路径负责补充空位。
+- 后续影响：backlog 会占用 TCP 收发缓冲内存，不能无限接受用户值；close/unlisten 必须回收仍在
+  listener 池和 accept queue 中的所有 handle。若以后替换为原生 SYN queue，应保持相同的
+  userspace 可观察并发语义。

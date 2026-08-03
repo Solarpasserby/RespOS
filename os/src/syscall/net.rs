@@ -740,9 +740,9 @@ pub fn sys_bind(socketfd: usize, socketaddr: usize, socketlen: usize) -> SysResu
     })
 }
 
-pub fn sys_listen(socketfd: usize, _backlog: usize) -> SysResult<usize> {
+pub fn sys_listen(socketfd: usize, backlog: usize) -> SysResult<usize> {
     with_socket(socketfd, |sock| {
-        sock.listen()?;
+        sock.listen(backlog)?;
         Ok(0)
     })
 }

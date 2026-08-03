@@ -216,6 +216,11 @@ impl<'a> SocketSetWrapper<'a> {
 /// 在 `block_on` 循环中被频繁调用，确保 smoltcp 状态机持续前进。
 pub fn poll_interfaces() {
     SOCKET_SET_INNER.lock().poll_interfaces();
+    // A smoltcp listening socket becomes the connected socket after one
+    // handshake.  Replenish it as part of protocol polling rather than waiting
+    // for userspace accept(2), so the listen backlog remains available to
+    // concurrent clients.
+    LISTEN_TABLE.lock().promote_ready_listeners();
 }
 
 pub(crate) struct TcpProcEntry {

@@ -425,7 +425,7 @@ impl TcpSocket {
     }
 
     /// 开始监听绑定的端口。将端点注册到 `LISTEN_TABLE`。
-    pub fn listen(&self) -> SysResult {
+    pub fn listen(&self, backlog: usize) -> SysResult {
         self.update_state(STATE_CLOSED, STATE_LISTENING, || {
             let bound_endpoint = self.bound_endpoint();
             let existing_handle = unsafe { self.handle.get().read() };
@@ -446,7 +446,10 @@ impl TcpSocket {
             unsafe {
                 (*self.local_addr.get()).port = bound_endpoint.port;
             }
-            if let Err(err) = LISTEN_TABLE.lock().listen(bound_endpoint, listen_handle) {
+            if let Err(err) = LISTEN_TABLE
+                .lock()
+                .listen(bound_endpoint, listen_handle, backlog)
+            {
                 if existing_handle.is_none() {
                     socket_set().lock().remove(listen_handle);
                 }

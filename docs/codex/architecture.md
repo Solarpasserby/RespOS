@@ -126,12 +126,17 @@ FdTable slot (FdEntry: descriptor flags)
 
 - 状态：已确认
 - 适用范围：TCP/UDP socket 与本地网络 benchmark
-- 最后验证：2026-08-01
-- 证据：`os/src/net/mod.rs`、`os/src/net/socket.rs`、`os/src/syscall/net.rs`
+- 最后验证：2026-08-03
+- 证据：`os/src/net/mod.rs`、`os/src/net/listen.rs`、`os/src/net/socket.rs`、
+  `os/src/syscall/net.rs`；RV64 CAgent 三轮并发回归
 - 内容：socket syscall 经 FileOp socket 对象进入 TCP/UDP 实现，全局 `SocketSet`、loopback
-  interface/device 和 listen table 由锁保护，`poll_interfaces` 驱动协议栈。
+  interface/device 和 listen table 由锁保护，`poll_interfaces` 驱动协议栈。smoltcp 的单个
+  listener 完成握手后会成为连接 socket，因此 listen table 按受限 `listen(backlog)` 预建
+  listener 池；poll 将已连接 handle 转入 accept queue 并及时补位，避免同一轮并发 SYN 在
+  userspace `accept` 前收到 reset。
 - 后续影响：网络失败应先区分 ABI、协议状态和测试服务端启动时序，不能只凭一次
-  `Connection refused` 判断内核网络语义损坏。
+  `Connection refused` 判断内核网络语义损坏。修改 poll/accept/close 时必须同时维护 listener
+  池、accept queue 和 socket handle 的唯一所有权，避免泄漏或重复 remove。
 
 ## 双架构差异
 

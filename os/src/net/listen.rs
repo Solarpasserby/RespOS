@@ -10,23 +10,32 @@ use crate::syscall::{Errno, SysResult};
 
 use super::{SocketSetWrapper, TcpProcEntry, socket_set};
 
-const LISTEN_QUEUE_SIZE: usize = 512;
+const LISTEN_QUEUE_SIZE: usize = 128;
 
 struct ListenTableEntry {
     listen_endpoint: IpListenEndpoint,
     #[allow(dead_code)]
     task_id: usize,
-    listen_handle: SocketHandle,
+    listen_handles: VecDeque<SocketHandle>,
     accept_queue: VecDeque<SocketHandle>,
+    queue_limit: usize,
 }
 
 impl ListenTableEntry {
-    pub fn new(listen_endpoint: IpListenEndpoint, listen_handle: SocketHandle) -> Self {
+    pub fn new(
+        listen_endpoint: IpListenEndpoint,
+        listen_handle: SocketHandle,
+        backlog: usize,
+    ) -> Self {
+        let queue_limit = backlog.clamp(1, LISTEN_QUEUE_SIZE);
+        let mut listen_handles = VecDeque::with_capacity(queue_limit);
+        listen_handles.push_back(listen_handle);
         ListenTableEntry {
             listen_endpoint,
             task_id: 0,
-            listen_handle,
-            accept_queue: VecDeque::with_capacity(LISTEN_QUEUE_SIZE),
+            listen_handles,
+            accept_queue: VecDeque::with_capacity(queue_limit),
+            queue_limit,
         }
     }
 }
@@ -34,6 +43,7 @@ impl ListenTableEntry {
 /// 端口监听表。每项用 SpinLock 包装以实现内部可变性（&self 方法可修改）。
 pub struct ListenTable {
     table: Box<[SpinLock<Option<Box<ListenTableEntry>>>]>,
+    active_ports: Vec<u16>,
 }
 
 impl ListenTable {
@@ -44,6 +54,7 @@ impl ListenTable {
         }
         ListenTable {
             table: v.into_boxed_slice(),
+            active_ports: Vec::new(),
         }
     }
 
@@ -52,9 +63,10 @@ impl ListenTable {
     }
 
     pub fn listen(
-        &self,
+        &mut self,
         listen_endpoint: IpListenEndpoint,
         listen_handle: SocketHandle,
+        backlog: usize,
     ) -> SysResult {
         let port = listen_endpoint.port;
         debug_assert!(port != 0);
@@ -63,22 +75,30 @@ impl ListenTable {
             *guard = Some(Box::new(ListenTableEntry::new(
                 listen_endpoint,
                 listen_handle,
+                backlog,
             )));
+            if let Some(entry) = guard.as_mut() {
+                replenish_listeners(entry);
+            }
+            self.active_ports.push(port);
             Ok(())
         } else {
             Err(Errno::EADDRINUSE)
         }
     }
 
-    pub fn unlisten(&self, port: u16) {
+    pub fn unlisten(&mut self, port: u16) {
         let mut guard = self.table[port as usize].lock();
         if let Some(entry) = guard.as_ref() {
-            socket_set().lock().remove(entry.listen_handle);
+            for &handle in entry.listen_handles.iter() {
+                socket_set().lock().remove(handle);
+            }
             for &handle in entry.accept_queue.iter() {
                 socket_set().lock().remove(handle);
             }
         }
         *guard = None;
+        self.active_ports.retain(|active_port| *active_port != port);
     }
 
     pub fn can_accept(&self, port: u16) -> bool {
@@ -101,6 +121,7 @@ impl ListenTable {
                 continue;
             }
             if let Some(addr_tuple) = get_addr_tuple(handle) {
+                replenish_listeners(entry);
                 return Ok((handle, addr_tuple));
             }
             socket_set().lock().remove(handle);
@@ -113,30 +134,35 @@ impl ListenTable {
         let Some(entry) = guard.as_mut() else {
             return;
         };
-        if entry.accept_queue.len() >= LISTEN_QUEUE_SIZE {
-            return;
+        let mut pending = VecDeque::with_capacity(entry.queue_limit);
+        while let Some(handle) = entry.listen_handles.pop_front() {
+            if entry.accept_queue.len() < entry.queue_limit && is_connected(handle) {
+                entry.accept_queue.push_back(handle);
+            } else if is_pending_listener(handle) {
+                pending.push_back(handle);
+            } else {
+                socket_set().lock().remove(handle);
+            }
         }
-        if !is_connected(entry.listen_handle) {
-            return;
-        }
+        entry.listen_handles = pending;
+        replenish_listeners(entry);
+    }
 
-        let old_handle = entry.listen_handle;
-        let mut socket = SocketSetWrapper::new_tcp_socket();
-        if socket.listen(entry.listen_endpoint).is_err() {
-            return;
+    /// Move every newly established listening socket into its accept queue and
+    /// install a replacement listener immediately.  smoltcp represents a
+    /// listener with one socket, so waiting until userspace calls accept leaves
+    /// a window where concurrent SYNs see no listening socket and are reset.
+    pub fn promote_ready_listeners(&self) {
+        for &port in self.active_ports.iter() {
+            self.promote_listener(port);
         }
-        let new_handle = socket_set().lock().add(socket);
-        entry.listen_handle = new_handle;
-        entry.accept_queue.push_back(old_handle);
     }
 
     pub fn take_handle(&self, port: u16, handle: SocketHandle) {
         let mut guard = self.table[port as usize].lock();
         if let Some(entry) = guard.as_mut() {
             entry.accept_queue.retain(|&item| item != handle);
-            if entry.listen_handle == handle {
-                return;
-            }
+            entry.listen_handles.retain(|&item| item != handle);
         }
     }
 
@@ -166,16 +192,33 @@ impl ListenTable {
     }
 }
 
-// Drop for ListenTableEntry is handled automatically — when guard is dropped,
-// Box<ListenTableEntry> is dropped, and the syn_queue's SocketHandles are
-// cleaned up via the SOCKET_SET. But we don't hook into that here since
-// the Drop impl would need to lock the global socket set.
+fn replenish_listeners(entry: &mut ListenTableEntry) {
+    while entry.listen_handles.len() + entry.accept_queue.len() < entry.queue_limit {
+        let mut socket = SocketSetWrapper::new_tcp_socket();
+        if socket.listen(entry.listen_endpoint).is_err() {
+            return;
+        }
+        let handle = socket_set().lock().add(socket);
+        entry.listen_handles.push_back(handle);
+    }
+}
+
+// SocketHandle does not own the corresponding SocketSet entry.  unlisten()
+// therefore removes every handle explicitly before dropping this table entry.
 
 fn is_connected(handle: SocketHandle) -> bool {
     super::socket_set()
         .lock()
         .with_socket::<_, tcp::Socket, _>(handle, |socket| {
             matches!(socket.state(), State::Established)
+        })
+}
+
+fn is_pending_listener(handle: SocketHandle) -> bool {
+    super::socket_set()
+        .lock()
+        .with_socket::<_, tcp::Socket, _>(handle, |socket| {
+            matches!(socket.state(), State::Listen | State::SynReceived)
         })
 }
 
