@@ -4,7 +4,7 @@ use crate::arch::config::KERNEL_BASE;
 use core::arch::asm;
 
 #[unsafe(no_mangle)]
-pub fn enter_main() {
+pub fn enter_main(hart_id: usize, opaque: usize) -> ! {
     unsafe {
         // 调整栈指针 加上偏移，跳转到 rust_main
         asm!(
@@ -13,6 +13,8 @@ pub fn enter_main() {
             "add t0, t0, {offset}",
             "jalr zero, 0(t0)",
             offset = in(reg) KERNEL_BASE,
+            in("a0") hart_id,
+            in("a1") opaque,
             options(noreturn)
         );
     }

@@ -60,7 +60,13 @@ const RLIMIT_COUNT: usize = 16;
 const RLIMIT_FSIZE: usize = 1;
 const RLIMIT_STACK: usize = 3;
 const RLIMIT_MEMLOCK: usize = 8;
-const DEFAULT_CPU_AFFINITY_MASK: usize = 0b11;
+const DEFAULT_CPU_AFFINITY_MASK: usize = usize::MAX;
+/// No CPU has saved or is executing this task's kernel context.
+///
+/// A task retains its owner while it is moving from a running context to the
+/// per-CPU idle context.  A wakeup may put it back on the global ready queue
+/// during that interval, but another CPU must not restore that context yet.
+pub const NO_CPU_OWNER: usize = usize::MAX;
 const SCHED_OTHER: usize = 0;
 const SCHED_FIFO: usize = 1;
 const SCHED_RR: usize = 2;
@@ -371,6 +377,7 @@ pub struct TaskControlBlock {
     thread_group: Arc<SpinLock<ThreadGroup>>,
     group_exiting: Arc<AtomicBool>,
     task_status: SpinLock<TaskStatus>,
+    cpu_owner: AtomicUsize,
     parent: Arc<SpinLock<Option<Weak<TaskControlBlock>>>>,
     // CLONE_VFORK has a separate synchronization edge from the normal
     // parent/child relationship: the parent must resume when this child
@@ -452,6 +459,7 @@ impl TaskControlBlock {
             thread_group: Arc::new(SpinLock::new(ThreadGroup::new())),
             group_exiting: Arc::new(AtomicBool::new(false)),
             task_status: SpinLock::new(TaskStatus::Ready),
+            cpu_owner: AtomicUsize::new(NO_CPU_OWNER),
             parent: Arc::new(SpinLock::new(None)),
             vfork_parent: SpinLock::new(None),
             children: Arc::new(SpinLock::new(BTreeMap::new())),
@@ -542,6 +550,7 @@ impl TaskControlBlock {
             thread_group: Arc::new(SpinLock::new(ThreadGroup::new())),
             group_exiting: Arc::new(AtomicBool::new(false)),
             task_status: SpinLock::new(TaskStatus::Ready),
+            cpu_owner: AtomicUsize::new(NO_CPU_OWNER),
             parent: Arc::new(SpinLock::new(None)),
             vfork_parent: SpinLock::new(None),
             children: Arc::new(SpinLock::new(BTreeMap::new())),
@@ -748,6 +757,7 @@ impl TaskControlBlock {
             thread_group,
             group_exiting,
             task_status: SpinLock::new(TaskStatus::Ready),
+            cpu_owner: AtomicUsize::new(NO_CPU_OWNER),
             parent,
             vfork_parent: SpinLock::new(None),
             children,
@@ -961,6 +971,46 @@ impl TaskControlBlock {
     pub fn status(&self) -> TaskStatus {
         self.task_status.lock().clone()
     }
+
+    /// Claim a ready context for one CPU.  The scheduler lock serializes queue
+    /// removal; this owner CAS additionally serializes the short interval in
+    /// which a task has been woken but its previous CPU has not saved it yet.
+    pub fn try_claim_running_on_cpu(&self, cpu: usize) -> bool {
+        let mut status = self.task_status.lock();
+        if *status != TaskStatus::Ready {
+            return false;
+        }
+        if self
+            .cpu_owner
+            .compare_exchange(NO_CPU_OWNER, cpu, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+        *status = TaskStatus::Running;
+        true
+    }
+
+    /// Release the CPU that owns this task's saved context.  This must execute
+    /// only after `__switch` has left the task, from the local idle context.
+    pub fn release_cpu_owner(&self, cpu: usize) {
+        assert_eq!(
+            self.cpu_owner.load(Ordering::Acquire),
+            cpu,
+            "task {} released by a CPU that does not own it",
+            self.tid()
+        );
+        self.cpu_owner.store(NO_CPU_OWNER, Ordering::Release);
+    }
+
+    pub fn assert_cpu_owner(&self, cpu: usize) {
+        assert_eq!(
+            self.cpu_owner.load(Ordering::Acquire),
+            cpu,
+            "task {} is running on a CPU that did not claim it",
+            self.tid()
+        );
+    }
     pub fn cwd(&self) -> Arc<Path> {
         self.cwd.lock().clone()
     }
@@ -984,6 +1034,12 @@ impl TaskControlBlock {
     /// 获取用户任务页表的页表基址寄存器值
     pub fn get_user_token(&self) -> usize {
         self.memory_set.read().token()
+    }
+
+    /// 在恢复本任务 context 前发布当前 hart 对其地址空间的 TLB residency。
+    /// 该位保守保留到地址空间销毁，供远端页表修改时的 RFENCE 使用。
+    pub fn mark_memory_set_current_hart(&self) {
+        self.memory_set.read().mark_current_hart_tlb_resident();
     }
     // 任务状态判断
     pub fn is_running(&self) -> bool {
@@ -1660,6 +1716,21 @@ impl TaskControlBlock {
     // 内核栈操作
     pub fn kstack(&self) -> usize {
         self.kernel_stack.get_top()
+    }
+
+    /// user trap 必须从固定的栈边界开始保存 TrapContext；调度器保存的
+    /// `kstack()` 则可能已经指向一个可恢复的 TaskContext。
+    pub fn kernel_stack_top_edge(&self) -> usize {
+        self.kernel_stack.get_top_edge()
+    }
+
+    /// 任务被某个 CPU claim 后，在恢复其内核上下文前写入该 CPU 的
+    /// `PerCpu` 指针。该字段只会写入未运行任务保存的 TaskContext。
+    pub fn set_kernel_tp(&self, tp: usize) {
+        let task_cx = self.kernel_stack.get_top() as *mut TaskContext;
+        unsafe {
+            (*task_cx).set_tp(tp);
+        }
     }
 
     pub fn get_trap_cx(&self) -> &'static mut TrapContext {

@@ -321,7 +321,15 @@ pub fn sys_sched_yield() -> SysResult<usize> {
     Ok(0)
 }
 
-const ONLINE_CPU_MASK: usize = 0b11;
+#[cfg(target_arch = "riscv64")]
+fn online_cpu_mask() -> usize {
+    crate::arch::smp::online_hart_mask()
+}
+
+#[cfg(target_arch = "loongarch64")]
+fn online_cpu_mask() -> usize {
+    1
+}
 const SCHED_OTHER: usize = 0;
 const SCHED_FIFO: usize = 1;
 const SCHED_RR: usize = 2;
@@ -429,7 +437,7 @@ pub fn sys_sched_setaffinity(pid: isize, cpusetsize: usize, mask: *const u8) -> 
     for (idx, byte) in kbuf.iter().take(core::mem::size_of::<usize>()).enumerate() {
         requested |= (*byte as usize) << (idx * 8);
     }
-    let effective = requested & ONLINE_CPU_MASK;
+    let effective = requested & online_cpu_mask();
     if effective == 0 {
         return Err(Errno::EINVAL);
     }
@@ -443,7 +451,7 @@ pub fn sys_sched_getaffinity(pid: isize, cpusetsize: usize, mask: *mut u8) -> Sy
         return Err(Errno::EINVAL);
     }
     let mut kbuf = alloc::vec![0u8; cpusetsize];
-    let affinity = task.cpu_affinity_mask() & ONLINE_CPU_MASK;
+    let affinity = task.cpu_affinity_mask() & online_cpu_mask();
     for idx in 0..core::mem::size_of::<usize>().min(cpusetsize) {
         kbuf[idx] = ((affinity >> (idx * 8)) & 0xff) as u8;
     }

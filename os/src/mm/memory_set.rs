@@ -20,6 +20,8 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use bitflags::bitflags;
+#[cfg(target_arch = "riscv64")]
+use core::sync::atomic::{AtomicUsize, Ordering};
 use lazy_static::lazy_static;
 use spin::Mutex;
 
@@ -230,6 +232,11 @@ pub struct MemorySet {
     // 页表和各逻辑段
     pub page_table: PageTable,
     areas: Vec<MapArea>,
+    // 对该地址空间执行过的 hart。它是保守集合：context switch 不能在
+    // 切换前安全清掉旧 bit，因此保留历史 hart，远端 shootdown 可以多做但
+    // 绝不能漏做。地址空间销毁前这些 hart 都是安全的 RFENCE 目标。
+    #[cfg(target_arch = "riscv64")]
+    tlb_hart_mask: AtomicUsize,
 }
 
 impl Drop for MemorySet {
@@ -1493,7 +1500,29 @@ impl MemorySet {
 
     /// 修改页表基址寄存器，切换页表
     pub fn flush_tlb(&self) {
+        #[cfg(target_arch = "riscv64")]
+        core::sync::atomic::fence(Ordering::SeqCst);
         sfence();
+        #[cfg(target_arch = "riscv64")]
+        {
+            let current = crate::arch::smp::current_hart_id();
+            let remote_mask = self.tlb_hart_mask.load(Ordering::Acquire) & !(1 << current);
+            if remote_mask != 0 {
+                crate::arch::sbi::remote_sfence_vma(remote_mask, 0)
+                    .expect("SBI RFENCE remote_sfence_vma failed");
+            }
+        }
+    }
+
+    /// 记录当前 hart 已经（或即将）加载这个地址空间。此集合只增长；这让
+    /// 页表写入期间即使恰逢 context switch，也不会遗漏仍持有旧 TLB 的 CPU。
+    #[inline]
+    pub fn mark_current_hart_tlb_resident(&self) {
+        #[cfg(target_arch = "riscv64")]
+        {
+            let hart = crate::arch::smp::current_hart_id();
+            self.tlb_hart_mask.fetch_or(1 << hart, Ordering::Release);
+        }
     }
 
     /// 激活地址空间
@@ -1505,6 +1534,7 @@ impl MemorySet {
         assert!(pte.is_valid());
         assert!(pte.readable() || pte.executable() || pte.writable());
 
+        self.mark_current_hart_tlb_resident();
         write_mmu_token(token);
         self.flush_tlb();
     }
@@ -1669,6 +1699,8 @@ impl MemorySet {
             mmap_start: Self::initial_mmap_start(),
             page_table: PageTable::new(),
             areas: Vec::new(),
+            #[cfg(target_arch = "riscv64")]
+            tlb_hart_mask: AtomicUsize::new(0),
         }
     }
     /// 创建一个拥有内核空间根页表页信息的地址空间，主要用于用户进程
@@ -1679,6 +1711,8 @@ impl MemorySet {
             mmap_start: Self::initial_mmap_start(),
             page_table: PageTable::from_kernel()?,
             areas: Vec::new(),
+            #[cfg(target_arch = "riscv64")]
+            tlb_hart_mask: AtomicUsize::new(0),
         })
     }
 

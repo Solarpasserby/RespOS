@@ -2,6 +2,188 @@
 
 本文件是快速变化的状态页。更新测试结论时必须同时更新日期、提交和命令。
 
+## 2026-08-05 交接审查：RV64 SMP 未提交工作树
+
+- **交接基线**：`dev` 的已提交 HEAD 为 `cf30f64`；下列 SMP 改动和
+  `docs/codex/buildstorm-smp-plan.md` 均尚未提交。工作树还保留用户已有的未提交修改；本次没有
+  reset、checkout、提交、推送，也没有改动 `testsuit/cagent-test/` 或官方测试逻辑。
+- **本次审查范围**：已逐项检查 RV64 entry/HSM/SBI、per-CPU trap scratch 与 `tp`/TLS 保存、
+  per-CPU processor/idle handoff、全局 ready queue 的 claim/owner 协议、`MemorySet` RFENCE、
+  `/proc/cpuinfo` 与 affinity syscall 的 diff。`git diff --check` 当时通过。没有发现已复现的
+  双运行 panic 或 ABI 寄存器破坏；但这只是代码审查和有限 guest 回归，不能替代并发压力验证。
+- **已验证的最小边界**：RV64 debug build、LA64 debug build（后者在最后一次仅删除未使用方法前）、
+  两个 rustfmt check 和 diff check 已通过。当前 owner 版本在 RV64 pub `-smp 1` 的
+  `true; sleep 1; true`、以及 `-smp 8` 的 `nproc=8`、CPU 0--7 的 `/proc/cpuinfo`、四路后台
+  `sleep 1` + `wait` 中均 exit 0；未见 owner assertion、`sepc=0` 或 panic。
+- **不能作为通过的项目**：owner 栅栏加入后尚未重新运行 CAgent；文中更早的 CAgent kernel
+  `pass 8829` 仅适用于 handoff 前的工作树，不代表当前版本。也未运行 BuildStorm、完整 fork/exec/wait、
+  futex、pipe/socket 或共享地址空间压力。
+- **审查结论 / 阻塞项**：四路 `busybox timeout 3 busybox sleep 60` + `wait` 在
+  `-snapshot -smp 8 -m 256M` 的 debug 和 release 中均超过 60 秒，不可计为成功。暂停 GDB 时可见
+  多个 CPU 在 `exit_process_group → recycle_data_pages → MapArea::unmap_one` 的页回收路径，争用
+  全局 heap lock；另有 CPU 竞争 scheduler lock，debug invariant 还会在该锁内分配 `BTreeSet`。
+  这证明严重迟滞/活性风险，**尚不足以断言永久死锁或 TLB 根因**。在专项审计完成前，不应提交为
+  “BuildStorm 可用 SMP”，也不应以关闭 debug assertion 或未经审计的 per-CPU allocator 掩盖问题。
+- **另一个明确的 ABI 缺口**：`sched_setaffinity` / `sched_getaffinity` 已按 online hart mask
+  读写 TCB affinity，但 `fetch_task()` 尚未按该 mask 筛选候选 task。因此 setaffinity 可能成功返回
+  却未实际约束运行 CPU；在实现筛选、空队列/唤醒策略和回归前，不应声称 affinity 语义完成。
+- **实现上限与待审计边界**：early stack、`PerCpu`、online/idle mask 固定为 8 个 hart；入口汇编在
+  Rust 范围检查前已经按 `a0` 计算栈，故只能用于预期 hart ID 小于 8 的 QEMU 配置。`tlb_hart_mask`
+  是“曾运行过”集合而非 active mask；虽保守地发 RFENCE，但没有 request/ack 协议，不能作为共享
+  `MemorySet`、frame 回收或多线程工具链并发安全的证明。
+
+### 接手后的优先顺序
+
+1. 固定镜像与 QEMU 命令（全程 `-snapshot`），为 2/4/8 核的短 `fork/exec/wait`、futex、pipe、
+   socket 和退出压力建立每轮 serial log、guest exit code、wall time 表；先区分“慢”与“不收敛”。
+2. 从 `MemorySet::recycle_data_pages`、frame/buddy allocator、`MapArea::unmap_one` 和
+   `Scheduler::assert_invariants` 开始，记录每一把锁的获取顺序及锁内分配；以最小复现定位 timeout
+   storm 的具体等待环或串行热点。未得到证据前不替换 allocator。
+3. 实现并验证 affinity-aware dequeue（不得饿死仅允许某一 CPU 的 ready task）；随后重跑上述矩阵。
+4. 完成 active-mask + shootdown request/ack，之后才允许共享地址空间并发、pthread/futex 和
+   BuildStorm toolchain。每一项修复后均重跑 RV64 build/fmt/diff 及干净 pub 的 SMP=1 CAgent 单项。
+
+## 2026-08-05 RV64 SMP owner 栅栏与退出清理压力（未提交，待设计决策）
+
+- 为覆盖 Blocked→wakeup 在 `__switch` 前重新入 ready queue 的窗口，TCB 新增 atomic CPU owner。
+  `fetch_task()` 只会 claim owner 为 `NO_CPU_OWNER` 的 Ready task；yield/preempt/blocked/stopped/exited
+  的 current 都先切到本 CPU idle，idle 在 context 已保存后才释放 owner。该 owner 同时是 debug
+  不变量：被恢复的 task 必须由当前 CPU claim。RV64/LA64 debug build、两个 fmt check、diff check
+  通过；RV64 SMP=1 `true → sleep 1 → true` 均 exit 0，SMP=8 `nproc`、完整 `/proc/cpuinfo`、四个
+  后台 `sleep 1` + `wait` 均 exit 0，未触发 owner/assert/panic。
+- **压力失败/迟滞证据**：在 QEMU `-snapshot -smp 8 -m 256M` 中，四路
+  `busybox timeout 3 busybox sleep 60` + `wait` 在 release 与 debug 均超过 60 秒未收敛；不是
+  debug-only scheduler invariant。GDB 暂停时，多个 CPU 正在 `exit_process_group →
+  MemorySet::recycle_data_pages → MapArea::unmap_one`，并发争用全局
+  `HEAP_ALLOCATOR` spin mutex；其他 CPU 处于 scheduler lock 等待或 idle handoff 的 `add_task`。
+  Debug build 还显示 `Scheduler::assert_invariants()` 在持 scheduler lock 时为 `BTreeSet` 分配，
+  加剧 heap/scheduler 争用。未观测到 owner 断言、`sepc=0` 或新的 kernel panic。
+- 判断边界：当前证据支持“并发退出/页回收与全局 allocator 严重串行化（并可能存在锁序活性风险）”，
+  不足以证明一个永久死锁或将其归因于 TLB stale mapping。下一步若继续处理，需要专项审计
+  heap/frame allocator、`MemorySet::recycle_data_pages` 与 scheduler debug invariant 的锁范围；这已
+  超出早期 SMP bring-up 的局部修补。未完成前不能把 timeout-storm 作为通过，也不能运行 BuildStorm。
+
+## 2026-08-05 RV64 scheduler context-handoff 修复与首次多核任务回归（未提交）
+
+- 基线提交：`cf30f64`；本轮未提交 SMP 工作树。GDB 已确认此前 8 核 `/proc/cpuinfo` panic 的
+  直接原因是 `yield_current_task()`/`preempt_current_task()` 在当前任务仍执行时先
+  `set_ready()+add_task()`、再 `__switch()`。其他 hart 能在其 context 尚未保存时 claim 同一
+  TCB，造成同一 kernel stack/trap context 并发访问，最终 CPU5 观测到
+  `InstructionPageFault (scause=12), sepc=0, stval=0`。这不是 procfs/文件系统语义失败。
+- 修复：每 CPU `Processor` 新增受本核锁保护的 handoff slot。yield/preempt 先把仍为
+  `Running` 的 current 放入该 slot 并切到本 CPU idle context；仅 idle loop 在 `__switch`
+  已保存旧 context 后，将 handoff task 标记 Ready 并调用统一 `add_task()` 发布/IPI kick。因而
+  task 对其他 CPU 可见时已不再执行，保留全局 scheduler lock 的 claim 语义且不持锁跨用户态。
+- 验证：构建 `make RV_MODE=debug RV_USER_FEATURES= build-rv` 与
+  `make LA_MODE=debug LA_USER_FEATURES= build-la` 均通过；两个 `cargo fmt --check` 与
+  `git diff --check` 通过。恢复 `img/sdcard-rv-pub.img.gz` 后 `e2fsck -pf` 正常完成。RV64
+  SMP=1 的 `true → sleep 1 → true` 均 exit 0；SMP=8 的 `nproc` 输出 8，`cat /proc/cpuinfo`
+  完整输出 CPU 0--7、exit 0；在 BusyBox sh 中运行四个后台 `sleep 1` 与 `wait` 后 sh exit 0，
+  shell 随后仍可 `nproc=8`。此前同一复现点未再 panic。
+- 单核题一回归：干净 pub 镜像临时注入仓库 `scripts/cagent_debug.sh`（不纳入 Git）后，执行
+  `/glibc/cagent_debug.sh kernel` 得到 `testcase cagent kernel pass 8829`，shell exit 0，guest
+  日志 `/tmp/cagent_debug_30_2`。这不是多核 CAgent/BuildStorm 成绩。
+- 当前边界：本次只覆盖 context handoff、启动、procfs、短 sleep 压力。共享 `MemorySet`、完整
+  affinity 选择、futex/pipe/socket 并发压力与 BuildStorm toolchain 仍未验证；在这些回归通过前
+  不能宣称 SMP 或题二完成。
+
+## 2026-08-05 RV64 SMP Phase 1/2 early bring-up 与 per-CPU timer idle（未提交）
+
+- 基线提交：`cf30f64`；当前工作树新增 RV64 HSM early bring-up，未提交。范围只覆盖
+  RV64，CAgent、pub 镜像和 `testsuit/cagent-test/` 均未修改。
+- 已实现：每 hart 64 KiB early stack；SBI HSM `hart_start`；first-arriving boot-hart 原子认领
+  （不能假设 hart 0）；Release/Acquire boot-ready barrier；次 hart 的共享内核页表和本地 trap
+  vector 设置。QEMU `-smp 2` 与 `-smp 8` 都到达 Rust user shell；8 核中 7 个次 hart 均打印
+  `online (per-cpu timer idle)`（控制台输出交错）。`-smp 8` 下 `/bin/busybox uname -r` 输出
+  `6.10.0-dev`，随后 `true` exit 0。
+- 已完成本阶段的 per-CPU 基础：`sscratch` 固定指向 per-CPU trap scratch，内核 `tp` 为
+  `PerCpu` 指针而用户 `tp` 仍按 Linux TLS ABI 保存/恢复；`PROCESSOR` 与 bootstrap context
+  已按 CPU 独立；次 hart已打开本地 supervisor timer 并以 WFI 空闲。内核 timer handler 在
+  没有 current task 的 idle hart 只重设本地 tick，不并发扫描全局 task timer。
+- 重要边界：次 hart尚不会进入 scheduler 或运行用户任务；全局 run queue 的原子 claim、调度器
+  IPI 唤醒，以及共享地址空间的 TLB shootdown 均未实现。因此这仍不是 BuildStorm 可用状态。
+- 验证命令：`make RV_MODE=debug RV_USER_FEATURES= build-rv`、
+  `cargo fmt --manifest-path os/Cargo.toml -- --check`、
+  `cargo fmt --manifest-path user/Cargo.toml -- --check`、`git diff --check`；均通过。
+  启动命令和现象见 `docs/codex/buildstorm-smp-plan.md` 的执行记录。
+
+## 2026-08-05 RV64 SMP Phase 2 trap/processor 基础（未提交）
+
+- 已完成：`sscratch` per-CPU trap scratch、kernel/user `tp` 分离、每次切换前更新 task kernel
+  context 与 scratch kernel stack、per-CPU `PROCESSOR` 和独立 bootstrap/idle context。RV64
+  `-smp 1`、`-smp 2` pub 启动均通过，次 hart 进入 `per-cpu idle`；用户态
+  `/bin/busybox uname -r` 与 `true` 均 exit 0。RV/LA debug build 均通过。
+- 已修复：次 hart timer 初诊断中读到的低 `stvec` 并非高半区映射缺失。`__trap_from_kernel`
+  原先只有 2 字节对齐，链接地址低两位为二进制 `10`；而 `stvec` 的低两位是 trap mode，保留值
+  会被 QEMU WARL 改写为错误地址。为该入口增加 `.align 2` 后，guest 实测 `stvec` 为对齐的
+  高半区 `0xffffffc08035de18`，`-smp 2` 首个 SBI TIME tick 会从 WFI 返回；清理探针后
+  `-smp 8` 的七个次 hart 都可进入 per-CPU timer idle。此前关于“补 `KERNEL_BASE`”的判断已撤销。
+- 多核 scheduler、调度器 IPI 唤醒、共享地址空间的 TLB shootdown 仍未实现，不能运行
+  BuildStorm 或宣称有真实用户任务并行。
+
+## 2026-08-05 RV64 SMP IPI trap 基础（未提交）
+
+- 已实现 SBI v0.2 IPI `send_ipi` 封装、`sie.SSIE` 使能、`SupervisorSoft` trap 分支，以及
+  `sip.SSIP` 清除。IPI handler 只做 pending ack 和 per-hart 原子计数，不获取 scheduler、驱动
+  或文件系统锁；这保留了后续“先发布 ready task、再 kick idle CPU”的锁顺序。
+- QEMU `-smp 8` 实测每个次 hart 在完成 per-CPU 初始化后向自身发送一次 IPI；7 条交错的上线
+  日志均含 `ipi=1`，随后 boot hart 到达 Rust user shell。此前在 boot hart 向 HSM
+  start-pending hart 发送 IPI 的试验得到 `ipi=0`，已撤销；不能把未 online 的 hart 当作可可靠
+  唤醒的调度目标。
+- 此项只证明 SBI IPI → SSIP → supervisor trap → clear pending 的本地链路。尚未把 IPI 接到
+  scheduler，也没有运行次 hart 的用户 task；仍需先完成 scheduler 内的 ready-task claim 与
+  idle CPU 目标选择，才可启用真正多核调度。
+- scheduler 的第一项并发修复已完成：`fetch_task()` 现在在持有全局 scheduler lock 时同时
+  从 ready queue 出队并将 task 标为 `Running`，随后才释放锁并做 context switch。此前的
+  “出队后、设 Running 前”窗口会让 signal/wakeup 路径看到既不在队列又仍为 `Ready` 的 task。
+  RV64 debug pub 镜像启动后 `/bin/busybox true`、`uname -r` 均 exit 0；这尚不是多核任务
+  调度验证。
+- idle/task 返回闭环已在单核验证：阻塞任务在无 runnable task 时保存自身 context 并恢复本 CPU
+  的独立 idle context；idle 在无锁状态重新启用 supervisor interrupt 后 WFI。boot hart 是目前
+  唯一的全局 timeout service CPU，因此即使它 idle，kernel timer 仍会扫描 timeout 并把 task
+  入队；次 hart 的 tick 只重编程本地 deadline。干净 debug pub 中 `/bin/busybox sleep 1` 随后
+  返回 shell，接着 `true` exit 0。此前第一次实现漏掉从 user syscall 返回 kernel 时被硬件清除的
+  `SIE`，表现为 WFI 返回但不进 timer trap；已修复，临时诊断日志已移除。
+
+## 2026-08-05 RV64 SMP MemorySet residency 与 RFENCE 基础（未提交）
+
+- `MemorySet` 新增保守的 `tlb_hart_mask`：task 即将恢复到某 hart 前记录该地址空间曾在该 hart
+  加载；该位在地址空间生命周期内不主动清除，因此 context switch 与页表修改交错时可能多刷但
+  不会漏掉仍持有旧 TLB 的 hart。所有既有 `MemorySet::flush_tlb()` 在本地 `sfence.vma` 和内存
+  barrier 后，对掩码中的远端 hart 调用 SBI RFENCE `remote_sfence_vma`；当前无 ASID 分配器，
+  故使用全地址空间刷新。
+- QEMU/OpenSBI `-smp 8` bring-up 中，临时让每个次 hart 对已 online 的 boot hart 发起一次
+  RFENCE，七项均成功返回（`rfnc=1`）；探针已移除。secondary 初始化顺序也改为先建立 `PerCpu`
+  `tp`/`sscratch`，再激活并标记共享 kernel page table，避免 residency 访问未初始化 CPU 身份。
+- 这提供了 page-table shootdown 的基础，不等于共享 `MemorySet` 的并发压力已经验证；secondary
+  尚未进入 scheduler，仍需实现 idle mask、enqueue-after-kick 与多核 task 压力回归。
+
+## 2026-08-05 RV64 secondary scheduler 首次接入失败（未提交，暂停扩大范围）
+
+- 已实现 per-CPU idle bit、ready task 发布后二次取队列、SBI IPI kick，以及让 secondary 进入
+  `task::run_tasks()` 的首次尝试；2 核 pub 可启动，`uname -r` 与 `sleep 1` 返回。默认 affinity、
+  `sched_{get,set}affinity` online mask 和 `/proc/cpuinfo` 已改为真实 online hart，不再硬编码
+  `0b11`；8 核下 BusyBox `nproc` 实测输出 8。
+- **失败证据与根因**：同一 8 核 pub 启动后，`/bin/busybox nproc` 正确输出 `8`；紧接着执行
+  `/bin/busybox cat /proc/cpuinfo` 会触发 kernel panic。GDB 在 `core::panicking::panic_fmt` 停住：
+  CPU5 的 `kernel_trap_handler` 收到 `InstructionPageFault`，`sepc=0`、`stval=0`、`scause=12`；其余
+  CPU 同时处于 scheduler `fetch()`、user timer preempt 和 per-CPU idle loop。此前并发 lazy
+  `IDLE_TASKS` 初始化确实存在，已由 boot hart 提前初始化消除，但复测仍失败，故不是根因。
+- **已确认的调度竞态**：`preempt_current_task()`/`yield_current_task()` 先对仍在本 CPU 执行的
+  current task 做 `set_ready()` + `add_task()`，再调用 `__switch()` 保存其 kernel context。另一 CPU
+  可在保存前从全局队列 claim 同一 TCB 并恢复/修改同一 kernel stack/trap context，最终可使返回 PC
+  变为零。现有“fetch 时在 scheduler lock 内设为 Running”只能关闭出队后的状态窗口，不能关闭这段
+  **context 尚未保存却已公开 runnable** 的窗口。
+- 结论：问题位于多核 context-switch/ready 发布协议，不是 procfs、文件系统或单一 trap 汇编错误。
+  当前 secondary `run_tasks()` 接入不得用于 BuildStorm；继续实现前必须设计“保存 current context
+  与将其发布到 ready queue”的原子交接（例如 scheduler handoff trampoline 或受控的 CPU ownership
+  协议），并为 task 加 CPU owner/debug 断言。不能仅增加 scheduler lock、关闭某个 timer 或针对
+  `/proc/cpuinfo` 特判。
+- 单核题一回归：在当前 pub 镜像、`-smp 1` 直接运行 `/glibc/cagent_debug.sh kernel`，得到
+  `testcase cagent kernel pass 3533`，shell process exit 0；guest 日志目录为
+  `/tmp/cagent_debug_6_2`（随镜像后续恢复会丢失）。这只证明 kernel 单项链路未被本轮 ABI
+  改造破坏，不是 CAgent 全量或 SMP 回归。
+
 ## 2026-08-05 CAgent `CLONE_VFORK` 语义修复与最新基线
 
 - 当前基线：`dev` 已提交 `269a94a`（包含 ext4 durability、timer、wait/TCP 修复）；本轮工作树新增

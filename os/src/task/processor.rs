@@ -13,25 +13,80 @@ use crate::mutex::SpinNoIrqLock;
 use alloc::sync::Arc;
 use lazy_static::lazy_static;
 
-// 空闲任务
+#[cfg(target_arch = "riscv64")]
+const MAX_CPUS: usize = crate::arch::smp::MAX_HARTS;
+#[cfg(target_arch = "loongarch64")]
+const MAX_CPUS: usize = 1;
+
+// 每个 CPU 都需要独立的 bootstrap/idle context。它们不进入 task manager，
+// 仅用于保存首次切入用户任务前的内核上下文。
 lazy_static! {
-    pub static ref IDLE_TASK: Arc<TaskControlBlock> = Arc::new(TaskControlBlock::zero_init());
+    static ref IDLE_TASKS: [Arc<TaskControlBlock>; MAX_CPUS] =
+        core::array::from_fn(|_| Arc::new(TaskControlBlock::zero_init()));
 }
 
-lazy_static! {
-    pub static ref PROCESSOR: SpinNoIrqLock<Processor> = SpinNoIrqLock::new(Processor::new());
+/// 只能由 boot hart 在启动 secondary 之前调用，避免多个 secondary 首次
+/// 进入 idle loop 时并发执行 lazy_static 的 Arc/KernelStack 初始化。
+pub fn init_per_cpu_idle_tasks() {
+    lazy_static::initialize(&IDLE_TASKS);
 }
+
+static PROCESSORS: [SpinNoIrqLock<Processor>; MAX_CPUS] =
+    [const { SpinNoIrqLock::new(Processor::new()) }; MAX_CPUS];
 
 /// 处理器管理
 ///
 /// 管理维护 CPU 状态
 pub struct Processor {
     current: Option<Arc<TaskControlBlock>>,
+    /// A running task that has already switched to this CPU's idle context,
+    /// but has not yet been published to the global ready queue.  Keeping the
+    /// Arc here makes the context-save → ready-publication handoff explicit.
+    handoff: Option<Arc<TaskControlBlock>>,
+}
+
+#[inline]
+pub fn current_processor() -> &'static SpinNoIrqLock<Processor> {
+    #[cfg(target_arch = "riscv64")]
+    {
+        &PROCESSORS[crate::arch::smp::current_hart_id()]
+    }
+    #[cfg(target_arch = "loongarch64")]
+    {
+        &PROCESSORS[0]
+    }
+}
+
+#[inline]
+fn current_cpu_id() -> usize {
+    #[cfg(target_arch = "riscv64")]
+    {
+        crate::arch::smp::current_hart_id()
+    }
+    #[cfg(target_arch = "loongarch64")]
+    {
+        0
+    }
+}
+
+#[inline]
+fn current_idle_task() -> Arc<TaskControlBlock> {
+    #[cfg(target_arch = "riscv64")]
+    {
+        IDLE_TASKS[crate::arch::smp::current_hart_id()].clone()
+    }
+    #[cfg(target_arch = "loongarch64")]
+    {
+        IDLE_TASKS[0].clone()
+    }
 }
 
 impl Processor {
-    pub fn new() -> Self {
-        Self { current: None }
+    pub const fn new() -> Self {
+        Self {
+            current: None,
+            handoff: None,
+        }
     }
 
     /// 取出当前执行的任务
@@ -46,18 +101,36 @@ impl Processor {
 
     /// 切换当前 CPU 记录的运行任务。
     pub fn switch_to(&mut self, task: Arc<TaskControlBlock>) {
+        assert!(
+            self.current.is_none(),
+            "switching with an existing current task"
+        );
         self.current = Some(task);
+    }
+
+    fn handoff_current(&mut self, current: &Arc<TaskControlBlock>) {
+        let running = self.current.take().expect("handoff without current task");
+        assert!(
+            Arc::ptr_eq(&running, current),
+            "handoff task differs from this CPU current task"
+        );
+        assert!(self.handoff.is_none(), "nested task handoff on one CPU");
+        self.handoff = Some(running);
+    }
+
+    fn take_handoff(&mut self) -> Option<Arc<TaskControlBlock>> {
+        self.handoff.take()
     }
 }
 
 /// 取出当前执行的任务
 pub fn take_current_task() -> Option<Arc<TaskControlBlock>> {
-    PROCESSOR.lock().take_current()
+    current_processor().lock().take_current()
 }
 
 /// 获取当前执行的任务的一份拷贝
 pub fn current_task() -> Option<Arc<TaskControlBlock>> {
-    PROCESSOR.lock().current()
+    current_processor().lock().current()
 }
 
 /// 获取当前执行的任务的页表基址寄存器值
@@ -67,26 +140,99 @@ pub fn current_user_token() -> usize {
     token
 }
 
+/// Yield a running task through this CPU's idle context.
+///
+/// A multicore scheduler must never add the still-executing task directly to a
+/// shared ready queue: another CPU could restore its saved stack before this
+/// CPU has finished `__switch`.  Instead `__switch` first saves the task and
+/// restores the per-CPU idle context; `run_tasks()` then publishes the saved
+/// task from that idle context.
+pub fn handoff_current_to_idle(current: Arc<TaskControlBlock>) {
+    let idle_task = current_idle_task();
+    let idle_kstack = idle_task.kstack();
+    assert_ne!(idle_kstack, 0, "idle context was not initialized");
+    {
+        let mut processor = current_processor().lock();
+        processor.handoff_current(&current);
+    }
+    unsafe {
+        __switch(idle_kstack, Arc::as_ptr(&current) as usize);
+    }
+}
+
+fn publish_saved_handoff() {
+    let handoff = current_processor().lock().take_handoff();
+    if let Some(task) = handoff {
+        let was_running = task.is_running();
+        if was_running {
+            // A yielding/preempted task is not visible to any other CPU until
+            // its context has reached this idle loop.
+            task.set_ready();
+            super::scheduler::add_task(task.clone());
+        }
+        task.release_cpu_owner(current_cpu_id());
+        #[cfg(target_arch = "riscv64")]
+        crate::arch::smp::kick_one_idle_hart();
+    }
+}
+
 /// 运行任务
 ///
-/// 该函数仅被空闲任务调用，因此任务调度的内容只会出现在初始栈上
-pub fn run_tasks() {
+/// 该函数仅在每 CPU 的 idle context 中运行。
+pub fn run_tasks() -> ! {
     loop {
-        if let Some(next_task) = fetch_task() {
-            let idle_task = IDLE_TASK.clone();
+        // This executes only after the outgoing task's __switch has saved its
+        // context and stopped executing it on this CPU.
+        publish_saved_handoff();
+        let mut next_task = fetch_task();
+        if next_task.is_none() {
+            #[cfg(target_arch = "riscv64")]
+            crate::arch::smp::enter_idle();
+
+            // 发布 idle 后再取一次任务。enqueue 若发生在首次 fetch 与
+            // enter_idle 之间，不会给我们发 IPI；这次检查避免遗漏它。
+            next_task = fetch_task();
+            if next_task.is_none() {
+                #[cfg(target_arch = "riscv64")]
+                {
+                    // 从用户 syscall 进入内核时硬件会清 SIE。idle 没有持锁或用户
+                    // copy 临界区，必须显式重新打开本地中断，否则 WFI 不会进入
+                    // supervisor timer trap，所有 timeout 都无法唤醒。
+                    crate::arch::trap::enable_timer_interrupt();
+                    crate::arch::wait_for_interrupt();
+                }
+                #[cfg(target_arch = "loongarch64")]
+                core::hint::spin_loop();
+            }
+
+            #[cfg(target_arch = "riscv64")]
+            crate::arch::smp::leave_idle();
+        }
+
+        if let Some(next_task) = next_task {
+            let idle_task = current_idle_task();
             let next_task_kstack = next_task.kstack();
+            #[cfg(target_arch = "riscv64")]
+            {
+                let per_cpu = crate::arch::smp::current_per_cpu_ptr();
+                next_task.set_kernel_tp(per_cpu);
+                crate::arch::smp::set_current_kernel_sp(next_task.kernel_stack_top_edge());
+                next_task.mark_memory_set_current_hart();
+            }
             let idle_task_ptr = Arc::as_ptr(&idle_task) as usize;
             idle_task.set_ready();
-            next_task.set_running();
-            let mut processor = PROCESSOR.lock();
-            processor.current = Some(next_task.clone());
+            next_task.assert_cpu_owner(current_cpu_id());
+            let mut processor = current_processor().lock();
+            processor.switch_to(next_task.clone());
             drop(processor);
             // 事实上这个循环只会执行一次，这里需要释放 `next_task` 的引用
             drop(next_task);
             unsafe {
                 __switch(next_task_kstack, idle_task_ptr);
             }
-            unreachable!("Unreachable in run_tasks");
+            // 任务在无 runnable work 时会恢复本 CPU 的 idle context，继续
+            // 从全局 ready queue 选择下一个已 claim 的任务。
+            continue;
         }
     }
 }

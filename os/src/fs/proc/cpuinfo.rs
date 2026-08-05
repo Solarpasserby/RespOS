@@ -72,11 +72,17 @@ fn generate_cpuinfo() -> String {
     let mut result = String::new();
     #[cfg(target_arch = "riscv64")]
     {
-        let _ = writeln!(result, "processor\t: 0");
-        let _ = writeln!(result, "hart\t\t: 0");
-        let _ = writeln!(result, "isa\t\t: rv64imafdch");
-        let _ = writeln!(result, "mmu\t\t: sv39");
-        let _ = writeln!(result, "uarch\t\t: qemu");
+        let online = crate::arch::smp::online_hart_mask();
+        for hart in 0..crate::arch::smp::MAX_HARTS {
+            if online & (1 << hart) == 0 {
+                continue;
+            }
+            let _ = writeln!(result, "processor\t: {}", hart);
+            let _ = writeln!(result, "hart\t\t: {}", hart);
+            let _ = writeln!(result, "isa\t\t: rv64imafdch");
+            let _ = writeln!(result, "mmu\t\t: sv39");
+            let _ = writeln!(result, "uarch\t\t: qemu\n");
+        }
     }
     #[cfg(target_arch = "loongarch64")]
     {

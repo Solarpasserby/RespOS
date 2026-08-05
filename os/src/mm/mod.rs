@@ -58,6 +58,11 @@ pub fn init() {
     // 注意此时已经启用了虚拟地址
 }
 
+/// 在已经完成全局内存初始化的次 hart 上重新装载内核页表。
+pub fn activate_kernel_space() {
+    KERNEL_SPACE.lock().activate();
+}
+
 /// 将 C 风格的字符串转换为 Rust 型字符串
 pub fn copy_cstr_from_user(ptr: *const u8) -> SysResult<String> {
     if ptr.is_null() {

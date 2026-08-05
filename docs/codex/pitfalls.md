@@ -28,6 +28,17 @@
 - 后续影响：每轮写入诊断 runner 前先恢复完整镜像并 `e2fsck -pf`；测试后先正常 guest
   `quit`、确认 QEMU 退出，再离线提取或修改文件。不可恢复的强制停止后应从压缩基线恢复镜像。
 
+## 多核诊断应使用 QEMU `-snapshot`
+
+- 状态：已确认
+- 适用范围：RV64 SMP 压力、超时、GDB 暂停和所有不需要持久保存 guest 写入的诊断
+- 最后验证：2026-08-05；RV64 `-smp 8 -m 256M` timeout/exit 压力
+- 内容：SMP 压力常需超时后暂停 QEMU 或接入 GDB，不能保证 guest 有机会正常卸载 ext4。直接对
+  raw pub 镜像运行会把临时 `/tmp`、journal 及非正常退出混入后续结果。
+- 后续影响：诊断启动命令在 raw drive 之外加入 `-snapshot`，例如
+  `qemu-system-riscv64 ... -snapshot -smp 8 -m 256M`。只有确实需要保留 guest 文件时才退出 snapshot
+  模式，并遵守上一节的正常 guest `quit`/离线 fsck 流程。
+
 ## `make rv/la` 返回 0 不等于测试通过
 
 - 状态：已确认

@@ -62,6 +62,10 @@ pub fn init() {
 pub fn enable_timer_interrupt() {
     unsafe {
         sie::set_stimer();
+        sie::set_ssoft();
+        // HSM 启动的次 hart 不保证继承 boot hart 的 SIE；仅设置
+        // sie.STIE 不会让 supervisor timer 到达 trap vector。
+        sstatus::set_sie();
     }
 }
 
@@ -132,8 +136,13 @@ pub fn trap_handler(cx: &mut TrapContext) {
         }
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
             set_next_ti_trigger();
-            check_all_task_timers();
+            if crate::arch::smp::is_timer_service_hart() {
+                check_all_task_timers();
+            }
             preempt_current_task();
+        }
+        Trap::Interrupt(Interrupt::SupervisorSoft) => {
+            crate::arch::smp::acknowledge_ipi();
         }
         _ => {
             panic!(
@@ -185,7 +194,14 @@ pub fn kernel_trap_handler(cx: &mut TrapContext) {
             // acknowledge it by arming the next tick and process expirations.
             // Scheduling remains at explicit safe points in kernel code.
             set_next_ti_trigger();
-            check_all_task_timers();
+            // 早期 SMP 的全局 timeout 队列仍只由 boot hart 串行扫描。这样
+            // boot hart idle 时 timer 仍能唤醒任务，次 hart 则只重编程本地 tick。
+            if crate::arch::smp::is_timer_service_hart() {
+                check_all_task_timers();
+            }
+        }
+        Trap::Interrupt(Interrupt::SupervisorSoft) => {
+            crate::arch::smp::acknowledge_ipi();
         }
         _ => {
             panic!(

@@ -5,6 +5,7 @@ mod entry;
 pub mod interrupt;
 pub mod mm;
 pub mod sbi;
+pub mod smp;
 pub mod task;
 pub mod timer;
 pub mod trap;
@@ -33,8 +34,13 @@ pub fn sfence() {
 #[inline(always)]
 pub fn idle() -> ! {
     loop {
-        unsafe {
-            asm!("wfi", options(nomem, nostack));
-        }
+        wait_for_interrupt();
+    }
+}
+
+#[inline(always)]
+pub fn wait_for_interrupt() {
+    unsafe {
+        asm!("wfi", options(nomem, nostack));
     }
 }

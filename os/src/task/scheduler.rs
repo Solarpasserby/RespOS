@@ -4,14 +4,13 @@
 //! 主动让出、阻塞或退出时选择下一个任务。
 //! 当前架构层 `__switch` 接收下一个任务的内核栈指针，因此这里会完成最后一步切换。
 
-use super::processor::{PROCESSOR, current_task};
+use super::processor::{current_task, handoff_current_to_idle};
 use super::task::{TaskControlBlock, task_exit, task_exit_by_signal, task_group_exit};
-use crate::{arch::task::__switch, mutex::SpinNoIrqLock};
+use crate::mutex::SpinNoIrqLock;
 #[cfg(debug_assertions)]
 use alloc::collections::BTreeSet;
 use alloc::{collections::vec_deque::VecDeque, sync::Arc, vec::Vec};
 use bitflags::bitflags;
-use core::sync::atomic::{Ordering, compiler_fence};
 use hashbrown::HashMap;
 use lazy_static::lazy_static;
 
@@ -61,25 +60,45 @@ fn cleanup_dead_tasks() {
     drop(dead_tasks);
 }
 
-#[inline(never)]
-fn schedule_barrier() {
-    compiler_fence(Ordering::SeqCst);
-    #[cfg(target_arch = "loongarch64")]
-    unsafe {
-        core::arch::asm!("dbar 0", options(nostack, preserves_flags));
-    }
-    compiler_fence(Ordering::SeqCst);
-}
-
 /// 添加新任务到就绪队列。
 pub fn add_task(task: Arc<TaskControlBlock>) {
     assert!(task.is_ready());
     SCHEDULER.lock().add(task);
+    #[cfg(target_arch = "riscv64")]
+    crate::arch::smp::kick_one_idle_hart();
 }
 
-/// 从就绪队列中取出队首任务。
+/// 从就绪队列中取出队首任务，并在同一把 scheduler 锁内将其 claim 为
+/// `Running`。
+///
+/// 多核下不能先出队、释放锁、再由调用者改 task status；否则 wakeup/signal
+/// 可以观察到任务既不在 ready queue、又仍为 `Ready` 的窗口。该任务的实际
+/// context switch 仍在锁外完成，避免把 scheduler 锁带入 `__switch`。
 pub fn fetch_task() -> Option<Arc<TaskControlBlock>> {
-    SCHEDULER.lock().fetch()
+    let mut scheduler = SCHEDULER.lock();
+    let task = scheduler.fetch();
+    if let Some(task) = task {
+        debug_assert!(task.is_ready(), "claimed task {} is not Ready", task.tid());
+        let cpu = {
+            #[cfg(target_arch = "riscv64")]
+            {
+                crate::arch::smp::current_hart_id()
+            }
+            #[cfg(target_arch = "loongarch64")]
+            {
+                0
+            }
+        };
+        if task.try_claim_running_on_cpu(cpu) {
+            return Some(task);
+        }
+        // A waker may have published this task while the previous CPU is
+        // still saving its context.  Keep it ready but let that CPU release
+        // the owner from idle before anyone can restore it.
+        scheduler.add(task);
+        return None;
+    }
+    None
 }
 
 /// 任务调度属性变化后，若它已经在就绪队列中，则按新策略重新入队。
@@ -102,6 +121,8 @@ pub fn wakeup_stopped_task(task: Arc<TaskControlBlock>) {
     if task.is_stopped() {
         task.set_ready();
         SCHEDULER.lock().add(task);
+        #[cfg(target_arch = "riscv64")]
+        crate::arch::smp::kick_one_idle_hart();
     }
 }
 
@@ -148,36 +169,11 @@ pub fn switch_to_next_task() {
             return;
         }
 
-        if let Some(next_task) = fetch_task() {
-            switch_to_task(current.clone(), next_task);
-            cleanup_dead_tasks();
-            return;
-        }
-
-        // There may be no runnable task while every process is waiting on a
-        // timeout. Keep the scheduling context alive until a timer makes one
-        // ready instead of entering the architecture's non-returning idle loop.
-        crate::syscall::check_all_task_timers();
-        core::hint::spin_loop();
+        // A blocked task can be woken by another CPU before it reaches idle.
+        // Keep its owner until this CPU has saved the context; fetch_task()
+        // will leave the newly-ready task queued until then.
+        handoff_current_to_idle(current.clone());
     }
-}
-
-fn switch_to_task(current: Arc<TaskControlBlock>, next_task: Arc<TaskControlBlock>) {
-    if Arc::ptr_eq(&current, &next_task) {
-        current.set_running();
-        return;
-    }
-
-    let current_task_ptr = Arc::as_ptr(&current) as usize;
-    let next_task_kernel_stack = next_task.kstack();
-    next_task.set_running();
-    PROCESSOR.lock().switch_to(next_task);
-    schedule_barrier();
-    unsafe {
-        __switch(next_task_kernel_stack, current_task_ptr);
-    }
-    schedule_barrier();
-    cleanup_dead_tasks();
 }
 
 /// 主动让出当前任务。
@@ -190,22 +186,7 @@ pub fn yield_current_task() {
     let Some(task) = current_task() else {
         return;
     };
-
-    let mut next_task = fetch_task();
-    if next_task.is_none() {
-        crate::syscall::check_all_task_timers();
-        next_task = fetch_task();
-    }
-
-    if let Some(next_task) = next_task {
-        if Arc::ptr_eq(&task, &next_task) {
-            task.set_running();
-            return;
-        }
-        task.set_ready();
-        add_task(task.clone());
-        switch_to_task(task, next_task);
-    }
+    handoff_current_to_idle(task);
 }
 
 /// 时间片抢占当前任务。
@@ -225,18 +206,7 @@ pub fn preempt_current_task() {
     // context back into a ready task; only dispatch work that was genuinely
     // woken. If the current task itself was woken, fetching it below restores
     // Running and the interrupted scheduling loop returns to its caller.
-    if !task.is_running() {
-        if let Some(next_task) = fetch_task() {
-            switch_to_task(task, next_task);
-        }
-        return;
-    }
-
-    task.set_ready();
-    add_task(task.clone());
-    if let Some(next_task) = fetch_task() {
-        switch_to_task(task, next_task);
-    }
+    handoff_current_to_idle(task);
 }
 
 /// 阻塞当前任务并运行下一个任务。
@@ -247,21 +217,9 @@ pub fn blocking_and_run_next() {
         return;
     };
 
-    if let Some(next_task) = fetch_task() {
-        let current_task_ptr = Arc::as_ptr(&task) as usize;
-        task.set_blocked();
-        block_task(task);
-
-        let next_task_kernel_stack = next_task.kstack();
-        next_task.set_running();
-        PROCESSOR.lock().switch_to(next_task);
-        schedule_barrier();
-        unsafe {
-            __switch(next_task_kernel_stack, current_task_ptr);
-        }
-        schedule_barrier();
-        cleanup_dead_tasks();
-    }
+    task.set_blocked();
+    block_task(task);
+    switch_to_next_task();
 }
 
 #[unsafe(no_mangle)]
@@ -271,20 +229,9 @@ pub fn stop_current_and_run_next() {
         return;
     };
 
-    if let Some(next_task) = fetch_task() {
-        let current_task_ptr = Arc::as_ptr(&task) as usize;
-        task.set_stopped();
-
-        let next_task_kernel_stack = next_task.kstack();
-        next_task.set_running();
-        PROCESSOR.lock().switch_to(next_task);
-        schedule_barrier();
-        unsafe {
-            __switch(next_task_kernel_stack, current_task_ptr);
-        }
-        schedule_barrier();
-        cleanup_dead_tasks();
-    }
+    task.set_stopped();
+    handoff_current_to_idle(task);
+    cleanup_dead_tasks();
 }
 
 #[inline(never)]
@@ -294,21 +241,9 @@ fn switch_to_next_task_after_exit() -> ! {
     };
 
     loop {
-        if let Some(next_task) = fetch_task() {
-            let next_task_kernel_stack = next_task.kstack();
-            let current_task_ptr = Arc::as_ptr(&current) as usize;
-            next_task.set_running();
-            PROCESSOR.lock().switch_to(next_task);
-            defer_drop_task(current);
-            schedule_barrier();
-            unsafe {
-                __switch(next_task_kernel_stack, current_task_ptr);
-            }
-            unreachable!("returned to an exited task");
-        }
-
-        crate::syscall::check_all_task_timers();
-        core::hint::spin_loop();
+        defer_drop_task(current.clone());
+        handoff_current_to_idle(current);
+        unreachable!("returned to exited task");
     }
 }
 
@@ -655,6 +590,9 @@ pub fn wakeup_task(tid: usize) {
         task.set_ready();
         scheduler.add(task);
     }
+    drop(scheduler);
+    #[cfg(target_arch = "riscv64")]
+    crate::arch::smp::kick_one_idle_hart();
 }
 
 pub fn scheduler_health_counts() -> Option<(usize, usize, usize)> {

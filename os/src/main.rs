@@ -35,20 +35,26 @@ use core::arch::global_asm;
 
 global_asm!(include_str!("link_app.S"));
 
+#[cfg(target_arch = "riscv64")]
+#[unsafe(no_mangle)]
+pub fn rust_main(hart_id: usize, opaque: usize) -> ! {
+    if !arch::smp::claim_boot_hart(hart_id) {
+        arch::smp::secondary_main(hart_id, opaque);
+    }
+    clear_bss();
+    arch::smp::init_current_hart(hart_id);
+    rust_main_high()
+}
+
+#[cfg(target_arch = "loongarch64")]
 #[unsafe(no_mangle)]
 pub fn rust_main() -> ! {
     clear_bss();
 
-    #[cfg(target_arch = "loongarch64")]
-    {
-        arch::enable_boot_paging();
-        unsafe {
-            arch::jump_to_high_half(rust_main_high as usize);
-        }
+    arch::enable_boot_paging();
+    unsafe {
+        arch::jump_to_high_half(rust_main_high as usize);
     }
-
-    #[cfg(target_arch = "riscv64")]
-    rust_main_high()
 }
 
 fn rust_main_high() -> ! {
@@ -62,14 +68,19 @@ fn rust_main_high() -> ! {
     mm::init();
     net::init();
     task::add_initproc();
+    #[cfg(target_arch = "riscv64")]
+    {
+        task::init_per_cpu_idle_tasks();
+        let boot_hart = arch::smp::boot_hart();
+        arch::smp::publish_boot_ready(boot_hart);
+        arch::smp::start_secondary_harts(boot_hart);
+    }
     trap::enable_timer_interrupt();
     timer::set_next_ti_trigger();
 
     #[cfg(feature = "verbose_boot")]
     loader::list_apps();
     task::run_tasks();
-
-    panic!("unreachable!");
 }
 
 /// 启动早期清零 BSS。
