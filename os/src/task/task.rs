@@ -372,6 +372,11 @@ pub struct TaskControlBlock {
     group_exiting: Arc<AtomicBool>,
     task_status: SpinLock<TaskStatus>,
     parent: Arc<SpinLock<Option<Weak<TaskControlBlock>>>>,
+    // CLONE_VFORK has a separate synchronization edge from the normal
+    // parent/child relationship: the parent must resume when this child
+    // successfully execs or exits.  Keep it one-shot so the ordinary SIGCHLD
+    // wakeup on exit cannot enqueue the parent twice.
+    vfork_parent: SpinLock<Option<Weak<TaskControlBlock>>>,
     children: Arc<SpinLock<BTreeMap<usize, Arc<TaskControlBlock>>>>,
     exited_children: Arc<SpinLock<BTreeSet<usize>>>,
     exit_code: AtomicI32,
@@ -448,6 +453,7 @@ impl TaskControlBlock {
             group_exiting: Arc::new(AtomicBool::new(false)),
             task_status: SpinLock::new(TaskStatus::Ready),
             parent: Arc::new(SpinLock::new(None)),
+            vfork_parent: SpinLock::new(None),
             children: Arc::new(SpinLock::new(BTreeMap::new())),
             exited_children: Arc::new(SpinLock::new(BTreeSet::new())),
             exit_code: AtomicI32::new(0),
@@ -537,6 +543,7 @@ impl TaskControlBlock {
             group_exiting: Arc::new(AtomicBool::new(false)),
             task_status: SpinLock::new(TaskStatus::Ready),
             parent: Arc::new(SpinLock::new(None)),
+            vfork_parent: SpinLock::new(None),
             children: Arc::new(SpinLock::new(BTreeMap::new())),
             exited_children: Arc::new(SpinLock::new(BTreeSet::new())),
             exit_code: AtomicI32::new(0),
@@ -742,6 +749,7 @@ impl TaskControlBlock {
             group_exiting,
             task_status: SpinLock::new(TaskStatus::Ready),
             parent,
+            vfork_parent: SpinLock::new(None),
             children,
             exited_children,
             exit_code: AtomicI32::new(0),
@@ -865,6 +873,10 @@ impl TaskControlBlock {
         self.op_sig_handler_mut(|handler| handler.reset_user_handlers_for_exec());
         self.op_sig_pending_mut(|pending| pending.clear_pending());
         *self.sig_stack.lock() = SignalStack::default();
+
+        // Linux vfork resumes the parent once the child has installed its new
+        // image.  Do this only after all exec-visible state is ready.
+        self.release_vfork_parent();
 
         Ok(argc)
     }
@@ -1161,6 +1173,17 @@ impl TaskControlBlock {
     }
     pub fn set_parent(&self, parent: &Arc<TaskControlBlock>) {
         *self.parent.lock() = Some(Arc::downgrade(parent));
+    }
+    pub fn set_vfork_parent(&self, parent: &Arc<TaskControlBlock>) {
+        *self.vfork_parent.lock() = Some(Arc::downgrade(parent));
+    }
+    /// Wake the CLONE_VFORK parent exactly once, either after a successful
+    /// exec or while this child is exiting.
+    pub fn release_vfork_parent(&self) {
+        let parent = self.vfork_parent.lock().take();
+        if let Some(parent) = parent.and_then(|parent| parent.upgrade()) {
+            crate::task::scheduler::wakeup_task(parent.tid());
+        }
     }
     // 添加子任务
     pub fn add_child(&self, task: Arc<TaskControlBlock>) {
@@ -1953,6 +1976,7 @@ fn exit_process_group(task: Arc<TaskControlBlock>, cause: ExitCause) {
 
     cause.apply_to(&leader);
     leader.set_exited();
+    leader.release_vfork_parent();
     leader.notify_parent_exit(cause.sigchld_code());
 
     // 清空残留信号

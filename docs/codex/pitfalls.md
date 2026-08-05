@@ -1,5 +1,19 @@
 # RespOS 已确认易错点
 
+## `CLONE_VFORK` 不能只阻塞父进程
+
+- 状态：已确认并在当前工作树修复
+- 适用范围：glibc `vfork`/`posix_spawn`/`popen`，以及所有带 `CLONE_VFORK` 的 clone 调用
+- 最后验证：2026-08-05；RV64、SMP=1、256 MiB glibc pub 镜像
+- 证据：`os/src/syscall/process.rs::sys_clone()`、`os/src/task/task.rs::execve()` 与
+  `exit_process_group()`；修复后的 4 路 CAgent pass 日志
+  `/tmp/cagent_debug_vfork_fix_4_busybox/`
+- 内容：Linux 语义要求 vfork 父任务一直阻塞到子任务成功 exec 或 exit。仅调用
+  `blocking_and_run_next()` 而不建立子到父的唤醒边，会使父任务错误地等到子命令退出；普通 exit
+  的 SIGCHLD 唤醒会掩盖这个错误，造成 `popen` 很慢而 `pclose` 几乎立即返回。
+- 后续影响：vfork 同步必须是一次性且只限该 clone 关系；exec 仅在新映像状态完整后释放，退出路径
+  也必须释放以覆盖 exec 失败。不要以普通 SIGCHLD 或把 vfork 改成 yield 代替该协议。
+
 ## pub 镜像不能在 QEMU 运行时由宿主修改
 
 - 状态：已确认

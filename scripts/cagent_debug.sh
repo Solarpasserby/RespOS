@@ -11,6 +11,15 @@ CAGENT_DIR="${CAGENT_DIR:-/glibc}"
 BUSYBOX="${BUSYBOX:-$CAGENT_DIR/busybox}"
 AGENT="${AGENT:-$CAGENT_DIR/agent_lite}"
 SERVER="${SERVER:-$CAGENT_DIR/simple_llm_server}"
+# The official runner resolves `timeout` from the glibc PATH.  Keep BusyBox as
+# the diagnostic default, but allow the exact executable to be selected when
+# comparing its process/signal behavior with the official script.
+TIMEOUT_BIN="${TIMEOUT_BIN:-$BUSYBOX}"
+TIMEOUT_IS_BUSYBOX="${TIMEOUT_IS_BUSYBOX:-1}"
+# Set to 1 only when reproducing the official launch shape.  The default
+# command probe is valuable for attribution, but it introduces extra work
+# before each agent that the official runner does not perform.
+SKIP_COMMAND_PROBE="${SKIP_COMMAND_PROBE:-0}"
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-8080}"
 SELECTED_TEST="${1:-all}"
@@ -117,14 +126,24 @@ run_test() {
 
     # Execute the fixed command separately so stdout, stderr, and the raw shell
     # exit code remain observable even when popen/pclose is the failing layer.
-    "$BUSYBOX" sh -c "$COMMAND" >"$prefix.command.stdout" 2>"$prefix.command.stderr"
-    probe_rc=$?
+    if [ "$SKIP_COMMAND_PROBE" = 1 ]; then
+        probe_rc=0
+    else
+        "$BUSYBOX" sh -c "$COMMAND" >"$prefix.command.stdout" 2>"$prefix.command.stderr"
+        probe_rc=$?
+    fi
     printf '%s\n' "$probe_rc" >"$prefix.command.exit"
 
     start_time=$(date +%s%3N)
-    "$BUSYBOX" timeout "${TIMEOUT}s" "$AGENT" \
-        --workspace . --host "$HOST" --port "$PORT" "$PROMPT" \
-        >"$prefix.agent.log" 2>&1
+    if [ "$TIMEOUT_IS_BUSYBOX" = 1 ]; then
+        "$TIMEOUT_BIN" timeout "${TIMEOUT}s" "$AGENT" \
+            --workspace . --host "$HOST" --port "$PORT" "$PROMPT" \
+            >"$prefix.agent.log" 2>&1
+    else
+        "$TIMEOUT_BIN" "${TIMEOUT}s" "$AGENT" \
+            --workspace . --host "$HOST" --port "$PORT" "$PROMPT" \
+            >"$prefix.agent.log" 2>&1
+    fi
     agent_rc=$?
     printf '%s\n' "$agent_rc" >"$prefix.agent.exit"
 

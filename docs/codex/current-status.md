@@ -2,6 +2,31 @@
 
 本文件是快速变化的状态页。更新测试结论时必须同时更新日期、提交和命令。
 
+## 2026-08-05 CAgent `CLONE_VFORK` 语义修复与最新基线
+
+- 当前基线：`dev` 已提交 `269a94a`（包含 ext4 durability、timer、wait/TCP 修复）；本轮工作树新增
+  `CLONE_VFORK` 父任务唤醒和诊断 runner 选择 timeout/跳过 command probe 的开关，尚未提交。
+  `testsuit/cagent-test/` 仍是本地忽略的上游参考，未修改、未加入 Git。
+- 根因（已由源码与受控结果共同确认）：`sys_clone()` 对 `CLONE_VFORK` 调用
+  `blocking_and_run_next()`，但原实现未在子任务成功 `execve()` 时唤醒父任务；只有子任务最终
+  exit 时的普通 `SIGCHLD` 路径会偶然唤醒父任务。因此 glibc `popen/posix_spawn` 的父进程会错误地
+  等到 `/bin/sh -c` 命令结束，表现为 `popen()` 4 路约 4.6--12.3 s 而 `pclose()` 仅约 2--44 ms。
+- 修复：`TaskControlBlock` 为 vfork 建立一次性弱父引用；`sys_clone()` 仅在
+  `CLONE_VFORK` 设置它；成功 exec 在新映像、fd 和 signal 状态完成后唤醒，未能 exec 的子任务在
+  最终退出时唤醒。普通 fork/SIGCHLD 不受影响。RV64 `make RV_MODE=debug RV_USER_FEATURES= build-rv`、
+  两个 `cargo fmt --check` 和 `git diff --check` 均通过。
+- 干净 RV64 pub、SMP=1、256 MiB 受控回归（先从 `img/sdcard-rv-pub.img.gz` 恢复并
+  `e2fsck -pf`，临时注入 runner）：4 路 `factorial,date,network,cpu` 在 BusyBox timeout 下全部
+  pass，分别为 15547、17829、18843、18057 ms。10 路在同一条件下 6/10 pass：factorial 48457、
+  kernel 61549、fs-create 45538、fs-readwrite 62149、fs-search 67115、fs-usage 61507 ms；date、
+  network、cpu、fs-directory 的 agent exit 均为 143（SIGTERM），其中 fs-directory validation
+  exit 为 0，不能归为文件系统语义失败。此轮不等同官方成绩：官方 runner 还使用动态
+  `/usr/bin/timeout`，其 4 路复现出现随机 exit 127（`/usr/bin/timeout: not found`），是下一项独立待查。
+- 下一目标：先对动态 coreutils/dash exec 失败和 10 路单核排队分别计数；在没有逐层日志前，不把
+  exit 127/143 归为某个固定 syscall。随后直接从干净镜像运行 `/glibc/cagent_testcode.sh` 和上游 judge
+  更新可申报分数。最新临时 guest 日志目录：`/tmp/cagent_debug_vfork_fix_4_busybox/`、
+  `/tmp/cagent_debug_vfork_fix_10_busybox/`（随镜像恢复会丢失）。
+
 ## 2026-08-03 提交前交接：题一现状、目标与建议
 
 - 当前基线：`dev` 的已提交基线为 `8169793`；工作树含 ext4 durability、RV64 kernel timer、

@@ -994,6 +994,9 @@ pub fn sys_clone(
     }
     new_task_trap_cx.set_a0(0);
 
+    if flags.contains(CloneFlags::CLONE_VFORK) {
+        new_task.set_vfork_parent(&current_task);
+    }
     add_task(new_task);
     if flags.contains(CloneFlags::CLONE_VFORK) {
         blocking_and_run_next();
