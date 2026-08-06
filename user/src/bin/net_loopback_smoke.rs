@@ -7,14 +7,14 @@ extern crate user_lib;
 use core::mem::size_of;
 use user_lib::{
     AF_INET, IPPROTO_TCP, IPPROTO_UDP, SOCK_DGRAM, SOCK_STREAM, SockAddrIn, accept, bind, close,
-    connect, exit, fork, listen, read, recvfrom, sendto, socket, wait, write,
+    connect, exit, fork, getpid, listen, read, recvfrom, sendto, socket, wait, write,
 };
 
-const UDP_PORT: u16 = 41000;
-const TCP_PORT: u16 = 41001;
+const PORT_BASE: u16 = 41000;
+const PORT_SLOTS: u16 = 1000;
 
-fn udp_loopback() {
-    let server_addr = SockAddrIn::loopback(UDP_PORT);
+fn udp_loopback(port: u16) {
+    let server_addr = SockAddrIn::loopback(port);
     let server = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     assert!(server >= 0);
     assert_eq!(bind(server as usize, &server_addr), 0);
@@ -46,8 +46,8 @@ fn udp_loopback() {
     close(server as usize);
 }
 
-fn tcp_loopback() {
-    let server_addr = SockAddrIn::loopback(TCP_PORT);
+fn tcp_loopback(port: u16) {
+    let server_addr = SockAddrIn::loopback(port);
     let server = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     assert!(server >= 0);
     assert_eq!(bind(server as usize, &server_addr), 0);
@@ -94,8 +94,11 @@ fn tcp_loopback() {
 
 #[unsafe(no_mangle)]
 fn main() -> i32 {
-    udp_loopback();
-    tcp_loopback();
+    // Standalone instances can run concurrently during SMP stress.  Reserve two
+    // adjacent loopback ports per parent PID so the probe does not race itself.
+    let slot = (getpid() as u16 % PORT_SLOTS) * 2;
+    udp_loopback(PORT_BASE + slot);
+    tcp_loopback(PORT_BASE + slot + 1);
     println!("net_loopback_smoke passed!");
     0
 }

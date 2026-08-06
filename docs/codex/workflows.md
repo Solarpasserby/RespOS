@@ -126,6 +126,16 @@ make run-la-pub       # LA pub 镜像，默认 256M、单核、串口 user_shell
 `make rv` 和 `make la` 仍保留 `FEATURES=eval` 及原初赛镜像，不能用来检查 pub 镜像。
 8 vCPU/8G 不是当前交互式入口的默认值；待 SMP 和决赛 launcher 明确后再单独增加决赛资源配置。
 
+交互式 RV64 SMP 专项构建后，可在 shell 直接运行内嵌 probe：
+
+```text
+smp_phase3_probe       # 30 轮 fork/exec/wait + pipe + loopback socket
+smp_shared_mm_probe    # 至少 2 CPU；100 轮跨 CPU 固定 VA remap/read
+```
+
+QEMU 必须附 `-snapshot`，并保存完整串口日志。`task_a_futex_cmp_requeue_probe` 需先以
+`TASK_A_FUTEX_CMP_REQUEUE_TEST_YIELD=1` 构建内核；专项结束后再执行一次不带该环境变量的默认构建。
+
 - 2026-08-02 实测 `make run-rv-pub` 已完成用户程序、lwext4 和内核构建，QEMU 以 1 个
   HART、256M 内存加载 `img/sdcard-rv-pub.img`，并显示 `Rust user shell` 的 `/>` 提示符；
   未进入 `testrunner`。LA 入口已做同样的配置检查，但尚未完成本轮启动验证。
@@ -258,3 +268,23 @@ git diff --check
 ```
 
 原因是架构配置会被复制，镜像会被写入，且本地未跟踪 `user/src/bin/*.rs` 也会被 wildcard 构建。
+
+## RV64 BuildStorm 分层验证
+
+BuildStorm 使用 pub 镜像、release kernel、无 `eval` user feature，并固定官方 8 核/8 GiB 参数。
+诊断必须带 `-snapshot`：
+
+```bash
+make build-rv RV_USER_FEATURES=
+qemu-system-riscv64 -machine virt -kernel kernel-rv -m 8G -nographic -smp 8 \
+  -bios default \
+  -drive file=img/sdcard-rv-pub.img,if=none,format=raw,id=x0 \
+  -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+  -no-reboot -snapshot
+```
+
+进入 guest shell 后执行 `/glibc/buildstorm_testcode.sh`。验收依次检查
+`BUILDSTORM_TOOLCHAIN ok`、`BUILDSTORM_MINIBUILD ok`、最终
+`BUILDSTORM_COMPILE mode=multi ok=true ... cores=8 bytes>=500000`；前一标记通过不能替代后一标记。
+脚本的 minibuild 会重定向 cargo 输出，若长时间静默，先单独在 `/bin/sh` 中设置脚本同款
+PATH/HOME/RUSTUP/CARGO 环境并运行 `cargo new`、`cargo build -vv`，再决定是否加入临时 kernel trace。

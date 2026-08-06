@@ -285,6 +285,12 @@ pub fn exit(exit_code: i32) -> isize {
 pub fn yield_() -> isize {
     sys_sched_yield()
 }
+pub fn sched_setaffinity(pid: isize, mask: usize) -> isize {
+    sys_sched_setaffinity(pid, &mask)
+}
+pub fn sched_getaffinity(pid: isize, mask: &mut usize) -> isize {
+    sys_sched_getaffinity(pid, mask)
+}
 pub fn time_get() -> isize {
     let mut tv = TimeVal::default();
     match sys_gettimeofday(&mut tv, 0) {

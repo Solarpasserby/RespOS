@@ -91,6 +91,46 @@
   0 只表示 runner 结束，必须解析测试 summary 和失败标记。
 - 后续影响：提交说明应分别陈述 build、boot、专项 probe、完整 workload，不使用笼统“测试通过”。
 
+## SMP kernel timer 只在无任务锁的安全点执行高层工作
+
+- 状态：已确认
+- 适用范围：RV64 SMP timer、timeout、signal、futex/timerfd/POSIX timer registry
+- 最后验证：2026-08-06
+- 证据：`os/src/arch/rv64/trap/mod.rs`；2 核 `ACTIVE_ITIMER_TASKS` 中断重入 GDB 栈
+  `/tmp/respos-smp2-dynamic-bt.txt`；2/4/8 核各三轮退出压力
+- 内容：普通 kernel-mode timer trap 只确认并重编程 tick，不调用会获取 task/signal/timer
+  锁的 `check_all_task_timers()`。高层 timer work 当前由 user-mode timer trap 和 boot hart 的无 current
+  idle context 串行服务。
+- 后续影响：不以“把某一把锁换成 NoIrq”逐个遮掩高层中断重入；需更强及时性时改为
+  中断只发布 pending，再在明确安全点消费。
+
+## RV64 shootdown 复用目标 OpenSBI 的同步 RFENCE
+
+- 状态：已确认（仅限当前 QEMU/OpenSBI 目标）
+- 适用范围：RV64 SMP `MemorySet::flush_tlb`
+- 最后验证：2026-08-06
+- 证据：RISC-V SBI RFENCE 规范；OpenSBI 1.5.1 `sbi_tlb_request`、`tlb_sync` 实现；
+  `smp_shared_mm_probe` 2/8 核日志
+- 内容：OS 维护真实 active hart mask；PTE 发布后调用 SBI remote SFENCE。当前 OpenSBI 的
+  TLB IPI event 带 per-source sync counter，发起方在远端执行 fence 并 ack 前不返回，因此不再
+  叠加一套重复的 S-mode shootdown IPI 队列。
+- 后续影响：这是平台契约，不是 SBI 文本对所有 firmware 的无条件完成性推论。更换 firmware、
+  绕过 SBI 或加入 ASID 后必须重新审计 request/ack、mask 与 frame 回收顺序。
+
+## filesystem exec 不以扩大固定 kernel heap 支持大 ELF
+
+- 状态：已采用
+- 适用范围：filesystem ELF loader、BuildStorm、kernel heap budget
+- 最后验证：2026-08-06
+- 证据：`os/src/mm/memory_set.rs::try_from_elf_file()`；45,559,552 字节 cargo 的
+  `BUILDSTORM_TOOLCHAIN ok` 日志 `/tmp/respos-buildstorm-rv8-file-backed-exec.log`
+- 内容：大 ELF 通过 file-backed PT_LOAD 按需装页；不提高 `KERNEL_HEAP_SIZE`、不放宽
+  `read_all()` 的半堆保护来承受完整 executable Vec。这样 exec 临时内存随 header 大小而非文件大小
+  增长，并把段页生命周期纳入已有 VMA/frame 模型。文件式 exec 的 header/PT_INTERP 元数据前缀
+  上限为 1 MiB；超出上限或 PT_LOAD 越过文件末尾的 ELF 返回 `ENOEXEC`，不得触发无界内核分配。
+- 后续影响：若扩展到 interpreter 或其他架构，继续传递 file identity/offset/length；不得为单个
+  workload 设置路径特判或无界整文件 allocation。
+
 ## 优化时保持原有有效测例兼容
 
 - 状态：暂定

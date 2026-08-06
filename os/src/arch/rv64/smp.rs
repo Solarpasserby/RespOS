@@ -139,8 +139,8 @@ pub fn leave_idle() {
 ///
 /// IPI 是提示而非 task ownership：hart 醒来后仍必须在 scheduler lock 内
 /// claim task。SBI 失败只在启动异常时记录，不能使 enqueue 回滚。
-pub fn kick_one_idle_hart() {
-    let mask = IDLE_HART_MASK.load(Ordering::Acquire) & online_hart_mask();
+pub fn kick_one_idle_hart_in(allowed_harts: usize) {
+    let mask = IDLE_HART_MASK.load(Ordering::Acquire) & online_hart_mask() & allowed_harts;
     if mask == 0 {
         return;
     }

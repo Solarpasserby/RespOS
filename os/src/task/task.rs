@@ -8,7 +8,7 @@ use super::scheduler::remove_task;
 use super::tid::{TidHandle, tid_alloc};
 use crate::config::CLK_TCK;
 use crate::fs::mount::init_root_fs;
-use crate::fs::{FdEntry, FdTable, Path};
+use crate::fs::{FdEntry, FdTable, FileOp, Path};
 use crate::mm::{MemorySet, copy_from_user, copy_to_user, writeback_file_pages};
 use crate::mutex::SpinLock;
 use crate::signal::sig_handler::{ActionType, SigHandler};
@@ -833,8 +833,39 @@ impl TaskControlBlock {
             args.push(String::new());
         }
 
-        let (mut memory_set, _token, mut user_sp, entry_point, aux_vec) =
-            MemorySet::try_from_elf_data(elf_data)?;
+        let loaded = MemorySet::try_from_elf_data(elf_data)?;
+        self.install_exec_image(exe_path, loaded, args, envs, linux_abi)
+    }
+
+    pub fn execve_file(
+        self: &Arc<Self>,
+        exe_path: String,
+        file: Arc<dyn FileOp>,
+        mut args: Vec<String>,
+        envs: Vec<String>,
+        linux_abi: bool,
+    ) -> SysResult<usize> {
+        if !self.is_process_leader() {
+            return Err(Errno::EINVAL);
+        }
+
+        if args.is_empty() {
+            args.push(String::new());
+        }
+
+        let loaded = MemorySet::try_from_elf_file(file)?;
+        self.install_exec_image(exe_path, loaded, args, envs, linux_abi)
+    }
+
+    fn install_exec_image(
+        self: &Arc<Self>,
+        exe_path: String,
+        loaded: (MemorySet, usize, usize, usize, Vec<AuxHeader>),
+        args: Vec<String>,
+        envs: Vec<String>,
+        linux_abi: bool,
+    ) -> SysResult<usize> {
+        let (mut memory_set, _token, mut user_sp, entry_point, aux_vec) = loaded;
 
         /* ===== 修改用户栈数据 ===== */
         let (argv_base, envp_base, auxv_base, stack_top) = init_user_stack(
@@ -852,6 +883,7 @@ impl TaskControlBlock {
         // 刷新页表，由于应用程序通过异常进入，在异常返回时不会刷新页表
         // 为了程序返回后看到的地址空间为自身而非父任务的地址空间，需要主动刷新页表
         memory_set_guard.activate();
+        old_memory_set.clear_current_hart_active();
         drop(old_memory_set);
         drop(memory_set_guard);
 
@@ -877,6 +909,11 @@ impl TaskControlBlock {
         self.close_other_threads_for_exec();
 
         /* ===== 修改文件描述符表 ===== */
+        // Linux execve always undoes CLONE_FILES sharing before applying
+        // close-on-exec.  Otherwise an exec'd child can keep mutating its
+        // parent's descriptor table and its pipe endpoints survive as long as
+        // the parent, preventing captured stdout/stderr from reaching EOF.
+        self.unshare_fd_table();
         self.fd_table.lock().close_on_exec();
 
         /* ===== 修改信号处理 ===== */
@@ -949,6 +986,20 @@ impl TaskControlBlock {
     }
     pub fn cpu_affinity_mask(&self) -> usize {
         self.sched.cpu_affinity_mask()
+    }
+
+    /// Whether this ready task can be claimed by `cpu` without violating its
+    /// affinity or the context-save owner handoff.
+    ///
+    /// The scheduler calls this while holding the global ready-queue lock, so
+    /// another CPU cannot claim the same queued task between this check and
+    /// `try_claim_running_on_cpu()`.  The owner may concurrently change from
+    /// this CPU to `NO_CPU_OWNER` after an outgoing context reaches idle; an
+    /// early `false` merely leaves the task queued for the next fetch.
+    pub fn can_be_claimed_on_cpu(&self, cpu: usize) -> bool {
+        cpu < usize::BITS as usize
+            && self.cpu_affinity_mask() & (1usize << cpu) != 0
+            && self.cpu_owner.load(Ordering::Acquire) == NO_CPU_OWNER
     }
     pub fn cap_effective(&self) -> usize {
         self.caps.effective()
@@ -1036,10 +1087,14 @@ impl TaskControlBlock {
         self.memory_set.read().token()
     }
 
-    /// 在恢复本任务 context 前发布当前 hart 对其地址空间的 TLB residency。
-    /// 该位保守保留到地址空间销毁，供远端页表修改时的 RFENCE 使用。
-    pub fn mark_memory_set_current_hart(&self) {
-        self.memory_set.read().mark_current_hart_tlb_resident();
+    /// 在恢复本任务 context 前发布当前 hart 正在使用其地址空间。
+    pub fn mark_memory_set_current_hart_active(&self) {
+        self.memory_set.read().mark_current_hart_active();
+    }
+
+    /// 只可在本 hart 已经切回 idle/kernel 页表后调用。
+    pub fn clear_memory_set_current_hart_active(&self) {
+        self.memory_set.read().clear_current_hart_active();
     }
     // 任务状态判断
     pub fn is_running(&self) -> bool {
@@ -1647,9 +1702,10 @@ impl TaskControlBlock {
         self.fd_table.lock().close(fd)
     }
     pub fn unshare_fd_table(&self) {
-        let current = self.fd_table.lock().clone();
-        let new_table = FdTable::from_existed_user(&current);
-        *self.fd_table.lock() = new_table;
+        let mut current = self.fd_table.lock();
+        if Arc::strong_count(&current) > 1 {
+            *current = FdTable::from_existed_user(&current);
+        }
     }
     pub fn get_fd_entry(&self, fd: usize) -> SysResult<FdEntry> {
         self.fd_table.lock().get_fd_entry(fd)
@@ -1970,6 +2026,14 @@ fn exit_process_group(task: Arc<TaskControlBlock>, cause: ExitCause) {
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
+        // Another thread owns group teardown.  Returning while this caller is
+        // still Running would let exit_group's scheduler path hand it off as
+        // runnable again, eventually resuming after a nominally noreturning
+        // exit.  Yield until the teardown owner commits this TCB to Exited;
+        // an exited handoff is never republished by the idle loop.
+        while !task.is_exited() {
+            crate::task::yield_current_task();
+        }
         return;
     }
 
@@ -2005,7 +2069,6 @@ fn exit_process_group(task: Arc<TaskControlBlock>, cause: ExitCause) {
         let fd_table = task.fd_table.lock();
         Arc::strong_count(&fd_table) <= fd_table_group_owners
     };
-
     let mut leader_cleaned = false;
     for thread in threads {
         if thread.tid() == leader.tid() {

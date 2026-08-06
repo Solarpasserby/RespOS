@@ -102,6 +102,19 @@ fn read_file_at(file: Arc<dyn FileOp>, offset: usize, buf: &mut [u8]) -> SysResu
     }
 }
 
+fn read_file_exact_at(file: Arc<dyn FileOp>, offset: usize, buf: &mut [u8]) -> SysResult {
+    let mut done = 0usize;
+    while done < buf.len() {
+        let current_offset = offset.checked_add(done).ok_or(Errno::EIO)?;
+        let n = read_file_at(file.clone(), current_offset, &mut buf[done..])?;
+        if n == 0 {
+            return Err(Errno::ENOEXEC);
+        }
+        done = done.checked_add(n).ok_or(Errno::EIO)?;
+    }
+    Ok(())
+}
+
 fn write_file_at(file: Arc<dyn FileOp>, offset: usize, buf: &[u8]) -> SysResult<usize> {
     if let Some(file) = file.as_any().downcast_ref::<File>() {
         return file.write_at_offset(offset, buf);
@@ -232,15 +245,21 @@ pub struct MemorySet {
     // 页表和各逻辑段
     pub page_table: PageTable,
     areas: Vec<MapArea>,
-    // 对该地址空间执行过的 hart。它是保守集合：context switch 不能在
-    // 切换前安全清掉旧 bit，因此保留历史 hart，远端 shootdown 可以多做但
-    // 绝不能漏做。地址空间销毁前这些 hart 都是安全的 RFENCE 目标。
+    // 当前加载该地址空间的 hart。scheduler 在恢复 task 前设置，在已经
+    // 切回 per-CPU idle/kernel satp 后清除。页表写入者持有 MemorySet 写锁，
+    // 因此不会与设置/清除 active bit 的读锁临界区交错。
     #[cfg(target_arch = "riscv64")]
-    tlb_hart_mask: AtomicUsize,
+    active_hart_mask: AtomicUsize,
 }
 
 impl Drop for MemorySet {
     fn drop(&mut self) {
+        #[cfg(target_arch = "riscv64")]
+        debug_assert_eq!(
+            self.active_hart_mask.load(Ordering::Acquire),
+            0,
+            "dropping an active user address space"
+        );
         self.recycle_data_pages();
     }
 }
@@ -1506,7 +1525,7 @@ impl MemorySet {
         #[cfg(target_arch = "riscv64")]
         {
             let current = crate::arch::smp::current_hart_id();
-            let remote_mask = self.tlb_hart_mask.load(Ordering::Acquire) & !(1 << current);
+            let remote_mask = self.active_hart_mask.load(Ordering::Acquire) & !(1 << current);
             if remote_mask != 0 {
                 crate::arch::sbi::remote_sfence_vma(remote_mask, 0)
                     .expect("SBI RFENCE remote_sfence_vma failed");
@@ -1514,14 +1533,26 @@ impl MemorySet {
         }
     }
 
-    /// 记录当前 hart 已经（或即将）加载这个地址空间。此集合只增长；这让
-    /// 页表写入期间即使恰逢 context switch，也不会遗漏仍持有旧 TLB 的 CPU。
+    /// 发布当前 hart 已经（或即将）加载这个地址空间。
     #[inline]
-    pub fn mark_current_hart_tlb_resident(&self) {
+    pub fn mark_current_hart_active(&self) {
         #[cfg(target_arch = "riscv64")]
         {
             let hart = crate::arch::smp::current_hart_id();
-            self.tlb_hart_mask.fetch_or(1 << hart, Ordering::Release);
+            self.active_hart_mask.fetch_or(1 << hart, Ordering::Release);
+        }
+    }
+
+    /// 当前 hart 已经切换到其他页表后撤销 active 状态。
+    #[inline]
+    pub fn clear_current_hart_active(&self) {
+        #[cfg(target_arch = "riscv64")]
+        {
+            let hart = crate::arch::smp::current_hart_id();
+            let old = self
+                .active_hart_mask
+                .fetch_and(!(1 << hart), Ordering::AcqRel);
+            debug_assert_ne!(old & (1 << hart), 0, "clearing an inactive address space");
         }
     }
 
@@ -1534,7 +1565,7 @@ impl MemorySet {
         assert!(pte.is_valid());
         assert!(pte.readable() || pte.executable() || pte.writable());
 
-        self.mark_current_hart_tlb_resident();
+        self.mark_current_hart_active();
         write_mmu_token(token);
         self.flush_tlb();
     }
@@ -1700,7 +1731,7 @@ impl MemorySet {
             page_table: PageTable::new(),
             areas: Vec::new(),
             #[cfg(target_arch = "riscv64")]
-            tlb_hart_mask: AtomicUsize::new(0),
+            active_hart_mask: AtomicUsize::new(0),
         }
     }
     /// 创建一个拥有内核空间根页表页信息的地址空间，主要用于用户进程
@@ -1712,7 +1743,7 @@ impl MemorySet {
             page_table: PageTable::from_kernel()?,
             areas: Vec::new(),
             #[cfg(target_arch = "riscv64")]
-            tlb_hart_mask: AtomicUsize::new(0),
+            active_hart_mask: AtomicUsize::new(0),
         })
     }
 
@@ -1806,6 +1837,74 @@ impl MemorySet {
     pub fn try_from_elf_data(
         elf_data: &[u8],
     ) -> SysResult<(Self, usize, usize, usize, Vec<AuxHeader>)> {
+        Self::try_from_elf_source(elf_data, None)
+    }
+
+    /// Load an ELF from a filesystem object without copying the complete file
+    /// into the fixed-size kernel heap.  Only the ELF/program headers and the
+    /// interpreter name are retained temporarily; PT_LOAD pages are populated
+    /// from the file when they fault in.
+    pub fn try_from_elf_file(
+        file: Arc<dyn FileOp>,
+    ) -> SysResult<(Self, usize, usize, usize, Vec<AuxHeader>)> {
+        const ELF64_HEADER_SIZE: usize = 64;
+        const ELF64_PROGRAM_HEADER_SIZE: usize = 56;
+        // The loader only needs headers plus the interpreter name.  Keep a
+        // hard bound so a malformed e_phoff/PT_INTERP cannot turn file-backed
+        // exec back into an unbounded kernel-heap allocation.
+        const ELF_METADATA_LIMIT: usize = 1024 * 1024;
+        let file_size = file.get_stat()?.size;
+        if file_size < ELF64_HEADER_SIZE {
+            return Err(Errno::ENOEXEC);
+        }
+
+        let mut header = alloc::vec![0u8; ELF64_HEADER_SIZE];
+        read_file_exact_at(file.clone(), 0, &mut header)?;
+        if !header.starts_with(b"\x7fELF") || header[4] != 2 || header[5] != 1 {
+            return Err(Errno::ENOEXEC);
+        }
+        let ph_offset = usize::try_from(u64::from_le_bytes(
+            header[32..40].try_into().map_err(|_| Errno::ENOEXEC)?,
+        ))
+        .map_err(|_| Errno::ENOEXEC)?;
+        let ph_entry_size = u16::from_le_bytes([header[54], header[55]]) as usize;
+        let ph_count = u16::from_le_bytes([header[56], header[57]]) as usize;
+        if ph_entry_size != ELF64_PROGRAM_HEADER_SIZE || ph_count == 0 {
+            return Err(Errno::ENOEXEC);
+        }
+        let ph_end = ph_entry_size
+            .checked_mul(ph_count)
+            .and_then(|len| ph_offset.checked_add(len))
+            .filter(|end| *end <= file_size && *end <= ELF_METADATA_LIMIT)
+            .ok_or(Errno::ENOEXEC)?;
+
+        let mut metadata = alloc::vec![0u8; ph_end.max(ELF64_HEADER_SIZE)];
+        read_file_exact_at(file.clone(), 0, &mut metadata)?;
+        let header_elf = xmas_elf::ElfFile::new(&metadata).map_err(|_| Errno::ENOEXEC)?;
+        let mut metadata_len = metadata.len();
+        for i in 0..header_elf.header.pt2.ph_count() {
+            let ph = header_elf.program_header(i).map_err(|_| Errno::ENOEXEC)?;
+            if ph.get_type().map_err(|_| Errno::ENOEXEC)? == xmas_elf::program::Type::Interp {
+                metadata_len = metadata_len.max(
+                    (ph.offset() as usize)
+                        .checked_add(ph.file_size() as usize)
+                        .filter(|end| *end <= file_size && *end <= ELF_METADATA_LIMIT)
+                        .ok_or(Errno::ENOEXEC)?,
+                );
+            }
+        }
+        if metadata_len > metadata.len() {
+            metadata.resize(metadata_len, 0);
+            read_file_exact_at(file.clone(), 0, &mut metadata)?;
+        }
+
+        Self::try_from_elf_source(&metadata, Some(file))
+    }
+
+    fn try_from_elf_source(
+        elf_data: &[u8],
+        file_backing: Option<Arc<dyn FileOp>>,
+    ) -> SysResult<(Self, usize, usize, usize, Vec<AuxHeader>)> {
         let mut memory_set = Self::from_kernel_page_table().map_err(|_| Errno::ENOMEM)?;
 
         // 在用户空间映射 sigreturn 跳板页
@@ -1874,8 +1973,29 @@ impl MemorySet {
                 let file_end = file_start
                     .checked_add(ph.file_size() as usize)
                     .ok_or(Errno::ENOEXEC)?;
-                let file_data = elf.input.get(file_start..file_end).ok_or(Errno::ENOEXEC)?;
-                memory_set.try_push_empty_map_area(map_area, Some(file_data), data_offset)?;
+                if let Some(file) = file_backing.as_ref() {
+                    if file_end > file.get_stat()?.size {
+                        return Err(Errno::ENOEXEC);
+                    }
+                    let backing_offset =
+                        file_start.checked_sub(data_offset).ok_or(Errno::ENOEXEC)?;
+                    let backing_len = data_offset
+                        .checked_add(ph.file_size() as usize)
+                        .ok_or(Errno::ENOEXEC)?;
+                    memory_set.push_map_area_lazy(MapArea::new_file_backed(
+                        start_va,
+                        end_va,
+                        map_perm,
+                        false,
+                        false,
+                        file.clone(),
+                        backing_offset,
+                        backing_len,
+                    ));
+                } else {
+                    let file_data = elf.input.get(file_start..file_end).ok_or(Errno::ENOEXEC)?;
+                    memory_set.try_push_empty_map_area(map_area, Some(file_data), data_offset)?;
+                }
             }
 
             if ph_type == xmas_elf::program::Type::Interp {
@@ -2288,6 +2408,14 @@ impl MemorySet {
 
         let pte = self.page_table.translate(vpn);
         let is_store = matches!(cause, PageFaultCause::Store);
+        let needed_perm = if is_store {
+            MapPermission::WRITE
+        } else {
+            match cause {
+                PageFaultCause::Instruction => MapPermission::EXECUTE,
+                _ => MapPermission::READ,
+            }
+        };
 
         // COW 写入：PTE 有效 + COW 标记 + area 允许写
         if is_store && pte.is_some_and(|p| p.is_valid() && p.is_cow()) {
@@ -2321,15 +2449,6 @@ impl MemorySet {
 
         // 惰性分配：PTE 无效 + 在有效 area 内
         if pte.is_none() || !pte.unwrap().is_valid() {
-            let needed_perm = if is_store {
-                MapPermission::WRITE
-            } else {
-                match cause {
-                    PageFaultCause::Instruction => MapPermission::EXECUTE,
-                    _ => MapPermission::READ,
-                }
-            };
-
             if !area_perm.contains(needed_perm) {
                 return Err(Errno::EFAULT);
             }
@@ -2337,6 +2456,22 @@ impl MemorySet {
             self.areas[area_idx].map_one(&mut self.page_table, vpn)?;
             self.flush_tlb();
             self.debug_check_invariants();
+            return Ok(());
+        }
+
+        // A shared address-space update can race with a fault that was already
+        // latched on this hart.  The handler then waits for the MemorySet
+        // writer and may observe the final, valid PTE after the remote fence
+        // has completed.  If both VMA and PTE now permit the access, refresh
+        // the local TLB and retry the faulting instruction.
+        if area_perm.contains(needed_perm)
+            && pte.is_some_and(|pte| match cause {
+                PageFaultCause::Instruction => pte.executable(),
+                PageFaultCause::Load => pte.readable(),
+                PageFaultCause::Store => pte.writable(),
+            })
+        {
+            sfence();
             return Ok(());
         }
 
@@ -2676,8 +2811,22 @@ impl MapArea {
     }
     /// 为逻辑段上所有虚拟页销毁物理页帧并消除映射
     pub fn unmap(&mut self, page_table: &mut PageTable) {
-        for vpn in self.vpn_range {
-            self.unmap_one(page_table, vpn);
+        match self.map_type {
+            MapType::Direct => {
+                for vpn in self.vpn_range {
+                    self.unmap_one(page_table, vpn);
+                }
+            }
+            MapType::Framed => {
+                // Lazy anonymous/file-backed VMAs can span very large sparse
+                // ranges.  Only resident framed pages have PTEs and frames to
+                // release; walking every virtual page makes process exit scale
+                // with address-space reservation rather than real memory use.
+                let resident = self.data_frames.keys().copied().collect::<Vec<_>>();
+                for vpn in resident {
+                    self.unmap_one(page_table, vpn);
+                }
+            }
         }
     }
 

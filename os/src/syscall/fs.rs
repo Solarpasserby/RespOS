@@ -2416,6 +2416,7 @@ struct RtcTime {
 pub fn sys_ioctl(fd: usize, request: usize, arg: usize) -> SysResult<usize> {
     const TIOCGWINSZ: usize = 0x5413;
     const FIONREAD: usize = 0x541b;
+    const FIONBIO: usize = 0x5421;
     const RTC_RD_TIME: usize = 0x8024_7009;
 
     let task = current_task().expect("[kernel] current task is None.");
@@ -2430,6 +2431,18 @@ pub fn sys_ioctl(fd: usize, request: usize, arg: usize) -> SysResult<usize> {
                 ypixel: 0,
             };
             copy_to_user(arg as *mut WinSize, &winsize as *const WinSize, 1)?;
+            Ok(0)
+        }
+        FIONBIO => {
+            let mut enabled = 0i32;
+            copy_from_user(&mut enabled as *mut i32, arg as *const i32, 1)?;
+            let mut flags = fd_entry.file.get_flags();
+            if enabled != 0 {
+                flags.insert(OpenFlags::O_NONBLOCK);
+            } else {
+                flags.remove(OpenFlags::O_NONBLOCK);
+            }
+            fd_entry.file.set_status_flags(flags)?;
             Ok(0)
         }
         FIONREAD => {

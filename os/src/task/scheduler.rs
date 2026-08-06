@@ -7,8 +7,6 @@
 use super::processor::{current_task, handoff_current_to_idle};
 use super::task::{TaskControlBlock, task_exit, task_exit_by_signal, task_group_exit};
 use crate::mutex::SpinNoIrqLock;
-#[cfg(debug_assertions)]
-use alloc::collections::BTreeSet;
 use alloc::{collections::vec_deque::VecDeque, sync::Arc, vec::Vec};
 use bitflags::bitflags;
 use hashbrown::HashMap;
@@ -63,9 +61,11 @@ fn cleanup_dead_tasks() {
 /// 添加新任务到就绪队列。
 pub fn add_task(task: Arc<TaskControlBlock>) {
     assert!(task.is_ready());
+    #[cfg(target_arch = "riscv64")]
+    let affinity = task.cpu_affinity_mask();
     SCHEDULER.lock().add(task);
     #[cfg(target_arch = "riscv64")]
-    crate::arch::smp::kick_one_idle_hart();
+    crate::arch::smp::kick_one_idle_hart_in(affinity);
 }
 
 /// 从就绪队列中取出队首任务，并在同一把 scheduler 锁内将其 claim 为
@@ -76,19 +76,19 @@ pub fn add_task(task: Arc<TaskControlBlock>) {
 /// context switch 仍在锁外完成，避免把 scheduler 锁带入 `__switch`。
 pub fn fetch_task() -> Option<Arc<TaskControlBlock>> {
     let mut scheduler = SCHEDULER.lock();
-    let task = scheduler.fetch();
+    let cpu = {
+        #[cfg(target_arch = "riscv64")]
+        {
+            crate::arch::smp::current_hart_id()
+        }
+        #[cfg(target_arch = "loongarch64")]
+        {
+            0
+        }
+    };
+    let task = scheduler.fetch_for_cpu(cpu);
     if let Some(task) = task {
         debug_assert!(task.is_ready(), "claimed task {} is not Ready", task.tid());
-        let cpu = {
-            #[cfg(target_arch = "riscv64")]
-            {
-                crate::arch::smp::current_hart_id()
-            }
-            #[cfg(target_arch = "loongarch64")]
-            {
-                0
-            }
-        };
         if task.try_claim_running_on_cpu(cpu) {
             return Some(task);
         }
@@ -108,7 +108,12 @@ pub fn requeue_ready_task(task: Arc<TaskControlBlock>) {
     }
     let mut scheduler = SCHEDULER.lock();
     scheduler.remove(task.tid());
+    #[cfg(target_arch = "riscv64")]
+    let affinity = task.cpu_affinity_mask();
     scheduler.add(task);
+    drop(scheduler);
+    #[cfg(target_arch = "riscv64")]
+    crate::arch::smp::kick_one_idle_hart_in(affinity);
 }
 
 /// 阻塞任务。
@@ -120,9 +125,11 @@ pub fn block_task(task: Arc<TaskControlBlock>) {
 pub fn wakeup_stopped_task(task: Arc<TaskControlBlock>) {
     if task.is_stopped() {
         task.set_ready();
+        #[cfg(target_arch = "riscv64")]
+        let affinity = task.cpu_affinity_mask();
         SCHEDULER.lock().add(task);
         #[cfg(target_arch = "riscv64")]
-        crate::arch::smp::kick_one_idle_hart();
+        crate::arch::smp::kick_one_idle_hart_in(affinity);
     }
 }
 
@@ -327,13 +334,25 @@ impl Scheduler {
         self.debug_assert_invariants();
     }
 
-    /// 取出最高优先级队列中的队首任务。
-    pub fn fetch(&mut self) -> Option<Arc<TaskControlBlock>> {
-        while self.rt_bitmap != 0 {
-            let bit = 127 - self.rt_bitmap.leading_zeros() as usize;
+    /// Take the highest-priority task that `cpu` is allowed to run.
+    ///
+    /// An incompatible task remains in place: a CPU must be able to skip a
+    /// pinned task at the head and run lower-priority work that is eligible on
+    /// this CPU, without disturbing FIFO order for the pinned task's CPU.
+    pub fn fetch_for_cpu(&mut self, cpu: usize) -> Option<Arc<TaskControlBlock>> {
+        let mut rt_candidates = self.rt_bitmap;
+        while rt_candidates != 0 {
+            let bit = 127 - rt_candidates.leading_zeros() as usize;
+            rt_candidates &= !(1u128 << bit);
             let idx = bit + 1;
             if idx < RT_QUEUE_COUNT {
-                if let Some(task) = self.rt_queues[idx].pop_front() {
+                if let Some(pos) = self.rt_queues[idx]
+                    .iter()
+                    .position(|task| task.can_be_claimed_on_cpu(cpu))
+                {
+                    let task = self.rt_queues[idx]
+                        .remove(pos)
+                        .expect("ready task position disappeared");
                     self.task_index.remove(&task.tid());
                     if self.rt_queues[idx].is_empty() {
                         self.rt_bitmap &= !(1u128 << bit);
@@ -342,13 +361,20 @@ impl Scheduler {
                     return Some(task);
                 }
             }
-            self.rt_bitmap &= !(1u128 << bit);
         }
 
-        while self.normal_bitmap != 0 {
-            let idx = self.normal_bitmap.trailing_zeros() as usize;
+        let mut normal_candidates = self.normal_bitmap;
+        while normal_candidates != 0 {
+            let idx = normal_candidates.trailing_zeros() as usize;
+            normal_candidates &= !(1u64 << idx);
             if idx < NORMAL_QUEUE_COUNT {
-                if let Some(task) = self.normal_queues[idx].pop_front() {
+                if let Some(pos) = self.normal_queues[idx]
+                    .iter()
+                    .position(|task| task.can_be_claimed_on_cpu(cpu))
+                {
+                    let task = self.normal_queues[idx]
+                        .remove(pos)
+                        .expect("ready task position disappeared");
                     self.task_index.remove(&task.tid());
                     if self.normal_queues[idx].is_empty() {
                         self.normal_bitmap &= !(1u64 << idx);
@@ -357,10 +383,13 @@ impl Scheduler {
                     return Some(task);
                 }
             }
-            self.normal_bitmap &= !(1u64 << idx);
         }
 
-        let task = self.idle_queue.pop_front();
+        let task = self
+            .idle_queue
+            .iter()
+            .position(|task| task.can_be_claimed_on_cpu(cpu))
+            .and_then(|pos| self.idle_queue.remove(pos));
         if let Some(task) = &task {
             self.task_index.remove(&task.tid());
         }
@@ -472,7 +501,7 @@ impl Scheduler {
             "unused RT queue 0 must remain empty"
         );
 
-        let mut ready_tids = BTreeSet::new();
+        let mut ready_count = 0usize;
         let mut expected_rt_bitmap = 0u128;
         for idx in 1..RT_QUEUE_COUNT {
             let queue = &self.rt_queues[idx];
@@ -480,7 +509,8 @@ impl Scheduler {
                 expected_rt_bitmap |= 1u128 << (idx - 1);
             }
             for task in queue {
-                self.assert_ready_task(task, ReadyQueue::Rt(idx), &mut ready_tids);
+                self.assert_ready_task(task, ReadyQueue::Rt(idx));
+                ready_count += 1;
             }
         }
         assert_eq!(
@@ -495,7 +525,8 @@ impl Scheduler {
                 expected_normal_bitmap |= 1u64 << idx;
             }
             for task in queue {
-                self.assert_ready_task(task, ReadyQueue::Normal(idx), &mut ready_tids);
+                self.assert_ready_task(task, ReadyQueue::Normal(idx));
+                ready_count += 1;
             }
         }
         assert_eq!(
@@ -504,33 +535,26 @@ impl Scheduler {
         );
 
         for task in &self.idle_queue {
-            self.assert_ready_task(task, ReadyQueue::Idle, &mut ready_tids);
+            self.assert_ready_task(task, ReadyQueue::Idle);
+            ready_count += 1;
         }
 
         assert_eq!(
             self.task_index.len(),
-            ready_tids.len(),
+            ready_count,
             "task_index and ready queues have different sizes"
         );
-        for (tid, queue) in &self.task_index {
-            assert!(
-                ready_tids.contains(tid),
-                "task_index contains tid {tid} absent from ready queues"
-            );
-            let actual_queue = self
-                .ready_queue_for_tid(*tid)
-                .expect("indexed task must exist in a ready queue");
-            assert_eq!(
-                *queue, actual_queue,
-                "task_index points tid {tid} at the wrong ready queue"
-            );
-        }
+        // Every queued entry was checked against task_index above. add()
+        // rejects a duplicate tid, so equal cardinality also proves that the
+        // index has no extra entry absent from the ready queues. Avoid a
+        // second task_index × all-queues scan while holding SpinNoIrqLock:
+        // on the boot hart that can delay the sole global timeout service.
 
         for (tid, task) in &self.blocked_tasks {
             assert_eq!(*tid, task.tid(), "blocked_tasks key/tid mismatch");
             assert!(task.is_blocked(), "blocked task {tid} is not Blocked");
             assert!(
-                !ready_tids.contains(tid),
+                !self.task_index.contains_key(tid),
                 "task {tid} appears in both ready and blocked sets"
             );
             assert!(!task.is_exited(), "exited task {tid} remains blocked");
@@ -538,14 +562,8 @@ impl Scheduler {
     }
 
     #[cfg(debug_assertions)]
-    fn assert_ready_task(
-        &self,
-        task: &TaskControlBlock,
-        queue: ReadyQueue,
-        ready_tids: &mut BTreeSet<usize>,
-    ) {
+    fn assert_ready_task(&self, task: &TaskControlBlock, queue: ReadyQueue) {
         let tid = task.tid();
-        assert!(ready_tids.insert(tid), "duplicate ready tid {tid}");
         assert!(task.is_ready(), "ready-queued task {tid} is not Ready");
         assert!(!task.is_exited(), "exited task {tid} remains ready");
         assert_eq!(
@@ -563,36 +581,24 @@ impl Scheduler {
             "task {tid} appears in both ready and blocked sets"
         );
     }
-
-    #[cfg(debug_assertions)]
-    fn ready_queue_for_tid(&self, tid: usize) -> Option<ReadyQueue> {
-        for idx in 1..RT_QUEUE_COUNT {
-            if self.rt_queues[idx].iter().any(|task| task.tid() == tid) {
-                return Some(ReadyQueue::Rt(idx));
-            }
-        }
-        for idx in 0..NORMAL_QUEUE_COUNT {
-            if self.normal_queues[idx].iter().any(|task| task.tid() == tid) {
-                return Some(ReadyQueue::Normal(idx));
-            }
-        }
-        self.idle_queue
-            .iter()
-            .any(|task| task.tid() == tid)
-            .then_some(ReadyQueue::Idle)
-    }
 }
 
 /// 唤醒指定 tid 的任务，将其从 blocked_queue 移入 ready_queue。
 pub fn wakeup_task(tid: usize) {
     let mut scheduler = SCHEDULER.lock();
-    if let Some(task) = scheduler.wake(tid) {
+    let _affinity = if let Some(task) = scheduler.wake(tid) {
         task.set_ready();
+        let affinity = task.cpu_affinity_mask();
         scheduler.add(task);
-    }
+        Some(affinity)
+    } else {
+        None
+    };
     drop(scheduler);
     #[cfg(target_arch = "riscv64")]
-    crate::arch::smp::kick_one_idle_hart();
+    if let Some(affinity) = _affinity {
+        crate::arch::smp::kick_one_idle_hart_in(affinity);
+    }
 }
 
 pub fn scheduler_health_counts() -> Option<(usize, usize, usize)> {

@@ -194,9 +194,16 @@ pub fn kernel_trap_handler(cx: &mut TrapContext) {
             // acknowledge it by arming the next tick and process expirations.
             // Scheduling remains at explicit safe points in kernel code.
             set_next_ti_trigger();
-            // 早期 SMP 的全局 timeout 队列仍只由 boot hart 串行扫描。这样
-            // boot hart idle 时 timer 仍能唤醒任务，次 hart 则只重编程本地 tick。
-            if crate::arch::smp::is_timer_service_hart() {
+            // Global timeout work touches task/signal/timer registries and
+            // must not re-enter an arbitrary kernel critical section.  A
+            // kernel-mode tick processes it only when this hart is in the
+            // per-CPU idle context (`current_task == None`), where no task
+            // lock is held. Ticks taken directly from user mode are handled
+            // by trap_handler's safe path above.
+            //
+            // The boot hart remains the sole global timer service CPU during
+            // early SMP; secondary harts only re-arm their local tick.
+            if crate::arch::smp::is_timer_service_hart() && crate::task::current_task().is_none() {
                 check_all_task_timers();
             }
         }

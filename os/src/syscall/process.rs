@@ -16,10 +16,9 @@ use crate::mm::{
 };
 use crate::signal::{LinuxSigInfo, SigInfo};
 use crate::task::{
-    CloneFlags, TASK_MANAGER, TaskControlBlock, WaitOption, add_task, blocking_and_run_next,
-    current_task, do_futex, exit_and_run_next, exit_group_and_run_next,
-    prepare_current_task_blocked, remove_task, requeue_ready_task, switch_to_next_task,
-    yield_current_task,
+    CloneFlags, TASK_MANAGER, TaskControlBlock, WaitOption, add_task, current_task, do_futex,
+    exit_and_run_next, exit_group_and_run_next, prepare_current_task_blocked, remove_task,
+    requeue_ready_task, switch_to_next_task, yield_current_task,
 };
 use crate::timer::TimeSpec;
 use alloc::string::String;
@@ -982,6 +981,7 @@ pub fn sys_clone(
                 Ok::<(), Errno>(())
             })?;
             parent.op_memory_set_read(|memory_set| memory_set.activate());
+            new_task.op_memory_set_read(|memory_set| memory_set.clear_current_hart_active());
         }
         new_task.set_set_child_tid(ctid);
     }
@@ -1004,10 +1004,17 @@ pub fn sys_clone(
 
     if flags.contains(CloneFlags::CLONE_VFORK) {
         new_task.set_vfork_parent(&current_task);
+        // Register the parent as blocked before publishing the child.  On SMP
+        // the child can otherwise exec and deliver its one-shot wakeup before
+        // blocking_and_run_next() inserts the parent into blocked_tasks,
+        // permanently losing the wakeup.
+        if !prepare_current_task_blocked() {
+            return Err(Errno::ESRCH);
+        }
     }
     add_task(new_task);
     if flags.contains(CloneFlags::CLONE_VFORK) {
-        blocking_and_run_next();
+        switch_to_next_task();
     }
     // 系统调用返回新创建任务的 pid
     Ok(new_tid)
@@ -1125,21 +1132,13 @@ fn exec_fs_file(
             if !is_elf(shell_head.as_slice()) {
                 return Err(Errno::ENOEXEC);
             }
-            let shell_data = shell_file.read_all()?;
-            task.execve(
-                shell_exe_path,
-                shell_data.as_slice(),
-                shell_args,
-                envs_vec,
-                true,
-            )?;
+            task.execve_file(shell_exe_path, shell_file, shell_args, envs_vec, true)?;
             return Ok(0);
         }
         return Err(Errno::ENOEXEC);
     }
 
-    let all_data = file.read_all()?;
-    task.execve(exe_path, all_data.as_slice(), args_vec, envs_vec, true)?;
+    task.execve_file(exe_path, file, args_vec, envs_vec, true)?;
     Ok(0)
 }
 

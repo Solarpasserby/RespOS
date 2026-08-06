@@ -2,6 +2,145 @@
 
 本文件是快速变化的状态页。更新测试结论时必须同时更新日期、提交和命令。
 
+## 2026-08-06 RV64 8 核 BuildStorm 首轮推进（未提交，minibuild 仍待验证）
+
+- **基线/命令**：`dev` HEAD 为 `dc793c4`，使用 release、无 `eval` user feature 的 `kernel-rv`，
+  `img/sdcard-rv-pub.img` 只读 snapshot 启动：`qemu-system-riscv64 -machine virt -kernel kernel-rv
+  -m 8G -nographic -smp 8 -bios default ... -snapshot`，guest 执行
+  `/glibc/buildstorm_testcode.sh`。镜像内脚本与 final-2026 规则一致。
+- **已越过的阻塞**：epoll 现在接受合法 `EPOLLRDHUP` interest；并发 `exit_group` 的非 owner
+  不再以 Running 状态返回；并发 lazy fault 在拿到 MM 锁后若发现 PTE 已由另一核补齐，会本地
+  `sfence` 并重试。以上修复后，8 核 BuildStorm 可稳定打印 `rustc 1.98.0-nightly`、
+  `cargo 1.98.0-nightly` 和 `BUILDSTORM_TOOLCHAIN ok`。
+- **大 ELF exec**：文件系统 ELF 不再通过 `File::read_all()` 把完整文件放入固定 64 MiB kernel
+  heap。新路径只读取 ELF64 header、program headers 和 PT_INTERP 字符串；主程序 PT_LOAD 作为
+  private file backing 记录，缺页时逐页读取。45,559,552 字节 cargo 已可执行；此前日志
+  `/tmp/respos-buildstorm-rv8-latched-fault-fix.log` 的 ENOMEM 上限不再出现。
+- **Rust 子进程 ABI**：实现 `ioctl(FIONBIO)` 对 open-file status 的 `O_NONBLOCK` 切换，修复
+  Rust std 同时捕获 stdout/stderr 时 `read_output` 因 ENOTTY panic。exec 在应用 CLOEXEC 前显式
+  解除可能的 `CLONE_FILES` 共享。lazy framed VMA 回收只遍历 `data_frames` 的 resident 页，
+  不再按可能极大的虚拟跨度逐页查询 PTE。
+- **SMP vfork 丢唤醒**：受控 trace 确认 cargo 启动 rustfmt 使用 `clone(0x4111)`。原 `sys_clone`
+  先 `add_task(child)`、后阻塞父任务；8 核下子任务可先 exec 并发出一次性 vfork wake，父任务
+  尚未进入 blocked 表导致 wake 丢失。当前改为先 `prepare_current_task_blocked()`，再发布 child，
+  最后 `switch_to_next_task()`，关闭该窗口。该结论由 `/tmp/respos-buildstorm-cloneflags.log`、
+  `/tmp/respos-buildstorm-exittrace.log` 支撑；临时 trace 已全部移除。
+- **最新分层证据/边界**：`/tmp/respos-buildstorm-pipetrace.log` 在同一 8 核 release 配置中确认：
+  vfork parent 已在 rustfmt child exec 后恢复，rustfmt（tid/tgid 13）随后完成 process-group exit，
+  `fd_table_owned_by_group=true` 且 fd table 已执行 `clear()`；但对应 `Pipe::drop()` 未出现，
+  `cargo new` 仍未返回。QEMU 随后由宿主终止，不能计为完整通过。当前 blocker 已缩小为
+  child-side pipe open-file 引用/父进程输出收集生命周期，根因仍为 `待验证`；不能再归因于 vfork
+  wake 丢失，也不能宣称 `BUILDSTORM_MINIBUILD` 或 `BUILDSTORM_COMPILE` 通过。临时 trace 已全部移除。
+  所有测试均为 `-snapshot`，repo pub 镜像未写入。
+- **收口审查门禁**：移除全部 `vforktrace`/`pipetrace` 后，文件式 ELF loader 又补充 1 MiB
+  metadata 上限、ELF64 program-header size 与 PT_LOAD 文件末尾校验。随后
+  `cargo fmt --manifest-path {os,user}/Cargo.toml -- --check`、`git diff --check`、
+  `make build-rv RV_USER_FEATURES=`、`make build-la LA_USER_FEATURES=` 均通过。该防御性校验后未重跑
+  BuildStorm runtime；已通过的 runtime 边界仍以前述日志为准。审查结束时无 QEMU 进程遗留。
+
+## 2026-08-06 RV64 SMP Phase 3 并发回归与 Phase 4 active-mask（未提交）
+
+- **基线与实现**：`dev` HEAD 仍为 `dc793c4`，所有改动未提交。新增
+  `smp_phase3_probe`，每轮并发执行两组 wait4/fork/exec、pipe 和 TCP/UDP loopback，固定运行
+  30 轮；loopback 端口按 probe 父 PID 分槽，避免并发测试自冲突。用户库补充
+  `sched_{set,get}affinity` 封装。
+- **Phase 3 结果**：RV64 debug、pub 镜像、`-snapshot -m 256M` 下，2/4/8 核各一次
+  30/30 PASS，随后 `nproc` 分别为 2/4/8，guest `quit` 均使 QEMU exit 0。日志为
+  `/tmp/respos-phase3-smp{2,4,8}.log`。active-mask 改动后 8 核同一 30 轮再次通过，日志
+  `/tmp/respos-active-mask-phase3-smp8.log`。
+- **active-mask / shootdown 协议**：`MemorySet` 的历史 residency 集合已改为真实
+  `active_hart_mask`。恢复 task 前在 `MemorySet` 读锁内发布 bit；`__switch` 已恢复
+  per-CPU idle/kernel `satp` 后才清除旧 bit；`exec` 和 clone 临时页表切换显式转移/撤销 bit。
+  页表写入持写锁，先完成 PTE 写入和本地 `sfence.vma`，再对 active remote hart 调用 SBI
+  RFENCE。当前 QEMU OpenSBI 1.5.1 的 `sbi_tlb_request → sbi_ipi_send_many` 使用同步计数等待
+  远端处理完成，故在该目标平台上 RFENCE 返回构成 request/ack；此结论不外推到未知 firmware。
+- **共享 MM 验证**：新增 `smp_shared_mm_probe`，把同一 `CLONE_VM` 地址空间的 writer/reader
+  固定到两个 CPU；writer 在固定 VA 上反复 `munmap + MAP_FIXED mmap`，reader 在每次握手后
+  从另一 CPU 读取新页。RV64 debug 8 核连续 10/10 PASS，共 1000 轮 remap；2 核再通过
+  100 轮，随后 shell health 与 QEMU exit 0。日志为
+  `/tmp/respos-active-mask-shared-mm-smp{2,8}.log`。
+- **futex 结果与边界**：8 核默认 build 的 `task_a_futex_exit_probe`、
+  `task_a_futex_race_probe` 各通过一次。`cmp_requeue` 默认 build 的结果无效，因为该 probe 已知
+  依赖 `TASK_A_FUTEX_CMP_REQUEUE_TEST_YIELD=1`；专项 build 首次出现一次 waiter timeout/不收敛，
+  随后相同 8 核配置连续 20/20 PASS，日志
+  `/tmp/respos-active-mask-futex-cmp{-gdb,}-smp8.log`。该首个样本保留为 `待验证`，不能宣称
+  cmp-requeue 压力已完全稳定。
+- **构建/release 门禁**：默认 RV64/LA64 debug 与 release build、两个 fmt check、
+  `git diff --check` 均通过；LA probe 明确 skip，因为 LA64 当前仍为单核路径。RV64 release
+  `-snapshot -smp 8 -m 256M` 下 Phase 3 30/30、共享-MM 100 轮、`nproc=8` 和 QEMU exit 0
+  均通过，日志 `/tmp/respos-release-active-mask-smp8.log`。
+- **单核 CAgent 门禁**：把 pub 镜像复制到 `/tmp/respos-cagent-active.xOhODX.img`，仅在临时副本
+  注入 `scripts/cagent_debug.sh`；RV64 debug `-snapshot -smp 1 -m 256M` 的 kernel 单项输出
+  `testcase cagent kernel pass 7752`，随后 `true` exit 0、QEMU 正常退出，日志
+  `/tmp/respos-active-mask-cagent-kernel-smp1.log`。CAgent 分数受 agent 输出影响，不能与历史
+  8829 直接作性能比较；这里只作为当前 task/MM 改动未破坏单核执行链的门禁。
+- **仍未完成**：BuildStorm 的最新进展见上一节；完整 CAgent、mprotect/COW 双线程压力或 LA64 SMP
+  尚未运行，
+  因此不能把本节等同于题二完成。
+
+## 2026-08-06 RV64 SMP 退出风暴的两处中断重入死锁已修复（未提交）
+
+- **基线与范围**：`dev` HEAD 仍为 `dc793c4`；本轮修复位于 `os/src/mm/heap_allocator.rs`、
+  `os/src/arch/rv64/trap/mod.rs` 和 scheduler debug invariant，并包含下一节的 affinity 改动，均未提交。
+- **根因 1（已用全 CPU GDB 栈确认）**：CPU 0 在
+  `MapArea::unmap_one → BTreeMap::remove → __rust_dealloc → LockedHeap::dealloc` 持有全局 heap
+  内部锁时被 kernel timer 中断；`check_nanosleep_timeouts()` 在中断中 `collect::<Vec<_>>()`
+  再次分配，同 CPU 永久等待自己持有的 heap 锁。CPU 6 同时在另一退出路径等该锁。
+  证据为 `/tmp/respos-smp8-gdb-bt1.txt`。当前 frame allocator 是
+  `StackFrameAllocator + spin::Mutex`，不是 buddy；buddy 是内核 heap allocator。
+- **根因 2（低扰动动态 GDB 确认）**：2 核失败态中，boot hart 在 syscall 内
+  `TaskControlBlock::check_real_timer()` 持有 `ACTIVE_ITIMER_TASKS` 普通 `SpinLock` 时被 timer 中断；
+  `kernel_trap_handler → check_active_itimers()` 重入同一把锁。另一 hart 已 WFI，因而整机无进展。
+  QEMU 正常启动时只开 monitor，确认卡住后才动态启动 gdbserver，避免 `-gdb` 改变竞态；
+  证据为 `/tmp/respos-smp2-dynamic-bt.txt`。
+- **修复协议**：全局 heap 现由 `IrqSafeHeap` 包装，alloc/dealloc/init/stats 均先保存并关闭
+  本地中断，再由 `LockedHeap` 处理跨 CPU 互斥，且先释放 heap 锁再恢复中断。RV64
+  kernel-mode timer trap 只在 boot hart 的 per-CPU idle context（`current_task == None`）运行
+  `check_all_task_timers()`；中断普通 syscall/exit/scheduler 临界区时只重编程下一 tick。从用户态直接
+  进入的 timer trap 仍是无内核锁的 timer-work 安全点。
+- **debug scheduler 检查**：不再分配 `BTreeSet`，也不再对 `task_index` 每一项反查
+  140 个优先级队列。现在在一次线性队列遍历中验证 status、queue kind、index mapping 和
+  ready/blocked 互斥；`add()` 保留重复 tid 断言，队列总数与 index 基数保持相等。
+- **退出压力矩阵**：RV64 debug pub、`-snapshot -m 256M`，2/4/8 核各连续 3 轮并发运行
+  4 路 `busybox timeout 3 busybox sleep 60` + `wait`。9 轮全部输出 `SMP_EXIT_STORM_DONE`，
+  guest 压力段为 3655–5159 ms；每轮随后的 `/proc/respos_health` 均可读，guest `quit`
+  使 QEMU exit 0，未见 panic。日志为 `/tmp/respos-safe-smp{2,4,8}-r{1,2,3}.log`。
+- **其他门禁**：RV64/LA64 debug build、两个 `cargo fmt --check`、`git diff --check` 通过。
+  RV64 `-snapshot -smp 1` 的 `true; sleep 1; true` 三项 exit 0；8 核 affinity 掩码
+  `0x80..0x01` 的 8 个进程全部 exit 0，`nproc=8`。日志为 `/tmp/respos-irqsafe-smp1.log`、
+  `/tmp/respos-irqsafe-affinity-smp8.log`。RV64 release 首次构建命中已知 lwext4 共享 CMake 目录
+  `mkdir: File exists`；确认无遗留构建进程后，按 `pitfalls.md` 顺序执行
+  `make musl-generic ARCH=riscv64 -C vendor/lwext4_rust/c/lwext4` 再重试，release build 通过。
+  该 release 产物在 `-snapshot -smp 8 -m 256M` 同一四路退出压力中完成标记、health
+  和 QEMU exit 0 均通过，日志 `/tmp/respos-release-smp8-exit.log`。
+- **当时仍未完成**：该阶段尚未运行完整 fork/exec/wait、futex、pipe/socket 或共享地址空间
+  压力；这些项目的后续结果见上一节。BuildStorm 与完整 CAgent 仍未运行。
+
+## 2026-08-06 RV64 affinity-aware dispatch 与退出压力复验（未提交）
+
+- **当前基线**：`dev` HEAD 为 `dc793c4`（`feat: 初步完成 RV64 smp 启动和调度`）；本轮
+  affinity/scheduler 及本文档改动尚未提交。工作树原有两份未跟踪中文文档未修改。
+- **实现**：全局 ready queue 现在为当前 CPU 选取最高优先级的首个 affinity-compatible
+  任务，不移动不兼容任务，保留同级 FIFO 顺序；候选任务还必须已释放 context owner。
+  ready 发布、stopped/wakeup、requeue 和 idle handoff owner 释放均只从该任务 affinity
+  允许的 online idle hart 中选择 IPI 目标，避免只允许高编号 CPU 的任务无人唤醒。
+- **调度器锁内分配**：debug invariant 不再在持 scheduler 锁时构造 `BTreeSet`；改用
+  ready 数量、现有 `task_index` 及队列反查保留 bitmap、重复 tid、队列错位和
+  ready/blocked 重叠检查。这只移除一个已知的 heap/scheduler 锁交叉放大因素，不是退出风暴修复。
+- **验证通过**：`make RV_MODE=debug RV_USER_FEATURES= build-rv`、
+  `make LA_MODE=debug LA_USER_FEATURES= build-la`、两个 `cargo fmt --check` 和 `git diff --check`。
+  RV64 debug pub 以 `-snapshot -smp 8 -m 256M` 启动（OpenSBI 本轮 boot hart 为 5），依次执行
+  `/glibc/busybox taskset 80|40|20|10|8|4|2|1 ...`；包括只允许 CPU 7 的 `sleep 1`
+  在内的 8 个进程均 exit 0，随后 `nproc` 输出 8，guest `quit` 使 QEMU exit 0。日志为
+  `/tmp/respos-affinity-smp8.log`。
+- **单核回归**：同一 RV64 debug 产物以 `-snapshot -smp 1 -m 256M` 运行
+  `true; sleep 1; true`，三个子进程均 exit 0，guest `quit` 使 QEMU exit 0；日志为
+  `/tmp/respos-affinity-smp1.log`。本轮未注入 debug runner，因此这不替代 CAgent 单项回归。
+- **修复前阻塞证据**：以单参数 `busybox sh -c` 确实启动四路
+  `busybox timeout 3 busybox sleep 60` 后，debug、`-snapshot -smp 8 -m 256M` 在 50 秒内仍未输出
+  `SMP_EXIT_STORM_DONE`，宿主 timeout 124；日志为 `/tmp/respos-smp8-exit-storm2.log`。未观察到
+  panic。本证据已由上一节的动态 GDB 根因和修复后矩阵取代，保留用于说明回归对照。
+
 ## 2026-08-05 交接审查：RV64 SMP 未提交工作树
 
 - **交接基线**：`dev` 的已提交 HEAD 为 `cf30f64`；下列 SMP 改动和

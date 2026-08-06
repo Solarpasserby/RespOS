@@ -65,6 +65,20 @@
   PTE 带 USER；VMA/PTE 权限相容；私有 COW 页不同时可写；shared mapping 不进入私有 COW。
 - 后续影响：debug 启动自检失败应视为结构性错误，不能通过关闭断言完成验收。
 
+### RV64 `MemorySet` active CPU 与 shootdown
+
+- 状态：已实现，目标 QEMU/OpenSBI 专项压力已通过
+- 适用范围：RV64 SMP、共享 `MemorySet`、PTE 修改与 frame 回收前 fence
+- 最后验证：2026-08-06
+- 证据：`os/src/mm/memory_set.rs`、`os/src/task/processor.rs`、`os/src/task/task.rs`；
+  `/tmp/respos-active-mask-shared-mm-smp{2,8}.log`
+- 内容：task 恢复前在 `MemorySet` 读锁内设置当前 hart active bit；切回 per-CPU idle/kernel
+  页表后才清除。页表修改持写锁，完成本地 fence 后，只向 active remote hart 发 SBI RFENCE。
+  `exec` 与 clone 的临时 `activate()` 必须显式撤销旧/临时地址空间 bit。当前 OpenSBI RFENCE
+  实现会等待远端 TLB 请求同步计数归零后返回。
+- 后续影响：不得在仍执行旧 `satp` 时提前清 bit，也不得绕过 `MemorySet` 锁修改 PTE。移植到
+  非 OpenSBI firmware 时必须重新确认 RFENCE completion 语义；未知实现不能沿用当前验收结论。
+
 ## task、scheduler 与 futex
 
 ### 调度状态只有一个所有者提交
@@ -76,6 +90,35 @@
 - 内容：scheduler 使用 RT、normal、idle 多级队列并维护 `task_index`/blocked 集合；状态先准备，
   再由调度路径提交。退出任务通过 `DEAD_TASKS` 延迟 drop，避免在自身内核栈上释放自身。
 - 后续影响：不要从多个路径重复入队或重复唤醒；close/signal/timeout 竞争必须保持 single-winner。
+
+### SMP ready 选择与唤醒必须同时遵守 affinity
+
+- 状态：已实现，RV64 8 核定向烟测已通过，退出压力仍有独立 blocker
+- 适用范围：全局 ready queue、TCB CPU owner、RV64 idle hart IPI
+- 最后验证：2026-08-06
+- 证据：`os/src/task/scheduler.rs`、`os/src/task/task.rs`、`os/src/task/processor.rs`、
+  `os/src/arch/rv64/smp.rs`；`/tmp/respos-affinity-smp8.log`
+- 内容：每个 CPU 从最高优先级开始，在队列内选择第一个 affinity 允许且 owner 已释放的
+  task；不兼容的队首保留原位。任务发布或 owner 释放后，IPI 目标只从 affinity 允许的
+  online idle hart 中选择。
+- 后续影响：不能只在 dequeue 中过滤 affinity。若 enqueue 仍唤醒任意 idle CPU，只允许高编号
+  CPU 的任务可能永久留队。owner 在 handoff 后释放时还必须补一次定向 kick，覆盖第一次
+  IPI 早于 context save 完成的窗口。
+
+### 全局 heap 和 kernel timer work 的中断边界
+
+- 状态：已实现，RV64 2/4/8 核退出压力已验证
+- 适用范围：全局内核 heap、RV64 user/kernel timer trap、timeout/signal registry
+- 最后验证：2026-08-06
+- 证据：`os/src/mm/heap_allocator.rs`、`os/src/arch/rv64/trap/mod.rs`；
+  `/tmp/respos-smp8-gdb-bt1.txt`、`/tmp/respos-smp2-dynamic-bt.txt`
+- 内容：`LockedHeap` 的跨 CPU 自旋锁不能防止同 CPU 中断重入；所有 heap alloc/dealloc 及直接
+  heap guard 都必须在本地 `InterruptGuard` 内执行，解锁顺序为先 heap、后恢复中断。
+  `check_all_task_timers()` 会进入 task/signal/timer 高层锁，不得从中断任意 kernel 临界区的
+  timer trap 重入。RV64 当前安全点是 user-mode timer trap，以及 boot hart 上
+  `current_task == None` 的 per-CPU idle context。
+- 后续影响：新增中断内工作前要列出其触及的所有锁；若需在长 syscall 期间精确处理
+  timeout，应建立 lock-free pending + 安全点延迟工作，不能直接恢复 kernel trap 里的高层扫描。
 
 ### futex 锁内不触发用户缺页
 
@@ -107,6 +150,33 @@ FdTable slot (FdEntry: descriptor flags)
 - 内容：`FdEntry` 保存 descriptor flags；`FileInner` 保存共享 offset、path 和 open-file status
   flags。dup 后 descriptor 可独立设置 CLOEXEC，但共享同一个 open-file offset/status。
 - 后续影响：实现新 fcntl 或 clone/exec 行为时，不得把 CLOEXEC 写进共享 `File` flags。
+
+### filesystem ELF 使用按需 private file backing
+
+- 状态：已实现，BuildStorm toolchain 阶段已验证
+- 适用范围：filesystem exec、动态程序、大 ELF、kernel heap
+- 最后验证：2026-08-06；RV64 release、8 核、8 GiB
+- 证据：`os/src/mm/memory_set.rs::try_from_elf_file()`、
+  `os/src/task/task.rs::execve_file()`；`/tmp/respos-buildstorm-rv8-file-backed-exec.log`
+- 内容：exec 只把 ELF/program header 与 PT_INTERP 名称读入 kernel heap；主 ELF 的 PT_LOAD VMA
+  持有 `Arc<dyn FileOp>`、page-aligned file offset 和有效文件长度，private fault 时分配独立 frame
+  并按页读取，BSS 尾部保持零。文件式 loader 将元数据前缀限制为 1 MiB，并在安装 VMA 前校验
+  ELF64 program-header 尺寸和 PT_LOAD 文件边界；嵌入式 app 仍使用完整 slice 的 eager loader。
+- 后续影响：PT_LOAD offset 与 virtual address 的页内偏移必须同余；不能重新用 `read_all()` 或
+  简单放大 kernel heap 规避大 ELF。动态链接器本身目前仍整文件读取，后续可用同一抽象继续收敛。
+
+### vfork 父任务必须先登记 blocked 再发布子任务
+
+- 状态：已实现，完整 BuildStorm 仍待验证
+- 适用范围：RV64 SMP `CLONE_VFORK`、posix_spawn、Rust Command/cargo
+- 最后验证：2026-08-06；RV64 release、8 核受控 trace
+- 证据：`os/src/syscall/process.rs::sys_clone()`；
+  `/tmp/respos-buildstorm-cloneflags.log`、`/tmp/respos-buildstorm-exittrace.log`
+- 内容：vfork parent 的 blocked registration 是 wakeup 协议的一部分，必须发生在 child 加入全局
+  ready queue 之前。发布后 child 可在任意 CPU 立即 exec；exec/exit 的一次性 wake 此时必能从
+  blocked 表取回 parent。父任务登记后再发布 child，随后直接切到 idle/下一任务。
+- 后续影响：任何“发布对象后再登记 waiter”的一次性事件都要审计同类 lost-wakeup 窗口；单核
+  测试因 child 无法提前运行，不能覆盖该顺序错误。
 
 ### path、dentry、inode 与 mount 各有身份
 

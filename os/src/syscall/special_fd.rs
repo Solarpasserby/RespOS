@@ -691,7 +691,12 @@ pub fn sys_epoll_ctl(epfd: usize, op: usize, fd: usize, event: *const u8) -> Sys
     let event = if op == EPOLL_CTL_DEL {
         None
     } else {
-        const EPOLL_SUPPORTED_EVENTS: u32 = 0x001 | 0x004 | (1 << 31) | (1 << 30);
+        // Tokio/mio registers every source with EPOLLRDHUP. Pipes and TCP
+        // already surface peer close as read-ready followed by EOF, so the
+        // interest bit is accepted even though readiness is reported through
+        // EPOLLIN rather than a separate RDHUP bit for now.
+        const EPOLLRDHUP: u32 = 0x2000;
+        const EPOLL_SUPPORTED_EVENTS: u32 = 0x001 | 0x004 | EPOLLRDHUP | (1 << 31) | (1 << 30);
         let mut raw = [0u8; 12];
         copy_from_user(raw.as_mut_ptr(), event, raw.len())?;
         let events = u32::from_ne_bytes(raw[..4].try_into().unwrap());

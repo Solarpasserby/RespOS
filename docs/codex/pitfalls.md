@@ -1,18 +1,49 @@
 # RespOS 已确认易错点
 
-## `CLONE_VFORK` 不能只阻塞父进程
+## 跨 CPU 自旋锁不能防止同 CPU 中断重入
+
+- 状态：已确认并修复当前 heap/timer 路径
+- 适用范围：全局 heap、kernel timer trap、任何同时被 syscall 和中断访问的状态
+- 最后验证：2026-08-06；RV64 debug、2/4/8 核
+- 证据：`/tmp/respos-smp8-gdb-bt1.txt`、`/tmp/respos-smp2-dynamic-bt.txt`；
+  `os/src/mm/heap_allocator.rs`、`os/src/arch/rv64/trap/mod.rs`
+- 内容：一个 CPU 持有普通 spin lock 时若仍可被使用同一把锁的中断打断，中断会永久等待
+  被它自己暂停的临界区。实测的两种形态是 heap dealloc 被 timer 中断后再 alloc，以及
+  `ACTIVE_ITIMER_TASKS.remove()` 被 timer 中断后再 lock。其他 CPU 的锁等待只是级联现象。
+- 后续影响：GDB 审查要保留“中断栈下方的被打断栈”，不能只看顶层等锁 CPU。修复时要么
+  让底层锁关本地中断，要么把中断工作延迟到无锁安全点；不能仅增加跨 CPU 锁或换 allocator。
+
+## `CLONE_VFORK` 必须先登记父进程 blocked 再发布子进程
 
 - 状态：已确认并在当前工作树修复
 - 适用范围：glibc `vfork`/`posix_spawn`/`popen`，以及所有带 `CLONE_VFORK` 的 clone 调用
-- 最后验证：2026-08-05；RV64、SMP=1、256 MiB glibc pub 镜像
+- 最后验证：2026-08-06；RV64、SMP=1 的原语义回归与 SMP=8 BuildStorm 受控 trace
 - 证据：`os/src/syscall/process.rs::sys_clone()`、`os/src/task/task.rs::execve()` 与
   `exit_process_group()`；修复后的 4 路 CAgent pass 日志
   `/tmp/cagent_debug_vfork_fix_4_busybox/`
 - 内容：Linux 语义要求 vfork 父任务一直阻塞到子任务成功 exec 或 exit。仅调用
   `blocking_and_run_next()` 而不建立子到父的唤醒边，会使父任务错误地等到子命令退出；普通 exit
-  的 SIGCHLD 唤醒会掩盖这个错误，造成 `popen` 很慢而 `pclose` 几乎立即返回。
+  的 SIGCHLD 唤醒会掩盖这个错误，造成 `popen` 很慢而 `pclose` 几乎立即返回。SMP 下还有更窄的
+  窗口：若先发布 child、后把 parent 加入 blocked 表，child 可先 exec 并把一次性 wake 丢掉。
+  cargo/rustfmt 曾表现为捕获输出不返回，但最新 trace 已确认顺序修复后 parent 正常恢复且 rustfmt
+  完成退出，仍有独立的 pipe 引用未释放问题；两者不能混作同一个根因。
 - 后续影响：vfork 同步必须是一次性且只限该 clone 关系；exec 仅在新映像状态完整后释放，退出路径
-  也必须释放以覆盖 exec 失败。不要以普通 SIGCHLD 或把 vfork 改成 yield 代替该协议。
+  也必须释放以覆盖 exec 失败。父 waiter 必须先登记，child 才能进入 ready queue；不要以普通
+  SIGCHLD、yield 或单核通过代替该协议。
+
+## lazy VMA 销毁不能按虚拟跨度逐页扫描
+
+- 状态：回收复杂度已修复，完整 BuildStorm 仍待验证
+- 适用范围：进程退出、munmap 辅助路径、稀疏匿名/文件 VMA
+- 最后验证：2026-08-06；RV64 8 核 cargo/rustfmt exit trace
+- 证据：`os/src/mm/memory_set.rs::MapArea::unmap()`；
+  `/tmp/respos-buildstorm-exittrace.log`
+- 内容：lazy VMA 可能保留很大的虚拟区间但只有少量 resident frame。销毁时遍历整个 VPNRange 会让
+  exit 成本与地址预留大小成正比。Framed area 应只遍历 `data_frames`；Direct area 才按完整
+  区间解除既有恒等映射。最新 rustfmt trace 已越过进程退出，但 pipe open-file 仍有额外引用，
+  因此 sparse unmap 优化不能作为 EOF 问题已解决的证据。
+- 后续影响：对 lazy 结构做回收、fork、mprotect 或统计时优先按 resident metadata 工作；需要改变
+  整个 VMA 属性时操作区间元数据，不能隐式扫描每个潜在页。
 
 ## pub 镜像不能在 QEMU 运行时由宿主修改
 
@@ -90,6 +121,19 @@
 - 内容：Git 未跟踪不等于构建不可见。任何放在 `user/src/bin` 的 `.rs` 都会被构建并可能嵌入内核，
   影响大小、编译时间或应用清单。
 - 后续影响：报告可复现结果时附 `git status --short`；干净 CI 与本地 dirty tree 可能产物不同。
+
+## futex cmp-requeue probe 默认构建不是有效竞态测试
+
+- 状态：已确认
+- 适用范围：`task_a_futex_cmp_requeue_probe`
+- 最后验证：2026-08-06
+- 证据：`os/src/task/futex/wait.rs` 的 `TASK_A_FUTEX_CMP_REQUEUE_TEST_YIELD`；
+  `docs/四天内核重构-ABC-整合审查.md`
+- 内容：probe 期待 changer 必定在线性化点前改值；只有用
+  `TASK_A_FUTEX_CMP_REQUEUE_TEST_YIELD=1` 编译内核才会强制形成该窗口。默认内核直接运行时，
+  cmp-requeue 合法地先完成并返回 affected count，probe 会产生伪失败。
+- 后续影响：专项测试后必须恢复默认 build。即使专项 build 一次通过，也要记录重复轮数和任何
+  timeout；不能删除非收敛样本。
 
 ## RV/LA 构建共享活动 Cargo config
 

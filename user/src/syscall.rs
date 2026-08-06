@@ -48,6 +48,8 @@ const SYSCALL_TIMER_DELETE: usize = 111;
 const SYSCALL_CLOCK_SETTIME: usize = 112;
 const SYSCALL_CLOCK_GETTIME: usize = 113;
 const SYSCALL_CLOCK_GETRES: usize = 114;
+const SYSCALL_SCHED_SETAFFINITY: usize = 122;
+const SYSCALL_SCHED_GETAFFINITY: usize = 123;
 const SYSCALL_SCHED_YIELD: usize = 124;
 const SYSCALL_SETPRIORITY: usize = 140;
 const SYSCALL_TIMES: usize = 153;
@@ -462,6 +464,34 @@ pub fn sys_exit(exit_code: i32) -> isize {
 /// 主动交出 CPU 所有权
 pub fn sys_sched_yield() -> isize {
     syscall(SYSCALL_SCHED_YIELD, [0, 0, 0, 0, 0, 0])
+}
+
+pub fn sys_sched_setaffinity(pid: isize, mask: &usize) -> isize {
+    syscall(
+        SYSCALL_SCHED_SETAFFINITY,
+        [
+            pid as usize,
+            core::mem::size_of::<usize>(),
+            mask as *const usize as usize,
+            0,
+            0,
+            0,
+        ],
+    )
+}
+
+pub fn sys_sched_getaffinity(pid: isize, mask: &mut usize) -> isize {
+    syscall(
+        SYSCALL_SCHED_GETAFFINITY,
+        [
+            pid as usize,
+            core::mem::size_of::<usize>(),
+            mask as *mut usize as usize,
+            0,
+            0,
+            0,
+        ],
+    )
 }
 
 pub fn sys_gettimeofday(tv: &mut TimeVal, tz: usize) -> isize {

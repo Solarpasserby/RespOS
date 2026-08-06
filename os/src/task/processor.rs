@@ -163,6 +163,9 @@ pub fn handoff_current_to_idle(current: Arc<TaskControlBlock>) {
 fn publish_saved_handoff() {
     let handoff = current_processor().lock().take_handoff();
     if let Some(task) = handoff {
+        // __switch has restored this CPU's idle context and kernel satp before
+        // returning here, so the outgoing address space is no longer active.
+        task.clear_memory_set_current_hart_active();
         let was_running = task.is_running();
         if was_running {
             // A yielding/preempted task is not visible to any other CPU until
@@ -172,7 +175,7 @@ fn publish_saved_handoff() {
         }
         task.release_cpu_owner(current_cpu_id());
         #[cfg(target_arch = "riscv64")]
-        crate::arch::smp::kick_one_idle_hart();
+        crate::arch::smp::kick_one_idle_hart_in(task.cpu_affinity_mask());
     }
 }
 
@@ -217,7 +220,7 @@ pub fn run_tasks() -> ! {
                 let per_cpu = crate::arch::smp::current_per_cpu_ptr();
                 next_task.set_kernel_tp(per_cpu);
                 crate::arch::smp::set_current_kernel_sp(next_task.kernel_stack_top_edge());
-                next_task.mark_memory_set_current_hart();
+                next_task.mark_memory_set_current_hart_active();
             }
             let idle_task_ptr = Arc::as_ptr(&idle_task) as usize;
             idle_task.set_ready();
