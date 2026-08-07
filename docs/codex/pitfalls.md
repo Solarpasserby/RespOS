@@ -18,16 +18,20 @@
 
 ## exec 必须在旧地址空间中清理 sibling thread 的用户地址
 
-- 状态：顺序已修正，远端 running thread 的协作式终止仍待完成
+- 状态：顺序已修正，远端 sibling 的协作式终止协议已实现
 - 适用范围：多线程 exec、robust futex、`clear_child_tid`、共享 `MemorySet`
 - 最后验证：2026-08-07；RV64 8 核 BuildStorm 受控 trace
-- 证据：`os/src/task/task.rs::install_exec_image()` 与 `close_other_threads_for_exec()`；
-  `/tmp/respos-buildstorm-user-fault-trace.log`
+- 证据：`os/src/task/task.rs::close_other_threads_for_exec()` 与 `exit_process_group()`；
+  `os/src/task/processor.rs::publish_saved_handoff()`；`/tmp/respos-buildstorm-user-fault-trace.log`
 - 内容：线程保存的 robust-list 和 clear-child-tid 是旧用户映像中的地址。若先替换
   共享 `MemorySet` 的内容，再清理 sibling，内核会把旧地址当作新程序地址写零或写
   `FUTEX_OWNER_DIED`，可破坏刚装载的映像。
-- 后续影响：必须在替换 MM 前处理依赖旧用户地址的线程私有状态。仅从 scheduler/
-  task manager 摘除远端 TCB 不等于它已停在安全点；真正 running sibling 仍需 stop/ack 协议。
+- 后续影响：必须在替换 MM 前处理依赖旧用户地址的线程私有状态。当前实现采用四步
+  quiescence 协议：`request_termination()` 标记 sibling 不可再被 claim → `remove_task()`
+  从调度器摘除 → spin-wait `has_cpu_owner()` 等待远端 CPU 切回 idle → 安全清理。
+  `publish_saved_handoff()` 对已标记 `terminate_requested` 的 task 不再重新发布到 ready
+  queue，而是静默丢弃。`can_be_claimed_on_cpu()` 和 `try_claim_running_on_cpu()` 均拒绝
+  已标记终止的 task。
 
 ## exec argv/envp 不能用很小的固定项数上限
 

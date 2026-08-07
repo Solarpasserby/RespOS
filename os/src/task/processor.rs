@@ -166,7 +166,7 @@ fn publish_saved_handoff() {
         // __switch has restored this CPU's idle context and kernel satp before
         // returning here, so the outgoing address space is no longer active.
         task.clear_memory_set_current_hart_active();
-        let was_running = task.is_running();
+        let was_running = task.is_running() && !task.termination_requested();
         if was_running {
             // A yielding/preempted task is not visible to any other CPU until
             // its context has reached this idle loop.

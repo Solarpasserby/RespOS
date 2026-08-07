@@ -313,6 +313,23 @@ git diff --check
   handoff。它通过了 SMP=1 sleep 与 SMP=8 procfs/四路短 sleep，但四路 `timeout 3 sleep 60` 在
   debug/release 的 8 核 QEMU 中超过 60 秒未完成。
 - GDB 显示多个 timeout/sleep 子进程同时执行 `exit_process_group` 的 `MemorySet` 回收，在全局
-  buddy heap spin lock 上争用；scheduler 也在 enqueue invariant 中分配。应把“全局 allocator 和
+  buddy heap spin lock 上争用；scheduler 也在 enqueue invariant 中分配。应把”全局 allocator 和
   exit page recycle 的并发锁序/分配行为”列为 Phase 3→4 的阻塞审计项。不能仅关闭 debug assertion
   宣称修复，也不能用 per-CPU allocator 作为未经 frame/page-table 所有权审计的快速替换。
+
+## 2026-08-07 执行记录：exec/group-exit quiescence 协议
+
+- 实现了 Phase 3→4 的协作式 sibling 终止协议，解决 exec/exit_group 时远端 CPU 仍在旧
+  `MemorySet` 上执行的安全窗口。核心机制：
+  - TCB 新增 `terminate_requested: AtomicBool` 字段，`request_termination()` 以 Release 写入。
+  - `can_be_claimed_on_cpu()` / `try_claim_running_on_cpu()` 以 Acquire 检查，拒绝已标记终止的 task。
+  - `publish_saved_handoff()` 对已终止 task 静默丢弃，不再重新发布到 ready queue。
+  - `close_other_threads_for_exec()` 和 `exit_process_group()` 采用统一四步流程：
+    标记终止 + 摘除 → spin-wait CPU owner 释放 → ack 确认 → 安全回收。
+- 协议不依赖 IPI 主动打断远端 CPU，而是依赖 timer preempt 使远端 CPU 进入调度路径后
+  自然释放 owner。最坏等待不超过一个调度 quantum。
+- 同时新增五条诊断 trace channel（`quiescetrace`/`proctrace`/`pipelifetrace`/`ldtrace`/
+  `illegaltrace`）用于下一轮 BuildStorm 阻塞点定位。
+- 本轮未实际运行 BuildStorm；quiescence 协议和 trace 的正确性仅通过构建门禁
+  （`make build-rv/build-la`、`cargo fmt --check`、`git diff --check`）。
+- 与该协议相关的上下文和诊断策略详见 `current-status.md` 和 `pitfalls.md` 同日更新。

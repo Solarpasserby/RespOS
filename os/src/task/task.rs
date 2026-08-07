@@ -376,6 +376,10 @@ pub struct TaskControlBlock {
     caps: CapState,
     thread_group: Arc<SpinLock<ThreadGroup>>,
     group_exiting: Arc<AtomicBool>,
+    /// Set by exec/group teardown before a remote sibling is detached.  It
+    /// prevents a context whose previous CPU is still completing handoff from
+    /// becoming claimable again.
+    terminate_requested: AtomicBool,
     task_status: SpinLock<TaskStatus>,
     cpu_owner: AtomicUsize,
     parent: Arc<SpinLock<Option<Weak<TaskControlBlock>>>>,
@@ -461,6 +465,7 @@ impl TaskControlBlock {
             caps: CapState::root(),
             thread_group: Arc::new(SpinLock::new(ThreadGroup::new())),
             group_exiting: Arc::new(AtomicBool::new(false)),
+            terminate_requested: AtomicBool::new(false),
             task_status: SpinLock::new(TaskStatus::Ready),
             cpu_owner: AtomicUsize::new(NO_CPU_OWNER),
             parent: Arc::new(SpinLock::new(None)),
@@ -553,6 +558,7 @@ impl TaskControlBlock {
             caps: CapState::root(),
             thread_group: Arc::new(SpinLock::new(ThreadGroup::new())),
             group_exiting: Arc::new(AtomicBool::new(false)),
+            terminate_requested: AtomicBool::new(false),
             task_status: SpinLock::new(TaskStatus::Ready),
             cpu_owner: AtomicUsize::new(NO_CPU_OWNER),
             parent: Arc::new(SpinLock::new(None)),
@@ -761,6 +767,7 @@ impl TaskControlBlock {
             caps: CapState::from_parent(&self.caps),
             thread_group,
             group_exiting,
+            terminate_requested: AtomicBool::new(false),
             task_status: SpinLock::new(TaskStatus::Ready),
             cpu_owner: AtomicUsize::new(NO_CPU_OWNER),
             parent,
@@ -1008,6 +1015,7 @@ impl TaskControlBlock {
     pub fn can_be_claimed_on_cpu(&self, cpu: usize) -> bool {
         cpu < usize::BITS as usize
             && self.cpu_affinity_mask() & (1usize << cpu) != 0
+            && !self.terminate_requested.load(Ordering::Acquire)
             && self.cpu_owner.load(Ordering::Acquire) == NO_CPU_OWNER
     }
     pub fn cap_effective(&self) -> usize {
@@ -1037,7 +1045,7 @@ impl TaskControlBlock {
     /// which a task has been woken but its previous CPU has not saved it yet.
     pub fn try_claim_running_on_cpu(&self, cpu: usize) -> bool {
         let mut status = self.task_status.lock();
-        if *status != TaskStatus::Ready {
+        if *status != TaskStatus::Ready || self.terminate_requested.load(Ordering::Acquire) {
             return false;
         }
         if self
@@ -1071,6 +1079,23 @@ impl TaskControlBlock {
             self.tid()
         );
     }
+
+    /// Whether some CPU can still execute this task's saved context.
+    /// `NO_CPU_OWNER` is published only after that CPU has switched back to
+    /// its per-CPU idle context.
+    pub fn has_cpu_owner(&self) -> bool {
+        self.cpu_owner.load(Ordering::Acquire) != NO_CPU_OWNER
+    }
+
+    pub fn request_termination(&self) {
+        self.terminate_requested.store(true, Ordering::Release);
+        self.set_exited();
+    }
+
+    pub fn termination_requested(&self) -> bool {
+        self.terminate_requested.load(Ordering::Acquire)
+    }
+
     pub fn cwd(&self) -> Arc<Path> {
         self.cwd.lock().clone()
     }
@@ -1286,6 +1311,12 @@ impl TaskControlBlock {
                         .map(|task| task.tid())
                         .collect::<Vec<_>>()
                 });
+                println!(
+                    "[quiescetrace] child={} exit parent={} waiters={:?}",
+                    self.tid(),
+                    parent.tid(),
+                    waiters
+                );
                 for tid in waiters {
                     crate::task::scheduler::wakeup_task(tid);
                 }
@@ -1378,10 +1409,36 @@ impl TaskControlBlock {
                 .filter(|task| task.tid() != self_tid)
                 .collect::<Vec<_>>()
         });
+        if !tasks.is_empty() {
+            println!(
+                "[quiescetrace] exec tid={} siblings={:?}",
+                self_tid,
+                tasks.iter().map(|task| task.tid()).collect::<Vec<_>>()
+            );
+        }
+
+        // Removing a task from scheduler/task maps does not stop a sibling
+        // already executing on another CPU. Mark every sibling non-runnable
+        // first, then wait for the owning CPU's post-__switch acknowledgement
+        // before old-image frames can be recycled by exec.
+        for task in &tasks {
+            task.request_termination();
+            remove_task(task.tid());
+        }
+
+        while tasks.iter().any(|task| task.has_cpu_owner()) {
+            crate::task::yield_current_task();
+        }
+        if !tasks.is_empty() {
+            println!("[quiescetrace] exec remote-ack tid={}", self_tid);
+        }
 
         for task in tasks {
-            remove_task(task.tid());
-            exit_thread(task, 0);
+            cleanup_exiting_thread(&task);
+            task.set_exited();
+            task.op_thread_group_mut(|tg| tg.remove(&task.tid()));
+            task.set_exit_code(0);
+            TASK_MANAGER.remove(task.tid());
         }
     }
 
@@ -2073,6 +2130,11 @@ pub fn task_group_exit(task: Arc<TaskControlBlock>, exit_code: i32) {
 }
 
 fn exit_process_group(task: Arc<TaskControlBlock>, cause: ExitCause) {
+    println!(
+        "[quiescetrace] group-exit begin tid={} tgid={}",
+        task.tid(),
+        task.tgid()
+    );
     if task
         .group_exiting
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -2091,6 +2153,28 @@ fn exit_process_group(task: Arc<TaskControlBlock>, cause: ExitCause) {
 
     let tgid = task.tgid();
     let threads = task.op_thread_group(|tg| tg.iter().collect::<Vec<_>>());
+
+    // A group-exit owner may tear down a MemorySet shared with siblings that
+    // are still executing on other CPUs.  Request their retirement first and
+    // wait for each owning CPU to publish its post-switch acknowledgement;
+    // only then may the common address space and file-backed frames be freed.
+    for thread in threads.iter().filter(|thread| thread.tid() != task.tid()) {
+        thread.request_termination();
+        remove_task(thread.tid());
+    }
+    while threads
+        .iter()
+        .filter(|thread| thread.tid() != task.tid())
+        .any(|thread| thread.has_cpu_owner())
+    {
+        crate::task::yield_current_task();
+    }
+    println!(
+        "[quiescetrace] group-exit remote-ack tid={} threads={}",
+        task.tid(),
+        threads.len()
+    );
+
     let leader = threads
         .iter()
         .find(|thread| thread.tid() == tgid)
@@ -2169,6 +2253,11 @@ fn exit_process_group(task: Arc<TaskControlBlock>, cause: ExitCause) {
     leader.op_sig_pending_mut(|p| p.clear());
 
     TASK_MANAGER.remove(leader.tid());
+    println!(
+        "[quiescetrace] group-exit done tid={} leader={}",
+        task.tid(),
+        leader.tid()
+    );
 }
 
 // 将命令行参数和环境变量压入用户栈

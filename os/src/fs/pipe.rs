@@ -485,6 +485,13 @@ impl FileOp for Pipe {
 
 impl Drop for Pipe {
     fn drop(&mut self) {
+        println!(
+            "[pipelifetrace] drop buffer={:#x} read={} write={} refs={}",
+            self.buffer_id(),
+            self.readable,
+            self.writable,
+            Arc::strong_count(&self.buffer)
+        );
         // 管道关闭时：
         // - 标记己端已关闭，让对端后续 read/write 感知到
         // - 收集被阻塞在对端缓冲区上的所有等待者并全部唤醒
@@ -594,5 +601,6 @@ pub fn make_pipe() -> (Arc<Pipe>, Arc<Pipe>) {
     let buffer = Arc::new(Mutex::new(PipeRingBuffer::new()));
     let read_end = Arc::new(Pipe::read_end_with_buffer(buffer.clone()));
     let write_end = Arc::new(Pipe::write_end_with_buffer(buffer.clone()));
+    println!("[pipelifetrace] create buffer={:#x}", read_end.buffer_id());
     (read_end, write_end)
 }

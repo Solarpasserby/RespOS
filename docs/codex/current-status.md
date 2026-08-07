@@ -2,6 +2,44 @@
 
 本文件是快速变化的状态页。更新测试结论时必须同时更新日期、提交和命令。
 
+## 2026-08-07 补充：quiescence 协议与诊断 trace（未提交，minibuild 仍待下一轮运行）
+
+- **基线/配置**：`dev` HEAD `17dcd4e`，基于上一节 pipe/wait/ARG_MAX 修复后的工作树。
+  原有两份未跟踪文档未修改。
+- **quiescence 协议（stop/ack）**：`close_other_threads_for_exec()` 和 `exit_process_group()`
+  现采用四步协作式终止协议，消除"远端 sibling 仍在旧 `MemorySet` 上执行时主线程已开始
+  释放共享资源"的窗口。
+  - 新增 `TaskControlBlock::terminate_requested: AtomicBool` 字段，`request_termination()`
+    同时设该标记和 `set_exited()`。
+  - `can_be_claimed_on_cpu()` 与 `try_claim_running_on_cpu()` 拒绝已标记终止的 task。
+  - `publish_saved_handoff()` 对 `terminate_requested` 的 task 不再重新发布到 ready queue，
+    改为静默丢弃——远端 CPU 切回 idle 后该 task 自然消失。
+  - 四步流程：① `request_termination()` + `remove_task()` 标记并摘除所有 sibling；
+    ② spin-wait `has_cpu_owner()` 等待各远端 CPU 在 `__switch` 后释放 owner；
+    ③ 确认全部 ack 后打印 `[quiescetrace] exec remote-ack` / `group-exit remote-ack`；
+    ④ 执行 `cleanup_exiting_thread()` 等回收操作。
+  - 机制不依赖 IPI——远端 CPU 在下一次 timer preempt 进入调度路径时因 `terminate_requested`
+    而无法被 claim，随后切入 idle 并释放 owner。最坏等待不超过一个调度 quantum。
+- **诊断 trace 基础设施**：新增五条受控 trace channel，均使用可 grep 的固定前缀：
+  - `[quiescetrace]`：wait-block/resume、child exit 通知、exec sibling quiescence、group-exit
+    全流程，覆盖 `task.rs` 和 `syscall/process.rs`。
+  - `[proctrace]`：clone（含 parent/child tgid 和 flags）与 exec（含 path 和 argv[0]），
+    位于 `syscall/process.rs`。
+  - `[pipelifetrace]`：pipe create（`make_pipe()`）、drop（`Pipe::drop()`，含 buffer 地址、
+    读写端状态和 Arc 强引用计数）、poll-notify（events 和被唤醒 tids），位于 `fs/pipe.rs`
+    和 `fs/poll.rs`。
+  - `[ldtrace]`：timer 中断时对 `tgid==20` 采样 `sepc`，每 hart 每秒至多一次（`AtomicUsize`
+    CAS 限速），位于 `arch/rv64/trap/mod.rs`。用于定位 BuildStorm"静默阻塞"时 cargo
+    进程停在什么内核路径。
+  - `[illegaltrace]`：IllegalInstruction trap 现在打印 hart/tid/tgid/sepc/指令字/stval，
+    替代原来的纯英文描述，位于同文件。
+  - 所有 trace 均为临时诊断用途，后续在 BuildStorm 通过后应移除。
+- **当前门禁**：`cargo fmt --manifest-path {os,user}/Cargo.toml -- --check`、`git diff --check`、
+  `make build-rv RV_USER_FEATURES=`、`make build-la LA_USER_FEATURES=` 均通过。
+- **仍待完成**：上述 quiescence 协议 + trace 尚未在实际 BuildStorm 运行中验证；下一轮应在
+  verbose cargo 运行同时收集 quiescetrace/ldtrace/pipelifetrace，确认"静默边界"是否由远端
+  sibling 未正确停止、pipe 引用泄漏或其他独立原因导致。
+
 ## 2026-08-07 BuildStorm 越过 pipe/wait/ARG_MAX（未提交，minibuild 仍待完成）
 
 - **基线/配置**：`dev` HEAD `17dcd4e`；`make build-rv RV_USER_FEATURES=` 的 release kernel，

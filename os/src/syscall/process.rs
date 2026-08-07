@@ -126,6 +126,7 @@ fn wait_block_current(task: &Arc<TaskControlBlock>) -> bool {
     // this task uninterruptible makes SIGALRM unable to wake the wait.
     task.set_interruptible(true);
     task.set_waiting_for_child(true);
+    println!("[quiescetrace] wait-block tid={}", task.tid());
     if task.check_signal_interrupt() || task.is_interrupted() {
         task.set_waiting_for_child(false);
         task.set_interruptible(false);
@@ -150,6 +151,12 @@ fn wait_block_current(task: &Arc<TaskControlBlock>) -> bool {
         yield_current_task();
     }
     let interrupted = task.is_interrupted() || task.check_signal_interrupt();
+    println!(
+        "[quiescetrace] wait-resume tid={} exited={:?} interrupted={}",
+        task.tid(),
+        task.exited_child_ids(),
+        interrupted
+    );
     task.set_waiting_for_child(false);
     task.set_interruptible(false);
     interrupted
@@ -939,6 +946,15 @@ pub fn sys_clone(
     let new_task = current_task.clone_(flags)?;
     let new_tid = new_task.tid();
 
+    println!(
+        "[proctrace] clone parent_tid={} parent_tgid={} child_tid={} child_tgid={} flags={:?}",
+        current_task.tid(),
+        current_task.tgid(),
+        new_tid,
+        new_task.tgid(),
+        flags
+    );
+
     #[cfg(target_arch = "loongarch64")]
     if LOONGARCH_PTHREAD_TRACE && flags.contains(CloneFlags::CLONE_THREAD) {
         let mut tls_head = 0usize;
@@ -1118,6 +1134,13 @@ fn exec_fs_file(
     }
 
     let exe_path = file.path().global_abs_path();
+    println!(
+        "[proctrace] exec tid={} tgid={} path={} argv0={}",
+        task.tid(),
+        task.tgid(),
+        exe_path,
+        args_vec.first().map(String::as_str).unwrap_or("")
+    );
     if exec_looks_like_ltp_mkfs(exe_path.as_str(), args_vec.as_slice())
         || exec_looks_like_ltp_mkfs_shell(exe_path.as_str(), args_vec.as_slice())
     {

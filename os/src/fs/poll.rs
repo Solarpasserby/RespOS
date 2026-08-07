@@ -47,6 +47,12 @@ impl PollWaiters {
             }
             tids
         };
+        if !tids.is_empty() {
+            println!(
+                "[pipelifetrace] poll-notify events={:#x} tids={:?}",
+                events, tids
+            );
+        }
         for tid in tids {
             wakeup_task(tid);
         }
