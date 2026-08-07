@@ -50,7 +50,7 @@ fn defer_drop_task(task: Arc<TaskControlBlock>) {
     DEAD_TASKS.lock().push(task);
 }
 
-fn cleanup_dead_tasks() {
+pub(crate) fn cleanup_dead_tasks() {
     let dead_tasks = {
         let mut tasks = DEAD_TASKS.lock();
         core::mem::take(&mut *tasks)

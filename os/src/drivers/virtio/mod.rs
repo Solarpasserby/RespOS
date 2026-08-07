@@ -11,7 +11,7 @@ use spin::Mutex;
 use virtio_drivers::{BufferDirection, Hal, PhysAddr};
 
 use crate::arch::{mm::PageTable, read_mmu_token};
-use crate::config::{KERNEL_BASE, MEMORY_END};
+use crate::config::{KERNEL_BASE, physical_memory_end};
 use crate::mm::{
     FrameTracker, PhysAddr as KernelPA, PhysPageNum as KernelPPN, VirtAddr, frame_alloc,
 };
@@ -28,7 +28,7 @@ pub struct VirtIoHalImpl;
 impl VirtIoHalImpl {
     fn virt_to_phys(vaddr: usize) -> PhysAddr {
         let direct_map_start = KERNEL_BASE;
-        let direct_map_end = KERNEL_BASE + MEMORY_END;
+        let direct_map_end = KERNEL_BASE + physical_memory_end();
         if (direct_map_start..direct_map_end).contains(&vaddr) {
             vaddr - KERNEL_BASE
         } else {

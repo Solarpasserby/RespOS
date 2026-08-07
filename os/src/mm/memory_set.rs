@@ -1,13 +1,15 @@
 // os/src/mm/memory_set.rs
 
+#[cfg(target_arch = "riscv64")]
+use super::address::PhysAddr;
 use super::address::{PhysPageNum, StepByOne, VPNRange, VirtAddr, VirtPageNum};
 use super::frame_allocator::{FrameTracker, frame_alloc};
 use super::{PTEFlags, PageTable, PageTableEntry};
 use crate::arch::{sfence, write_mmu_token};
 use crate::config::{
-    CLK_TCK, DL_INTERP_OFFSET, KERNEL_BASE, KERNEL_STACK_SIZE, MEMORY_END, MMAP_MAX_ADDR,
-    MMAP_MIN_ADDR, PAGE_SIZE, PAGE_SIZE_BITS, TRAMPOLINE, TRAMPOLINE_CODE, USER_STACK_SIZE,
-    VIRTIO_MMIO,
+    CLK_TCK, DL_INTERP_OFFSET, KERNEL_BASE, KERNEL_STACK_SIZE, MMAP_MAX_ADDR, MMAP_MIN_ADDR,
+    PAGE_SIZE, PAGE_SIZE_BITS, TRAMPOLINE, TRAMPOLINE_CODE, USER_STACK_SIZE, VIRTIO_MMIO,
+    physical_memory_end,
 };
 use crate::fs::{AT_FDCWD, File, FileOp, path_open};
 use crate::syscall::{Errno, SysResult};
@@ -1799,17 +1801,39 @@ impl MemorySet {
             None,
             0,
         );
-        // 内核剩余部分
+        // 首个 RAM GiB 保留 4 KiB 映射，以继承上述内核段的细粒度权限。
+        // 其余 RAM 用 Sv39 1 GiB 叶页，避免 8 GiB direct map 消耗数千页页表。
+        let memory_end = physical_memory_end();
+        let first_gigabyte_end = 0xc000_0000usize.min(memory_end);
         memory_set.push_empty_map_area(
             MapArea::new(
                 VirtAddr::from(ekernel as *const () as usize),
-                VirtAddr::from(KERNEL_BASE + MEMORY_END),
+                VirtAddr::from(KERNEL_BASE + first_gigabyte_end),
                 MapType::Direct,
                 MapPermission::READ | MapPermission::WRITE,
             ),
             None,
             0,
         );
+        #[cfg(target_arch = "riscv64")]
+        if memory_end > first_gigabyte_end {
+            const GIGABYTE: usize = 1 << 30;
+            let flags = PTEFlags::from(MapPermission::READ | MapPermission::WRITE);
+            let mut pa = first_gigabyte_end;
+            while pa < memory_end {
+                memory_set
+                    .page_table
+                    .map_gigabyte(VirtAddr::from(KERNEL_BASE + pa), PhysAddr::from(pa), flags)
+                    .expect("failed to map kernel RAM gigapage");
+                pa += GIGABYTE;
+            }
+            memory_set.areas.push(MapArea::new(
+                VirtAddr::from(KERNEL_BASE + first_gigabyte_end),
+                VirtAddr::from(KERNEL_BASE + memory_end),
+                MapType::Direct,
+                MapPermission::READ | MapPermission::WRITE,
+            ));
+        }
         // 设备 MMIO 区域
         for (start, len) in VIRTIO_MMIO.iter().copied() {
             memory_set.push_empty_map_area(

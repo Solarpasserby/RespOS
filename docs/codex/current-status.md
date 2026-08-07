@@ -2,6 +2,84 @@
 
 本文件是快速变化的状态页。更新测试结论时必须同时更新日期、提交和命令。
 
+## 2026-08-07 BuildStorm 越过 pipe/wait/ARG_MAX（未提交，minibuild 仍待完成）
+
+- **基线/配置**：`dev` HEAD `17dcd4e`；`make build-rv RV_USER_FEATURES=` 的 release kernel，
+  `img/sdcard-rv-pub.img` 以 `-snapshot -smp 8 -m 8G` 启动，guest 执行
+  `/glibc/buildstorm_testcode.sh`。原有两份未跟踪文档未修改。
+- **pipe/exec 根因**：受控 trace 确认 rustup/cargo shim 在多线程状态 exec；被
+  `close_other_threads_for_exec` 摘除的 blocked TCB 通过遗留 kernel stack 持有旧
+  `FdTable`，使 stdout/stderr pipe 写端不到 EOF。exec 现在 clone 新表后，仅在
+  `TASK_MANAGER` 中无其他 live sharer 时显式清空旧表。修复后日志
+  `/tmp/respos-buildstorm-waiter-wake-trace.log` 中对应 pipe 强引用由异常的 3 恢复为 2，
+  cargo parent 可继续运行。
+- **thread-group wait**：子进程 69 退出时，实际 `wait4` 等待者是同组 tid 68，
+  旧路径只唤醒 parent leader tid 45。TCB 现显式标记 child waiter，退出事件唤醒
+  该线程组的真正 waiter；同一日志确认 tid 68 连续回收 child 69/70，不再永久睡眠。
+- **exec 顺序**：旧代码先替换共享 `MemorySet`，再执行旧线程 robust-list /
+  `clear_child_tid` 清理，会使旧用户地址写入新程序映像。现改为在旧地址空间仍安装时
+  先清理 sibling threads，再替换映像。远端 running thread 的完全协作式终止仍是后续边界。
+- **实际 RAM**：RV64 原固定 `MEMORY_END=0x90000000`，QEMU `-m 8G` 时仍只管理约
+  256 MiB；`/tmp/respos-buildstorm-user-fault-trace.log` 确认 cargo 指令缺页和 shell 读缺页均
+  最终返回 `ENOMEM`。现在 boot 大页覆盖最多 8 GiB QEMU RAM，从 OpenSBI FDT 取实际上限，
+  frame allocator/procfs/sysinfo 使用动态值，首 GiB 之后用 Sv39 1 GiB direct-map leaf。
+  8 GiB guest 实测 `MemTotal: 8386560 kB`、`MemFree: 8312232 kB`；同一 trace-free RV
+  release 以 `-m 256M -smp 1` 回归，`MemTotal: 260096 kB`、shell `quit` 使 QEMU exit 0，
+  日志 `/tmp/respos-dynamic-memory-256m.log`。
+- **ARG_MAX**：官方 minibuild 原先稳定失败；保留 stderr 的临时镜像日志
+  `/tmp/respos-minibuild-pipe-output.log` 给出 rustc `never executed` / `Argument list too long (os error 7)`。
+  根因是 argv 和 envp 各自被限制为 32 项。现改为每组 4096 项且每组字符串总量
+  1 MiB，防止无界 kernel allocation；修复后 rustc 已真正进入 `Compiling minibuild`。
+- **RV64 trap 恢复根因**：对上述长时间运行附加 GDB 后，连续快照
+  `/tmp/respos-rustc-pc-sample{1,2,3,4,5}.txt` 发现 CPU0 重复停在
+  `__trap_from_user`，其中 `sepc=__trap_from_user+8`、`scause=15`，对应
+  `sd sp, 8(t0)` 的递归 StorePageFault。旧 `__restore` 过早把 `stvec` 切到 user trap
+  入口，又原样恢复可能带 `SIE=1` 的 `sstatus`；timer 可在 `sret` 前、`sscratch`/寄存器
+  仍处于过渡状态时重入。现在 `TrapContext::init_app_context()` 清 `SIE`，汇编在写
+  `sstatus` 前再次统一掩码，并把 user `stvec` 切换延后到最终返回窗口。
+- **修复后证据**：RV64 release 重新构建后，`-m 256M -smp 8` 的 `nproc`、`/bin/true`、
+  `quit` smoke 通过。新的 8 GiB/8 核 BuildStorm 已越过 `BUILDSTORM_TOOLCHAIN ok`；运行中
+  快照 `/tmp/respos-rustc-pc-postfix-sample{1,2,3,4,5}.txt` 显示早期工作核在 ext4、用户缺页、
+  `mprotect` 与调度路径推进，且所有快照均不再出现上述递归特征。
+- **新的静默边界**：同一官方运行到约 15 分 51 秒时，较晚两次快照显示所有 guest CPU
+  均回到 scheduler idle/SBI timer 路径，但脚本仍未打印 `BUILDSTORM_MINIBUILD ok|fail`；
+  这说明 trap 修复后仍存在独立的 sleep/wakeup 或资源生命周期阻塞，不能解释为 rustc
+  单纯执行缓慢。该 QEMU 已主动终止；后续 verbose 复现已确认 `cargo new` 成功并进入
+  `cargo build -vv`，但因本轮收口未继续等待到新的阻塞点。
+- **环境与门禁**：当前执行环境把 QEMU 置于 Linux `SCHED_IDLE`（且无权提升），所以墙钟
+  耗时不能作为 RespOS 性能结论。修复后
+  `cargo fmt --manifest-path {os,user}/Cargo.toml -- --check`、`git diff --check`、
+  `make build-rv RV_USER_FEATURES=`、`make build-la LA_USER_FEATURES=` 均通过；当前无 QEMU
+  残留。BuildStorm minibuild/full compile 仍未通过，下一轮应在 verbose cargo 运行同时
+  读取任务/等待关系，并继续审计远端 exec thread teardown 的 stop/ack 协议。
+
+## 2026-08-06 BuildStorm minibuild 续查（未提交，blocker 仍存在）
+
+- **实际基线**：队友的多核推进已提交为 `17dcd4e`（`fix: 推进多核工作`），不再是下节所写的
+  `dc793c4 + 未提交工作树`。本轮保留的新增改动位于 wait4、task manager、per-CPU idle 回收和
+  process-group fd-table 归属判断；两份原有未跟踪文档未修改。
+- **复现**：RV64 release、无 `eval` user feature、8 核/8 GiB、pub 镜像 `-snapshot`，运行
+  `/glibc/buildstorm_testcode.sh`。`/tmp/respos-buildstorm-wait4-fix.log` 等多轮日志均稳定打印
+  `BUILDSTORM_TOOLCHAIN ok`，但至少再等待 120 秒仍无 `BUILDSTORM_MINIBUILD` 标记；所有失败态均由
+  QEMU monitor 终止，仓库镜像未写入。
+- **已确认的两个独立窗口**：`wait4` 在扫描 child 后、发布 Blocked 前存在 child-exit lost wakeup，
+  现于 blocked 发布后复查 `exited_children`；退出 TCB 原只在后续 task 恢复等少数路径清理，所有 CPU
+  idle 时 `DEAD_TASKS` 可永久保留旧 fd table，现于 context 已切回 per-CPU idle 栈后清理。这两项均为
+  代码证据明确的生命周期问题，但加入后 BuildStorm minibuild 仍未通过，不能把它们写成最终根因。
+- **fd-table 归属**：退出路径原用 `Arc::strong_count <= 当前 thread_group 成员数` 判断能否清表；已退出
+  但仍延迟回收的同组 TCB 会使该值漂移。当前改为从 `TASK_MANAGER` 的 live-task snapshot 判断是否有
+  不同 tgid 共享同一张表，保留真正的跨进程 `CLONE_FILES`，忽略同组延迟引用。该边界尚待专项
+  `CLONE_FILES + exit` probe 验证。
+- **已撤回的实验**：曾尝试让 pipe EOF 由显式 descriptor 槽位计数和 live-task fd 扫描驱动；它未让
+  minibuild 前进，并在普通 `close()` 路径触发 TCB 外层 fd-table 锁递归。GDB 证据为
+  `/tmp/respos-buildstorm-fd-lifetime-bt.txt`（失败态其余 CPU 均在 idle；实验性扫描版本另见当轮终端
+  记录）。该实验已完全移除，不属于当前工作树。
+- **当前门禁**：保留改动后 `cargo fmt --manifest-path {os,user}/Cargo.toml -- --check`、
+  `git diff --check`、`make build-rv RV_USER_FEATURES=`、`make build-la LA_USER_FEATURES=` 均通过。
+  尚未完成专项 wait4/pipe/CLONE_FILES guest probe，也未得到 `BUILDSTORM_MINIBUILD ok`；下一步应对
+  cargo parent 的 wait4/poll 状态和 rustfmt child 的退出通知做同一轮低量 trace，不能继续只以
+  `Pipe::drop()` 是否出现判断阻塞点。
+
 ## 2026-08-06 RV64 8 核 BuildStorm 首轮推进（未提交，minibuild 仍待验证）
 
 - **基线/命令**：`dev` HEAD 为 `dc793c4`，使用 release、无 `eval` user feature 的 `kernel-rv`，

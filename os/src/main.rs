@@ -43,6 +43,7 @@ pub fn rust_main(hart_id: usize, opaque: usize) -> ! {
     }
     clear_bss();
     arch::smp::init_current_hart(hart_id);
+    config::init_physical_memory_end(opaque);
     rust_main_high()
 }
 

@@ -16,6 +16,10 @@ pub const ACCOUNTING_CLOCK_FREQ: usize = HARDWARE_CLOCK_FREQ;
 pub const MEMORY_START: usize = 0;
 pub const MEMORY_END: usize = 0x1000_0000;
 
+pub const fn physical_memory_end() -> usize {
+    MEMORY_END
+}
+
 pub const PCI_ECAM_BASE: usize = 0x2000_0000;
 pub const PCI_ECAM_SIZE: usize = 0x1000_0000;
 pub const PCI_MMIO_BASE: usize = 0x4000_0000;

@@ -2,7 +2,7 @@
 
 use super::{Errno, SysResult};
 use crate::arch::sbi;
-use crate::config::{MEMORY_END, MEMORY_START, PAGE_SIZE};
+use crate::config::{MEMORY_START, PAGE_SIZE, physical_memory_end};
 use crate::fs::ext4;
 use crate::mm::{copy_from_user, copy_to_user, free_frame_count};
 use crate::mutex::SpinLock;
@@ -207,7 +207,7 @@ pub fn sys_reboot() -> SysResult<usize> {
 }
 
 pub fn sys_sysinfo(buf: *mut SysInfo) -> SysResult<usize> {
-    let totalram = MEMORY_END.saturating_sub(MEMORY_START);
+    let totalram = physical_memory_end().saturating_sub(MEMORY_START);
     let info = SysInfo {
         uptime: get_time_ms() / 1000,
         loads: [0, 0, 0],

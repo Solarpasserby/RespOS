@@ -125,7 +125,9 @@ fn wait_block_current(task: &Arc<TaskControlBlock>) -> bool {
     // implementations arm ITIMER_REAL and then wait for their child; leaving
     // this task uninterruptible makes SIGALRM unable to wake the wait.
     task.set_interruptible(true);
+    task.set_waiting_for_child(true);
     if task.check_signal_interrupt() || task.is_interrupted() {
+        task.set_waiting_for_child(false);
         task.set_interruptible(false);
         return true;
     }
@@ -134,7 +136,11 @@ fn wait_block_current(task: &Arc<TaskControlBlock>) -> bool {
         // A signal can arrive between the first check and publishing Blocked.
         // It then records `interrupted` before there is a blocked-queue entry
         // to wake, so consume that race here instead of sleeping indefinitely.
-        if task.is_ready() || task.is_interrupted() || task.check_signal_interrupt() {
+        if task.is_ready()
+            || !task.exited_child_ids().is_empty()
+            || task.is_interrupted()
+            || task.check_signal_interrupt()
+        {
             remove_task(task.tid());
             task.set_running();
         } else {
@@ -144,6 +150,7 @@ fn wait_block_current(task: &Arc<TaskControlBlock>) -> bool {
         yield_current_task();
     }
     let interrupted = task.is_interrupted() || task.check_signal_interrupt();
+    task.set_waiting_for_child(false);
     task.set_interruptible(false);
     interrupted
 }
@@ -1210,7 +1217,6 @@ pub fn sys_wait4(
     }
 
     let nohang = options.contains(WaitOption::WNOHANG);
-
     loop {
         let task = current_task().expect("[kernel] current task is None.");
         let current_pgid = task.pgid();
@@ -1321,6 +1327,13 @@ pub fn sys_wait4(
             return Err(Errno::EINTR);
         }
         if wait_block_current(&task) {
+            // SIGCHLD may select this exact waiter and set `interrupted` at
+            // the same time as publishing the child exit. Prefer the wait
+            // result over EINTR, matching the scan-before-sleep rule above.
+            if !task.exited_child_ids().is_empty() {
+                task.clear_interrupted();
+                continue;
+            }
             task.clear_interrupted();
             return Err(Errno::EINTR);
         }
@@ -1488,6 +1501,10 @@ pub fn sys_waitid(
             return Err(Errno::EINTR);
         }
         if wait_block_current(&task) {
+            if !task.exited_child_ids().is_empty() {
+                task.clear_interrupted();
+                continue;
+            }
             task.clear_interrupted();
             return Err(Errno::EINTR);
         }

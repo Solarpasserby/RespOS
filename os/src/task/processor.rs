@@ -6,7 +6,7 @@
 //!
 //! - 理解：上下文切换的关键是 [`__switch`] 函数，该函数保存和恢复
 
-use super::scheduler::fetch_task;
+use super::scheduler::{cleanup_dead_tasks, fetch_task};
 use super::task::TaskControlBlock;
 use crate::arch::task::__switch;
 use crate::mutex::SpinNoIrqLock;
@@ -187,6 +187,9 @@ pub fn run_tasks() -> ! {
         // This executes only after the outgoing task's __switch has saved its
         // context and stopped executing it on this CPU.
         publish_saved_handoff();
+        // The outgoing context is now on this CPU's idle stack, so deferred
+        // TCBs can be dropped even if no user task will ever wake again.
+        cleanup_dead_tasks();
         let mut next_task = fetch_task();
         if next_task.is_none() {
             #[cfg(target_arch = "riscv64")]

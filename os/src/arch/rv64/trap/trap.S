@@ -87,12 +87,12 @@ __restore:
     
     # 用户页表映射内核后无需切换页表
     # csrw satp, a1
-    # 设置异常相关状态寄存器
-    la t0, __trap_from_user
-    csrw stvec, t0
     # 恢复 sstatus, sepc
     ld t0, 32*8(sp)
     ld t1, 33*8(sp)
+    # TrapContext 可来自 exec/sigreturn，不得在真正 sret 前恢复 SIE。
+    # 否则 timer 会在 sscratch/stvec 过渡窗口中重入 user trap 入口。
+    andi t0, t0, -3
     csrw sstatus, t0
     csrw sepc, t1
     # 恢复浮点寄存器
@@ -115,8 +115,11 @@ __restore:
         LOAD_GP %n
         .set n, n+1
     .endr
-    # sscratch 保持本 CPU scratch，sp 直接恢复为保存的用户栈。
+    # sscratch 保持本 CPU scratch。只在批量上下文恢复完成后才切换
+    # user trap vector，把 S 模式使用 user vector 的收尾窗口压到最小。
     csrw sscratch, t0
+    la t0, __trap_from_user
+    csrw stvec, t0
     ld t1, 6*8(sp)
     ld t0, 5*8(sp)
     ld sp, 2*8(sp)

@@ -1,5 +1,47 @@
 # RespOS 已确认易错点
 
+## RV64 `sret` 前不能提前恢复 SIE 或 user trap vector
+
+- 状态：已确认并修复
+- 适用范围：RV64 trap return、exec 初始上下文、signal frame 恢复、SMP timer interrupt
+- 最后验证：2026-08-07；8 核 BuildStorm 运行中 GDB CSR 快照
+- 证据：`os/src/arch/rv64/trap/{context.rs,trap.S}`；修复前
+  `/tmp/respos-rustc-pc-sample{1,2,3,4,5}.txt`，修复后
+  `/tmp/respos-rustc-pc-postfix-sample{1,2,3,4,5}.txt`
+- 内容：若 `__restore` 先把 `stvec` 指向 `__trap_from_user`，再原样写回带 `SIE=1` 的
+  `sstatus`，timer 可在 `sret` 前进入 user trap 汇编。此时 `sscratch` 和 GPR 尚未形成
+  user-entry 契约，`csrrw` 后的保存指令会递归 StorePageFault；表面上多个 vCPU 仍活跃，
+  实际任务已不能前进。
+- 后续影响：恢复汇编必须在写 `sstatus` 前无条件清 `SIE`，保持 kernel `stvec` 直到所有
+  可能 fault 的恢复完成，并由 `sret`/`SPIE` 完成最终中断状态转换。不能只依赖某一种
+  TrapContext 构造路径清位，因为 signal return 等路径也可能提供保存上下文。
+
+## exec 必须在旧地址空间中清理 sibling thread 的用户地址
+
+- 状态：顺序已修正，远端 running thread 的协作式终止仍待完成
+- 适用范围：多线程 exec、robust futex、`clear_child_tid`、共享 `MemorySet`
+- 最后验证：2026-08-07；RV64 8 核 BuildStorm 受控 trace
+- 证据：`os/src/task/task.rs::install_exec_image()` 与 `close_other_threads_for_exec()`；
+  `/tmp/respos-buildstorm-user-fault-trace.log`
+- 内容：线程保存的 robust-list 和 clear-child-tid 是旧用户映像中的地址。若先替换
+  共享 `MemorySet` 的内容，再清理 sibling，内核会把旧地址当作新程序地址写零或写
+  `FUTEX_OWNER_DIED`，可破坏刚装载的映像。
+- 后续影响：必须在替换 MM 前处理依赖旧用户地址的线程私有状态。仅从 scheduler/
+  task manager 摘除远端 TCB 不等于它已停在安全点；真正 running sibling 仍需 stop/ack 协议。
+
+## exec argv/envp 不能用很小的固定项数上限
+
+- 状态：已确认并修复当前 BuildStorm E2BIG
+- 适用范围：`execve`/`execveat`、动态工具链、大环境表
+- 最后验证：2026-08-07；RV64 8 核 cargo/rustc
+- 证据：`os/src/mm/mod.rs::extract_cstrings_from_user()`；
+  `/tmp/respos-minibuild-pipe-output.log`
+- 内容：argv 和 envp 共用的 32 项限制使 cargo 启动 rustc 时返回 `E2BIG`，cargo 只能报
+  child `never executed`。项数放宽必须同时限制累计字节，否则会把用户指针数转化为无界
+  kernel heap allocation。
+- 后续影响：调试工具链 exec 必须保留 cargo 捕获的 child stderr；仅看顶层
+  `BUILDSTORM_MINIBUILD fail` 会丢失具体 errno。
+
 ## 跨 CPU 自旋锁不能防止同 CPU 中断重入
 
 - 状态：已确认并修复当前 heap/timer 路径

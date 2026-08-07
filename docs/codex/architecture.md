@@ -30,6 +30,35 @@
 - 后续影响：新增依赖 allocator、页表或 timer 的全局对象时，要确认首次访问发生在相应子系统
   初始化之后。
 
+### RV64 物理内存上限来自 OpenSBI FDT
+
+- 状态：已实现，8 GiB 识别与 256 MiB 兼容启动已验证
+- 适用范围：RV64 early page table、frame allocator、kernel direct map、procfs/sysinfo
+- 最后验证：2026-08-07
+- 证据：`os/src/arch/rv64/entry/entry.asm`、`os/src/arch/rv64/config/board.rs`、
+  `os/src/mm/{frame_allocator,memory_set}.rs`；`/tmp/respos-buildstorm-dynamic-memory.log`、
+  `/tmp/respos-dynamic-memory-256m.log`
+- 内容：early root page table 只提供最大 8 GiB QEMU RAM 的可达窗口；boot hart 从 FDT
+  `/memory` `reg` 取实际末址并发布。frame allocator 严格以该实际末址为上限。
+  首个 RAM GiB 保留 4 KiB 页以分离 kernel section 权限，后续整 GiB 用 Sv39 level-2 leaf。
+- 后续影响：不得把 early “最大可达窗口”当成真实 RAM 分配上限；增大支持内存时
+  必须同时审计 Sv39 物理地址范围、FDT 位置、direct-map leaf 和最小内存启动。
+
+### RV64 返回用户态前必须保持 kernel trap 状态
+
+- 状态：已实现并通过 8 核 BuildStorm 运行中 GDB 快照验证
+- 适用范围：RV64 `TrapContext` 初始化、signal return、`__restore`/`sret`
+- 最后验证：2026-08-07
+- 证据：`os/src/arch/rv64/trap/{context.rs,trap.S}`；
+  `/tmp/respos-rustc-pc-sample{1,2,3,4,5}.txt`、
+  `/tmp/respos-rustc-pc-postfix-sample{1,2,3,4,5}.txt`
+- 内容：恢复用户上下文期间，`stvec` 必须继续指向 kernel trap 入口，且写入
+  `sstatus` 前必须清 `SIE`。只有通用/浮点寄存器与 per-CPU `sscratch` 都恢复完毕后，
+  才切换到 user trap vector 并执行 `sret`；`sret` 按 `SPIE` 恢复用户态中断状态。
+- 后续影响：不能信任来自 exec 或 signal frame 的保存 `SIE`。扩展 trap frame 或调整
+  汇编顺序时，应把 bulk context restore 留在 kernel vector 生效期间，并把切换 user
+  vector 后的固定收尾保持在最小范围。
+
 ## 内核边界
 
 | 边界 | 当前所有者 | 不应放入调用方的内容 |

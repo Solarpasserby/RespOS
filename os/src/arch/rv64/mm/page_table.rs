@@ -114,11 +114,28 @@ impl PageTable {
 
     /// 转译虚拟页号为对应页表项
     pub fn translate(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
-        self.find_pte(vpn).map(|pte| *pte)
+        let idxs = vpn.indexes();
+        let mut ppn = self.root_ppn;
+        for (level, index) in idxs.into_iter().enumerate() {
+            let pte = ppn.get_pte_array()[index];
+            if !pte.is_valid() {
+                return None;
+            }
+            if pte.readable() || pte.executable() {
+                let lower_bits = 9 * (2 - level);
+                let page_offset = vpn.0 & ((1usize << lower_bits) - 1);
+                return Some(PageTableEntry::new(
+                    PhysPageNum(pte.ppn().0 + page_offset),
+                    pte.flags(),
+                ));
+            }
+            ppn = pte.ppn();
+        }
+        None
     }
     /// 转译虚拟地址为物理地址
     pub fn translate_va(&self, va: VirtAddr) -> Option<PhysAddr> {
-        self.find_pte(va.clone().floor()).map(|pte| {
+        self.translate(va.clone().floor()).map(|pte| {
             let aligned_pa: PhysAddr = pte.ppn().into();
             let offset = va.page_offset();
             let aligned_pa_usize: usize = aligned_pa.into();
@@ -148,6 +165,26 @@ pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> &'static mut T {
 ///
 /// 均返回页表项的可变借用，用于修改或读取页表项
 impl PageTable {
+    /// Install an aligned Sv39 level-2 leaf for the kernel direct map.
+    pub fn map_gigabyte(&mut self, va: VirtAddr, pa: PhysAddr, flags: PTEFlags) -> SysResult {
+        const GIGABYTE: usize = 1 << 30;
+        let va_raw = usize::from(va);
+        let pa_raw = usize::from(pa);
+        if va_raw % GIGABYTE != 0 || pa_raw % GIGABYTE != 0 {
+            return Err(Errno::EINVAL);
+        }
+        let index = (va_raw >> 30) & 0x1ff;
+        let pte = &mut self.root_ppn.get_pte_array()[index];
+        if pte.is_valid() {
+            return Err(Errno::EEXIST);
+        }
+        *pte = PageTableEntry::new(
+            PhysPageNum::from(pa_raw >> PAGE_SIZE_BITS),
+            flags | PTEFlags::VALID | PTEFlags::ACCESSED | PTEFlags::DIRTY,
+        );
+        Ok(())
+    }
+
     /// 根据虚拟地址寻找目标页表项，若发现多级页表不存在则创建
     fn find_pte_create(&mut self, vpn: VirtPageNum) -> SysResult<&mut PageTableEntry> {
         let idxs = vpn.indexes();

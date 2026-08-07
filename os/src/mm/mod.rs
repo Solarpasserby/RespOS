@@ -12,7 +12,9 @@ mod heap_allocator;
 mod memory_set;
 
 use crate::arch::mm::{PTEFlags, PageTable, PageTableEntry};
-use crate::config::{PAGE_SIZE, TRAMPOLINE, USER_ARG_MAX_COUNT, USER_CSTR_MAX_LEN};
+use crate::config::{
+    PAGE_SIZE, TRAMPOLINE, USER_ARG_MAX_BYTES, USER_ARG_MAX_COUNT, USER_CSTR_MAX_LEN,
+};
 use crate::syscall::{Errno, SysResult};
 use crate::task::current_task;
 pub use address::*;
@@ -93,17 +95,24 @@ pub fn copy_cstr_from_user(ptr: *const u8) -> SysResult<String> {
 pub fn extract_cstrings_from_user(mut ptr: *const usize) -> SysResult<Vec<String>> {
     let mut ret: Vec<String> = Vec::new();
     let mut count = 0;
+    let mut total_bytes = 0usize;
     loop {
-        if count > USER_ARG_MAX_COUNT {
-            return Err(Errno::E2BIG); // 参数过多
-        }
-
         let mut str_ptr: *const u8 = core::ptr::null();
         copy_from_user(&mut str_ptr as *mut *const u8, ptr as *const *const u8, 1)?;
         if str_ptr.is_null() {
             break;
         }
-        ret.push(copy_cstr_from_user(str_ptr)?);
+        if count >= USER_ARG_MAX_COUNT {
+            return Err(Errno::E2BIG); // 参数过多
+        }
+        let string = copy_cstr_from_user(str_ptr)?;
+        total_bytes = total_bytes
+            .checked_add(string.len() + 1)
+            .ok_or(Errno::E2BIG)?;
+        if total_bytes > USER_ARG_MAX_BYTES {
+            return Err(Errno::E2BIG);
+        }
+        ret.push(string);
 
         count += 1;
         let next = (ptr as usize)

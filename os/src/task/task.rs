@@ -413,6 +413,9 @@ pub struct TaskControlBlock {
     // ===== 新增：可中断状态标记 =====
     // 标记当前线程是否处于"可被信号中断"的阻塞中（futex_wait / sigtimedwait / wait4）
     interruptible: AtomicBool,
+    // wait4/waitid 可由线程组中任意线程执行；子进程状态变化时需要
+    // 唤醒真正的等待者，而不能只唤醒进程组长。
+    waiting_for_child: AtomicBool,
     // 信号中断标记：当线程在 interruptible 状态下被信号唤醒时置为 true
     interrupted: AtomicBool,
     itimers: Arc<TaskTimers>,
@@ -491,6 +494,7 @@ impl TaskControlBlock {
 
             // 可中断状态
             interruptible: AtomicBool::new(false),
+            waiting_for_child: AtomicBool::new(false),
             interrupted: AtomicBool::new(false),
             itimers: Arc::new(TaskTimers::new()),
             personality: AtomicUsize::new(0),
@@ -581,6 +585,7 @@ impl TaskControlBlock {
 
             // 可中断状态
             interruptible: AtomicBool::new(false),
+            waiting_for_child: AtomicBool::new(false),
             interrupted: AtomicBool::new(false),
             itimers: Arc::new(TaskTimers::new()),
             personality: AtomicUsize::new(0),
@@ -788,6 +793,7 @@ impl TaskControlBlock {
 
             // 可中断状态
             interruptible: AtomicBool::new(false),
+            waiting_for_child: AtomicBool::new(false),
             interrupted: AtomicBool::new(false),
             itimers,
             personality: AtomicUsize::new(self.personality()),
@@ -877,6 +883,12 @@ impl TaskControlBlock {
             &mut user_sp,
         )?;
 
+        // Thread-private robust-list and clear_child_tid addresses belong to
+        // the old image. Tear down sibling threads while that address space is
+        // still installed; doing this after the MemorySet replacement lets
+        // stale thread metadata write into the freshly loaded executable.
+        self.close_other_threads_for_exec();
+
         /* ===== 修改地址空间 ===== */
         let mut memory_set_guard = self.memory_set.write();
         let old_memory_set = core::mem::replace(&mut *memory_set_guard, memory_set);
@@ -905,15 +917,12 @@ impl TaskControlBlock {
         self.set_exe_path(exe_path);
         self.did_exec.store(true, Ordering::Relaxed);
 
-        /* ===== 修改线程组 ===== */
-        self.close_other_threads_for_exec();
-
         /* ===== 修改文件描述符表 ===== */
         // Linux execve always undoes CLONE_FILES sharing before applying
         // close-on-exec.  Otherwise an exec'd child can keep mutating its
         // parent's descriptor table and its pipe endpoints survive as long as
         // the parent, preventing captured stdout/stderr from reaching EOF.
-        self.unshare_fd_table();
+        self.unshare_fd_table_for_exec();
         self.fd_table.lock().close_on_exec();
 
         /* ===== 修改信号处理 ===== */
@@ -1270,8 +1279,24 @@ impl TaskControlBlock {
                     SigInfo::new(Sig::SIGCHLD.raw(), code, SiField::Kill { tid: self.tid() });
                 parent.receive_siginfo(siginfo, false);
                 crate::task::scheduler::wakeup_task(parent.tid());
+                let waiters = parent.op_thread_group(|group| {
+                    group
+                        .iter()
+                        .filter(|task| task.is_waiting_for_child())
+                        .map(|task| task.tid())
+                        .collect::<Vec<_>>()
+                });
+                for tid in waiters {
+                    crate::task::scheduler::wakeup_task(tid);
+                }
             }
         });
+    }
+    pub fn set_waiting_for_child(&self, waiting: bool) {
+        self.waiting_for_child.store(waiting, Ordering::Release);
+    }
+    pub fn is_waiting_for_child(&self) -> bool {
+        self.waiting_for_child.load(Ordering::Acquire)
     }
     pub fn exited_child_ids(&self) -> Vec<usize> {
         self.exited_children.lock().iter().copied().collect()
@@ -1707,6 +1732,33 @@ impl TaskControlBlock {
             *current = FdTable::from_existed_user(&current);
         }
     }
+
+    /// Exec must detach from CLONE_FILES before applying CLOEXEC. Threads
+    /// removed by `close_other_threads_for_exec` can retain their old shared
+    /// table through abandoned kernel-stack Arcs; if no live task still owns
+    /// that table, clear it explicitly so stale TCBs cannot pin pipe ends.
+    pub fn unshare_fd_table_for_exec(&self) {
+        let old_table = {
+            let mut current = self.fd_table.lock();
+            if Arc::strong_count(&current) <= 1 {
+                return;
+            }
+            let old = current.clone();
+            *current = FdTable::from_existed_user(&old);
+            old
+        };
+        let old_ptr = Arc::as_ptr(&old_table);
+        let shared_by_live_task = TASK_MANAGER.snapshot().into_iter().any(|other| {
+            if core::ptr::eq(other.as_ref(), self) {
+                return false;
+            }
+            let other_table = other.fd_table.lock();
+            Arc::as_ptr(&other_table) == old_ptr
+        });
+        if !shared_by_live_task {
+            old_table.clear();
+        }
+    }
     pub fn get_fd_entry(&self, fd: usize) -> SysResult<FdEntry> {
         self.fd_table.lock().get_fd_entry(fd)
     }
@@ -2058,17 +2110,17 @@ fn exit_process_group(task: Arc<TaskControlBlock>, cause: ExitCause) {
         let fd_table = task.fd_table.lock();
         Arc::as_ptr(&fd_table)
     };
-    let fd_table_group_owners = threads
-        .iter()
-        .filter(|thread| {
-            let fd_table = thread.fd_table.lock();
-            Arc::as_ptr(&fd_table) == fd_table_ptr
-        })
-        .count();
-    let fd_table_owned_by_group = {
-        let fd_table = task.fd_table.lock();
-        Arc::strong_count(&fd_table) <= fd_table_group_owners
-    };
+    // Deferred TCBs can retain this FdTable after leaving `thread_group`, so
+    // Arc counts cannot distinguish them from a live CLONE_FILES process.
+    // Only a live task in another tgid makes clearing the shared table unsafe.
+    let fd_table_shared_outside_group = TASK_MANAGER.snapshot().into_iter().any(|other| {
+        if other.tgid() == tgid {
+            return false;
+        }
+        let other_fd_table = other.fd_table.lock();
+        Arc::as_ptr(&other_fd_table) == fd_table_ptr
+    });
+    let fd_table_owned_by_group = !fd_table_shared_outside_group;
     let mut leader_cleaned = false;
     for thread in threads {
         if thread.tid() == leader.tid() {

@@ -1,7 +1,7 @@
 // os/src/mm/frame_allocator
 
 use super::address::{PhysAddr, PhysPageNum};
-use crate::config::{KERNEL_BASE, MEMORY_END, MEMORY_START};
+use crate::config::{KERNEL_BASE, MEMORY_START, physical_memory_end};
 use alloc::vec::Vec;
 use lazy_static::lazy_static;
 use spin::Mutex;
@@ -123,7 +123,7 @@ pub fn init_frame_allocator() {
     let alloc_start = kernel_end.max(MEMORY_START);
     FRAME_ALLOCATOR.lock().init(
         PhysAddr::from(alloc_start).ceil(),
-        PhysAddr::from(MEMORY_END).floor(),
+        PhysAddr::from(physical_memory_end()).floor(),
     );
 }
 

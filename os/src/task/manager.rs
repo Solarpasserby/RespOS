@@ -46,4 +46,10 @@ impl TaskManager {
             f(&task.upgrade().unwrap())
         }
     }
+
+    /// Snapshot live tasks without retaining the manager lock while the
+    /// caller inspects locks owned by those tasks.
+    pub fn snapshot(&self) -> alloc::vec::Vec<Arc<TaskControlBlock>> {
+        self.0.lock().values().filter_map(Weak::upgrade).collect()
+    }
 }

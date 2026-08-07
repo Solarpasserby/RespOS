@@ -70,6 +70,7 @@ impl TrapContext {
         }
         let mut sstatus = sstatus::read(); // CSR sstatus
         sstatus.set_spp(SPP::User); //previous privilege mode: user mode
+        sstatus.set_sie(false);
         let mut gerneal_regs = [0; 32];
         if linux_abi {
             // Linux/RISC-V 进程入口从用户栈读取 argc/argv/envp/auxv。
