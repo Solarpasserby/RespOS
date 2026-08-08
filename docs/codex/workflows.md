@@ -269,22 +269,32 @@ git diff --check
 
 原因是架构配置会被复制，镜像会被写入，且本地未跟踪 `user/src/bin/*.rs` 也会被 wildcard 构建。
 
-## RV64 BuildStorm 分层验证
+## 决赛 BuildStorm 分层验证
 
-BuildStorm 使用 pub 镜像、release kernel、无 `eval` user feature，并固定官方 8 核/8 GiB 参数。
-诊断必须带 `-snapshot`：
+2026-08-08 比赛官方群公告的新决赛参数为：RV64 `-m 16G -smp 8`，LA64
+`-m 36G -smp 12`，整轮超时 6250 秒。评测宿主是 128 GiB、40 线程的 VMware Guest；公告给出的
+Linux 最好成绩为 RV64 4655.23 秒、LA64 6223.00 秒。这些是外部公告口径，本地取得更新后的镜像后
+仍须核对镜像 hash、脚本和实际启动命令。
+
+BuildStorm 使用 release kernel、无 `eval` user feature。诊断必须带 `-snapshot`，当前 RV64 命令为：
 
 ```bash
 make build-rv RV_USER_FEATURES=
-qemu-system-riscv64 -machine virt -kernel kernel-rv -m 8G -nographic -smp 8 \
+timeout 6250s qemu-system-riscv64 -machine virt -kernel kernel-rv -m 16G -nographic -smp 8 \
   -bios default \
   -drive file=img/sdcard-rv-pub.img,if=none,format=raw,id=x0 \
   -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
   -no-reboot -snapshot
 ```
 
+LA64 最终资源参数固定为 `-m 36G -smp 12`；具体 QEMU machine、BIOS 与磁盘参数必须以更新后的
+官方启动脚本为准，不能从 RV64 命令类推。
+
 进入 guest shell 后执行 `/glibc/buildstorm_testcode.sh`。验收依次检查
 `BUILDSTORM_TOOLCHAIN ok`、`BUILDSTORM_MINIBUILD ok`、最终
 `BUILDSTORM_COMPILE mode=multi ok=true ... cores=8 bytes>=500000`；前一标记通过不能替代后一标记。
+新镜像将补回预编译 `tg-xtask`；官方计分只覆盖测试用例自身的编译时间，不包含前置依赖构建，也不
+包含编译完成后的运行验证。旧镜像仍应保留 minibuild/tg-xtask 自举作为兼容性诊断，但其耗时不能
+与新基线成绩直接比较。
 脚本的 minibuild 会重定向 cargo 输出，若长时间静默，先单独在 `/bin/sh` 中设置脚本同款
 PATH/HOME/RUSTUP/CARGO 环境并运行 `cargo new`、`cargo build -vv`，再决定是否加入临时 kernel trace。

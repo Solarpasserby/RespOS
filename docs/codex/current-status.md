@@ -2,6 +2,75 @@
 
 本文件是快速变化的状态页。更新测试结论时必须同时更新日期、提交和命令。
 
+## 2026-08-08 决赛镜像/计时口径更新（官方群公告，待新镜像验证）
+
+- 比赛官方群同步：CAgent 已修正 waitpid 测例问题并补回缺失的 `ss`；决赛 QEMU 参数调整为
+  RV64 `-m 16G -smp 8`、LA64 `-m 36G -smp 12`，整轮超时 6250 秒。评测平台为 128 GiB、
+  40 线程 VMware Guest；公告中的 Linux 最好成绩为 RV64 4655.23 秒、LA64 6223.00 秒。
+- 当前两个旧镜像缺少预编译 `tg-xtask`。官方计划在更新镜像中补回它；前置依赖构建不计入内核
+  编译成绩，计时基线仅覆盖测试用例自身编译，也不包含编译后的运行验证。
+- **对当前结论的影响**：旧 pub 镜像上的 `tg-xtask` 自举 SIGSEGV 当时是真实兼容性缺陷，现已按
+  下一节所述修复；但旧镜像结果仍不能直接证明新计分区间通过，此前 8 GiB 运行也只能作为历史功能
+  证据，不能作为新资源配置下的最终结果。
+- **待验证**：本地尚未取得公告所述新镜像。拿到后需记录镜像 hash、核对脚本实际 marker/计时边界，
+  并分别按 RV64 16 GiB/8 核和 LA64 36 GiB/12 核重跑；公告调整期的平台成绩波动不能作为内核回归。
+
+## 2026-08-08 tg-xtask 启动与链接产物损坏已修复（未提交，新镜像仍待验证）
+
+- **基线/配置**：`dev` HEAD `0881216` 加当前未提交工作树。由于宿主仅约 15 GiB 内存，本地功能验证
+  使用 RV64 `-m 8G -smp 8`；这不是公告中的 16 GiB 正式资源配置，也不能作为最终成绩。
+- **tg-xtask SIGSEGV 根因**：原 512 KiB 用户栈被大程序启动数据耗尽，向下越过 guard 后落入动态
+  解释器的只读可执行 VMA，表现为在解释器地址附近发生 store page fault。RV64/LA64 用户栈扩大为
+  8 MiB 并保持 lazy VMA，仅为 argv/envp/auxv 实际写入页建页；旧镜像中的
+  `target/debug/tg-xtask --help` 已完整退出成功。
+- **装载与内存门槛**：filesystem 动态解释器的 PT_LOAD 与主 ELF 一样改为按页 file-backed fault，
+  仅预读并校验最多 1 MiB ELF 元数据；嵌入式 fallback 保持 eager。并发工具链仍会耗尽 64 MiB
+  kernel heap，RV64/LA64 均调整为 128 MiB；64 MiB 失败时已记录到精确 393216-byte 分配及后续小分配。
+- **损坏 ELF 的最终根因**：lwext4 `ext4_fread()` 把未分配的完整块和尾部洞的 `fblock == 0` 当作
+  物理块 0 读取。新建稀疏 lld 输出在用户写入前便出现稳定的磁盘块 0 字节，导致 ELF
+  `.symtab[0]` 非零、`llvm-objcopy` 拒绝产物。完整洞块和尾部洞现显式填零；Rust ext4 `read_at()`
+  也先清零 buffer 作为防御。修复后专项 probe 在 RV64 `-m 1G -smp 8 -snapshot` 打印
+  `BUILDSTORM_FILE_PROBE_PASS`。
+- **共享映射一致性**：普通文件以 backend inode 作为稳定身份共享 resident file pages；pwrite/write
+  会更新已驻留的共享页，read 会叠加共享页内容，truncate shrink 会清零新 EOF 之后的驻留字节。
+  probe 同时覆盖同页 mmap+pwrite、truncate/regrow 零洞以及新建约 1.7 MiB 稀疏文件立即
+  `MAP_SHARED` 读取。
+- **工具链证据**：在最终修复内核上直接执行与 xtask 相同的 release cargo 构建，7 分 15 秒完成；
+  新 ELF 的 `.symtab[0]` 为合法的全零 undefined entry，`llvm-objcopy` 返回 0，生成 763000-byte
+  binary（ELF 1696472 bytes）。随后旧镜像完整执行
+  `cargo xtask arceos build -p arceos-helloworld --arch riscv64`，全量 release cargo 阶段用时
+  6584.09 秒，wrapper 的 `llvm-objcopy --strip-all -O binary` 和顶层命令均返回 0。该结果证明旧镜像
+  全调用链兼容，但因包含失效缓存后的前置重编译、使用本地 8 GiB 配置且超过 6250 秒，不能作为新
+  计时口径下的正式成绩。
+- **门禁状态**：最终修复后的 `make build-rv RV_USER_FEATURES=`、`make build-la LA_USER_FEATURES=`、
+  os/user `cargo fmt --check` 与 `git diff --check` 均通过。补回预编译 `tg-xtask` 的新官方镜像仍为
+  `待验证`。
+
+## 2026-08-08 BuildStorm minibuild 已通过，最终 tg-xtask 执行仍失败（未提交）
+
+- **基线/配置**：`dev` HEAD `0881216` 加当前未提交工作树；执行
+  `make build-rv RV_USER_FEATURES=`，随后按 `docs/codex/workflows.md` 的 8 GiB、8 核、pub 镜像、
+  `-snapshot` 命令启动，guest 运行 `/glibc/buildstorm_testcode.sh`。
+- **本轮确认并修复**：新建普通文件现在以真实 ext4 inode 为键复用 synthetic inode 的
+  `PageCache`；lwext4 `ext4_generic_open2()` 的失败清理不再重复释放旧 inode ref；
+  `ext4_ftruncate()` 扩容会按稀疏文件语义更新 inode/open-file size；离散脏页写回在 seek 前先扩展
+  lower file；可写 `MAP_SHARED` 文件映射保留完整映射作为写回窗口，最终仍按当前 EOF 裁剪。
+- **专项回归**：新增 `buildstorm_file_probe`，同时覆盖“短文件 mmap 后扩容并写入尾页”和
+  “4 MiB 级稀疏 pwrite + hardlink + unlink-open-source + close/reopen”两条路径。RV64 release、
+  `-m 8G -smp 8 -snapshot` 打印 `BUILDSTORM_FILE_PROBE_PASS`。
+- **官方结果**：同一内核依次打印 `BUILDSTORM_TOOLCHAIN ok`、`BUILDSTORM_MINIBUILD ok`；此前
+  minibuild ELF 被截为 `0x395d30`、而节表要求到 `0x40cd30` 的问题已越过。最终预构建 cargo
+  在 5 分 01 秒完成，timed cargo 在 5 分 54 秒生成并执行
+  `/work/tgoskits/target/debug/tg-xtask`，但该程序以 SIGSEGV 退出，最终标记为
+  `BUILDSTORM_COMPILE mode=multi ok=false rc=139 elapsed_s=0.00 cores=8 bytes=0 arch=riscv64`。
+- **失败边界**：失败现场中 `tg-xtask` 实际大小为 `277827240`，ELF 节表起点为
+  `277824552`、42 个 64-byte section header，`readelf -S` 可正常解析；因此这一次不能再归因于
+  文件尾截断。下一步应对未处理的 RV64 user page fault 临时记录 `sepc/stval/cause/tid/tgid`，
+  复现 tg-xtask 启动 SIGSEGV 后再判断是大 ELF 装载、动态链接器还是多线程启动路径。
+- **当前门禁**：`make build-rv RV_USER_FEATURES=` 通过（仅既有 target-feature warning），
+  `make build-la LA_USER_FEATURES=`、os/user `cargo fmt --check` 与 `git diff --check` 通过；完整题二
+  仍未通过，不能将 minibuild 成功等同于最终成绩。
+
 ## 2026-08-08 BuildStorm 已越过 ld/cargo 管道阻塞（未提交，minibuild 执行仍失败）
 
 - **基线/配置**：`dev` HEAD `b785262`；`make build-rv RV_USER_FEATURES=`，随后以

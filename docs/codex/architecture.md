@@ -182,17 +182,32 @@ FdTable slot (FdEntry: descriptor flags)
 
 ### filesystem ELF 使用按需 private file backing
 
-- 状态：已实现，BuildStorm toolchain 阶段已验证
+- 状态：已实现，BuildStorm tg-xtask、手工链接与完整 xtask wrapper 已验证
 - 适用范围：filesystem exec、动态程序、大 ELF、kernel heap
-- 最后验证：2026-08-06；RV64 release、8 核、8 GiB
+- 最后验证：2026-08-08；RV64 release、8 核、8 GiB
 - 证据：`os/src/mm/memory_set.rs::try_from_elf_file()`、
-  `os/src/task/task.rs::execve_file()`；`/tmp/respos-buildstorm-rv8-file-backed-exec.log`
+  `os/src/task/task.rs::execve_file()`、`read_elf_metadata()`、`open_dynamic_linker()`
 - 内容：exec 只把 ELF/program header 与 PT_INTERP 名称读入 kernel heap；主 ELF 的 PT_LOAD VMA
   持有 `Arc<dyn FileOp>`、page-aligned file offset 和有效文件长度，private fault 时分配独立 frame
-  并按页读取，BSS 尾部保持零。文件式 loader 将元数据前缀限制为 1 MiB，并在安装 VMA 前校验
-  ELF64 program-header 尺寸和 PT_LOAD 文件边界；嵌入式 app 仍使用完整 slice 的 eager loader。
+  并按页读取，BSS 尾部保持零。文件系统中的动态解释器也走相同的 lazy PT_LOAD 路径；文件式 loader
+  将元数据前缀限制为 1 MiB，并在安装 VMA 前校验 ELF64 program-header 尺寸和 PT_LOAD 文件边界；
+  嵌入式 app/解释器 fallback 仍使用完整 slice 的 eager loader。
 - 后续影响：PT_LOAD offset 与 virtual address 的页内偏移必须同余；不能重新用 `read_all()` 或
-  简单放大 kernel heap 规避大 ELF。动态链接器本身目前仍整文件读取，后续可用同一抽象继续收敛。
+  单纯放大 kernel heap 规避大 ELF。工具链并发峰值仍需要 128 MiB kernel heap，但这与 ELF 整文件
+  分配是两个独立问题。
+
+### 用户栈是大范围 lazy VMA，不等于启动时一次性物理分配
+
+- 状态：已实现，旧 BuildStorm 镜像中的 tg-xtask 已验证
+- 适用范围：exec argv/envp/auxv、大型动态程序、线程初始栈
+- 最后验证：2026-08-08；RV64 release、8 核、8 GiB
+- 证据：`os/src/arch/{rv64,loongarch64}/config/mm.rs`、
+  `os/src/mm/memory_set.rs::try_from_elf_file()`
+- 内容：RV64/LA64 主用户栈窗口为 8 MiB，但 VMA 保持 lazy；exec 只确保初始启动数据实际覆盖的页
+  存在。原 512 KiB 栈在 tg-xtask 启动时越过 guard，并把相邻动态解释器 RX VMA 的权限故障伪装成
+  loader 问题。
+- 后续影响：诊断解释器地址附近的 store fault 时必须同时计算 SP、栈 VMA 与 guard 距离；扩大栈窗口
+  时不能退回 eager 分配全部页面。
 
 ### vfork 父任务必须先登记 blocked 再发布子任务
 

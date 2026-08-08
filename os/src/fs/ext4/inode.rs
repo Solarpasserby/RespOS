@@ -308,11 +308,18 @@ impl Ext4Inode {
         found.ok_or(Errno::ENOENT)
     }
 
-    fn synthetic_created_inode(ty: Ext4InodeTypes) -> Arc<dyn InodeOp> {
-        Arc::new(Self::new(
+    fn synthetic_created_inode(backend_ino: u64, ty: Ext4InodeTypes) -> Arc<dyn InodeOp> {
+        let mut cache = EXT4_INODE_CACHE.lock();
+        if let Some(inode) = cache.get(&backend_ino).and_then(Weak::upgrade) {
+            return inode;
+        }
+
+        let inode: Arc<dyn InodeOp> = Arc::new(Self::new(
             CREATED_INODE_ALLOC.fetch_add(1, Ordering::Relaxed),
             ty,
-        ))
+        ));
+        cache.insert(backend_ino, Arc::downgrade(&inode));
+        inode
     }
 
     fn inode_mode_type(path: &str) -> Option<Ext4InodeTypes> {
@@ -561,6 +568,10 @@ impl InodeOp for Ext4Inode {
             .map_err(Self::map_lwext4_err)?;
         file.file_seek(off as i64, bindings::SEEK_SET)
             .map_err(Self::map_lwext4_err)?;
+        // lwext4 advances across sparse extents but does not reliably write
+        // zeroes into every byte of the caller's buffer.  POSIX hole reads
+        // must return zero, and file-backed mmap depends on that guarantee.
+        buf.fill(0);
         let read_size = file.file_read(buf).map_err(Self::map_lwext4_err)?;
         file.file_close().map_err(Self::map_lwext4_err)?;
 
@@ -575,6 +586,14 @@ impl InodeOp for Ext4Inode {
             let file = &mut Ext4File::new(path, self.ty.clone());
             file.file_open(path, bindings::O_RDWR)
                 .map_err(Self::map_lwext4_err)?;
+            // lwext4's fseek rejects offsets beyond EOF and the Rust wrapper
+            // historically clamped them to the current size.  Page-cache
+            // writeback may legitimately start a dirty extent after a sparse
+            // hole, so extend the lower file before positioning the write.
+            if off as u64 > file.file_size() {
+                file.file_truncate(off as u64)
+                    .map_err(Self::map_lwext4_err)?;
+            }
             file.file_seek(off as i64, bindings::SEEK_SET)
                 .map_err(Self::map_lwext4_err)?;
             let write_size = file.file_write(buf).map_err(Self::map_lwext4_err)?;
@@ -873,11 +892,14 @@ impl InodeOp for Ext4Inode {
         // lwext4，后续创建会以 EINVAL 失败。普通文件仍使用 synthetic
         // inode：其数据操作按绝对路径访问后端，避免 lwext4 create 后
         // 立即重新打开文件的已知问题。
+        let (child_ino, child_ty) = Self::lookup_dirent(parent_path, name)?;
         let inode = if ext4_ty == Ext4InodeTypes::EXT4_DE_DIR {
-            let (child_ino, child_ty) = Self::lookup_dirent(parent_path, name)?;
             Self::get_or_create(child_ino, child_ty)
         } else {
-            Self::synthetic_created_inode(ext4_ty)
+            // Keep the synthetic inode's compatibility behavior, but index it
+            // by the real ext4 inode.  A later lookup from another process can
+            // then reuse the same PageCache while the created inode is alive.
+            Self::synthetic_created_inode(child_ino, ext4_ty)
         };
         if let Some(inode) = inode.as_any().downcast_ref::<Ext4Inode>() {
             inode.init_inode_times();

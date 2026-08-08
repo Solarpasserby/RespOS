@@ -937,6 +937,7 @@ static int ext4_generic_open2(ext4_file *f, const char *path, int flags,
 	struct ext4_mountpoint *mp = ext4_get_mount(path);
 	struct ext4_dir_search_result result;
 	struct ext4_inode_ref ref;
+	bool ref_loaded = false;
 
 	f->mp = 0;
 
@@ -961,6 +962,7 @@ static int ext4_generic_open2(ext4_file *f, const char *path, int flags,
 	r = ext4_fs_get_inode_ref(fs, EXT4_INODE_ROOT_INDEX, &ref);
 	if (r != EOK)
 		return r;
+	ref_loaded = true;
 
 	if (parent_inode)
 		*parent_inode = ref.index;
@@ -1051,6 +1053,8 @@ static int ext4_generic_open2(ext4_file *f, const char *path, int flags,
 			}
 		}
 
+		/* put_inode_ref consumes the reference even if writeback fails. */
+		ref_loaded = false;
 		r = ext4_fs_put_inode_ref(&ref);
 		if (r != EOK)
 			break;
@@ -1058,6 +1062,7 @@ static int ext4_generic_open2(ext4_file *f, const char *path, int flags,
 		r = ext4_fs_get_inode_ref(fs, next_inode, &ref);
 		if (r != EOK)
 			break;
+		ref_loaded = true;
 
 		if (is_goal)
 			break;
@@ -1069,7 +1074,8 @@ static int ext4_generic_open2(ext4_file *f, const char *path, int flags,
 	}
 
 	if (r != EOK) {
-		ext4_fs_put_inode_ref(&ref);
+		if (ref_loaded)
+			ext4_fs_put_inode_ref(&ref);
 		return r;
 	}
 
@@ -1615,7 +1621,17 @@ static int ext4_ftruncate_no_lock(ext4_file *file, uint64_t size)
 
 	/*Sync file size*/
 	file->fsize = ext4_inode_get_size(&file->mp->fs.sb, ref.inode);
-	if (file->fsize <= size) {
+	if (file->fsize < size) {
+		/* Growing truncate creates a sparse tail.  No data blocks need to
+		 * be allocated, but the inode and the open-file size must both be
+		 * updated so a following seek/write can reach the new offset. */
+		ext4_inode_set_size(ref.inode, size);
+		ref.dirty = true;
+		file->fsize = size;
+		r = EOK;
+		goto Finish;
+	}
+	if (file->fsize == size) {
 		r = EOK;
 		goto Finish;
 	}
@@ -1772,21 +1788,38 @@ int ext4_fread(ext4_file *file, void *buf, size_t size, size_t *rcnt)
 	fblock_start = 0;
 	fblock_count = 0;
 	while (size >= block_size) {
+		r = ext4_fs_get_inode_dblk_idx(&ref, iblock_idx, &fblock, true);
+		if (r != EOK)
+			goto Finish;
+
+		if (fblock == 0) {
+			/* A sparse full block is logically zero.  Block number zero is
+			 * not file data and must never be passed to the block device. */
+			memset(u8_buf, 0, block_size);
+			iblock_idx++;
+			size -= block_size;
+			u8_buf += block_size;
+			file->fpos += block_size;
+			if (rcnt)
+				*rcnt += block_size;
+			continue;
+		}
+
+		fblock_start = fblock;
+		fblock_count = 1;
+		iblock_idx++;
 		while (iblock_idx < iblock_last) {
 			r = ext4_fs_get_inode_dblk_idx(&ref, iblock_idx,
 						       &fblock, true);
 			if (r != EOK)
 				goto Finish;
 
-			iblock_idx++;
-
-			if (!fblock_start)
-				fblock_start = fblock;
-
-			if ((fblock_start + fblock_count) != fblock)
+			if (fblock == 0 ||
+			    (fblock_start + fblock_count) != fblock)
 				break;
 
 			fblock_count++;
+			iblock_idx++;
 		}
 
 		r = ext4_blocks_get_direct(file->mp->fs.bdev, u8_buf, fblock_start,
@@ -1801,8 +1834,8 @@ int ext4_fread(ext4_file *file, void *buf, size_t size, size_t *rcnt)
 		if (rcnt)
 			*rcnt += block_size * fblock_count;
 
-		fblock_start = fblock;
-		fblock_count = 1;
+		fblock_start = 0;
+		fblock_count = 0;
 	}
 
 	if (size) {
@@ -1811,10 +1844,15 @@ int ext4_fread(ext4_file *file, void *buf, size_t size, size_t *rcnt)
 		if (r != EOK)
 			goto Finish;
 
-		off = fblock * block_size;
-		r = ext4_block_readbytes(file->mp->fs.bdev, off, u8_buf, size);
-		if (r != EOK)
-			goto Finish;
+		if (fblock != 0) {
+			off = fblock * block_size;
+			r = ext4_block_readbytes(file->mp->fs.bdev, off, u8_buf,
+						 size);
+			if (r != EOK)
+				goto Finish;
+		} else {
+			memset(u8_buf, 0, size);
+		}
 
 		file->fpos += size;
 

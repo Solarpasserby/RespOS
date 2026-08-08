@@ -4,7 +4,10 @@
 
 目标是在不破坏当前 RV64 单核 CAgent 回归的前提下，使内核真实使用 BuildStorm 所需的多个 CPU，随后跑通 Debian glibc 镜像中的 Rust 工具链与 arceos-helloworld 全量构建。
 
-官方 final-2026 说明要求 BuildStorm 使用 `-smp 8 -m 8G`；脚本将 `nproc` 写入 `BUILDSTORM_COMPILE`。公开 judge 的 RV64 期望核心数为 8，LoongArch64 代码中为 12，和说明文字存在待核对差异。因此 RV64 先以 8 核为硬门槛；LA64 的最终核数必须以平台启动命令为准。
+2026-08-08 比赛官方群更新的决赛参数为 RV64 `-smp 8 -m 16G`、LA64
+`-smp 12 -m 36G`，整轮超时 6250 秒；脚本将 `nproc` 写入 `BUILDSTORM_COMPILE`。公告还说明新镜像
+会补回预编译 `tg-xtask`，计时仅包含测试用例自身编译，不包含前置依赖和编译后的运行验证。当前
+本地仍是旧 pub 镜像，以上口径在取得新镜像后必须以镜像 hash、脚本和实际命令再次验证。
 
 第一阶段只承诺 SMP 正确性，不承诺时间分。不得伪造 `/proc/cpuinfo`、`nproc` 或 `/proc/uptime`，也不得只启动 QEMU 多 vCPU 而让次核停机。
 
@@ -33,7 +36,8 @@ BuildStorm 就绪状态。以 QEMU `-snapshot -smp 8 -m 256M` 运行四路
    affinity-aware dequeue 和对应 idle/IPI 行为，并回归 set/getaffinity、单核和多核非饥饿情形。
 4. **补齐共享 MM。** `tlb_hart_mask` 是保守 residency 记录，不是 active-mask 和 request/ack
    shootdown。完成后才能开始 pthread/共享 `MemorySet` 压力；不要提前运行 BuildStorm cargo。
-5. **最后才验收 BuildStorm。** 在固定官方 Debian 镜像与 `-smp 8 -m 8G` 命令下依次跑 toolchain、
+5. **最后才验收 BuildStorm。** 在固定官方 Debian 镜像与 RV64 `-smp 8 -m 16G`（LA64
+   `-smp 12 -m 36G`）命令下依次跑 toolchain、
    minibuild、untimed build 和 timed build；题一 CAgent 保持 SMP=1，并在 owner/调度改动后重新做
    干净 pub 单项回归。
 
@@ -263,7 +267,9 @@ git diff --check
 - 依官方顺序运行：toolchain version、cargo new+minibuild、untimed tg-xtask、timed full build。每段保存 serial log、返回码、磁盘/内存和 `/proc/uptime` 原始值。
 - 遇失败按动态 loader/ELF → syscall errno → FS/MM → scheduler/futex → linker 分层定位，不能把 cargo 首个报错直接当作 SMP 错误。
 
-验收：RV64 `-smp 8 -m 8G` 下 `nproc=8`，`BUILDSTORM_TOOLCHAIN ok`、`BUILDSTORM_MINIBUILD ok`，并至少得到 `BUILDSTORM_COMPILE mode=multi ok=true` 与 ≥500 KiB 产物。
+验收：RV64 `-smp 8 -m 16G` 下 `nproc=8`，`BUILDSTORM_TOOLCHAIN ok`、
+`BUILDSTORM_MINIBUILD ok`，并至少得到 `BUILDSTORM_COMPILE mode=multi ok=true` 与 ≥500 KiB 产物；
+LA64 对应 `-smp 12 -m 36G`、`nproc=12`。成绩比较只采用新脚本标出的测试用例编译区间。
 
 ### Phase 6：性能与 LA64
 
@@ -286,7 +292,11 @@ git diff --check
 
 ## 首轮行动清单
 
-- [ ] 获取并校验 BuildStorm 镜像与官方最终启动命令，核实 RV64/LA64 核数差异。
+- [ ] 获取并校验补回预编译 `tg-xtask` 的 BuildStorm 镜像与官方最终启动命令，记录 hash，并确认
+  RV64 16 GiB/8 核、LA64 36 GiB/12 核、6250 秒超时和新计时边界。
+- [x] 在旧镜像上完成 `tg-xtask --help`、手工 ArceOS release 链接，以及完整
+  `cargo xtask arceos build -p arceos-helloworld --arch riscv64`；后者的 cargo 阶段 6584.09 秒、
+  objcopy 与顶层命令均返回 0。该结果只证明内核运行时兼容性，不替代上一项的新镜像与正式资源验收。
 - [ ] 当前内核跑一次 `SMP=2` 只读启动实验并保存完整 serial log。
 - [ ] 列出 `PROCESSOR`、`IDLE_TASK`、`current_task`、`SCHEDULER`、timer/trap、`UnsafeCell`、`SpinNoIrqLock` 的调用点，形成共享状态审计表。
 - [ ] 确定 RV64 OpenSBI HSM/IPI API 与现有 `arch::sbi` 的能力缺口。

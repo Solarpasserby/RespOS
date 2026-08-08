@@ -90,5 +90,12 @@ pub fn init_heap() {
 
 #[cfg_attr(not(rust_analyzer), alloc_error_handler)]
 pub fn handle_alloc_error(layout: core::alloc::Layout) -> ! {
-    panic!("Heap allocation error, layout = {:?}", layout);
+    let heap = HEAP_ALLOCATOR.lock();
+    panic!(
+        "Heap allocation error, layout = {:?}, user_bytes = {}, actual_bytes = {}, total_bytes = {}",
+        layout,
+        heap.stats_alloc_user(),
+        heap.stats_alloc_actual(),
+        heap.stats_total_bytes(),
+    );
 }

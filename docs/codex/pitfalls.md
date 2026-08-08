@@ -1,5 +1,67 @@
 # RespOS 已确认易错点
 
+## lwext4 读取稀疏洞时不能把未分配块号当物理块 0
+
+- 状态：已确认并修复 tg-xtask 链接产物损坏
+- 适用范围：稀疏文件、共享文件 mmap、linker 输出、`ext4_fread()`
+- 最后验证：2026-08-08；RV64 8 核专项 probe 与手工 ArceOS release build
+- 证据：`vendor/lwext4_rust/c/lwext4/src/ext4.c::ext4_fread()`、
+  `os/src/fs/ext4/inode.rs::read_at()`；修复前 lld 新文件的共享映射在任何用户写入前就含稳定的磁盘
+  块 0 字节，最终 `.symtab[0]` 非零；修复后该 entry 全零且 `llvm-objcopy` 返回 0
+- 内容：extent lookup 对洞返回 `fblock == 0`。旧批量读取路径仍把完整洞块传给 direct block read，
+  尾部不足一块的洞也读取物理块 0。两种洞必须显式填零并推进位置，只有非零且物理连续的数据块才能
+  合并读取。Rust `read_at()` 预清 buffer 可作为防御，但不能替代后端正确处理洞。
+- 后续影响：稀疏回归不仅要 close/reopen 后读洞，还要覆盖新建文件 ftruncate 后立即 MAP_SHARED，
+  并在用户首次写入前检查映射内容全零。
+
+## mmap 与 pwrite 共存时必须维护驻留共享页一致性
+
+- 状态：已确认并修复专项回归
+- 适用范围：同一 inode 的 `MAP_SHARED`、read/write/pwrite、truncate
+- 最后验证：2026-08-08；RV64 8 核 `buildstorm_file_probe`
+- 证据：`os/src/fs/file.rs`、`os/src/mm/mod.rs`、`os/src/mm/memory_set.rs`
+- 内容：只共享各个 VMA fault 出来的 frame 仍不够；普通 write/pwrite 若绕过驻留 frame 写 backend，
+  mmap 会继续看到旧数据，反向 read 也可能忽略 mmap 中尚未写回的数据。当前以 backend inode 作为
+  file-page 身份，写入同步更新驻留共享页，读取叠加驻留内容，truncate shrink 清零新 EOF 后的字节。
+- 后续影响：文件一致性 probe 应包含同页 mmap+pwrite 双向观察与 truncate/regrow 零填充，不能只在
+  munmap/close 后比较磁盘内容。
+
+## 用户栈溢出可能伪装成动态解释器权限故障
+
+- 状态：已确认并修复 tg-xtask 启动 SIGSEGV
+- 适用范围：大型动态 ELF、exec 初始栈、相邻 VMA fault
+- 最后验证：2026-08-08；旧 BuildStorm 镜像 RV64 8 核
+- 证据：fault `sepc=0x9bbbe0`、目标 `0x3000017298` 与当时栈/解释器 VMA 布局；
+  `os/src/arch/{rv64,loongarch64}/config/mm.rs`
+- 内容：原 512 KiB 栈向下越过 guard 后命中解释器 RX VMA，表象是 loader 区域 store permission fault。
+  将栈窗口扩大为 8 MiB 且保持 lazy 后，tg-xtask `--help` 正常退出。
+- 后续影响：遇到解释器附近 fault 不应只审查 PT_LOAD flags；先根据 SP 和写地址检查是否为栈越界。
+
+## lwext4 的 truncate 扩容不能只返回成功
+
+- 状态：已确认并修复 BuildStorm minibuild ELF 截断
+- 适用范围：稀疏文件、PageCache 离散脏区写回、linker 输出
+- 最后验证：2026-08-08；RV64 8 核 `buildstorm_file_probe` 与官方 BuildStorm minibuild
+- 证据：`vendor/lwext4_rust/c/lwext4/src/ext4.c::ext4_ftruncate_no_lock()`、
+  `os/src/fs/ext4/inode.rs::write_at()`；修复前产物实际结束于 `0x395d30`，而 ELF 节表要求到
+  `0x40cd30`，差值 `0x77000` 正是被错误压缩的稀疏区；修复后 `BUILDSTORM_MINIBUILD ok`
+- 内容：旧实现对 `old_size < new_size` 返回 `EOK` 却不更新 inode 或 open-file size，随后
+  `file_seek()` 又把目标偏移夹到旧 EOF，导致远端脏区被追加到错误位置。增长 truncate 应只更新
+  inode size 并保留洞，不需要为洞分配数据块。
+- 后续影响：稀疏写回回归必须检查最终长度、洞区为零以及尾部模式数据，不能只检查 write 返回值。
+
+## 可写共享文件映射不能永久冻结 mmap 时的 EOF
+
+- 状态：已确认并修复专项 mmap 扩容回归
+- 适用范围：`MAP_SHARED | PROT_WRITE`、mmap 后 ftruncate 扩容、munmap/msync 写回
+- 最后验证：2026-08-08；RV64 8 核 `buildstorm_file_probe`
+- 证据：`os/src/mm/memory_set.rs::mmap_file_backing()` 与
+  `MemorySet::prepare_file_writeback()`
+- 内容：映射建立后文件可能扩容，原先超出旧 EOF、但仍位于映射窗口内的页随之变为有效页。VMA
+  若把 mmap 时的 file length 永久作为写回上限，会静默丢弃这些页。共享 VMA 应保存完整映射窗口，
+  写回时再以当前 EOF 裁剪，避免重扩展后来被截短的文件。
+- 后续影响：mmap 文件回归需包含“先映射短文件、后扩容、再写新增尾页”，仅测试固定长度映射不足。
+
 ## lwext4 的 superblock 与 inode 操作必须使用同一把全局锁
 
 - 状态：已确认并修复当前 BuildStorm linker 阻塞

@@ -4,15 +4,18 @@
 // 模型保持同一布局。
 pub const KERNEL_BASE: usize = 0xffff_ffc0_0000_0000;
 
-// 用户栈大小（每个用户程序）
-pub const USER_STACK_SIZE: usize = PAGE_SIZE << 7;
+// Reserve the conventional Linux-sized 8 MiB user stack.  The VMA is lazy,
+// so this is an address-space limit rather than an 8 MiB allocation per task.
+pub const USER_STACK_SIZE: usize = 8 * 1024 * 1024;
 
 // 内核栈设置
 pub const KERNEL_STACK_TOP: usize = 0xffff_ffff_ffff_f000;
 pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 8; // 32 KiB
 
 // 内核堆大小
-pub const KERNEL_HEAP_SIZE: usize = 48 * 1024 * 1024;
+// Keep enough metadata capacity for the official 12-vCPU compiler workload.
+// User frames and page-cache frames are not allocated from this fixed heap.
+pub const KERNEL_HEAP_SIZE: usize = 128 * 1024 * 1024;
 
 // 文件映射和匿名映射区域
 pub const MMAP_MIN_ADDR: usize = 0x0000_0020_0000_0000;

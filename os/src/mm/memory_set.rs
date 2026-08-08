@@ -63,16 +63,6 @@ struct SharedFilePageKey {
 
 const KERNEL_STACK_EAGER_SIZE: usize = KERNEL_STACK_SIZE;
 
-fn read_dynamic_linker(interp: &str) -> Option<Vec<u8>> {
-    if let Ok(file) = path_open(AT_FDCWD, interp, 0, 0) {
-        if let Ok(data) = file.read_all() {
-            info!("[from_elf_data] dynamic linker {} loaded", interp);
-            return Some(data);
-        }
-    }
-    None
-}
-
 fn read_file_at(file: Arc<dyn FileOp>, offset: usize, buf: &mut [u8]) -> SysResult<usize> {
     if let Some(file) = file.as_any().downcast_ref::<File>() {
         return file.read_at_offset(offset, buf);
@@ -115,6 +105,67 @@ fn read_file_exact_at(file: Arc<dyn FileOp>, offset: usize, buf: &mut [u8]) -> S
         done = done.checked_add(n).ok_or(Errno::EIO)?;
     }
     Ok(())
+}
+
+/// Read only the ELF64 header, program-header table, and PT_INTERP string.
+/// PT_LOAD contents stay in the filesystem and are faulted in page by page.
+fn read_elf_metadata(file: Arc<dyn FileOp>) -> SysResult<Vec<u8>> {
+    const ELF64_HEADER_SIZE: usize = 64;
+    const ELF64_PROGRAM_HEADER_SIZE: usize = 56;
+    const ELF_METADATA_LIMIT: usize = 1024 * 1024;
+
+    let file_size = file.get_stat()?.size;
+    if file_size < ELF64_HEADER_SIZE {
+        return Err(Errno::ENOEXEC);
+    }
+
+    let mut header = alloc::vec![0u8; ELF64_HEADER_SIZE];
+    read_file_exact_at(file.clone(), 0, &mut header)?;
+    if !header.starts_with(b"\x7fELF") || header[4] != 2 || header[5] != 1 {
+        return Err(Errno::ENOEXEC);
+    }
+    let ph_offset = usize::try_from(u64::from_le_bytes(
+        header[32..40].try_into().map_err(|_| Errno::ENOEXEC)?,
+    ))
+    .map_err(|_| Errno::ENOEXEC)?;
+    let ph_entry_size = u16::from_le_bytes([header[54], header[55]]) as usize;
+    let ph_count = u16::from_le_bytes([header[56], header[57]]) as usize;
+    if ph_entry_size != ELF64_PROGRAM_HEADER_SIZE || ph_count == 0 {
+        return Err(Errno::ENOEXEC);
+    }
+    let ph_end = ph_entry_size
+        .checked_mul(ph_count)
+        .and_then(|len| ph_offset.checked_add(len))
+        .filter(|end| *end <= file_size && *end <= ELF_METADATA_LIMIT)
+        .ok_or(Errno::ENOEXEC)?;
+
+    let mut metadata = alloc::vec![0u8; ph_end.max(ELF64_HEADER_SIZE)];
+    read_file_exact_at(file.clone(), 0, &mut metadata)?;
+    let header_elf = xmas_elf::ElfFile::new(&metadata).map_err(|_| Errno::ENOEXEC)?;
+    let mut metadata_len = metadata.len();
+    for i in 0..header_elf.header.pt2.ph_count() {
+        let ph = header_elf.program_header(i).map_err(|_| Errno::ENOEXEC)?;
+        if ph.get_type().map_err(|_| Errno::ENOEXEC)? == xmas_elf::program::Type::Interp {
+            metadata_len = metadata_len.max(
+                (ph.offset() as usize)
+                    .checked_add(ph.file_size() as usize)
+                    .filter(|end| *end <= file_size && *end <= ELF_METADATA_LIMIT)
+                    .ok_or(Errno::ENOEXEC)?,
+            );
+        }
+    }
+    if metadata_len > metadata.len() {
+        metadata.resize(metadata_len, 0);
+        read_file_exact_at(file, 0, &mut metadata)?;
+    }
+    Ok(metadata)
+}
+
+fn open_dynamic_linker(interp: &str) -> Option<(Vec<u8>, Arc<dyn FileOp>)> {
+    let file: Arc<dyn FileOp> = path_open(AT_FDCWD, interp, 0, 0).ok()?;
+    let metadata = read_elf_metadata(file.clone()).ok()?;
+    info!("[from_elf_data] dynamic linker {} opened", interp);
+    Some((metadata, file))
 }
 
 fn write_file_at(file: Arc<dyn FileOp>, offset: usize, buf: &[u8]) -> SysResult<usize> {
@@ -235,6 +286,80 @@ fn shared_file_frame(backing: &FileBacking, page_offset: usize) -> SysResult<Arc
     Ok(frame)
 }
 
+/// Keep regular file I/O coherent with resident MAP_SHARED frames. The file
+/// page cache and mmap frames currently use different storage objects, so a
+/// pwrite must also update any live shared frame before a later munmap writes
+/// that frame back as a whole page.
+pub(crate) fn update_shared_file_pages(dev: u64, ino: u64, offset: usize, data: &[u8]) {
+    let Some(end) = offset.checked_add(data.len()) else {
+        return;
+    };
+    let pages = SHARED_FILE_PAGES.lock();
+    let mut pos = offset;
+    while pos < end {
+        let page_index = pos / PAGE_SIZE;
+        let page_offset = pos % PAGE_SIZE;
+        let len = (end - pos).min(PAGE_SIZE - page_offset);
+        let key = SharedFilePageKey {
+            dev,
+            ino,
+            page_index,
+        };
+        if let Some(frame) = pages.get(&key).and_then(Weak::upgrade) {
+            let source_offset = pos - offset;
+            frame.ppn().get_bytes_array()[page_offset..page_offset + len]
+                .copy_from_slice(&data[source_offset..source_offset + len]);
+        }
+        pos += len;
+    }
+}
+
+/// Overlay resident MAP_SHARED contents on a regular read. User stores reach
+/// the shared frame directly and may not have been written back yet.
+pub(crate) fn overlay_shared_file_pages(dev: u64, ino: u64, offset: usize, data: &mut [u8]) {
+    let Some(end) = offset.checked_add(data.len()) else {
+        return;
+    };
+    let pages = SHARED_FILE_PAGES.lock();
+    let mut pos = offset;
+    while pos < end {
+        let page_index = pos / PAGE_SIZE;
+        let page_offset = pos % PAGE_SIZE;
+        let len = (end - pos).min(PAGE_SIZE - page_offset);
+        let key = SharedFilePageKey {
+            dev,
+            ino,
+            page_index,
+        };
+        if let Some(frame) = pages.get(&key).and_then(Weak::upgrade) {
+            let target_offset = pos - offset;
+            data[target_offset..target_offset + len]
+                .copy_from_slice(&frame.ppn().get_bytes_array()[page_offset..page_offset + len]);
+        }
+        pos += len;
+    }
+}
+
+/// Shrinking a file invalidates the truncated portion even for mappings that
+/// keep their frames alive. If the file is grown again, those bytes must read
+/// as zero rather than exposing the previous file contents.
+pub(crate) fn truncate_shared_file_pages(dev: u64, ino: u64, new_size: usize) {
+    let pages = SHARED_FILE_PAGES.lock();
+    for (key, frame) in pages.iter() {
+        if key.dev != dev || key.ino != ino {
+            continue;
+        }
+        let page_start = key.page_index.saturating_mul(PAGE_SIZE);
+        let clear_from = new_size.saturating_sub(page_start).min(PAGE_SIZE);
+        if clear_from == PAGE_SIZE {
+            continue;
+        }
+        if let Some(frame) = frame.upgrade() {
+            frame.ppn().get_bytes_array()[clear_from..].fill(0);
+        }
+    }
+}
+
 /// 地址空间
 ///
 /// 一系列有关联的逻辑段 [`MapArea`]，地址不一定连续
@@ -323,7 +448,13 @@ pub(crate) fn mmap_file_backing(
         Ok(MmapBacking::SharedFileFrames {
             file,
             offset,
-            len: file_len,
+            // Keep the whole mapped window as the writeback boundary.  A
+            // file may be enlarged with ftruncate after mmap (linkers do
+            // this for their output image), making pages beyond the mmap-time
+            // EOF valid.  writeback_file_pages still clips every snapshot to
+            // the current EOF, so this cannot re-extend a subsequently
+            // truncated file.
+            len: map_len,
             frames,
         })
     } else {
@@ -904,10 +1035,17 @@ impl MemorySet {
     /// 读写权限影响，适合用于 `mmap` 初始化只读文件页。
     /// 将字节数据写入用户地址空间中已映射的虚拟地址范围。
     ///
-    /// execve 初始化用户栈（argv/envp/auxv）时使用：新地址空间的用户栈页
-    /// 已在 MemorySet 中建立映射，通过页表翻译到物理页直接写入，避免依赖尚未设置的当前页表
+    /// execve 初始化用户栈（argv/envp/auxv）时使用。用户栈 VMA 是惰性映射，
+    /// 因此先在目标地址空间内补齐实际写到的页，再通过页表写入，避免依赖尚未
+    /// 设置为当前地址空间的页表。
     pub fn write_bytes_to_mapped_range(&mut self, start: usize, data: &[u8]) -> SysResult {
         let end = start.checked_add(data.len()).ok_or(Errno::EFAULT)?;
+        if start != end {
+            self.ensure_user_page_access(
+                VPNRange::new(VirtAddr::from(start).floor(), VirtAddr::from(end).ceil()),
+                MapPermission::WRITE,
+            )?;
+        }
         let mut copied = 0usize;
         let mut cur = start;
 
@@ -1871,57 +2009,7 @@ impl MemorySet {
     pub fn try_from_elf_file(
         file: Arc<dyn FileOp>,
     ) -> SysResult<(Self, usize, usize, usize, Vec<AuxHeader>)> {
-        const ELF64_HEADER_SIZE: usize = 64;
-        const ELF64_PROGRAM_HEADER_SIZE: usize = 56;
-        // The loader only needs headers plus the interpreter name.  Keep a
-        // hard bound so a malformed e_phoff/PT_INTERP cannot turn file-backed
-        // exec back into an unbounded kernel-heap allocation.
-        const ELF_METADATA_LIMIT: usize = 1024 * 1024;
-        let file_size = file.get_stat()?.size;
-        if file_size < ELF64_HEADER_SIZE {
-            return Err(Errno::ENOEXEC);
-        }
-
-        let mut header = alloc::vec![0u8; ELF64_HEADER_SIZE];
-        read_file_exact_at(file.clone(), 0, &mut header)?;
-        if !header.starts_with(b"\x7fELF") || header[4] != 2 || header[5] != 1 {
-            return Err(Errno::ENOEXEC);
-        }
-        let ph_offset = usize::try_from(u64::from_le_bytes(
-            header[32..40].try_into().map_err(|_| Errno::ENOEXEC)?,
-        ))
-        .map_err(|_| Errno::ENOEXEC)?;
-        let ph_entry_size = u16::from_le_bytes([header[54], header[55]]) as usize;
-        let ph_count = u16::from_le_bytes([header[56], header[57]]) as usize;
-        if ph_entry_size != ELF64_PROGRAM_HEADER_SIZE || ph_count == 0 {
-            return Err(Errno::ENOEXEC);
-        }
-        let ph_end = ph_entry_size
-            .checked_mul(ph_count)
-            .and_then(|len| ph_offset.checked_add(len))
-            .filter(|end| *end <= file_size && *end <= ELF_METADATA_LIMIT)
-            .ok_or(Errno::ENOEXEC)?;
-
-        let mut metadata = alloc::vec![0u8; ph_end.max(ELF64_HEADER_SIZE)];
-        read_file_exact_at(file.clone(), 0, &mut metadata)?;
-        let header_elf = xmas_elf::ElfFile::new(&metadata).map_err(|_| Errno::ENOEXEC)?;
-        let mut metadata_len = metadata.len();
-        for i in 0..header_elf.header.pt2.ph_count() {
-            let ph = header_elf.program_header(i).map_err(|_| Errno::ENOEXEC)?;
-            if ph.get_type().map_err(|_| Errno::ENOEXEC)? == xmas_elf::program::Type::Interp {
-                metadata_len = metadata_len.max(
-                    (ph.offset() as usize)
-                        .checked_add(ph.file_size() as usize)
-                        .filter(|end| *end <= file_size && *end <= ELF_METADATA_LIMIT)
-                        .ok_or(Errno::ENOEXEC)?,
-                );
-            }
-        }
-        if metadata_len > metadata.len() {
-            metadata.resize(metadata_len, 0);
-            read_file_exact_at(file.clone(), 0, &mut metadata)?;
-        }
-
+        let metadata = read_elf_metadata(file.clone())?;
         Self::try_from_elf_source(&metadata, Some(file))
     }
 
@@ -2048,9 +2136,11 @@ impl MemorySet {
 
         // —— 加载动态链接器 ——
         if let Some(ref interp) = interp_path {
-            let fs_interp_data = read_dynamic_linker(interp);
-            let interp_data = fs_interp_data
-                .as_deref()
+            let fs_interp = open_dynamic_linker(interp);
+            let interp_file = fs_interp.as_ref().map(|(_, file)| file.clone());
+            let interp_data = fs_interp
+                .as_ref()
+                .map(|(metadata, _)| metadata.as_slice())
                 .or_else(|| crate::loader::get_app_data_by_name(interp));
 
             if let Some(interp_data) = interp_data {
@@ -2088,14 +2178,35 @@ impl MemorySet {
                         let file_end = file_start
                             .checked_add(ph.file_size() as usize)
                             .ok_or(Errno::ENOEXEC)?;
-                        let file_data = interp_data
-                            .get(file_start..file_end)
-                            .ok_or(Errno::ENOEXEC)?;
-                        memory_set.try_push_empty_map_area(
-                            map_area,
-                            Some(file_data),
-                            data_offset,
-                        )?;
+                        if let Some(file) = interp_file.as_ref() {
+                            if file_end > file.get_stat()?.size {
+                                return Err(Errno::ENOEXEC);
+                            }
+                            let backing_offset =
+                                file_start.checked_sub(data_offset).ok_or(Errno::ENOEXEC)?;
+                            let backing_len = data_offset
+                                .checked_add(ph.file_size() as usize)
+                                .ok_or(Errno::ENOEXEC)?;
+                            memory_set.push_map_area_lazy(MapArea::new_file_backed(
+                                start_va,
+                                end_va,
+                                map_perm,
+                                false,
+                                false,
+                                file.clone(),
+                                backing_offset,
+                                backing_len,
+                            ));
+                        } else {
+                            let file_data = interp_data
+                                .get(file_start..file_end)
+                                .ok_or(Errno::ENOEXEC)?;
+                            memory_set.try_push_empty_map_area(
+                                map_area,
+                                Some(file_data),
+                                data_offset,
+                            )?;
+                        }
                     }
                 }
 
@@ -2168,17 +2279,14 @@ impl MemorySet {
         let mut user_stack_bottom = usize::from(max_va_end);
         user_stack_bottom += PAGE_SIZE; // 上移栈底，将空白页作为守护页，当栈溢出时将访问守护页而发生段错误
         let user_stack_top = user_stack_bottom + USER_STACK_SIZE;
-        // 映射栈段
-        memory_set.try_push_empty_map_area(
-            MapArea::new(
-                VirtAddr::from(user_stack_bottom),
-                VirtAddr::from(user_stack_top),
-                MapType::Framed,
-                MapPermission::READ | MapPermission::WRITE | MapPermission::USER,
-            ),
-            None,
-            0,
-        )?;
+        // 只预留栈 VMA；exec 参数页和运行时触及的页再按需分配。这样可以提供
+        // Linux 常见的 8 MiB 栈上限，而不为每次 exec 立即占用 8 MiB 物理内存。
+        memory_set.push_map_area_lazy(MapArea::new(
+            VirtAddr::from(user_stack_bottom),
+            VirtAddr::from(user_stack_top),
+            MapType::Framed,
+            MapPermission::READ | MapPermission::WRITE | MapPermission::USER,
+        ));
         // 动态程序的 brk 紧随主程序 LOAD 段，不能被高地址解释器抬高；
         // 栈仍放在解释器之后，因此两者之间有完整的增长空间。
         // 静态程序没有这一段地址间隔，继续把 brk 放在栈之后以避免重叠。
@@ -2420,10 +2528,11 @@ impl MemorySet {
         }
         let vpn = VirtAddr::from(stval).floor();
 
-        let area_idx = match self.areas.iter().position(|a| a.vpn_range.contain(&vpn)) {
-            Some(idx) => idx,
-            None => return Err(Errno::EFAULT),
-        };
+        let area_idx = self
+            .areas
+            .iter()
+            .position(|a| a.vpn_range.contain(&vpn))
+            .ok_or(Errno::EFAULT)?;
 
         let area_perm = self.areas[area_idx].map_perm;
         if !area_perm.contains(MapPermission::USER) {

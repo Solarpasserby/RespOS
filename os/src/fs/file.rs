@@ -16,6 +16,7 @@ use spin::Mutex;
 // 常规文件
 pub struct File {
     inode: Arc<dyn InodeOp>,
+    shared_page_identity: Option<(u64, u64)>,
     inner: Mutex<FileInner>,
 }
 
@@ -135,12 +136,17 @@ impl File {
         let abs_path = path.abs_path();
         let ty = inode.node_type();
         let page_cache = inode.get_page_cache();
+        let shared_page_identity = inode.stat(&abs_path).ok().map(|stat| (stat.dev, stat.ino));
         if flags.contains(OpenFlags::O_TRUNC)
             && flags.intersects(OpenFlags::O_WRONLY | OpenFlags::O_RDWR)
         {
-            let _ = inode.truncate(&abs_path, 0);
-            if let Some(ref pc) = page_cache {
-                pc.resize(0);
+            if inode.truncate(&abs_path, 0).is_ok() {
+                if let Some((dev, ino)) = shared_page_identity {
+                    crate::mm::truncate_shared_file_pages(dev, ino, 0);
+                }
+                if let Some(ref pc) = page_cache {
+                    pc.resize(0);
+                }
             }
         }
         let offset = if flags.contains(OpenFlags::O_APPEND) && ty == InodeType::Regular {
@@ -157,6 +163,7 @@ impl File {
         }
         Self {
             inode,
+            shared_page_identity,
             inner: Mutex::new(FileInner {
                 offset,
                 path,
@@ -184,6 +191,7 @@ impl File {
         let page_cache = Some(PageCache::new(0));
         Self {
             inode,
+            shared_page_identity: None,
             inner: Mutex::new(FileInner {
                 offset: 0,
                 path,
@@ -415,6 +423,11 @@ impl File {
                 }
             }
             pc.resize(size);
+            if size < old_size {
+                if let Some((dev, ino)) = self.shared_page_identity {
+                    crate::mm::truncate_shared_file_pages(dev, ino, size);
+                }
+            }
             if inner.write_back {
                 if size < old_size {
                     self.flush_page_cache_if_needed(&pc, &path, true)?;
@@ -455,6 +468,11 @@ impl File {
         } else {
             self.inode.read_at(&path, offset, buf)
         }?;
+        if n != 0 {
+            if let Some((dev, ino)) = self.shared_page_identity {
+                crate::mm::overlay_shared_file_pages(dev, ino, offset, &mut buf[..n]);
+            }
+        }
         if let Some(atime) = self.touch_atime_if_needed(&file_path, ty)? {
             self.inner.lock().atime_override = Some(atime);
         }
@@ -486,6 +504,11 @@ impl File {
         if let Some(pc) = page_cache {
             let lower = write_back.then_some((&self.inode, path.as_str()));
             let n = pc.write_at(offset, buf, lower)?;
+            if n != 0 {
+                if let Some((dev, ino)) = self.shared_page_identity {
+                    crate::mm::update_shared_file_pages(dev, ino, offset, &buf[..n]);
+                }
+            }
             let end = offset.checked_add(n).ok_or(Errno::EINVAL)?;
             if end > pc.len() {
                 pc.resize(end);
@@ -606,6 +629,11 @@ impl FileOp for File {
         } else {
             self.inode.read_at(&path, offset, buf)?
         };
+        if n != 0 {
+            if let Some((dev, ino)) = self.shared_page_identity {
+                crate::mm::overlay_shared_file_pages(dev, ino, offset, &mut buf[..n]);
+            }
+        }
         inner.offset += n;
         drop(inner);
         if let Some(atime) = self.touch_atime_if_needed(&file_path, ty)? {
@@ -640,6 +668,11 @@ impl FileOp for File {
         let n = if let Some(pc) = inner.page_cache.clone() {
             let lower = inner.write_back.then_some((&self.inode, path.as_str()));
             let n = pc.write_at(offset, buf, lower)?;
+            if n != 0 {
+                if let Some((dev, ino)) = self.shared_page_identity {
+                    crate::mm::update_shared_file_pages(dev, ino, offset, &buf[..n]);
+                }
+            }
             let end = offset.checked_add(n).ok_or(Errno::EINVAL)?;
             if end > pc.len() {
                 pc.resize(end);
