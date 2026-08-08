@@ -1,5 +1,27 @@
 # RespOS 已确认易错点
 
+## lwext4 的 superblock 与 inode 操作必须使用同一把全局锁
+
+- 状态：已确认并修复当前 BuildStorm linker 阻塞
+- 适用范围：SMP 下所有 lwext4 C API，包括文件/目录操作、sync、statfs 和 shutdown
+- 最后验证：2026-08-08；RV64 8 核官方 BuildStorm
+- 证据：`os/src/fs/ext4/{inode.rs,super_block.rs}`；修复前 PC 长期位于
+  `ext4_dir_write_entry` 的断言路径，修复后 `ld.bfd` 完成且 collect2/gcc/rustc/cargo 正常退出
+- 内容：lwext4 的 mount、block cache 与目录遍历状态位于共享 C 对象中。只串行 inode 操作而让
+  superblock flush/statfs/shutdown 并发进入，会破坏其内部状态；增加另一把锁也不能建立正确互斥。
+- 后续影响：任何新增 lwext4 入口必须复用 `EXT4_OP_LOCK`，不能按 Rust 模块各建一把锁。
+
+## UNIX stream socket 必须显式传播 peer close
+
+- 状态：已确认并修复当前 cargo/rustc 退出阻塞
+- 适用范围：`socketpair(AF_UNIX, SOCK_STREAM)`、connect/accept、read/write/poll
+- 最后验证：2026-08-08；RV64 8 核官方 BuildStorm
+- 证据：`os/src/net/socket.rs`；修复前 cargo 永久等 `recvfrom`，修复后 linker 及完整编译子进程退出
+- 内容：仅靠接收队列是否为空无法区分“暂时无数据”和“对端已经关闭”。端点必须共享 close 状态；
+  peer close 后 read 先排空已有数据再返回 0，write 返回 `EPIPE`，poll 同时报告相应 readiness。
+- 后续影响：修改 UNIX socket clone/drop/connect/pair 时需一起审查端点引用和 close 状态，不能只修
+  阻塞 read 分支，否则 poll 或 write 会继续产生不一致行为。
+
 ## RV64 `sret` 前不能提前恢复 SIE 或 user trap vector
 
 - 状态：已确认并修复

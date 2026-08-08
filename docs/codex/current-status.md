@@ -2,6 +2,34 @@
 
 本文件是快速变化的状态页。更新测试结论时必须同时更新日期、提交和命令。
 
+## 2026-08-08 BuildStorm 已越过 ld/cargo 管道阻塞（未提交，minibuild 执行仍失败）
+
+- **基线/配置**：`dev` HEAD `b785262`；`make build-rv RV_USER_FEATURES=`，随后以
+  `qemu-system-riscv64 -machine virt -kernel kernel-rv -m 8G -nographic -smp 8 -bios default
+  -drive file=img/sdcard-rv-pub.img,if=none,format=raw,id=x0
+  -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 -no-reboot -snapshot` 启动，guest 执行
+  `/glibc/buildstorm_testcode.sh`。原有两份未跟踪文档未修改。
+- **本轮已确认修复**：futex compare/requeue 在持队列锁前预取用户值，锁内使用 nofault 读取；
+  `CLONE_VM` task 共享内层地址空间但各自持有可替换 handle，exec 不再覆盖 vfork/clone parent 的
+  `MemorySet`；用户非法指令改为投递 `SIGILL`；所有 lwext4 入口（含 superblock sync/statfs/shutdown）
+  统一串行化；UNIX socket 端点共享 close 状态，peer close 后 read 在排空队列后返回 EOF、write 返回
+  `EPIPE`，poll readiness 与之保持一致。
+- **运行证据**：官方脚本稳定打印 `BUILDSTORM_TOOLCHAIN ok`；`ld.bfd` 已能完成，collect2/gcc/rustc/
+  cargo 均退出，说明先前 lwext4 并发断言循环和 UNIX socket `recvfrom` 永久等待均已越过。随后生成
+  `/tmp/minibuild/target/debug/minibuild`，但首次执行在 `sepc=0x4293f0`、`stval=0x9` 发生 load fault，
+  脚本打印 `BUILDSTORM_MINIBUILD fail`，因此不能宣称题目通过。
+- **文件一致性证据**：针对 linker tgid 83 的临时 syscall trace（已移除）确认输出 fd 4 在
+  `0x40c370` 连续写入 `0x800 + 0x1c0 = 0x9c0` 字节，恰为 ELF 的 39 个 64-byte section headers，
+  所有 write 均返回完整长度且最终 close 成功；但重新打开时该区间为零。根因已缩小到“新建/重命名
+  普通文件的 synthetic inode 与后续 lookup 所见页缓存不一致，或最终写回生命周期”一层，仍标记
+  **待验证**。强制 close 同步和直接改用真实 inode 都造成 linker 长时间同步/写入，已回退，不属于
+  当前工作树。
+- **当前门禁**：`cargo fmt --manifest-path os/Cargo.toml -- --check` 与 `git diff --check` 通过；
+  `make build-rv RV_USER_FEATURES=` 通过（仅既有 target-feature warning）。最后一次无高频 syscall trace
+  的真实-inode实验在 `ld.bfd` 阶段超过 3 分钟无输出后主动终止并回退，不能计为验证结果。当前无
+  QEMU 残留；下一步应设计“真实 inode 号到共享 PageCache”的独立映射或专项 create/rename/reopen
+  probe，避免在 close 路径同步整份文件。
+
 ## 2026-08-07 补充：quiescence 协议与诊断 trace（未提交，minibuild 仍待下一轮运行）
 
 - **基线/配置**：`dev` HEAD `17dcd4e`，基于上一节 pipe/wait/ARG_MAX 修复后的工作树。

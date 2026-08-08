@@ -132,8 +132,14 @@ pub fn trap_handler(cx: &mut TrapContext) {
                 instruction,
                 stval
             );
-            // 非法指令退出码
-            exit_and_run_next(-3);
+            // IllegalInstruction is a synchronous user exception.  Deliver
+            // SIGILL to the faulting thread so an installed handler can
+            // inspect/recover from it; the normal signal path applies the
+            // process-wide default Core action when no handler is installed.
+            // Killing only this thread strands pthread joiners and differs
+            // from Linux fatal-signal semantics.
+            let siginfo = SigInfo::new(Sig::SIGILL.raw(), SigInfo::KERNEL, SiField::None);
+            task.receive_siginfo(siginfo, true);
         }
         Trap::Exception(Exception::Breakpoint) => {
             println!(

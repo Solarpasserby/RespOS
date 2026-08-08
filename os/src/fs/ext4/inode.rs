@@ -20,7 +20,10 @@ use crate::timer::{TimeSpec, get_time_ms};
 lazy_static! {
     static ref EXT4_INODE_CACHE: Mutex<HashMap<u64, Weak<dyn InodeOp>>> =
         Mutex::new(HashMap::new());
-    static ref EXT4_OP_LOCK: Mutex<()> = Mutex::new(());
+    /// lwext4 keeps mount, block-cache, and directory traversal state in
+    /// shared C objects.  Every entry into lwext4, including superblock
+    /// operations, must be serialized by this one lock on SMP.
+    pub(super) static ref EXT4_OP_LOCK: Mutex<()> = Mutex::new(());
 }
 
 const CREATED_INODE_BASE: u64 = 1 << 62;

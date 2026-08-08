@@ -259,9 +259,14 @@ fn futex_wait_common(
     let key = futex_key(uaddr, private)?;
     let hash_idx = futex_hash_idx(&key);
 
+    // Resolve lazy/COW mappings before entering the global queue critical
+    // section.  The value is read again under FUTEX_QUEUES below so the
+    // compare-and-enqueue operation remains atomic with respect to wakeups.
+    check_user_readable(uaddr as *const u32, 1)?;
+
     {
         let mut queues = FUTEX_QUEUES.lock();
-        let actual_val = read_futex_value(uaddr)?;
+        let actual_val = read_user_u32_nofault(uaddr as *const u32)?;
         if actual_val != expected_val {
             trace_futex("wait-eagain", &key, expected_val, actual_val as usize);
             return Err(Errno::EAGAIN);
@@ -482,7 +487,10 @@ fn futex_wait_timed_common(
 
         {
             let mut queues = FUTEX_QUEUES.lock();
-            let actual_val = read_futex_value(uaddr)?;
+            // The faulting read above resolved the mapping.  Do not call
+            // copy_from_user while holding FUTEX_QUEUES: that needs the
+            // MemorySet write lock and can deadlock against another hart.
+            let actual_val = read_user_u32_nofault(uaddr as *const u32)?;
             if actual_val != expected_val {
                 trace_futex(
                     "wait-timed-changed",

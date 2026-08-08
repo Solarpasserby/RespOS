@@ -10,7 +10,7 @@ use crate::config::CLK_TCK;
 use crate::fs::mount::init_root_fs;
 use crate::fs::{FdEntry, FdTable, FileOp, Path};
 use crate::mm::{MemorySet, copy_from_user, copy_to_user, writeback_file_pages};
-use crate::mutex::SpinLock;
+use crate::mutex::{SpinLock, SpinNoIrqLock};
 use crate::signal::sig_handler::{ActionType, SigHandler};
 use crate::signal::sig_info::SigInfo;
 use crate::signal::sig_stack::{SS_DISABLE, SignalStack};
@@ -397,7 +397,10 @@ pub struct TaskControlBlock {
     // task_context: TaskContext, // 注意任务上下文的处理
 
     // 内存管理
-    memory_set: Arc<RwLock<MemorySet>>,
+    // Each task owns a replaceable handle to an address space. CLONE_VM copies
+    // the inner Arc, but exec replaces only the caller's handle instead of
+    // overwriting the MemorySet still used by its vfork/clone parent.
+    memory_set: SpinNoIrqLock<Arc<RwLock<MemorySet>>>,
 
     // 文件系统
     fd_table: SpinLock<Arc<FdTable>>,
@@ -479,7 +482,7 @@ impl TaskControlBlock {
             // task_context: TaskContext, // 注意任务上下文的处理
 
             // 内存管理
-            memory_set: Arc::new(RwLock::new(MemorySet::new())),
+            memory_set: SpinNoIrqLock::new(Arc::new(RwLock::new(MemorySet::new()))),
 
             // 文件系统
             fd_table: SpinLock::new(FdTable::new()),
@@ -571,7 +574,7 @@ impl TaskControlBlock {
             wait_event_status: AtomicI32::new(0),
 
             // 内存管理
-            memory_set: Arc::new(RwLock::new(memory_set)),
+            memory_set: SpinNoIrqLock::new(Arc::new(RwLock::new(memory_set))),
 
             // 文件系统
             fd_table: SpinLock::new(FdTable::new()),
@@ -699,11 +702,12 @@ impl TaskControlBlock {
         };
 
         // 是否与父线程共享地址空间
+        let parent_memory_set = self.memory_set_arc();
         let memory_set = if flags.share_user_vm() {
-            self.memory_set.clone()
+            parent_memory_set
         } else {
             Arc::new(RwLock::new(MemorySet::from_existed_user(
-                &mut self.memory_set.write(),
+                &mut parent_memory_set.write(),
             )?))
         };
 
@@ -780,7 +784,7 @@ impl TaskControlBlock {
             wait_event_status: AtomicI32::new(0),
 
             // 内存管理
-            memory_set,
+            memory_set: SpinNoIrqLock::new(memory_set),
 
             // 文件系统
             fd_table: SpinLock::new(fd_table),
@@ -897,14 +901,16 @@ impl TaskControlBlock {
         self.close_other_threads_for_exec();
 
         /* ===== 修改地址空间 ===== */
-        let mut memory_set_guard = self.memory_set.write();
-        let old_memory_set = core::mem::replace(&mut *memory_set_guard, memory_set);
+        let new_memory_set = Arc::new(RwLock::new(memory_set));
+        let old_memory_set = {
+            let mut memory_set_handle = self.memory_set.lock();
+            core::mem::replace(&mut *memory_set_handle, new_memory_set.clone())
+        };
         // 刷新页表，由于应用程序通过异常进入，在异常返回时不会刷新页表
         // 为了程序返回后看到的地址空间为自身而非父任务的地址空间，需要主动刷新页表
-        memory_set_guard.activate();
-        old_memory_set.clear_current_hart_active();
+        new_memory_set.read().activate();
+        old_memory_set.read().clear_current_hart_active();
         drop(old_memory_set);
-        drop(memory_set_guard);
 
         /* ===== 修改异常上下文 ===== */
         let argc = args.len();
@@ -1118,17 +1124,17 @@ impl TaskControlBlock {
     }
     /// 获取用户任务页表的页表基址寄存器值
     pub fn get_user_token(&self) -> usize {
-        self.memory_set.read().token()
+        self.memory_set_arc().read().token()
     }
 
     /// 在恢复本任务 context 前发布当前 hart 正在使用其地址空间。
     pub fn mark_memory_set_current_hart_active(&self) {
-        self.memory_set.read().mark_current_hart_active();
+        self.memory_set_arc().read().mark_current_hart_active();
     }
 
     /// 只可在本 hart 已经切回 idle/kernel 页表后调用。
     pub fn clear_memory_set_current_hart_active(&self) {
-        self.memory_set.read().clear_current_hart_active();
+        self.memory_set_arc().read().clear_current_hart_active();
     }
     // 任务状态判断
     pub fn is_running(&self) -> bool {
@@ -1443,11 +1449,17 @@ impl TaskControlBlock {
     }
 
     /* ======= 操作内部数据 ====== */
+    fn memory_set_arc(&self) -> Arc<RwLock<MemorySet>> {
+        self.memory_set.lock().clone()
+    }
+
     pub fn op_memory_set_read<T>(&self, f: impl FnOnce(&MemorySet) -> T) -> T {
-        f(&self.memory_set.read())
+        let memory_set = self.memory_set_arc();
+        f(&memory_set.read())
     }
     pub fn op_memory_set_write<T>(&self, f: impl FnOnce(&mut MemorySet) -> T) -> T {
-        f(&mut self.memory_set.write())
+        let memory_set = self.memory_set_arc();
+        f(&mut memory_set.write())
     }
     pub fn op_parent<T>(&self, f: impl FnOnce(&Option<Weak<TaskControlBlock>>) -> T) -> T {
         f(&self.parent.lock())
@@ -2184,11 +2196,14 @@ fn exit_process_group(task: Arc<TaskControlBlock>, cause: ExitCause) {
     // Arc counts include one resource owner per TCB. Distinguish references
     // held by this thread group from a separate CLONE_VM/CLONE_FILES process:
     // group exit may tear down the former, but must preserve the latter.
+    let task_memory_set = task.memory_set_arc();
     let memory_set_group_owners = threads
         .iter()
-        .filter(|thread| Arc::ptr_eq(&thread.memory_set, &task.memory_set))
+        .filter(|thread| Arc::ptr_eq(&thread.memory_set_arc(), &task_memory_set))
         .count();
-    let memory_set_owned_by_group = Arc::strong_count(&task.memory_set) <= memory_set_group_owners;
+    // task_memory_set itself contributes one temporary reference here.
+    let memory_set_owned_by_group =
+        Arc::strong_count(&task_memory_set) <= memory_set_group_owners + 1;
 
     let fd_table_ptr = {
         let fd_table = task.fd_table.lock();

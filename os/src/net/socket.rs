@@ -74,6 +74,8 @@ enum SocketInner {
 struct UnixSocket {
     rx: Arc<SpinLock<VecDeque<u8>>>,
     peer_rx: SpinLock<Option<Arc<SpinLock<VecDeque<u8>>>>>,
+    closed: Arc<AtomicBool>,
+    peer_closed: SpinLock<Option<Arc<AtomicBool>>>,
     bound_key: Mutex<Option<String>>,
     listener: SpinLock<Option<Arc<UnixListener>>>,
     nonblock: AtomicBool,
@@ -96,6 +98,8 @@ impl UnixSocket {
         Self {
             rx: Arc::new(SpinLock::new(VecDeque::new())),
             peer_rx: SpinLock::new(None),
+            closed: Arc::new(AtomicBool::new(false)),
+            peer_closed: SpinLock::new(None),
             bound_key: Mutex::new(None),
             listener: SpinLock::new(None),
             nonblock: AtomicBool::new(false),
@@ -107,6 +111,8 @@ impl UnixSocket {
         let right = Self::new();
         *left.peer_rx.lock() = Some(right.rx.clone());
         *right.peer_rx.lock() = Some(left.rx.clone());
+        *left.peer_closed.lock() = Some(right.closed.clone());
+        *right.peer_closed.lock() = Some(left.closed.clone());
         (left, right)
     }
 
@@ -164,6 +170,7 @@ impl UnixSocket {
         if self.peer_rx.lock().is_none() {
             return Err(Errno::ENOTCONN);
         }
+        let peer_closed = self.peer_closed.lock().clone().ok_or(Errno::ENOTCONN)?;
         loop {
             let mut rx = self.rx.lock();
             if !rx.is_empty() {
@@ -178,6 +185,11 @@ impl UnixSocket {
                 return Ok(read_len);
             }
             drop(rx);
+            // A stream socket reports EOF once the last reference to the peer
+            // endpoint is closed and all bytes already sent have been drained.
+            if peer_closed.load(Ordering::Acquire) {
+                return Ok(0);
+            }
             self.wait_interruptible()?;
         }
     }
@@ -187,7 +199,11 @@ impl UnixSocket {
             return Ok(0);
         }
         let peer_rx = self.peer_rx.lock().clone().ok_or(Errno::ENOTCONN)?;
+        let peer_closed = self.peer_closed.lock().clone().ok_or(Errno::ENOTCONN)?;
         loop {
+            if peer_closed.load(Ordering::Acquire) {
+                return Err(Errno::EPIPE);
+            }
             let mut rx = peer_rx.lock();
             let available = UNIX_SOCKET_BUFFER_LIMIT.saturating_sub(rx.len());
             if available > 0 {
@@ -202,6 +218,11 @@ impl UnixSocket {
 
     fn read_ready(&self) -> bool {
         !self.rx.lock().is_empty()
+            || self
+                .peer_closed
+                .lock()
+                .as_ref()
+                .is_some_and(|closed| closed.load(Ordering::Acquire))
     }
 
     fn write_ready(&self) -> bool {
@@ -209,6 +230,11 @@ impl UnixSocket {
             .lock()
             .as_ref()
             .is_some_and(|rx| rx.lock().len() < UNIX_SOCKET_BUFFER_LIMIT)
+            && !self
+                .peer_closed
+                .lock()
+                .as_ref()
+                .is_some_and(|closed| closed.load(Ordering::Acquire))
     }
 
     fn listen(&self) -> SysResult {
@@ -237,10 +263,13 @@ impl UnixSocket {
         let server = UnixSocket::new();
         *server.peer_rx.lock() = Some(self.rx.clone());
         *self.peer_rx.lock() = Some(server.rx.clone());
+        *server.peer_closed.lock() = Some(self.closed.clone());
+        *self.peer_closed.lock() = Some(server.closed.clone());
 
         let mut pending = listener.pending.lock();
         if pending.len() >= UNIX_LISTEN_QUEUE_LIMIT {
             *self.peer_rx.lock() = None;
+            *self.peer_closed.lock() = None;
             return Err(Errno::EAGAIN);
         }
         pending.push_back(server);
@@ -273,6 +302,7 @@ impl UnixSocket {
 
 impl Drop for UnixSocket {
     fn drop(&mut self) {
+        self.closed.store(true, Ordering::Release);
         self.close();
     }
 }
