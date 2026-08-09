@@ -14,7 +14,9 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use lazy_static::lazy_static;
 
+#[cfg(feature = "debug_traces")]
 const FUTEX_TRACE: bool = false;
+#[cfg(feature = "debug_traces")]
 const FUTEX_EXIT_TRACE: bool = option_env!("TASK_A_FUTEX_EXIT_TRACE").is_some();
 const FUTEX_CMP_REQUEUE_TEST_YIELD: bool =
     option_env!("TASK_A_FUTEX_CMP_REQUEUE_TEST_YIELD").is_some();
@@ -229,20 +231,25 @@ fn futex_key(uaddr: usize, private: bool) -> SysResult<FutexKey> {
 }
 
 fn trace_futex(op: &str, key: &FutexKey, val: u32, extra: usize) {
-    if FUTEX_TRACE {
-        if let Some(task) = current_task() {
-            println!(
-                "[futex-trace] op={} tid={} tgid={} scope={} uaddr={:#x} val={} extra={}",
-                op,
-                task.tid(),
-                task.tgid(),
-                key.scope,
-                key.uaddr,
-                val,
-                extra
-            );
+    #[cfg(feature = "debug_traces")]
+    {
+        if FUTEX_TRACE {
+            if let Some(task) = current_task() {
+                println!(
+                    "[futex-trace] op={} tid={} tgid={} scope={} uaddr={:#x} val={} extra={}",
+                    op,
+                    task.tid(),
+                    task.tgid(),
+                    key.scope,
+                    key.uaddr,
+                    val,
+                    extra
+                );
+            }
         }
     }
+    #[cfg(not(feature = "debug_traces"))]
+    let _ = (op, key, val, extra);
 }
 
 fn futex_wait_common(
@@ -408,12 +415,17 @@ pub fn remove_futex_waiter(tid: usize) {
     let mut queues = FUTEX_QUEUES.lock();
     let removed_queue = queues.remove_tid(tid);
     let (removed_wait, removed_deadline) = FUTEX_WAITS.lock().cancel(tid);
-    if FUTEX_EXIT_TRACE && (removed_queue != 0 || removed_wait) {
-        println!(
-            "[futex-exit-trace] tid={} queue={} wait={} deadline={}",
-            tid, removed_queue, removed_wait, removed_deadline
-        );
+    #[cfg(feature = "debug_traces")]
+    {
+        if FUTEX_EXIT_TRACE && (removed_queue != 0 || removed_wait) {
+            println!(
+                "[futex-exit-trace] tid={} queue={} wait={} deadline={}",
+                tid, removed_queue, removed_wait, removed_deadline
+            );
+        }
     }
+    #[cfg(not(feature = "debug_traces"))]
+    let _ = (removed_queue, removed_wait, removed_deadline);
 }
 
 fn futex_deadline_us(

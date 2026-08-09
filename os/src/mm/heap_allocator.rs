@@ -64,12 +64,21 @@ impl<const ORDER: usize> DerefMut for IrqSafeHeapGuard<'_, ORDER> {
 unsafe impl<const ORDER: usize> GlobalAlloc for IrqSafeHeap<ORDER> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let _irq_guard = InterruptGuard::new();
-        unsafe { GlobalAlloc::alloc(&self.0, layout) }
+        let started = crate::perf::now_ticks();
+        let result = unsafe { GlobalAlloc::alloc(&self.0, layout) };
+        crate::perf::heap_alloc(
+            layout.size(),
+            crate::perf::elapsed_since(started),
+            !result.is_null(),
+        );
+        result
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         let _irq_guard = InterruptGuard::new();
+        let started = crate::perf::now_ticks();
         unsafe { GlobalAlloc::dealloc(&self.0, ptr, layout) }
+        crate::perf::heap_dealloc(layout.size(), crate::perf::elapsed_since(started));
     }
 }
 

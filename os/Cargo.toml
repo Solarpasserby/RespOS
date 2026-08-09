@@ -6,6 +6,8 @@ edition = "2024"
 [features]
 log = []
 verbose_boot = []
+perf_counters = []
+debug_traces = []
 
 [[bin]]
 name = "os"

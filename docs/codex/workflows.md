@@ -271,6 +271,36 @@ git diff --check
 
 ## 决赛 BuildStorm 分层验证
 
+### BuildStorm 性能计数器
+
+2026-08-09 起可构建带低量原子计数的诊断 kernel；正式成绩对照仍应再跑一轮无 feature 内核：
+
+```bash
+make build-rv RV_USER_FEATURES= RV_KERNEL_FEATURES=perf_counters
+# guest 中在目标计时区间开始前清零，结束后读取
+/bin/busybox echo reset > /proc/respos_perf
+cat /proc/respos_perf
+```
+
+LA64 对应使用 `LA_USER_FEATURES=` 和 `LA_KERNEL_FEATURES=perf_counters`。输出中的 `ticks` 使用同一行
+`clock_hz` 换算；block 平均请求大小可由 bytes/requests 计算。读取 proc 文件本身会产生少量 task、
+heap 和文件关闭活动，因此分析大工作负载时忽略最后一次读取造成的常数扰动。未带 feature 的 kernel
+仍保留该 proc 路径，但只输出 `enabled=0`。
+
+历史进程/退出/pipe/timer/futex 详细串口输出由独立的 `debug_traces` feature 控制。它会显著扰动
+QEMU wall time，不得用于正式成绩或性能计数对照：
+
+```bash
+# 只打开详细串口 trace
+make build-rv RV_USER_FEATURES= RV_KERNEL_FEATURES=debug_traces
+
+# 必要时同时打开聚合计数和详细 trace；仅用于定位正确性/活性问题
+make build-rv RV_USER_FEATURES= RV_KERNEL_FEATURES='perf_counters debug_traces'
+
+# 正式计时必须保持两个 feature 都关闭
+make build-rv RV_USER_FEATURES= RV_KERNEL_FEATURES=
+```
+
 2026-08-08 比赛官方群公告的新决赛参数为：RV64 `-m 16G -smp 8`，LA64
 `-m 36G -smp 12`，整轮超时 6250 秒。评测宿主是 128 GiB、40 线程的 VMware Guest；公告给出的
 Linux 最好成绩为 RV64 4655.23 秒、LA64 6223.00 秒。这些是外部公告口径，本地取得更新后的镜像后

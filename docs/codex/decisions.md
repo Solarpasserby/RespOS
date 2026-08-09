@@ -3,6 +3,45 @@
 这里只收录能解释当前代码形态或避免重复踩坑的决策。日期是当前证据最后核验时间，不一定是
 最初提出时间。
 
+## 普通 close 不执行全文件系统持久化屏障
+
+- 状态：已采用，完整 BuildStorm 计时待验证
+- 适用范围：普通文件 close、PageCache writeback、fsync/sync、ext4 shutdown
+- 最后验证：2026-08-09
+- 证据：`os/src/fs/file.rs`、`os/src/fs/ext4/super_block.rs`；RV64 8 核
+  `buildstorm_file_probe` 与 `/proc/respos_perf`
+- 内容：普通 `close(2)` 不等价于 `fsync(2)`，不得在每个 `File::drop()` 中调用
+  `ext4_cache_flush("/")` 或 block-device FLUSH。当前 inode cache 仍以 weak reference 为主，因此
+  close 会把该文件现有脏页提交给 lwext4，避免最后 inode/PageCache 消失时丢数据；全文件系统和
+  设备持久化只由显式 fsync/sync 及正常卸载触发。
+- 后续影响：若改为强引用 inode/page cache 和后台 writeback，可进一步取消 close 数据写回；在此之前
+  不能以性能为由直接丢弃脏页。崩溃一致性和正常 shutdown 的 virtio FLUSH 门禁保持不变。
+
+## lwext4 连续对齐块使用 multi-block VirtIO 请求
+
+- 状态：已采用，完整 BuildStorm 计时待验证
+- 适用范围：lwext4 `KernelDevOp` 到 `BlockDevice` 的读写
+- 最后验证：2026-08-09
+- 证据：`os/src/drivers/disk.rs`、`os/src/drivers/virtio/block_dev.rs`；RV64 8 核
+  `buildstorm_file_probe`
+- 内容：对齐且连续的 512-byte blocks 合并为一次 `read_blocks`/`write_blocks` 调用；只有非对齐
+  头尾继续单块读取或 read-modify-write。块层计数记录实际 VirtIO 请求数和字节数。
+- 后续影响：不得为了继续合并而跨越非连续 LBA 或跳过 partial-block 保留内容；异步队列和多队列属于
+  后续独立优化。
+
+## 高频诊断设施必须由 kernel feature 静态隔离
+
+- 状态：已采用
+- 适用范围：BuildStorm 性能计数器、进程/退出/pipe/futex/timer 等详细串口 trace
+- 最后验证：2026-08-09
+- 证据：`os/src/perf.rs`、`os/src/console.rs`、`os/Cargo.toml`；RV64/LA64 feature 组合构建及
+  RV64 `/proc/respos_perf`/trace 烟测
+- 内容：聚合原子计数只由 `perf_counters` 启用，高频串口路径只由 `debug_traces` 启用；正式计时两者
+  均关闭。业务调用统一使用编译为空操作的计数函数和 `debug_trace!`，不得在热点中以运行时布尔值
+  保留格式化、timer 采样或原子更新成本。
+- 后续影响：临时定位问题时优先扩展现有门控和 proc 汇总，不再新增无条件串口输出或平行计数框架；
+  panic、启动和不可恢复错误输出不属于该高频诊断边界。
+
 ## 共享高半区内核模型
 
 - 状态：已确认

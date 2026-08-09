@@ -48,9 +48,10 @@ impl PollWaiters {
             tids
         };
         if !tids.is_empty() {
-            println!(
+            debug_trace!(
                 "[pipelifetrace] poll-notify events={:#x} tids={:?}",
-                events, tids
+                events,
+                tids
             );
         }
         for tid in tids {

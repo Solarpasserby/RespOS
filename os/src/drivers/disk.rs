@@ -40,79 +40,39 @@ impl Disk {
         self.offset = pos % BLOCK_SIZE;
     }
 
-    /// 读取单个块数据，返回读取的字节数
-    pub fn read_one(&mut self, buf: &mut [u8]) -> DevResult<usize> {
-        let read_size = if self.offset == 0 && buf.len() >= BLOCK_SIZE {
-            // 读取完整的块
-            self.dev
-                .read_block(self.block_id, &mut buf[0..BLOCK_SIZE])?;
+    /// Read the partial head or tail left around an aligned batched request.
+    fn read_partial(&mut self, buf: &mut [u8]) -> DevResult<usize> {
+        debug_assert!(self.offset != 0 || buf.len() < BLOCK_SIZE);
+        let mut data = [0u8; BLOCK_SIZE];
+        let start = self.offset;
+        let count = buf.len().min(BLOCK_SIZE - self.offset);
+
+        self.dev.read_block(self.block_id, &mut data)?;
+        buf[..count].copy_from_slice(&data[start..start + count]);
+        self.advance(count);
+        Ok(count)
+    }
+
+    /// Write the partial head or tail left around an aligned batched request.
+    fn write_partial(&mut self, buf: &[u8]) -> DevResult<usize> {
+        debug_assert!(self.offset != 0 || buf.len() < BLOCK_SIZE);
+        let mut data = [0u8; BLOCK_SIZE];
+        let start = self.offset;
+        let count = buf.len().min(BLOCK_SIZE - self.offset);
+
+        self.dev.read_block(self.block_id, &mut data)?;
+        data[start..start + count].copy_from_slice(&buf[..count]);
+        self.dev.write_block(self.block_id, &data)?;
+        self.advance(count);
+        Ok(count)
+    }
+
+    fn advance(&mut self, count: usize) {
+        self.offset += count;
+        if self.offset == BLOCK_SIZE {
             self.block_id += 1;
-            BLOCK_SIZE
-        } else {
-            // 读取局部的块
-            let mut data = [0u8; BLOCK_SIZE];
-            let start = self.offset;
-            let count = buf.len().min(BLOCK_SIZE - self.offset);
-            // if start > BLOCK_SIZE { info!("block size: {} start {}", BLOCK_SIZE, start); }
-
-            self.dev.read_block(self.block_id, &mut data)?;
-            buf[..count].copy_from_slice(&data[start..start + count]);
-
-            self.offset += count;
-            if self.offset >= BLOCK_SIZE {
-                self.block_id += 1;
-                self.offset -= BLOCK_SIZE;
-            }
-            count
-        };
-        Ok(read_size)
-    }
-
-    /// 写入单个块数据，返回写入的字节数
-    pub fn write_one(&mut self, buf: &[u8]) -> DevResult<usize> {
-        let write_size = if self.offset == 0 && buf.len() >= BLOCK_SIZE {
-            // whole block
-            self.dev.write_block(self.block_id, &buf[0..BLOCK_SIZE])?;
-            self.block_id += 1;
-            BLOCK_SIZE
-        } else {
-            // partial block
-            let mut data = [0u8; BLOCK_SIZE];
-            let start = self.offset;
-            let count = buf.len().min(BLOCK_SIZE - self.offset);
-
-            self.dev.read_block(self.block_id, &mut data)?;
-            data[start..start + count].copy_from_slice(&buf[..count]);
-            self.dev.write_block(self.block_id, &data)?;
-
-            self.offset += count;
-            if self.offset >= BLOCK_SIZE {
-                self.block_id += 1;
-                self.offset -= BLOCK_SIZE;
-            }
-            count
-        };
-        Ok(write_size)
-    }
-
-    /// 依据总偏移读取对应块数据
-    pub fn read_offset(&mut self, offset: usize) -> [u8; BLOCK_SIZE] {
-        let block_id = offset / BLOCK_SIZE;
-        let mut block_data = [0u8; BLOCK_SIZE];
-        self.dev.read_block(block_id, &mut block_data).unwrap();
-        block_data
-    }
-
-    /// 依据总偏移读取对应块数据，只能写入完整的块
-    pub fn write_offset(&mut self, offset: usize, buf: &[u8]) -> DevResult<usize> {
-        assert!(
-            buf.len() == BLOCK_SIZE,
-            "Buffer length must be equal to BLOCK_SIZE"
-        );
-        assert!(offset % BLOCK_SIZE == 0);
-        let block_id = offset / BLOCK_SIZE;
-        self.dev.write_block(block_id, buf).unwrap();
-        Ok(buf.len())
+            self.offset = 0;
+        }
     }
 }
 
@@ -123,7 +83,23 @@ impl KernelDevOp for Disk {
     fn read(dev: &mut Self::DevType, mut buf: &mut [u8]) -> Result<usize, i32> {
         let mut total_len = 0;
         while !buf.is_empty() {
-            if let Ok(len) = dev.read_one(buf) {
+            // BlockDevice accepts a multi-block buffer. Preserve partial-block
+            // handling, but submit every aligned contiguous span as one
+            // VirtIO request instead of one request per 512-byte sector.
+            if dev.offset == 0 {
+                let whole_blocks_len = buf.len() / BLOCK_SIZE * BLOCK_SIZE;
+                if whole_blocks_len != 0 {
+                    dev.dev
+                        .read_block(dev.block_id, &mut buf[..whole_blocks_len])
+                        .map_err(|_| -1)?;
+                    dev.block_id += whole_blocks_len / BLOCK_SIZE;
+                    total_len += whole_blocks_len;
+                    let remaining = buf;
+                    buf = &mut remaining[whole_blocks_len..];
+                    continue;
+                }
+            }
+            if let Ok(len) = dev.read_partial(buf) {
                 if len == 0 {
                     break;
                 }
@@ -141,7 +117,19 @@ impl KernelDevOp for Disk {
     fn write(dev: &mut Self::DevType, mut buf: &[u8]) -> Result<usize, i32> {
         let mut total_len = 0;
         while !buf.is_empty() {
-            if let Ok(len) = dev.write_one(buf) {
+            if dev.offset == 0 {
+                let whole_blocks_len = buf.len() / BLOCK_SIZE * BLOCK_SIZE;
+                if whole_blocks_len != 0 {
+                    dev.dev
+                        .write_block(dev.block_id, &buf[..whole_blocks_len])
+                        .map_err(|_| -1)?;
+                    dev.block_id += whole_blocks_len / BLOCK_SIZE;
+                    total_len += whole_blocks_len;
+                    buf = &buf[whole_blocks_len..];
+                    continue;
+                }
+            }
+            if let Ok(len) = dev.write_partial(buf) {
                 if len == 0 {
                     break;
                 }

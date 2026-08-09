@@ -12,6 +12,7 @@ use crate::signal::{SiField, Sig, SigInfo};
 use crate::syscall::*;
 use crate::task::{current_task, exit_and_run_next, handle_signals, preempt_current_task};
 use core::arch::global_asm;
+#[cfg(feature = "debug_traces")]
 use core::sync::atomic::{AtomicUsize, Ordering};
 use riscv::register::{
     mtvec::TrapMode,
@@ -23,6 +24,7 @@ use riscv::register::{
 
 pub use context::TrapContext;
 
+#[cfg(feature = "debug_traces")]
 static LAST_LD_TRACE_MS: AtomicUsize = AtomicUsize::new(0);
 
 global_asm!(include_str!("trap.S"));
@@ -150,22 +152,25 @@ pub fn trap_handler(cx: &mut TrapContext) {
         }
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
             set_next_ti_trigger();
-            if let Some(task) = current_task()
-                && task.tgid() == 20
+            #[cfg(feature = "debug_traces")]
             {
-                let now = crate::timer::get_time_ms();
-                let last = LAST_LD_TRACE_MS.load(Ordering::Relaxed);
-                if now.saturating_sub(last) >= 1_000
-                    && LAST_LD_TRACE_MS
-                        .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
-                        .is_ok()
+                if let Some(task) = current_task()
+                    && task.tgid() == 20
                 {
-                    println!(
-                        "[ldtrace] hart={} tid={} sepc={:#x}",
-                        crate::arch::smp::current_hart_id(),
-                        task.tid(),
-                        cx.sepc
-                    );
+                    let now = crate::timer::get_time_ms();
+                    let last = LAST_LD_TRACE_MS.load(Ordering::Relaxed);
+                    if now.saturating_sub(last) >= 1_000
+                        && LAST_LD_TRACE_MS
+                            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                            .is_ok()
+                    {
+                        println!(
+                            "[ldtrace] hart={} tid={} sepc={:#x}",
+                            crate::arch::smp::current_hart_id(),
+                            task.tid(),
+                            cx.sepc
+                        );
+                    }
                 }
             }
             if crate::arch::smp::is_timer_service_hart() {

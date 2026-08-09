@@ -28,6 +28,7 @@ const CLOCK_BOOTTIME: usize = 7;
 
 const CLOCK_FINE_RESOLUTION_NS: isize = 1_000;
 const CLOCK_COARSE_RESOLUTION_NS: isize = 1_000_000;
+#[cfg(feature = "debug_traces")]
 const TIMER_LIFECYCLE_TRACE: bool = option_env!("TASK_A_TIMER_LIFECYCLE_TRACE").is_some();
 
 #[repr(C)]
@@ -603,9 +604,14 @@ pub fn remove_posix_timers_for_owner(owner_tgid: usize) {
         timers.retain(|_, timer| timer.owner_tgid != owner_tgid);
         before - timers.len()
     };
-    if TIMER_LIFECYCLE_TRACE {
-        println!("[timer-lifecycle] owner={} removed={}", owner_tgid, removed);
+    #[cfg(feature = "debug_traces")]
+    {
+        if TIMER_LIFECYCLE_TRACE {
+            println!("[timer-lifecycle] owner={} removed={}", owner_tgid, removed);
+        }
     }
+    #[cfg(not(feature = "debug_traces"))]
+    let _ = removed;
 }
 
 pub fn sys_timer_delete(timerid: usize) -> SysResult<usize> {

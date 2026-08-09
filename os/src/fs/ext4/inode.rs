@@ -23,7 +23,40 @@ lazy_static! {
     /// lwext4 keeps mount, block-cache, and directory traversal state in
     /// shared C objects.  Every entry into lwext4, including superblock
     /// operations, must be serialized by this one lock on SMP.
-    pub(super) static ref EXT4_OP_LOCK: Mutex<()> = Mutex::new(());
+    pub(super) static ref EXT4_OP_LOCK: ProfiledExt4Lock = ProfiledExt4Lock::new();
+}
+
+pub(super) struct ProfiledExt4Lock {
+    inner: Mutex<()>,
+}
+
+impl ProfiledExt4Lock {
+    const fn new() -> Self {
+        Self {
+            inner: Mutex::new(()),
+        }
+    }
+
+    pub(super) fn lock(&self) -> ProfiledExt4Guard<'_> {
+        let started = crate::perf::now_ticks();
+        let guard = self.inner.lock();
+        crate::perf::observe_ext4_lock_wait(crate::perf::elapsed_since(started));
+        ProfiledExt4Guard {
+            _guard: guard,
+            acquired: crate::perf::now_ticks(),
+        }
+    }
+}
+
+pub(super) struct ProfiledExt4Guard<'a> {
+    _guard: spin::MutexGuard<'a, ()>,
+    acquired: usize,
+}
+
+impl Drop for ProfiledExt4Guard<'_> {
+    fn drop(&mut self) {
+        crate::perf::observe_ext4_lock_hold(crate::perf::elapsed_since(self.acquired));
+    }
 }
 
 const CREATED_INODE_BASE: u64 = 1 << 62;

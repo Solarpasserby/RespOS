@@ -1,19 +1,23 @@
 # 架构选择: riscv64 | loongarch64
 ARCH ?= riscv64
 MODE ?= debug
+FEATURES ?=
+
+ifneq ($(strip $(FEATURES)),)
+	CARGO_FEATURES := --features "$(FEATURES)"
+else
+	CARGO_FEATURES :=
+endif
 
 ifeq ($(MODE),debug)
 	CARGO_BUILD_ARG :=
 	CARGO_TARGET_DIR := debug
-	CARGO_FEATURES := # --features log  # FIXME: loongarch 架构下以 debug 评测，取消日志输出
 else ifeq ($(MODE),release)
 	CARGO_BUILD_ARG := --release
 	CARGO_TARGET_DIR := release
-	CARGO_FEATURES :=
 else ifeq ($(MODE),release-debug)
 	CARGO_BUILD_ARG := --profile release-debug
 	CARGO_TARGET_DIR := release-debug
-	CARGO_FEATURES :=
 else
 	$(error Unsupported MODE '$(MODE)'. Use MODE=debug, MODE=release, or MODE=release-debug)
 endif

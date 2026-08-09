@@ -32,6 +32,7 @@ impl Ext4SuperBlock {
     }
 
     fn flush_cache(&self) -> SysResult {
+        crate::perf::filesystem_flush(1);
         // Use the same lock as inode operations.  `inner` only protects the
         // Rust wrapper's lifetime; it does not serialize lwext4's global
         // mount/block-cache state against create/write/rename on other CPUs.

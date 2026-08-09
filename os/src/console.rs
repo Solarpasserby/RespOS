@@ -88,6 +88,22 @@ macro_rules! println {
     };
 }
 
+/// High-volume diagnostic output. Disabled builds erase the entire call,
+/// including argument evaluation.
+#[cfg(feature = "debug_traces")]
+#[macro_export]
+macro_rules! debug_trace {
+    ($($arg: tt)*) => {
+        $crate::println!($($arg)*);
+    };
+}
+
+#[cfg(not(feature = "debug_traces"))]
+#[macro_export]
+macro_rules! debug_trace {
+    ($($arg: tt)*) => {};
+}
+
 // 以下日志宏各有两个版本：
 // - feature = "log" → 调用 console::log 输出日志
 // - 无 feature      → 展开为空块 {}，编译器完全消除

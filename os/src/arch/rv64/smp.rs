@@ -145,8 +145,11 @@ pub fn kick_one_idle_hart_in(allowed_harts: usize) {
         return;
     }
     let hart = mask.trailing_zeros() as usize;
-    if let Err(error) = arch::sbi::send_ipi(1 << hart, 0) {
-        println!("[smp] IPI kick hart {} failed: {}", hart, error);
+    match arch::sbi::send_ipi(1 << hart, 0) {
+        Ok(()) => crate::perf::scheduler_ipi(1),
+        Err(error) => {
+            println!("[smp] IPI kick hart {} failed: {}", hart, error);
+        }
     }
 }
 

@@ -68,6 +68,14 @@ pub fn add_task(task: Arc<TaskControlBlock>) {
     crate::arch::smp::kick_one_idle_hart_in(affinity);
 }
 
+/// Publish a task whose previous CPU still owns its saved context. The caller
+/// releases that ownership immediately afterwards and performs the one
+/// required kick only after the handoff is complete.
+pub(crate) fn add_task_before_owner_release(task: Arc<TaskControlBlock>) {
+    assert!(task.is_ready());
+    SCHEDULER.lock().add(task);
+}
+
 /// 从就绪队列中取出队首任务，并在同一把 scheduler 锁内将其 claim 为
 /// `Running`。
 ///

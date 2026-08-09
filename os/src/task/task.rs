@@ -1317,7 +1317,7 @@ impl TaskControlBlock {
                         .map(|task| task.tid())
                         .collect::<Vec<_>>()
                 });
-                println!(
+                debug_trace!(
                     "[quiescetrace] child={} exit parent={} waiters={:?}",
                     self.tid(),
                     parent.tid(),
@@ -1416,7 +1416,7 @@ impl TaskControlBlock {
                 .collect::<Vec<_>>()
         });
         if !tasks.is_empty() {
-            println!(
+            debug_trace!(
                 "[quiescetrace] exec tid={} siblings={:?}",
                 self_tid,
                 tasks.iter().map(|task| task.tid()).collect::<Vec<_>>()
@@ -1436,7 +1436,7 @@ impl TaskControlBlock {
             crate::task::yield_current_task();
         }
         if !tasks.is_empty() {
-            println!("[quiescetrace] exec remote-ack tid={}", self_tid);
+            debug_trace!("[quiescetrace] exec remote-ack tid={}", self_tid);
         }
 
         for task in tasks {
@@ -2142,7 +2142,7 @@ pub fn task_group_exit(task: Arc<TaskControlBlock>, exit_code: i32) {
 }
 
 fn exit_process_group(task: Arc<TaskControlBlock>, cause: ExitCause) {
-    println!(
+    debug_trace!(
         "[quiescetrace] group-exit begin tid={} tgid={}",
         task.tid(),
         task.tgid()
@@ -2181,7 +2181,7 @@ fn exit_process_group(task: Arc<TaskControlBlock>, cause: ExitCause) {
     {
         crate::task::yield_current_task();
     }
-    println!(
+    debug_trace!(
         "[quiescetrace] group-exit remote-ack tid={} threads={}",
         task.tid(),
         threads.len()
@@ -2268,7 +2268,7 @@ fn exit_process_group(task: Arc<TaskControlBlock>, cause: ExitCause) {
     leader.op_sig_pending_mut(|p| p.clear());
 
     TASK_MANAGER.remove(leader.tid());
-    println!(
+    debug_trace!(
         "[quiescetrace] group-exit done tid={} leader={}",
         task.tid(),
         leader.tid()

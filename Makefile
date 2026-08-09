@@ -26,6 +26,15 @@ RV_PUB_OUTPUT ?= /tmp/respos-rv-pub-output.txt
 LA_PUB_OUTPUT ?= /tmp/respos-la-pub-output.txt
 RV_USER_FEATURES ?= eval
 LA_USER_FEATURES ?= eval
+RV_KERNEL_FEATURES ?=
+LA_KERNEL_FEATURES ?=
+
+ifneq ($(strip $(RV_KERNEL_FEATURES)),)
+	RV_KERNEL_FEATURE_ARGS := --features "$(RV_KERNEL_FEATURES)"
+endif
+ifneq ($(strip $(LA_KERNEL_FEATURES)),)
+	LA_KERNEL_FEATURE_ARGS := --features "$(LA_KERNEL_FEATURES)"
+endif
 
 ifeq ($(RV_MODE),debug)
 	RV_CARGO_TARGET_DIR := debug
@@ -89,7 +98,7 @@ build-rv: prepare-rv-cargo-config
 	$(MAKE) -C user build ARCH=riscv64 MODE=$(RV_MODE) FEATURES=$(RV_USER_FEATURES)
 	cd os && RESPOS_USER_PROFILE_DIR=$(RV_CARGO_TARGET_DIR) \
 		RESPOS_USER_TARGET=$(RV_TARGET) \
-		RESPOS_APP_REBUILD_STAMP=$$(date +%s%N) cargo build $(RV_CARGO_BUILD_ARG)
+		RESPOS_APP_REBUILD_STAMP=$$(date +%s%N) cargo build $(RV_CARGO_BUILD_ARG) $(RV_KERNEL_FEATURE_ARGS)
 	rust-objcopy --set-start=0x80200000 $(RV_ELF) $(KERNEL_RV)
 	@rust-readobj -h -l $(KERNEL_RV) | awk '/Entry:/ || /VirtualAddress:/ || /PhysicalAddress:/ { print }'
 
@@ -97,7 +106,7 @@ build-la: prepare-la-cargo-config
 	$(MAKE) -C user build ARCH=loongarch64 MODE=$(LA_MODE) FEATURES=$(LA_USER_FEATURES)
 	cd os && RESPOS_USER_PROFILE_DIR=$(LA_CARGO_TARGET_DIR) \
 		RESPOS_USER_TARGET=$(LA_TARGET) \
-		RESPOS_APP_REBUILD_STAMP=$$(date +%s%N) cargo build $(LA_CARGO_BUILD_ARG)
+		RESPOS_APP_REBUILD_STAMP=$$(date +%s%N) cargo build $(LA_CARGO_BUILD_ARG) $(LA_KERNEL_FEATURE_ARGS)
 	cp $(LA_ELF) $(KERNEL_LA)
 	@rust-readobj -h -l $(KERNEL_LA) | awk '/Entry:/ || /VirtualAddress:/ || /PhysicalAddress:/ { print }'
 

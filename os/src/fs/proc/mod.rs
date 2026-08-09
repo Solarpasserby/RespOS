@@ -15,6 +15,7 @@ mod health;
 mod maps;
 mod meminfo;
 mod mounts;
+mod perf_stats;
 mod smaps;
 mod stat;
 mod version;

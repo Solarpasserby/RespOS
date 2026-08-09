@@ -171,7 +171,7 @@ fn publish_saved_handoff() {
             // A yielding/preempted task is not visible to any other CPU until
             // its context has reached this idle loop.
             task.set_ready();
-            super::scheduler::add_task(task.clone());
+            super::scheduler::add_task_before_owner_release(task.clone());
         }
         task.release_cpu_owner(current_cpu_id());
         #[cfg(target_arch = "riscv64")]
@@ -205,7 +205,9 @@ pub fn run_tasks() -> ! {
                     // copy 临界区，必须显式重新打开本地中断，否则 WFI 不会进入
                     // supervisor timer trap，所有 timeout 都无法唤醒。
                     crate::arch::trap::enable_timer_interrupt();
+                    let idle_started = crate::perf::now_ticks();
                     crate::arch::wait_for_interrupt();
+                    crate::perf::idle_ticks(crate::perf::elapsed_since(idle_started));
                 }
                 #[cfg(target_arch = "loongarch64")]
                 core::hint::spin_loop();
@@ -233,9 +235,14 @@ pub fn run_tasks() -> ! {
             drop(processor);
             // 事实上这个循环只会执行一次，这里需要释放 `next_task` 的引用
             drop(next_task);
+            let running_started = crate::perf::now_ticks();
+            crate::perf::context_switch(1);
+            #[cfg(target_arch = "riscv64")]
+            crate::perf::local_sfence(1);
             unsafe {
                 __switch(next_task_kstack, idle_task_ptr);
             }
+            crate::perf::task_running_ticks(crate::perf::elapsed_since(running_started));
             // 任务在无 runnable work 时会恢复本 CPU 的 idle context，继续
             // 从全局 ready queue 选择下一个已 claim 的任务。
             continue;

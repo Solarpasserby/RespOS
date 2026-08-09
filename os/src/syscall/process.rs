@@ -26,7 +26,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{Ordering, fence};
 
-#[cfg(target_arch = "loongarch64")]
+#[cfg(all(target_arch = "loongarch64", feature = "debug_traces"))]
 const LOONGARCH_PTHREAD_TRACE: bool = false;
 
 fn is_elf(data: &[u8]) -> bool {
@@ -126,7 +126,7 @@ fn wait_block_current(task: &Arc<TaskControlBlock>) -> bool {
     // this task uninterruptible makes SIGALRM unable to wake the wait.
     task.set_interruptible(true);
     task.set_waiting_for_child(true);
-    println!("[quiescetrace] wait-block tid={}", task.tid());
+    debug_trace!("[quiescetrace] wait-block tid={}", task.tid());
     if task.check_signal_interrupt() || task.is_interrupted() {
         task.set_waiting_for_child(false);
         task.set_interruptible(false);
@@ -151,7 +151,7 @@ fn wait_block_current(task: &Arc<TaskControlBlock>) -> bool {
         yield_current_task();
     }
     let interrupted = task.is_interrupted() || task.check_signal_interrupt();
-    println!(
+    debug_trace!(
         "[quiescetrace] wait-resume tid={} exited={:?} interrupted={}",
         task.tid(),
         task.exited_child_ids(),
@@ -946,7 +946,7 @@ pub fn sys_clone(
     let new_task = current_task.clone_(flags)?;
     let new_tid = new_task.tid();
 
-    println!(
+    debug_trace!(
         "[proctrace] clone parent_tid={} parent_tgid={} child_tid={} child_tgid={} flags={:?}",
         current_task.tid(),
         current_task.tgid(),
@@ -955,7 +955,7 @@ pub fn sys_clone(
         flags
     );
 
-    #[cfg(target_arch = "loongarch64")]
+    #[cfg(all(target_arch = "loongarch64", feature = "debug_traces"))]
     if LOONGARCH_PTHREAD_TRACE && flags.contains(CloneFlags::CLONE_THREAD) {
         let mut tls_head = 0usize;
         let _ = copy_from_user(&mut tls_head as *mut usize, tls as *const usize, 1);
@@ -1134,7 +1134,7 @@ fn exec_fs_file(
     }
 
     let exe_path = file.path().global_abs_path();
-    println!(
+    debug_trace!(
         "[proctrace] exec tid={} tgid={} path={} argv0={}",
         task.tid(),
         task.tgid(),

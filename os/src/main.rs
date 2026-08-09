@@ -26,6 +26,7 @@ pub mod loader;
 pub mod mm;
 pub mod mutex;
 pub mod net;
+pub mod perf;
 pub mod signal;
 pub mod syscall;
 pub mod task;

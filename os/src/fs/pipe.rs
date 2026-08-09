@@ -485,7 +485,7 @@ impl FileOp for Pipe {
 
 impl Drop for Pipe {
     fn drop(&mut self) {
-        println!(
+        debug_trace!(
             "[pipelifetrace] drop buffer={:#x} read={} write={} refs={}",
             self.buffer_id(),
             self.readable,
@@ -601,6 +601,6 @@ pub fn make_pipe() -> (Arc<Pipe>, Arc<Pipe>) {
     let buffer = Arc::new(Mutex::new(PipeRingBuffer::new()));
     let read_end = Arc::new(Pipe::read_end_with_buffer(buffer.clone()));
     let write_end = Arc::new(Pipe::write_end_with_buffer(buffer.clone()));
-    println!("[pipelifetrace] create buffer={:#x}", read_end.buffer_id());
+    debug_trace!("[pipelifetrace] create buffer={:#x}", read_end.buffer_id());
     (read_end, write_end)
 }

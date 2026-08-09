@@ -106,6 +106,10 @@ impl PageCache {
                     || PAGE_CACHE_PAGE_COUNT.load(Ordering::Relaxed) > PAGE_CACHE_GLOBAL_MAX_PAGES))
     }
 
+    pub fn has_dirty_pages(&self) -> bool {
+        self.dirty_pages.load(Ordering::Relaxed) != 0
+    }
+
     fn next_generation() -> usize {
         NEXT_LRU_GENERATION.fetch_add(1, Ordering::Relaxed)
     }
@@ -141,6 +145,7 @@ impl PageCache {
             match cache.reclaim_lru_entry(entry.page_idx, entry.generation) {
                 ReclaimResult::Removed => {
                     PAGE_CACHE_PAGE_COUNT.fetch_sub(1, Ordering::Relaxed);
+                    crate::perf::page_cache_eviction(1);
                 }
                 ReclaimResult::Kept => {}
             }
@@ -230,8 +235,10 @@ impl PageCache {
         lower: Option<(&Arc<dyn InodeOp>, &str)>,
     ) -> SysResult<Arc<Mutex<Page>>> {
         if let Some(page) = self.lookup_page(page_idx) {
+            crate::perf::page_cache_hit(1);
             return Ok(page);
         }
+        crate::perf::page_cache_miss(1);
 
         let file_size = *self.file_size.lock();
         let page_start = page_idx * PAGE_SIZE;
@@ -343,7 +350,8 @@ impl PageCache {
             p.data[page_off..page_off + n].copy_from_slice(&buf[copied..copied + n]);
             if !p.dirty {
                 self.dirty_pages.fetch_add(1, Ordering::Relaxed);
-                PAGE_CACHE_DIRTY_PAGE_COUNT.fetch_add(1, Ordering::Relaxed);
+                let global_dirty = PAGE_CACHE_DIRTY_PAGE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+                crate::perf::observe_dirty_pages(global_dirty);
             }
             p.dirty = true;
             p.write_version = p.write_version.wrapping_add(1);
@@ -440,6 +448,7 @@ impl PageCache {
             if written != data.len() {
                 return Err(Errno::EIO);
             }
+            crate::perf::page_cache_writeback_bytes(written);
 
             // truncate 可以与另一个 File 的 fsync 并发。旧长度的写回若越过新 EOF，
             // 会重新扩展底层文件；检测到长度代次变化后立即恢复当前长度，并保留

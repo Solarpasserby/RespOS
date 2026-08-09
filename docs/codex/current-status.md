@@ -2,6 +2,41 @@
 
 本文件是快速变化的状态页。更新测试结论时必须同时更新日期、提交和命令。
 
+## 2026-08-09 BuildStorm 第一轮性能优化与可选计数器（未提交，完整计时待验证）
+
+- **基线/范围**：`dev` HEAD `999bd8e` 加当前工作树；只调整普通 close 写回边界、lwext4 到
+  VirtIO 的连续块提交、scheduler handoff IPI 以及可选诊断计数器，未拆分 `EXT4_OP_LOCK`，也未
+  改变显式 `fsync`、`sync` 或正常卸载的持久化屏障。
+- **close 语义**：`File::drop()` 不再把每次普通 close 提升为 `fsync()` 和
+  `ext4_cache_flush("/")`。为兼容当前 weak inode cache 生命周期，最后 open-file description
+  消失时仍将该文件的脏 PageCache 写入 lwext4；只有显式同步和 shutdown 才继续执行全文件系统/
+  设备 flush。后续 inode/page-cache 生命周期重构完成前，不能直接移除 close 时的数据写回。
+- **连续块 I/O**：`Disk` 对齐的连续读写现在一次提交完整 multi-block buffer，头尾非对齐部分仍走
+  原有 read-modify-write。RV64 8 核 `buildstorm_file_probe` 通过；该轮计数为约 11.7 MiB block
+  write / 930 requests（平均约 12 KiB/request），`filesystem_flushes=0`，并打印
+  `BUILDSTORM_FILE_PROBE_PASS`。
+- **调度 IPI**：handoff 任务先在 scheduler 锁下入队但不 kick，待旧 CPU owner 释放后只发送一次
+  IPI，保留原 owner-release 竞态保护并消除原先 add-task 与 handoff 的重复 kick。
+- **诊断接口**：kernel feature `perf_counters` 启用原子计数；`/proc/respos_perf` 汇总 close/fsync、
+  block I/O、page cache、fault、TLB/RFENCE/IPI、task/idle ticks、ext4 lock 和 heap allocator 数据，
+  写入 `reset` 可建立新的测量窗口。未启用 feature 时接口只返回 `enabled=0`，热路径更新编译为空操作。
+- **串口 trace 边界**：历史 `proctrace`、`quiescetrace`、`pipelifetrace`、RV64 `ldtrace`，以及原有
+  futex/timer lifecycle/LA pthread 调试输出统一要求 kernel feature `debug_traces`。默认和仅
+  `perf_counters` 的正式/计数内核不会编译这些格式化与 timer 采样路径；panic、错误和启动信息保留。
+- **减法重构**：在保持上述行为的前提下，删除 `Disk` 中已被连续块路径覆盖的整块单请求分支和两个
+  全仓库无调用的 offset I/O 接口，仅保留 batched span 与 partial head/tail 两条路径；close 与 fsync
+  复用缓存数据同步函数；性能计数器移除中间 `Counter` 枚举/匹配层，高频串口调用统一走
+  `debug_trace!`。`perf.rs` 由 377 行降为 308 行，`disk.rs` 由 216 行降为 176 行。
+- **验证**：带 `perf_counters` 的 RV64/LA64 release、无 eval user feature 均构建通过；RV64
+  `-m 1G -smp 8 -snapshot` 验证 proc reset/read、创建文件后 close/reopen 内容一致及
+  `buildstorm_file_probe`。新增 trace 门控后，无 feature RV64/LA64、RV64
+  `perf_counters debug_traces` 组合和 LA64 `debug_traces` 构建通过；RV64 8 核无 feature 烟测中四类
+  trace 均消失且 file probe 继续通过，启用 `debug_traces` 后 clone/exec/wait/exit trace 恢复。
+  减法重构后重新验证 RV64/LA64 无 feature 及两 feature 同开 release 构建；RV64 1 GiB/8 核
+  `-snapshot` 下无 feature 返回 `enabled=0` 且 probe 通过，仅 `perf_counters` 时返回 `enabled=1`、
+  `filesystem_flushes=0`，约 10.3 MiB block write 合并为 701 次请求，probe 继续通过。
+  尚未执行完整官方 BuildStorm，因此没有新的 `<3000s` 结论。
+
 ## 2026-08-08 决赛镜像/计时口径更新（官方群公告，待新镜像验证）
 
 - 比赛官方群同步：CAgent 已修正 waitpid 测例问题并补回缺失的 `ss`；决赛 QEMU 参数调整为

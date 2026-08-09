@@ -1662,11 +1662,13 @@ impl MemorySet {
         #[cfg(target_arch = "riscv64")]
         core::sync::atomic::fence(Ordering::SeqCst);
         sfence();
+        crate::perf::local_sfence(1);
         #[cfg(target_arch = "riscv64")]
         {
             let current = crate::arch::smp::current_hart_id();
             let remote_mask = self.active_hart_mask.load(Ordering::Acquire) & !(1 << current);
             if remote_mask != 0 {
+                crate::perf::remote_rfence(1);
                 crate::arch::sbi::remote_sfence_vma(remote_mask, 0)
                     .expect("SBI RFENCE remote_sfence_vma failed");
             }
@@ -2576,6 +2578,7 @@ impl MemorySet {
                 self.areas[area_idx].remap_one_with_data(&mut self.page_table, vpn, old_data)?;
             }
             self.flush_tlb();
+            crate::perf::cow_fault(1);
             self.debug_check_invariants();
             return Ok(());
         }
@@ -2586,7 +2589,18 @@ impl MemorySet {
                 return Err(Errno::EFAULT);
             }
 
+            let file_backed = self.areas[area_idx].file_backing.is_some();
+            let shared = self.areas[area_idx].shared;
             self.areas[area_idx].map_one(&mut self.page_table, vpn)?;
+            if file_backed {
+                if shared {
+                    crate::perf::shared_file_fault(1);
+                } else {
+                    crate::perf::private_file_fault(1);
+                }
+            } else {
+                crate::perf::anonymous_fault(1);
+            }
             self.flush_tlb();
             self.debug_check_invariants();
             return Ok(());

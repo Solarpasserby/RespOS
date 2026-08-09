@@ -404,6 +404,42 @@ impl File {
         Ok(())
     }
 
+    /// Write cached file data to lwext4 without issuing a device durability
+    /// barrier. `dirty_only` keeps close cheap; fsync forces the cache sync.
+    fn sync_cached_data(&self, dirty_only: bool) -> SysResult<bool> {
+        let (page_cache, write_back, path, tmpfile, mtime) = {
+            let inner = self.inner.lock();
+            let visible_path = inner.path.abs_path();
+            (
+                inner.page_cache.clone(),
+                inner.write_back,
+                self.storage_path(&visible_path),
+                inner.tmpfile_meta.is_some(),
+                inner.mtime_override,
+            )
+        };
+        let Some(page_cache) = page_cache else {
+            return Ok(false);
+        };
+        if !write_back || (dirty_only && !page_cache.has_dirty_pages()) {
+            return Ok(false);
+        }
+        self.flush_page_cache_if_needed(&page_cache, &path, true)?;
+        self.sync_cached_write_time(tmpfile, mtime, &path)?;
+        Ok(true)
+    }
+
+    /// Preserve dirty file data when the final open-file description goes
+    /// away, without turning ordinary close(2) into a filesystem-wide
+    /// durability barrier. Linux close does not imply fsync; explicit fsync,
+    /// sync and unmount retain the backend flush semantics.
+    fn flush_data_on_close(&self) -> SysResult {
+        if self.sync_cached_data(true)? {
+            crate::perf::close_data_writeback(1);
+        }
+        Ok(())
+    }
+
     pub fn truncate(&self, size: usize) -> SysResult<usize> {
         let mut inner = self.inner.lock();
         let visible_path = inner.path.abs_path();
@@ -598,7 +634,8 @@ impl File {
 
 impl Drop for File {
     fn drop(&mut self) {
-        let _ = <Self as FileOp>::fsync(self);
+        crate::perf::file_close(1);
+        let _ = self.flush_data_on_close();
         if let Some(inode) = self.inode.as_any().downcast_ref::<Ext4Inode>() {
             if inode.close_file() {
                 inode.cleanup_orphan();
@@ -801,24 +838,9 @@ impl FileOp for File {
     }
 
     fn fsync(&self) -> SysResult<usize> {
-        let (superblock, page_cache, write_back, path, tmpfile, mtime) = {
-            let inner = self.inner.lock();
-            let visible_path = inner.path.abs_path();
-            (
-                inner.path.mnt.fs.clone(),
-                inner.page_cache.clone(),
-                inner.write_back,
-                self.storage_path(&visible_path),
-                inner.tmpfile_meta.is_some(),
-                inner.mtime_override,
-            )
-        };
-        if let Some(ref pc) = page_cache {
-            if write_back {
-                self.flush_page_cache_if_needed(pc, &path, true)?;
-                self.sync_cached_write_time(tmpfile, mtime, &path)?;
-            }
-        }
+        crate::perf::explicit_fsync(1);
+        let superblock = self.inner.lock().path.mnt.fs.clone();
+        self.sync_cached_data(false)?;
         superblock.sync()?;
         Ok(0)
     }
