@@ -1,11 +1,12 @@
 // os/src/vfs/file.rs
 
 use super::vfs::{InodeOp, InodeType, LinuxDirent64};
-use crate::config::KERNEL_HEAP_SIZE;
+use crate::config::{KERNEL_HEAP_SIZE, PAGE_SIZE};
 use crate::fs::ext4::Ext4Inode;
 use crate::fs::mount::{MS_NOATIME, MS_NODIRATIME, MS_STRICTATIME, check_mount_file_growth};
 use crate::fs::page_cache::PageCache;
 use crate::fs::{KStat, Path, PollEvents};
+use crate::mm::FrameTracker;
 use crate::syscall::{Errno, SysResult};
 use crate::timer::{TimeSpec, get_time_ms};
 use alloc::sync::Arc;
@@ -129,6 +130,31 @@ impl File {
             .unwrap_or_else(|| alloc::string::String::from(path))
     }
 
+    /// Resolve a regular-file offset to the same physical frame used by its
+    /// buffered page cache.  Special files without a page cache return None
+    /// and let the mmap layer use its compatibility path.
+    pub(crate) fn shared_page_frame(
+        &self,
+        file_offset: usize,
+    ) -> SysResult<Option<Arc<FrameTracker>>> {
+        let (page_cache, write_back, path) = {
+            let inner = self.inner.lock();
+            let visible_path = inner.path.abs_path();
+            (
+                inner.page_cache.clone(),
+                inner.write_back,
+                self.storage_path(&visible_path),
+            )
+        };
+        let Some(page_cache) = page_cache else {
+            return Ok(None);
+        };
+        let lower = write_back.then_some((&self.inode, path.as_str()));
+        page_cache
+            .shared_frame_at(file_offset / PAGE_SIZE, lower)
+            .map(Some)
+    }
+
     pub fn new(path: Arc<Path>, inode: Arc<dyn InodeOp>, flags: OpenFlags) -> Self {
         if let Some(ext4_inode) = inode.as_any().downcast_ref::<Ext4Inode>() {
             ext4_inode.open_file();
@@ -141,7 +167,9 @@ impl File {
             && flags.intersects(OpenFlags::O_WRONLY | OpenFlags::O_RDWR)
         {
             if inode.truncate(&abs_path, 0).is_ok() {
-                if let Some((dev, ino)) = shared_page_identity {
+                if page_cache.is_none()
+                    && let Some((dev, ino)) = shared_page_identity
+                {
                     crate::mm::truncate_shared_file_pages(dev, ino, 0);
                 }
                 if let Some(ref pc) = page_cache {
@@ -459,11 +487,6 @@ impl File {
                 }
             }
             pc.resize(size);
-            if size < old_size {
-                if let Some((dev, ino)) = self.shared_page_identity {
-                    crate::mm::truncate_shared_file_pages(dev, ino, size);
-                }
-            }
             if inner.write_back {
                 if size < old_size {
                     self.flush_page_cache_if_needed(&pc, &path, true)?;
@@ -478,6 +501,11 @@ impl File {
             }
         } else {
             self.inode.truncate(&path, size)?;
+            if size < old_size
+                && let Some((dev, ino)) = self.shared_page_identity
+            {
+                crate::mm::truncate_shared_file_pages(dev, ino, size);
+            }
         }
         if inner.offset > size {
             drop(inner);
@@ -504,7 +532,7 @@ impl File {
         } else {
             self.inode.read_at(&path, offset, buf)
         }?;
-        if n != 0 {
+        if page_cache.is_none() && n != 0 {
             if let Some((dev, ino)) = self.shared_page_identity {
                 crate::mm::overlay_shared_file_pages(dev, ino, offset, &mut buf[..n]);
             }
@@ -540,11 +568,6 @@ impl File {
         if let Some(pc) = page_cache {
             let lower = write_back.then_some((&self.inode, path.as_str()));
             let n = pc.write_at(offset, buf, lower)?;
-            if n != 0 {
-                if let Some((dev, ino)) = self.shared_page_identity {
-                    crate::mm::update_shared_file_pages(dev, ino, offset, &buf[..n]);
-                }
-            }
             let end = offset.checked_add(n).ok_or(Errno::EINVAL)?;
             if end > pc.len() {
                 pc.resize(end);
@@ -563,7 +586,13 @@ impl File {
             }
             Ok(n)
         } else {
-            self.inode.write_at(&path, offset, buf)
+            let n = self.inode.write_at(&path, offset, buf)?;
+            if n != 0
+                && let Some((dev, ino)) = self.shared_page_identity
+            {
+                crate::mm::update_shared_file_pages(dev, ino, offset, &buf[..n]);
+            }
+            Ok(n)
         }
     }
 
@@ -666,7 +695,7 @@ impl FileOp for File {
         } else {
             self.inode.read_at(&path, offset, buf)?
         };
-        if n != 0 {
+        if inner.page_cache.is_none() && n != 0 {
             if let Some((dev, ino)) = self.shared_page_identity {
                 crate::mm::overlay_shared_file_pages(dev, ino, offset, &mut buf[..n]);
             }
@@ -705,11 +734,6 @@ impl FileOp for File {
         let n = if let Some(pc) = inner.page_cache.clone() {
             let lower = inner.write_back.then_some((&self.inode, path.as_str()));
             let n = pc.write_at(offset, buf, lower)?;
-            if n != 0 {
-                if let Some((dev, ino)) = self.shared_page_identity {
-                    crate::mm::update_shared_file_pages(dev, ino, offset, &buf[..n]);
-                }
-            }
             let end = offset.checked_add(n).ok_or(Errno::EINVAL)?;
             if end > pc.len() {
                 pc.resize(end);
@@ -730,7 +754,13 @@ impl FileOp for File {
             }
             n
         } else {
-            self.inode.write_at(&path, offset, buf)?
+            let n = self.inode.write_at(&path, offset, buf)?;
+            if n != 0
+                && let Some((dev, ino)) = self.shared_page_identity
+            {
+                crate::mm::update_shared_file_pages(dev, ino, offset, &buf[..n]);
+            }
+            n
         };
         inner.offset += n;
         Ok(n)

@@ -120,6 +120,19 @@
   再由调度路径提交。退出任务通过 `DEAD_TASKS` 延迟 drop，避免在自身内核栈上释放自身。
 - 后续影响：不要从多个路径重复入队或重复唤醒；close/signal/timeout 竞争必须保持 single-winner。
 
+### 进程组资源回收按 live owner 判定
+
+- 状态：已确认并由 RV64 frame 回收 A/B 验证
+- 适用范围：`MemorySet`、FdTable、thread-group exit、`CLONE_VM`/`CLONE_FILES`
+- 最后验证：2026-08-09
+- 证据：`os/src/task/task.rs::exit_process_group()`、`user/src/bin/frame_reclaim_probe.rs`
+- 内容：退出 handoff 和 `DEAD_TASKS` 允许已退出同组 TCB 暂时继续持有资源 Arc，因此引用计数不表达
+  活跃所有权。进程组 teardown 通过一次 `TASK_MANAGER` live snapshot 同时判断 MemorySet/FdTable，
+  只查找不同 tgid 的同资源 owner；同组临时引用不能阻止清空资源，真正存活的跨进程共享者必须阻止
+  清空。
+- 后续影响：zombie 可以保留 TCB 和 wait status，但不能因此保留已经确认由本退出组独占的 resident
+  用户页或打开文件资源。
+
 ### SMP ready 选择与唤醒必须同时遵守 affinity
 
 - 状态：已实现，RV64 8 核定向烟测已通过，退出压力仍有独立 blocker
@@ -179,6 +192,20 @@ FdTable slot (FdEntry: descriptor flags)
 - 内容：`FdEntry` 保存 descriptor flags；`FileInner` 保存共享 offset、path 和 open-file status
   flags。dup 后 descriptor 可独立设置 CLOEXEC，但共享同一个 open-file offset/status。
 - 后续影响：实现新 fcntl 或 clone/exec 行为时，不得把 CLOEXEC 写进共享 `File` flags。
+
+### PageCache 是普通文件驻留页的唯一所有者
+
+- 状态：已实现，完整 BuildStorm 已越过旧 heap 阻断；并行 rustc SIGSEGV 已定位为独立退出回收缺陷
+- 适用范围：普通文件 buffered I/O、MAP_SHARED、truncate、缓存回收
+- 最后验证：2026-08-09；RV64/LA64 release、RV64 8 核专项 probe 与 8 GiB BuildStorm
+- 证据：`os/src/fs/page_cache.rs`、`os/src/fs/file.rs`、`os/src/mm/memory_set.rs`
+- 内容：每个 PageCache page 持有一个 `Arc<FrameTracker>`；普通文件共享映射克隆同一 frame，VMA 的
+  frame 强引用同时充当 cache pin。PageCache 元数据仍负责 dirty/version/LRU，truncate 在移除页前
+  清零 frame，从而让仍存活的映射同步观察 EOF 后清零。无 PageCache 文件才使用 MM 全局弱表后备。
+  当前全局工作集上限为 16384 页（64 MiB），底层文件 read miss 最多做 16 页顺序预读；I/O 在缓存锁
+  外完成，安装前以文件长度代次排除并发 truncate 的旧快照。
+- 后续影响：回收页时必须同时检查 Page 对象和 frame 的强引用；普通文件 read/write 不应再复制或
+  overlay 一份 mmap 缓冲。若修改 mmap writeback，dirty 状态仍应归并到该唯一 PageCache page。
 
 ### filesystem ELF 使用按需 private file backing
 

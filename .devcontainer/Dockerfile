@@ -2,6 +2,8 @@ FROM zhouzhouyi/os-contest:20260510
 
 USER root
 
+COPY codex-priority /usr/local/bin/codex-priority
+
 RUN set -eux; \
     test -d /root/.cargo; \
     test -d /root/.rustup; \
@@ -16,7 +18,10 @@ RUN set -eux; \
         ln -sf "${tool_path}" "/usr/local/bin/${tool}"; \
         ln -sf "${tool_path}" "/home/ubuntu/.cargo/bin/${tool}"; \
     done; \
-    chown -R ubuntu:ubuntu /home/ubuntu/.cargo
+    chown -R ubuntu:ubuntu /home/ubuntu/.cargo; \
+    chmod 0755 /usr/local/bin/codex-priority; \
+    setcap cap_sys_nice=ep /usr/bin/chrt; \
+    setcap cap_sys_nice=ep /usr/bin/renice
 
 ENV CARGO_HOME=/workspaces/RespOS/.cargo-home
 ENV RUSTUP_HOME=/root/.rustup

@@ -13,4 +13,6 @@ pub const INODE_CACHE_CAPACITY: usize = 1024;
 pub const DENTRY_CACHE_CAPACITY: usize = 1024;
 
 /// 页缓存容量上限
-pub const PAGE_CACHE_GLOBAL_MAX_PAGES: usize = 512;
+/// Frame-backed file cache budget. Cache data consumes physical frames rather
+/// than the fixed kernel heap; 16K pages retain a 64 MiB working set.
+pub const PAGE_CACHE_GLOBAL_MAX_PAGES: usize = 16 * 1024;

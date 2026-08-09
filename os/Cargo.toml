@@ -8,6 +8,7 @@ log = []
 verbose_boot = []
 perf_counters = []
 debug_traces = []
+fault_trace = []
 
 [[bin]]
 name = "os"

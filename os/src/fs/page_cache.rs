@@ -3,6 +3,7 @@
 use super::vfs::InodeOp;
 use crate::config::PAGE_CACHE_GLOBAL_MAX_PAGES;
 use crate::config::PAGE_SIZE;
+use crate::mm::{FrameTracker, frame_alloc};
 use crate::syscall::{Errno, SysResult};
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::{Arc, Weak};
@@ -24,6 +25,7 @@ static PAGE_CACHE_DIRTY_PAGE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 const WRITEBACK_BATCH_PAGES: usize = 32;
 const DIRTY_PAGES_PER_CACHE_HIGH_WATERMARK: usize = 256;
+const READ_AHEAD_PAGES: usize = 16;
 
 pub fn page_cache_page_count() -> usize {
     PAGE_CACHE_PAGE_COUNT.load(Ordering::Relaxed)
@@ -31,6 +33,14 @@ pub fn page_cache_page_count() -> usize {
 
 pub fn page_cache_dirty_page_count() -> usize {
     PAGE_CACHE_DIRTY_PAGE_COUNT.load(Ordering::Relaxed)
+}
+
+pub fn page_cache_registry_count() -> usize {
+    PAGE_CACHE_REGISTRY.lock().len()
+}
+
+pub fn page_cache_lru_entry_count() -> usize {
+    PAGE_CACHE_LRU.lock().len()
 }
 
 #[derive(Clone, Copy)]
@@ -47,7 +57,7 @@ enum ReclaimResult {
 
 /// 页缓存中的一页
 pub struct Page {
-    data: Vec<u8>, // PAGE_SIZE 字节
+    frame: Arc<FrameTracker>,
     dirty: bool,
     write_version: usize,
     generation: usize,
@@ -55,14 +65,18 @@ pub struct Page {
 }
 
 impl Page {
-    fn new_zeroed(generation: usize) -> Self {
-        Self {
-            data: alloc::vec![0u8; PAGE_SIZE],
+    fn new_zeroed(generation: usize) -> SysResult<Self> {
+        Ok(Self {
+            frame: Arc::new(frame_alloc().ok_or(Errno::ENOMEM)?),
             dirty: false,
             write_version: 0,
             generation,
             queued: false,
-        }
+        })
+    }
+
+    fn bytes(&mut self) -> &mut [u8] {
+        self.frame.ppn().get_bytes_array()
     }
 }
 
@@ -131,10 +145,19 @@ impl PageCache {
     }
 
     fn reclaim_global() {
-        while PAGE_CACHE_PAGE_COUNT.load(Ordering::Relaxed) > PAGE_CACHE_GLOBAL_MAX_PAGES {
+        // Examine each currently queued candidate at most once per pass.
+        // Entries that are temporarily pinned by mmap are requeued for a
+        // later pressure pass; bounding the scan prevents an all-pinned cache
+        // from spinning forever.
+        let scan_limit = PAGE_CACHE_LRU.lock().len();
+        let mut scanned = 0usize;
+        while scanned < scan_limit
+            && PAGE_CACHE_PAGE_COUNT.load(Ordering::Relaxed) > PAGE_CACHE_GLOBAL_MAX_PAGES
+        {
             let Some(entry) = PAGE_CACHE_LRU.lock().pop_front() else {
                 break;
             };
+            scanned += 1;
             let Some(cache) = PAGE_CACHE_REGISTRY
                 .lock()
                 .get(&entry.cache_id)
@@ -170,7 +193,17 @@ impl PageCache {
                 self.touch_page(page_idx, &page);
                 return ReclaimResult::Kept;
             }
-            if page_guard.dirty || Arc::strong_count(&page) != 2 {
+            // The page object itself is only owned by the cache and this
+            // local lookup.  Its frame can additionally be owned by one or
+            // more MAP_SHARED mappings; keep the cache entry in that case so
+            // a later file read cannot load a second frame for the same page.
+            if page_guard.dirty
+                || Arc::strong_count(&page) != 2
+                || Arc::strong_count(&page_guard.frame) != 1
+            {
+                drop(page_guard);
+                drop(pages);
+                self.touch_page(page_idx, &page);
                 return ReclaimResult::Kept;
             }
         }
@@ -195,7 +228,12 @@ impl PageCache {
             removed_pages = victims.len();
             for victim in victims {
                 if let Some(page) = pages.remove(&victim) {
-                    if page.lock().dirty {
+                    let mut page = page.lock();
+                    // A MAP_SHARED mapping may still own the frame after the
+                    // cache entry is removed.  Clear it so truncate followed
+                    // by regrowth cannot expose the old file contents.
+                    page.bytes().fill(0);
+                    if page.dirty {
                         self.dirty_pages.fetch_sub(1, Ordering::Relaxed);
                         PAGE_CACHE_DIRTY_PAGE_COUNT.fetch_sub(1, Ordering::Relaxed);
                     }
@@ -205,7 +243,7 @@ impl PageCache {
                 let last_page_idx = new_size / PAGE_SIZE;
                 if let Some(page) = pages.get(&last_page_idx) {
                     let mut page = page.lock();
-                    page.data[new_size % PAGE_SIZE..].fill(0);
+                    page.bytes()[new_size % PAGE_SIZE..].fill(0);
                     // 尾页内容也是写回快照的一部分；即使只是清零不可见尾部，
                     // 也必须使并发写回的旧快照失效。
                     page.write_version = page.write_version.wrapping_add(1);
@@ -233,6 +271,7 @@ impl PageCache {
         &self,
         page_idx: usize,
         lower: Option<(&Arc<dyn InodeOp>, &str)>,
+        read_ahead_pages: usize,
     ) -> SysResult<Arc<Mutex<Page>>> {
         if let Some(page) = self.lookup_page(page_idx) {
             crate::perf::page_cache_hit(1);
@@ -240,35 +279,104 @@ impl PageCache {
         }
         crate::perf::page_cache_miss(1);
 
+        let load_version = self.size_version.load(Ordering::Acquire);
         let file_size = *self.file_size.lock();
         let page_start = page_idx * PAGE_SIZE;
-        let mut new_page = Page::new_zeroed(Self::next_generation());
+        let available_pages = file_size.div_ceil(PAGE_SIZE).saturating_sub(page_idx);
+        let load_pages = if lower.is_some() && page_start < file_size {
+            read_ahead_pages
+                .clamp(1, READ_AHEAD_PAGES)
+                .min(available_pages)
+        } else {
+            1
+        };
 
-        // 在 PageCache 锁外做磁盘 I/O。tmpfile 没有底层文件，保持零页。
-        if page_start < file_size {
+        // Read a sequential run while outside the PageCache lock.  One 64 KiB
+        // lwext4 operation replaces up to sixteen 4 KiB operations and lets
+        // the lower block layer preserve its multi-block request batching.
+        let read_len = if lower.is_some() && page_start < file_size {
+            (file_size - page_start).min(load_pages * PAGE_SIZE)
+        } else {
+            0
+        };
+        let mut read_buf = Vec::new();
+        if read_len != 0 {
+            read_buf
+                .try_reserve_exact(read_len)
+                .map_err(|_| Errno::ENOMEM)?;
+            read_buf.resize(read_len, 0);
             if let Some((inode, path)) = lower {
-                let page_len = (file_size - page_start).min(PAGE_SIZE);
-                match inode.read_at(path, page_start, &mut new_page.data[..page_len]) {
+                match inode.read_at(path, page_start, &mut read_buf) {
                     Ok(_) | Err(Errno::ENOENT) => {}
                     Err(err) => return Err(err),
                 }
             }
         }
 
-        let page = Arc::new(Mutex::new(new_page));
-        let mut pages = self.pages.lock();
-        if let Some(existing) = pages.get(&page_idx) {
-            let existing = existing.clone();
-            drop(pages);
-            self.touch_page(page_idx, &existing);
-            return Ok(existing.clone());
+        let mut candidates = Vec::new();
+        candidates
+            .try_reserve_exact(load_pages)
+            .map_err(|_| Errno::ENOMEM)?;
+        for run_idx in 0..load_pages {
+            let mut new_page = Page::new_zeroed(Self::next_generation())?;
+            let source_start = run_idx * PAGE_SIZE;
+            if source_start < read_buf.len() {
+                let source_end = (source_start + PAGE_SIZE).min(read_buf.len());
+                new_page.bytes()[..source_end - source_start]
+                    .copy_from_slice(&read_buf[source_start..source_end]);
+            }
+            candidates.push((page_idx + run_idx, Arc::new(Mutex::new(new_page)), false));
         }
-        pages.insert(page_idx, page.clone());
-        PAGE_CACHE_PAGE_COUNT.fetch_add(1, Ordering::Relaxed);
+
+        let mut pages = self.pages.lock();
+        if self.size_version.load(Ordering::Acquire) != load_version {
+            drop(pages);
+            return self.get_or_load(page_idx, lower, read_ahead_pages);
+        }
+        let mut requested = None;
+        let mut inserted_count = 0usize;
+        for (candidate_idx, candidate, inserted) in candidates.iter_mut() {
+            let page = if let Some(existing) = pages.get(candidate_idx) {
+                existing.clone()
+            } else {
+                pages.insert(*candidate_idx, candidate.clone());
+                *inserted = true;
+                inserted_count += 1;
+                candidate.clone()
+            };
+            if *candidate_idx == page_idx {
+                requested = Some(page);
+            }
+        }
         drop(pages);
-        self.touch_page(page_idx, &page);
-        Self::reclaim_global();
-        Ok(page)
+        if inserted_count != 0 {
+            PAGE_CACHE_PAGE_COUNT.fetch_add(inserted_count, Ordering::Relaxed);
+            for (candidate_idx, candidate, inserted) in candidates.iter() {
+                if *inserted {
+                    self.touch_page(*candidate_idx, candidate);
+                }
+            }
+            Self::reclaim_global();
+        }
+        let requested = requested.ok_or(Errno::EIO)?;
+        self.touch_page(page_idx, &requested);
+        Ok(requested)
+    }
+
+    /// Return the physical cache page used by a shared file mapping.
+    ///
+    /// Keeping the frame inside `PageCache` makes buffered I/O and
+    /// `MAP_SHARED` observe the same bytes without a second frame or a
+    /// coherence overlay.  Global reclaim detects the additional frame owner
+    /// and retains the page metadata until the mapping is gone.
+    pub(crate) fn shared_frame_at(
+        &self,
+        page_idx: usize,
+        lower: Option<(&Arc<dyn InodeOp>, &str)>,
+    ) -> SysResult<Arc<FrameTracker>> {
+        let page = self.get_or_load(page_idx, lower, READ_AHEAD_PAGES)?;
+        let frame = page.lock().frame.clone();
+        Ok(frame)
     }
 
     /// 从页缓存读取数据到 buf
@@ -286,9 +394,9 @@ impl PageCache {
             let page_idx = pos / PAGE_SIZE;
             let page_off = pos % PAGE_SIZE;
             let n = (end - pos).min(PAGE_SIZE - page_off);
-            let page = self.get_or_load(page_idx, lower)?;
-            let p = page.lock();
-            buf[copied..copied + n].copy_from_slice(&p.data[page_off..page_off + n]);
+            let page = self.get_or_load(page_idx, lower, READ_AHEAD_PAGES)?;
+            let mut p = page.lock();
+            buf[copied..copied + n].copy_from_slice(&p.bytes()[page_off..page_off + n]);
             drop(p);
             pos += n;
             copied += n;
@@ -330,7 +438,7 @@ impl PageCache {
                 let (page, inserted) = if let Some(page) = pages.get(&page_idx) {
                     (page.clone(), false)
                 } else {
-                    let page = Arc::new(Mutex::new(Page::new_zeroed(Self::next_generation())));
+                    let page = Arc::new(Mutex::new(Page::new_zeroed(Self::next_generation())?));
                     pages.insert(page_idx, page.clone());
                     (page, true)
                 };
@@ -344,10 +452,10 @@ impl PageCache {
                 }
                 page
             } else {
-                self.get_or_load(page_idx, lower)?
+                self.get_or_load(page_idx, lower, 1)?
             };
             let mut p = page.lock();
-            p.data[page_off..page_off + n].copy_from_slice(&buf[copied..copied + n]);
+            p.bytes()[page_off..page_off + n].copy_from_slice(&buf[copied..copied + n]);
             if !p.dirty {
                 self.dirty_pages.fetch_add(1, Ordering::Relaxed);
                 let global_dirty = PAGE_CACHE_DIRTY_PAGE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
@@ -432,11 +540,11 @@ impl PageCache {
                     break;
                 }
                 let page_len = (file_size - page_offset).min(PAGE_SIZE);
-                let page_guard = page.lock();
+                let mut page_guard = page.lock();
                 if !page_guard.dirty {
                     break;
                 }
-                data.extend_from_slice(&page_guard.data[..page_len]);
+                data.extend_from_slice(&page_guard.bytes()[..page_len]);
                 snapshots.push((page.clone(), page_guard.write_version));
                 drop(page_guard);
                 expected_page_idx += 1;
@@ -486,6 +594,14 @@ impl PageCache {
 impl Drop for PageCache {
     fn drop(&mut self) {
         PAGE_CACHE_REGISTRY.lock().remove(&self.id);
+        // LRU entries own no page data, but leaving one entry behind for every
+        // page of every short-lived file makes the global VecDeque grow
+        // without bound. Remove this cache's entries while its id is still
+        // unambiguous. This leaves the queue proportional to live resident
+        // pages instead of cumulative file traffic.
+        PAGE_CACHE_LRU
+            .lock()
+            .retain(|entry| entry.cache_id != self.id);
         let page_count = self.pages.lock().len();
         let dirty_count = self.dirty_pages.load(Ordering::Relaxed);
         if page_count != 0 {

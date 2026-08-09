@@ -111,6 +111,21 @@ pub fn trap_handler(cx: &mut TrapContext) {
                     memory_set.handle_page_fault(page_fault_cause, stval)
                 });
             if let Err(err) = result {
+                #[cfg(feature = "fault_trace")]
+                if let Some(task) = current_task() {
+                    println!(
+                        "[user-fault] hart={} tid={} tgid={} cause={:?} sepc={:#x} stval={:#x} sp={:#x} ra={:#x} err={:?}",
+                        crate::arch::smp::current_hart_id(),
+                        task.tid(),
+                        task.tgid(),
+                        page_fault_cause,
+                        cx.sepc,
+                        stval,
+                        cx.x[2],
+                        cx.x[1],
+                        err
+                    );
+                }
                 let sig = if err == Errno::EIO {
                     Sig::SIGBUS
                 } else {

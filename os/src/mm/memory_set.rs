@@ -252,8 +252,18 @@ pub(crate) fn writeback_file_pages(writebacks: Vec<FileWriteback>, sync: bool) -
 }
 
 fn shared_file_frame(backing: &FileBacking, page_offset: usize) -> SysResult<Arc<FrameTracker>> {
-    let stat = backing.file.get_stat()?;
     let file_offset = backing.offset.checked_add(page_offset).ok_or(Errno::EIO)?;
+
+    // Regular files use their PageCache frame as the mmap frame.  Besides
+    // eliminating a duplicate physical page, this avoids accumulating one
+    // global weak-map node for every file page ever mapped by a linker.
+    if let Some(file) = backing.file.as_any().downcast_ref::<File>() {
+        if let Some(frame) = file.shared_page_frame(file_offset)? {
+            return Ok(frame);
+        }
+    }
+
+    let stat = backing.file.get_stat()?;
     let key = SharedFilePageKey {
         dev: stat.dev,
         ino: stat.ino,
@@ -282,14 +292,20 @@ fn shared_file_frame(backing: &FileBacking, page_offset: usize) -> SysResult<Arc
     if let Some(existing) = pages.get(&key).and_then(|weak| weak.upgrade()) {
         return Ok(existing);
     }
+    // Compatibility mappings are uncommon, so an O(n) prune on insertion is
+    // preferable to letting dead Weak keys consume kernel heap indefinitely.
+    pages.retain(|_, weak| weak.strong_count() != 0);
     pages.insert(key, Arc::downgrade(&frame));
     Ok(frame)
 }
 
-/// Keep regular file I/O coherent with resident MAP_SHARED frames. The file
-/// page cache and mmap frames currently use different storage objects, so a
-/// pwrite must also update any live shared frame before a later munmap writes
-/// that frame back as a whole page.
+pub(crate) fn shared_file_page_entry_count() -> usize {
+    SHARED_FILE_PAGES.lock().len()
+}
+
+/// Keep fallback file I/O coherent with resident MAP_SHARED frames. Regular
+/// PageCache files share one frame and do not enter this compatibility table;
+/// files without a PageCache still need writes mirrored into any live frame.
 pub(crate) fn update_shared_file_pages(dev: u64, ino: u64, offset: usize, data: &[u8]) {
     let Some(end) = offset.checked_add(data.len()) else {
         return;
@@ -314,8 +330,8 @@ pub(crate) fn update_shared_file_pages(dev: u64, ino: u64, offset: usize, data: 
     }
 }
 
-/// Overlay resident MAP_SHARED contents on a regular read. User stores reach
-/// the shared frame directly and may not have been written back yet.
+/// Overlay fallback MAP_SHARED contents on a read. User stores reach the
+/// shared frame directly and may not have been written back yet.
 pub(crate) fn overlay_shared_file_pages(dev: u64, ino: u64, offset: usize, data: &mut [u8]) {
     let Some(end) = offset.checked_add(data.len()) else {
         return;

@@ -2,9 +2,138 @@
 
 本文件是快速变化的状态页。更新测试结论时必须同时更新日期、提交和命令。
 
-## 2026-08-09 BuildStorm 第一轮性能优化与可选计数器（未提交，完整计时待验证）
+## 2026-08-09 正常宿主调度优先级下的完整 BuildStorm 复跑（正式阶段超时）
 
-- **基线/范围**：`dev` HEAD `999bd8e` 加当前工作树；只调整普通 close 写回边界、lwext4 到
+- **基线与配置**：`dev` HEAD `7cb282a` 加当前未提交的 PageCache、退出页回收、诊断和
+  devcontainer 工作树；RV64 pub 镜像 SHA-256 为
+  `9d163855dbb67da561925c74666d0e4fc1856e118640cb4889e88dcaf5f8e25f`。使用无 kernel feature、
+  无 user `eval` feature 的 release kernel，以旧 pub 镜像、`-snapshot -m 8G -smp 8` 运行
+  `/glibc/buildstorm_testcode.sh`。本机只有约 15 GiB RAM，因此本轮不是公告要求的 RV64 16 GiB
+  正式资源配置，也不能作为最终比赛成绩。
+- **宿主调度前提**：QEMU 启动后实测为 `NI=-10`、`CLS=TS`，不再继承历史 Codex 会话的
+  `nice=16/SCHED_IDLE`。运行中 QEMU RSS 主要约 1.2--2.0 GiB，宿主 swap 使用量从约 2.0 GiB
+  增至约 4.7 GiB，但 available memory 仍约 7 GiB；本轮超时不能继续归因于 QEMU 被
+  `SCHED_IDLE` 饿死。
+- **阶段结果**：`BUILDSTORM_TOOLCHAIN ok` 与 `BUILDSTORM_MINIBUILD ok` 均通过；旧镜像特有的
+  untimed `tg-xtask` 预构建约 3 分 32 秒，正式区间开始前的 debug `tg-xtask` 构建约 3 分 14 秒。
+  正式 `arceos-helloworld` 构建最终打印
+  `BUILDSTORM_COMPILE mode=multi ok=false rc=124 elapsed_s=0.00 cores=8 bytes=0 arch=riscv64`，即在
+  脚本 6250 秒上限触发 timeout，未生成计分产物。
+- **正确性边界**：本轮未出现此前的用户 fault `ENOMEM`、并行 rustc SIGSEGV、kernel panic 或
+  heap allocation failure，说明进程组退出页回收修复已经让完整工作负载越过旧正确性阻断；但
+  “不再崩溃”不等于 BuildStorm 通过。超时时仍在自定义 RISC-V target 的 build-std/ArceOS 编译中，
+  tail 包含 `alloc`、`panic_abort`、`unwind`、`std_detect` 与 `hashbrown`。
+- **性能观察与下一步**：构建前段常只有约 2--4 个 vCPU 活跃，后段曾达到 8 个 vCPU 各约
+  86%--94%，说明宿主优先级修复有效，但整体吞吐仍远低于 Linux baseline。后续不再用完整
+  BuildStorm 定位单点问题；按三层级路线先用 `perf_counters` 和分钟级
+  `buildstorm_file_probe`/专项小测量化 ext4 lock、block I/O、PageCache、scheduler idle 与 fault，
+  每次只修改一个最高热点，短门禁通过后才重跑无 feature 完整配置。
+
+## 2026-08-09 BuildStorm 三层级优化路线与物理页泄漏修复（进行中）
+
+- **统一路线**：`buildstorm-smp-plan.md` 已把历史 SMP Phase 0--5 作为正确性前置，并将性能工作统一为
+  三层：低风险热路径/资源闭环、共享瓶颈/有效多核扩展、深层 I/O/MM/双架构扩展。第一、二轮现有
+  优化均归入第一层；在并行 rustc SIGSEGV 闭环前不叠加 ext4 拆锁、per-CPU runqueue、private mmap
+  共享或异步 VirtIO 重构。可复现 CPU/jobs 双矩阵与判读规则见 `workflows.md`。
+- **独立故障 trace**：新增 kernel feature `fault_trace`，只在 RV64 用户页故障无法由
+  `MemorySet::handle_page_fault()` 处理、即将发送 SIGSEGV/SIGBUS 时打印 hart/tid/tgid、cause、
+  sepc/stval/sp/ra 和 errno；它不打开历史 `debug_traces` 的高频输出。正式计时仍要求无诊断 feature。
+- **短回放证据**：旧 pub 镜像、`-snapshot` 下，单个历史失败 `riscv` rustc 精确命令成功；`riscv`
+  与 `rgb` 两路并发均成功；七个历史失败 crate 的不同输出文件并发回放中六个成功，`rust_decimal`
+  只因脱离 Cargo 后缺少 `OUT_DIR` 返回普通编译错误，全程无 `fault_trace`。另有 8 路并发读取约
+  300 MiB `librustc_driver.so` 的 SHA-256 一致。以上排除固定 crate 输入、普通并发读和单次七路并发
+  的确定性崩溃，但不能排除完整构建累计后的 PageCache/MM/资源状态。
+- **完整 fault-only 证据**：RV64 8 GiB/8 核旧 pub 镜像的正式阶段仍失败，首次不可处理的 instruction
+  与 store fault 均返回 `ENOMEM`；Cargo 结束后 guest 只剩 4 个基础任务，但 `/proc/respos_health`
+  仍为约 `free_kb=60004 cached_kb=52464 heap_kb=187807`，十秒后不恢复。约 7.7 GiB 物理页既不属于
+  PageCache，也不属于 kernel heap，确认是退出后的用户 frame 泄漏。宿主 QEMU RSS+swap 约 9.5 GiB，
+  swap 压力解释了本轮极慢，但不是 guest frame 未回收的根因。
+- **根因与修复**：`exit_process_group()` 原用 `MemorySet` 的原始 `Arc::strong_count` 与当前
+  `thread_group` 成员数判断地址空间是否仅由本组拥有。同组 worker 已从 thread group 移除、但 TCB
+  仍在退出 handoff/延迟 drop 中时会抬高引用数，导致 leader 跳过 `recycle_data_pages()`，随后 zombie
+  leader 长期固定全部 resident frame。现在与 fd-table 归属规则一致：只把 `TASK_MANAGER` 中仍存活、
+  不同 tgid 且共享同一 `MemorySet` 的任务视为外部 `CLONE_VM` owner。
+- **短周期 A/B**：新增 RV64 `frame_reclaim_probe`，每轮实际触碰 64 MiB，并让 7 个 worker 与 leader
+  近同时退出。在 1 GiB/8 核、`-snapshot` 中，旧判定 6 轮使 `free_kb` 从 `774156` 降至 `375648`
+  （约 389 MiB，符合 6×64 MiB 线性泄漏）；修复版 10 轮从 `773996` 到 `768672`，640 MiB 累计压力后
+  仅约 5.2 MiB 初始化/缓存抖动，`tasks=4 deferred=0`。这构成同一探针、同一资源配置的因果回归证据。
+- **修复后门禁**：`cargo fmt --check`（os/user）、`git diff --check` 和无 feature
+  `make build-rv RV_USER_FEATURES= RV_KERNEL_FEATURES=` 均通过；该正式内核在 RV64 1 GiB/8 核
+  `-snapshot` 下依次打印 `FRAME_RECLAIM_PROBE_EXIT resident_mb=64 threads=7`、
+  `SMP_SHARED_MM_PROBE_PASS rounds=100` 与 `BUILDSTORM_FILE_PROBE_PASS`。最终退出路径把 MemorySet/FdTable
+  的外部 owner 判断合并为一次 live-task snapshot；重构后再次运行 10 轮 frame probe，`free_kb`
+  从 `774208` 到 `768912`，仍只有约 5.17 MiB 非线性抖动，`tasks=4 deferred=0`。
+- **六路 rustc 回放边界**：无 feature 修复内核另以 RV64 4 GiB/8 核并发回放失败日志中的
+  `riscv/rgb/radium/rdif_serial/funty/rdrive` 六条完整 release rustc 命令。QEMU 持续使用约 4--6 核、
+  RSS 在约 1.4--1.9 GiB 间且无串口 fault，但受当前宿主 `nice=16/SCHED_IDLE` 放大，约 32 分钟仍未全部
+  返回，已终止 snapshot。该轮没有最终退出码/`free_kb`，明确不计为通过；它说明六条完整 link 命令
+  不适合作为本环境的日常短门禁，不能推翻专用 probe 的同配置 A/B 因果证据。
+- **双架构构建**：同一修复已通过 LA64 无 feature
+  `make build-la LA_USER_FEATURES= LA_KERNEL_FEATURES=`，新增 RV64 probe 在 LA64 构建中明确跳过运行。
+- **下一执行顺序**：该退出回收缺陷按专用 A/B、三项 RV64 门禁和双架构 release 构建视为闭环；下一步
+  才重跑完整 BuildStorm，并进入固定 8-vCPU jobs=1/2/4/8 与 CPU=jobs 1/2/4/8 缩放矩阵。完整运行用于
+  集成验收，不再承担单点根因定位。
+
+## 2026-08-09 BuildStorm 第二轮：扩大 heap、PageCache 工作集与顺序预读（未提交，完整运行失败）
+
+- **基线/范围**：提交 `7cb282a` 加当前 PageCache/共享 mmap 重构工作树。RV64/LA64 kernel heap
+  从 128 MiB 扩大到 256 MiB；frame-backed PageCache 全局上限从 512 页（2 MiB）提高到 16384 页
+  （64 MiB）；缓存 read miss 最多预读 16 页（64 KiB）。未拆分 `EXT4_OP_LOCK`，未引入异步或多队列
+  VirtIO。
+- **预读语义**：顺序 run 在 PageCache 锁外通过一次 inode/lwext4 read 填充，再逐页复制到
+  `FrameTracker`。写路径的 read-modify-write 只加载目标页；插入前检查 `size_version`，若期间发生
+  truncate/extend 则丢弃旧快照并重试，避免把截断前数据重新放回缓存。
+- **专项计数**：RV64 1 GiB/8 核、`perf_counters`、`-snapshot` 的同一
+  `buildstorm_file_probe` 继续通过。相对统一页帧但尚无本轮优化的 probe，block read requests
+  `2494 -> 12`、block write requests `17522 -> 1247`、ext4 lock acquisitions `3568 -> 503`、
+  累计 heap allocation `124455223 -> 37737157` 字节、heap peak `6971508 -> 6630659` 字节；
+  `shared_file_page_entries=0`，最终无脏页。该 probe 的收益不能直接外推为完整 BuildStorm 成绩。
+- **门禁**：最终无 feature RV64/LA64 release 构建通过；RV64 1 GiB/8 核无 feature 专项 probe
+  打印 `BUILDSTORM_FILE_PROBE_PASS`。RV64 8 GiB/8 核、旧 pub 镜像、无 feature 运行到
+  `BUILDSTORM_TOOLCHAIN ok` 与 `BUILDSTORM_MINIBUILD ok` 后按计划主动停止，日志为
+  `/tmp/respos-buildstorm-round2-minibuild.log`。256 MiB BSS 的 RV64 PT_LOAD `MemSize=268968108`，
+  已在 1 GiB 与 8 GiB guest 正常启动。
+- **完整运行结果**：同一无 feature kernel 以 RV64 8 GiB/8 核、旧 pub 镜像、`-snapshot` 完整执行
+  `/glibc/buildstorm_testcode.sh`，日志为 `/tmp/respos-buildstorm-round2-full.log`。工具链和 minibuild
+  均通过，正式阶段最终打印
+  `BUILDSTORM_COMPILE mode=multi ok=false rc=1 elapsed_s=0.00 cores=8 bytes=0 arch=riscv64`；宿主侧
+  `time` 为 `real 8067.83`、`user 23789.22`、`sys 17788.38` 秒。运行越过先前 4515.91 秒的堆耗尽点，
+  全程未见 heap allocation failure、kernel panic 或 OOM，但 `riscv`、`rgb`、`radium`、
+  `rdif-serial`、`funty`、`rust_decimal`、`rdrive` 七个不同 crate 的并行 `rustc` 均收到 SIGSEGV。
+- **采样与下一阻塞**：约每五分钟采样时 QEMU RSS 主要在 2.5--3.2 GiB 间波动，并非单调增长；后半程
+  宿主 swap 接近耗尽，瞬时 QEMU CPU 一度降至约单核。该环境压力能解释运行极慢，不能单独解释多个
+  guest `rustc` 的 SIGSEGV。当前应把高并发用户映射/PageCache 一致性或回收问题列为 `待验证`，先用
+  可缩短复现时间的并发 rustc/文件映射专项测试定位；本轮不能宣称通过或达到 `<3000s`。公告要求的
+  新镜像与 RV64 16 GiB 正式资源仍待取得。
+
+## 2026-08-09 PageCache/共享 mmap 统一页帧（未提交，BuildStorm 仍受 buddy 堆膨胀阻塞）
+
+- **基线/范围**：提交 `7cb282a` 加当前工作树。`PageCache::Page` 不再为每页持有
+  `Vec<u8>`，而是持有 `Arc<FrameTracker>`；普通文件 `MAP_SHARED` 直接复用该帧，不再另分配 mmap
+  帧或向 `SHARED_FILE_PAGES` 插入常驻弱引用键。无 PageCache 的特殊文件仍使用原弱表兼容路径，
+  插入时会清除失效项。
+- **回收与一致性**：PageCache 全局 LRU 在 cache drop 时删除残留条目；受 mmap pin 的页采用有界
+  轮询并重新排队，避免忙循环且能在映射释放后的下一轮压力中回收。truncate 会先清零仍可能被映射
+  持有的完整 victim frame；普通缓存文件 read/write 不再进入旧的全局 overlay/update 锁路径。
+- **专项验证**：`make build-rv RV_USER_FEATURES= RV_KERNEL_FEATURES=` 与对应 `build-la` 均通过；RV64
+  `-m 1G -smp 8 -snapshot` 的 `buildstorm_file_probe` 通过，覆盖 mmap 后扩容、truncate/regrow、
+  mmap+pwrite 同页一致性和稀疏洞。带 `perf_counters` 的同一 probe 显示
+  `shared_file_page_entries=0`、`heap_peak_bytes=6971508`；重构前同类 probe 峰值约 8.82 MiB。
+- **完整 BuildStorm 结果**：统一页帧版本（随后只把正常缓存文件移出冗余 fallback 全局锁，最终工作树
+  未重跑完整用例）以无 feature RV64、8 GiB/8 核、旧 pub 镜像、`-snapshot` 执行
+  `/glibc/buildstorm_testcode.sh`，日志 `/tmp/respos-buildstorm-shared-pagecache.log`。已通过
+  `BUILDSTORM_TOOLCHAIN ok` 和 `BUILDSTORM_MINIBUILD ok`，但在宿主 `real 4515.91s`、标准库构建阶段
+  申请 60000 字节失败，未产生最终 `BUILDSTORM_COMPILE`。失败时
+  `user_bytes=98093955`、`actual_bytes=134159544`、`total_bytes=134217728`。
+- **结论/下一阻塞**：该版本越过原实现约 2202 秒以及仅完成 PageCache 帧化版本约 4269 秒的 OOM
+  窗口，并把失败时仍存活的用户请求量降到约 93.5 MiB；普通文件共享页的重复物理帧和弱表增长已被
+  消除。当前 buddy allocator 将每次分配上取整到 2 的幂，约 34.4 MiB 消耗在请求量与实际占用差额，
+  因此 128 MiB 堆仍被内部膨胀耗尽。尚未达到 `<3000s`，下一轮应评估低内部碎片堆分配器或分离
+  大块临时缓冲，而不是继续扩大 PageCache 数据结构。
+
+## 2026-08-09 BuildStorm 第一轮性能优化与可选计数器（已提交 `7cb282a`）
+
+- **基线/范围**：提交 `7cb282a`（父提交 `999bd8e`）；只调整普通 close 写回边界、lwext4 到
   VirtIO 的连续块提交、scheduler handoff IPI 以及可选诊断计数器，未拆分 `EXT4_OP_LOCK`，也未
   改变显式 `fsync`、`sync` 或正常卸载的持久化屏障。
 - **close 语义**：`File::drop()` 不再把每次普通 close 提升为 `fsync()` 和
@@ -35,15 +164,21 @@
   减法重构后重新验证 RV64/LA64 无 feature 及两 feature 同开 release 构建；RV64 1 GiB/8 核
   `-snapshot` 下无 feature 返回 `enabled=0` 且 probe 通过，仅 `perf_counters` 时返回 `enabled=1`、
   `filesystem_flushes=0`，约 10.3 MiB block write 合并为 701 次请求，probe 继续通过。
-  尚未执行完整官方 BuildStorm，因此没有新的 `<3000s` 结论。
+  后续 8 GiB 完整 BuildStorm 的失败结果与 `<3000s` 状态见上一节。
 
 ## 2026-08-08 决赛镜像/计时口径更新（官方群公告，待新镜像验证）
 
 - 比赛官方群同步：CAgent 已修正 waitpid 测例问题并补回缺失的 `ss`；决赛 QEMU 参数调整为
   RV64 `-m 16G -smp 8`、LA64 `-m 36G -smp 12`，整轮超时 6250 秒。评测平台为 128 GiB、
-  40 线程 VMware Guest；公告中的 Linux 最好成绩为 RV64 4655.23 秒、LA64 6223.00 秒。
+  40 线程 VMware Guest。2026-08-09 核对官方 `testsuits-for-oskernel` 的 `final-2026` 分支提交
+  `3c80dc1` / PR #60 后，计分窗口 Linux baseline 已修正为 RV64 `1616.09s`、LA64 `1985.21s`；
+  原 `4655.23s` / `6223.0s` 与正式 timed 窗口不一致，不能继续用于成绩比较。
 - 当前两个旧镜像缺少预编译 `tg-xtask`。官方计划在更新镜像中补回它；前置依赖构建不计入内核
   编译成绩，计时基线仅覆盖测试用例自身编译，也不包含编译后的运行验证。
+- PR #60 的 Linux 原始日志显示 RV64/LA64 untimed `tg-xtask` 预构建分别为 58 分 27 秒和
+  64 分 45 秒，而计分的 `cargo xtask arceos build ...` 分别为 1616.09 秒和 1985.21 秒。这是计时
+  口径纠正，不代表任意本地环境排除 `tg-xtask` 都会固定节省约 3000 秒；缓存和宿主性能会显著改变
+  untimed 阶段。
 - **对当前结论的影响**：旧 pub 镜像上的 `tg-xtask` 自举 SIGSEGV 当时是真实兼容性缺陷，现已按
   下一节所述修复；但旧镜像结果仍不能直接证明新计分区间通过，此前 8 GiB 运行也只能作为历史功能
   证据，不能作为新资源配置下的最终结果。

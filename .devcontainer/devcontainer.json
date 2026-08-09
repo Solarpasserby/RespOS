@@ -15,6 +15,8 @@
   ],
   "runArgs": [
     "--cap-add=SYS_PTRACE",
+    "--cap-add=SYS_NICE",
+    "--ulimit=nice=-10:-10",
     "--security-opt=seccomp=unconfined"
   ],
   "containerEnv": {
@@ -24,7 +26,8 @@
     "vscode": {
       "settings": {
         "terminal.integrated.defaultProfile.linux": "bash",
-        "rust-analyzer.cargo.allTargets": false
+        "rust-analyzer.cargo.allTargets": false,
+        "chatgpt.cliExecutable": "/usr/local/bin/codex-priority"
       },
       "extensions": [
         "openai.chatgpt",

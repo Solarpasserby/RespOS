@@ -86,6 +86,28 @@ make -C user build ARCH=riscv64 MODE=debug
 
 ## QEMU 运行
 
+### 启动后检查宿主调度优先级
+
+- 状态：已确认
+- 适用范围：所有由 Codex 启动的 QEMU 正确性、压力和性能运行
+- 最后验证：2026-08-09
+- 证据：`.devcontainer/{devcontainer.json,Dockerfile,codex-priority}`、宿主 `ps` 输出
+- 内容：QEMU 启动后、开始 guest 测试或计时前，在另一终端检查实际 QEMU PID；不能只依据容器的
+  `SYS_NICE`/ulimit 配置推断进程优先级：
+
+```bash
+qemu_pid="$(pgrep -n -f '[q]emu-system-(riscv64|loongarch64)')"
+ps -o pid,ppid,ni,cls,stat,etime,cmd -p "$qemu_pid"
+```
+
+重建当前 devcontainer 后，由 Codex 启动的 QEMU 期望为 `NI=-10`、`CLS=TS`（Linux
+`SCHED_OTHER`）。若看到 `CLS=IDL`，或仍继承此前的 `NI=16`，应先停止该轮、修复 Codex 启动包装器
+或改从正常优先级终端启动，再重新运行；这类结果可用于定位功能问题，但墙钟时间和超时不应作为
+性能、活性或缩放结论。长时间 BuildStorm 还应把这行 `ps` 输出随串口日志一起保存。
+
+- 后续影响：每次容器/扩展重启后的首个 QEMU 运行必须检查一次；正式计时和 jobs/CPU 缩放矩阵每轮
+  都要记录实际 `NI/CLS`。
+
 ### 完整双架构运行
 
 - 状态：已确认
@@ -297,14 +319,90 @@ make build-rv RV_USER_FEATURES= RV_KERNEL_FEATURES=debug_traces
 # 必要时同时打开聚合计数和详细 trace；仅用于定位正确性/活性问题
 make build-rv RV_USER_FEATURES= RV_KERNEL_FEATURES='perf_counters debug_traces'
 
-# 正式计时必须保持两个 feature 都关闭
+# 只记录最终无法处理的 RV64 用户页故障；用于 rustc SIGSEGV 定位
+make build-rv RV_USER_FEATURES= RV_KERNEL_FEATURES=fault_trace
+
+# 正式计时必须保持所有诊断 feature 都关闭
 make build-rv RV_USER_FEATURES= RV_KERNEL_FEATURES=
 ```
 
+`fault_trace` 只在 `MemorySet::handle_page_fault()` 返回错误、即将向用户发送 SIGSEGV/SIGBUS 时打印
+hart/tid/tgid、cause、sepc、stval、sp、ra 和 errno；它不会打印成功的 demand/COW fault。它适合
+正确性复现，不是性能内核，结束诊断后仍须恢复无 feature kernel。
+
+### BuildStorm CPU/jobs 缩放矩阵
+
+正式 judge 只接受最终平台规定的 RV64 8 核、LA64 12 核配置；下列矩阵只用于选择优化方向，日志必须
+明确标为 diagnostic，不得混入成绩。每个数据点从同一只读 snapshot/冷启动开始，固定内核、镜像、
+QEMU、宿主负载和磁盘后端，记录 `CARGO_BUILD_JOBS`、kernel features 与 host/guest 两套时间。
+
+先固定官方 vCPU 数，只改变 Cargo 并发：
+
+```sh
+# guest /bin/sh 中；1、2、4、8 分别独立冷启动运行
+export CARGO_BUILD_JOBS=1
+/glibc/buildstorm_testcode.sh
+```
+
+再让 vCPU 与 jobs 同时变化：RV64 `1/1、2/2、4/4、8/8`，LA64 在 SMP 正确后使用
+`1/1、3/3、6/6、12/12`。正式命令之外的 `-smp` 只用于计算：
+
+```text
+speedup(n) = timed_seconds(1) / timed_seconds(n)
+efficiency(n) = speedup(n) / n
+```
+
+完整构建太慢时，先用同一镜像中的单个历史 rustc 命令或 2 路不同输出文件回放筛选；短回放只能证明
+局部趋势，最终选择仍以官方 timed command 为准。不要并发执行会写同一输出文件的命令。历史 Codex
+会话曾把 QEMU 置于 `nice=16/SCHED_IDLE`，使六条带完整 release link 的命令并发 30 分钟仍无法作为
+短测收口；重建 devcontainer 或显式修正启动调度后，必须按本文件前述方法确认实际 `NI/CLS`，不能仅
+凭配置推断。即使调度优先级正常，固定 4/8 路完整 rustc 仍不作为每次修改后的强制门禁；退出回收优先
+使用下述专用 probe。
+
+进程退出后的物理页回收使用嵌入式 `frame_reclaim_probe` 做分钟级门禁。RV64 1 GiB/8 核、`-snapshot`
+进入 `user_shell` 后，先通过 `/bin/sh` 读取 `/proc/respos_health`，退出 shell，再连续运行探针并重新
+读取 `free_kb`。每轮触碰 64 MiB 并并发退出 7 个 worker；修复版不应出现约 64 MiB/轮的线性下降：
+
+```text
+/> /bin/sh
+cat /proc/respos_health
+exit
+/> frame_reclaim_probe
+/> frame_reclaim_probe
+/> /bin/sh
+cat /proc/respos_health
+```
+
+该 probe 针对 exit/reap 生命周期，不替代共享 MM/TLB 的 `smp_shared_mm_probe` 或文件一致性的
+`buildstorm_file_probe`。
+
+每个样本至少保存：
+
+- commit、`git diff --stat`、镜像 hash、QEMU 版本/参数、kernel features、jobs；
+- guest `BUILDSTORM_BEGIN/COMPILE` 与 `/proc/uptime` timed 秒数；
+- host wall time、QEMU `%CPU/RSS`、available memory/swap，长测约每五分钟采样；
+- `/proc/respos_perf` 的 running/idle ticks、context switch、IPI、local/remote fence、page fault、
+  PageCache、block request、ext4 lock 和 heap 数据；
+- 成功 marker、产物大小、首次 kernel/rustc 错误，而不是只记录 Cargo 最后一行。
+
+判读顺序：
+
+1. runnable 充足而 hart idle，或 wake-to-run 延迟高：先查 scheduler/IPI/runqueue；
+2. QEMU CPU 低且 ext4 lock 时间高：先查 FS 锁域和锁内 I/O；
+3. private-file faults、RSS 和 eviction 随 jobs 急升：先查 private mmap/PageCache；
+4. remote RFENCE 随共享线程增加：再查 active-mask/ASID/shootdown；
+5. guest 计数相近但只在 host swap 压力下骤慢/失败：先稳定宿主环境，不把它误判成内核回归。
+
+一次只实现一个由上述数据支持的主要改动，然后重跑对应短门禁、缩放矩阵的数据点和无 feature 正式
+配置。完整三层级路线、进入/退出门槛和候选优化见
+[buildstorm-smp-plan.md](./buildstorm-smp-plan.md#buildstorm-三层级优化总路线2026-08-09)。
+
 2026-08-08 比赛官方群公告的新决赛参数为：RV64 `-m 16G -smp 8`，LA64
-`-m 36G -smp 12`，整轮超时 6250 秒。评测宿主是 128 GiB、40 线程的 VMware Guest；公告给出的
-Linux 最好成绩为 RV64 4655.23 秒、LA64 6223.00 秒。这些是外部公告口径，本地取得更新后的镜像后
-仍须核对镜像 hash、脚本和实际启动命令。
+`-m 36G -smp 12`，整轮超时 6250 秒。评测宿主是 128 GiB、40 线程的 VMware Guest。2026-08-09
+核对官方 `testsuits-for-oskernel` `final-2026` 分支提交 `3c80dc1` / PR #60 后，正式 timed build 的
+Linux baseline 为 RV64 1616.09 秒、LA64 1985.21 秒；此前 4655.23 / 6223.0 秒包含或对应了不同
+计时范围，已被上游明确替换。资源参数来自群公告，仓库 README 仍写 RV64 8 GiB，两者冲突处必须以
+最终平台启动命令为准；本地取得更新后的镜像后仍须核对镜像 hash、脚本和实际启动命令。
 
 BuildStorm 使用 release kernel、无 `eval` user feature。诊断必须带 `-snapshot`，当前 RV64 命令为：
 

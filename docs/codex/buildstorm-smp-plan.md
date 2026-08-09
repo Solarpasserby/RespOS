@@ -13,6 +13,109 @@
 
 范围：先实施 RV64；LA64 在 RV64 2/8 核稳定、公共抽象形成后接入。第一版允许全局 run queue 和全局锁，目标是可正确运行多线程 cargo/rustc；per-CPU run queue、work stealing、cache 优化属于后续性能阶段。题一 pub 入口继续保持 `SMP=1`。
 
+## BuildStorm 三层级优化总路线（2026-08-09）
+
+历史 Phase 0--5 继续作为 SMP 启动、task owner、唤醒、共享 MM 与真实拓扑的**正确性前置**；本节把
+原 Phase 6 的性能工作与已经完成的第一、二轮优化合并为后续唯一推进路线。正式评分看 RV64 8 核、
+LA64 12 核的完整构建，但诊断必须先取得 1/2/4/8（LA64 为 1/3/6/12）缩放曲线，不能把
+`nproc` 正确或 QEMU 启动了多个 vCPU 当作并行加速证据。
+
+统一原则：
+
+1. **先成功，再计时。** 任一 rustc SIGSEGV、产物缺失或内核错误都先按正确性缺陷处理；性能优化
+   不能绕过失败门槛。
+2. **先测量，再选择层级。** 每次只改变一个主要变量，保存 commit、镜像 hash、kernel features、
+   QEMU 参数、Cargo jobs、guest timed 秒数、host wall time 和计数器窗口。
+3. **诊断与正式配置分离。** `perf_counters`、`fault_trace`、`debug_traces` 只用于定位；正式成绩必须
+   用无调试 feature 的 release kernel 重跑。详细串口 trace 不参与性能对照。
+4. **整体吞吐优先。** BuildStorm 同时受 scheduler、ext4、PageCache/MM、allocator、VirtIO 和宿主
+   资源影响；不能只因配置为 8/12 核就预设 scheduler 是主瓶颈。
+
+### 第一层：低风险热路径与资源闭环
+
+目标是在不改变核心并发模型的前提下降低确定性的串行 I/O、冗余写回、日志和内存元数据成本。
+
+已完成主体：
+
+- 普通 close 不再执行全文件系统/device flush，显式 `fsync`/`sync`/shutdown 语义保留；
+- lwext4 连续块合并为 multi-block VirtIO 请求；scheduler handoff 去除重复 IPI；
+- 性能计数和详细串口输出由 feature 静态隔离；
+- PageCache 以 `Arc<FrameTracker>` 承载缓存页，普通文件 `MAP_SHARED` 与缓存共用 frame；
+- PageCache 工作集提高到 64 MiB 并做最多 64 KiB 顺序预读；kernel heap 提高到 256 MiB。
+
+当前闭环任务：先定位并修复完整 RV64 BuildStorm 中并行 rustc SIGSEGV，再以同镜像、同 QEMU、
+无 feature kernel 证明正式构建成功。不得在该故障未定位时继续叠加缓存、调度或异步 I/O 重构。
+
+第一层退出门槛：
+
+- `BUILDSTORM_TOOLCHAIN ok`、`BUILDSTORM_MINIBUILD ok`、最终
+  `BUILDSTORM_COMPILE ... ok=true` 且产物不少于 500 KiB；
+- RV64/LA64 无 feature release 构建、RV64 8 核 file/shared-MM/进程门禁和题一关键回归通过；
+- heap、PageCache page/LRU/registry、共享 file-page 表不随累计短命进程或文件流量无界增长；
+- 保存第一轮提交 `7cb282a`、第二轮工作树与修复后的可比数据，不把旧计时窗口当成新基线。
+
+### 第二层：消除共享瓶颈并取得有效多核扩展
+
+目标是让固定的 RV64 8 核、LA64 12 核真正产生吞吐，而不是把额外并发转化成锁竞争、缺页复制、
+迁移和内存压力。进入本层后先执行 `workflows.md` 的 CPU/jobs 双矩阵，再按证据只选择最高占比热点。
+
+候选按当前证据优先级排列：
+
+1. **ext4 锁域。** 测量 `EXT4_OP_LOCK` 等待/持有时间，区分 metadata、inode/file data 与 block I/O。
+   只有确认 lwext4 对目标对象可并发后才拆锁；不能直接在全局锁外并发调用未知线程安全的 C 状态。
+2. **私有只读文件映射。** 当前每个 rustc 的 `MAP_PRIVATE` fault 会分配独立 frame 并从 PageCache
+   复制；约 300 MiB 的 `librustc_driver.so` 会放大多进程缺页和回收。评估让 clean、只读 private
+   mapping 共享 PageCache frame，写权限映射保持 COW；必须覆盖 truncate、写入一致性、mprotect、
+   fork/exec/exit 和回收 pin，不能把现有 `MAP_SHARED` 方案直接套用。
+3. **per-CPU run queue。** 当前 RV64 已有 per-CPU Processor/idle 和 task owner，但 ready/blocked
+   状态仍由全局 `SCHEDULER` 锁管理。仅当 runnable 积压、idle 比例或 scheduler lock 数据证明其为
+   热点时，引入本地队列、last-CPU/wake affinity、idle pull/有限 work stealing 和 global fallback。
+4. **PageCache 策略。** 根据 hit/miss/eviction 和访问跨度判断 64 MiB/16 页预读是否合适，再考虑
+   自适应预读、冷热分离或工作集调整；不得只靠扩大缓存掩盖生命周期问题。
+5. **退出/分配并发。** 若高并发退出再次集中在全局 heap/frame/task 回收锁，先缩短锁内析构与分配，
+   再评估 per-CPU 小对象缓存；本阶段不替换整个 heap allocator。
+
+调度器的第二层目标不是移植完整 CFS/EEVDF，而是消除单一全局 ready lock、保持缓存局部性并在空闲时
+拉取工作。8/12 核规模可先用 O(N) `nr_running` 选择最忙队列；enqueue 仅在目标 CPU 从 idle 获得
+runnable work 时发送/合并 IPI。Linux 的 per-CPU runqueue、wakeup placement、idle pull 和周期负载
+均衡作为结构参考，RespOS 的 owner/handoff/affinity 不变量仍是实现边界。
+
+第二层退出门槛：
+
+- 固定 8-vCPU 的 jobs=1/2/4/8 曲线以及 CPU=jobs 的 1/2/4/8 曲线可复现；
+- runnable 充足时无非预期 idle，且 8 路吞吐相对 1/2 路有明确提升；
+- 每项修改都有 guest timed、host wall、CPU/RSS/swap 和对应锁/IO/fault 计数的前后对照；
+- 单核、2/4/8 核以及 FS/MM/futex/pipe/exit 回归未因追求吞吐而退化为不安全语义。
+
+### 第三层：深层并行 I/O、MM 与双架构扩展
+
+只有第二层显示 CPU 仍被底层架构限制时才进入本层：
+
+- VirtIO block 异步提交、完成中断与多队列，减少同步轮询和单队列串行；
+- 强引用 inode/PageCache 生命周期与后台/批量 writeback，使普通 close 可完全脱离数据提交；
+- per-CPU allocator cache 或按对象类型分配，前提是先证明全局 allocator 为热点并完成所有权审计；
+- ASID、精确 active-mask 和按地址/地址空间 shootdown，降低共享 MM 的远端 RFENCE；
+- 把 RV64 已验证的 PerCpu、runqueue、IPI、timer、TLB 协议接入 LA64，先 2 核，再 6/12 核；当前
+  LA64 `task/processor.rs` 仍只配置一个 Processor，不能把 `nproc=12` 当作实现完成；
+- 最后才考虑 NUMA/复杂 scheduler domain、完整公平调度策略或更激进的无锁结构。
+
+第三层每项都是独立设计任务，必须有专项正确性测试和回退点；不得把多队列、ASID、allocator 与
+scheduler 大改合在一次 BuildStorm 计时中。
+
+### 数据到优化方向的判定
+
+| 观测 | 优先方向 |
+| --- | --- |
+| ready/runnable 长期大于 CPU 数，但部分 hart idle 或 wake-to-run 很长 | scheduler 唤醒、IPI、runqueue 放置 |
+| QEMU CPU 未满、ext4 lock wait/hold 占比高 | ext4 锁域、PageCache/I/O 锁外工作 |
+| private-file faults、RSS、PageCache eviction 随 jobs 急升 | clean private 映射共享/COW、缓存策略 |
+| remote RFENCE 随线程数急升且 MM 写操作集中 | active-mask、ASID、精确 shootdown |
+| 所有 hart busy 但 block requests 小且同步等待多 | I/O 合并、异步完成、多队列 |
+| guest 指标相近，只有 host available/swap 变化时出现骤慢或失败 | 宿主隔离与资源条件，不先修改内核 |
+
+每轮只推进表中证据最强的一项。若计数器不能解释 wall time，先补测量，不以“优秀内核这样做”作为
+直接合入理由。
+
 ## 交接状态与下一轮计划（2026-08-05，未提交工作树）
 
 当前实现已经越过 early bring-up：RV64 次 hart 会进入 `task::run_tasks()`，全局 ready queue 有

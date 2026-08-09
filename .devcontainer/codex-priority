@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+
+codex_binary=
+for candidate in /home/ubuntu/.vscode-server/extensions/openai.chatgpt-*/bin/linux-x86_64/codex; do
+    if [ -x "$candidate" ]; then
+        codex_binary=$candidate
+    fi
+done
+
+if [ -z "$codex_binary" ]; then
+    echo "codex-priority: bundled Codex executable not found" >&2
+    exit 127
+fi
+
+exec /usr/bin/chrt --other 0 /bin/sh -c '
+    /usr/bin/renice -n -10 -p $$ >/dev/null
+    exec "$@"
+' codex-priority "$codex_binary" "$@"

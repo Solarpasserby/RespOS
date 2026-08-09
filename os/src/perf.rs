@@ -246,6 +246,16 @@ pub fn render() -> String {
     );
     let _ = writeln!(
         out,
+        "page_cache_pages={} page_cache_dirty_pages={} page_cache_lru_entries={} page_cache_registry={} shared_file_page_entries={} free_frames={}",
+        crate::fs::page_cache_page_count(),
+        crate::fs::page_cache_dirty_page_count(),
+        crate::fs::page_cache_lru_entry_count(),
+        crate::fs::page_cache_registry_count(),
+        crate::mm::shared_file_page_entry_count(),
+        crate::mm::free_frame_count()
+    );
+    let _ = writeln!(
+        out,
         "anonymous_faults={} private_file_faults={} shared_file_faults={} cow_faults={}",
         s.anonymous_faults, s.private_file_faults, s.shared_file_faults, s.cow_faults
     );

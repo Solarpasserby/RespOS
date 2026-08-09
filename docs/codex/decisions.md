@@ -3,6 +3,62 @@
 这里只收录能解释当前代码形态或避免重复踩坑的决策。日期是当前证据最后核验时间，不一定是
 最初提出时间。
 
+## BuildStorm 采用三层级、测量驱动的优化路线
+
+- 状态：已采用
+- 适用范围：题目二正确性修复、性能优化、多核调度、FS/MM/I/O 重构
+- 最后验证：2026-08-09
+- 证据：`docs/codex/buildstorm-smp-plan.md`、`docs/codex/workflows.md`；第一轮提交 `7cb282a`、
+  第二轮当前工作树和 RV64 8 核完整运行/短 rustc 回放
+- 内容：历史 SMP Phase 0--5 作为正确性前置；性能阶段统一分为低风险热路径与资源闭环、共享瓶颈与
+  有效多核扩展、深层 I/O/MM/双架构扩展三层。每层依据固定镜像下的 CPU/jobs 缩放曲线及
+  scheduler、ext4、PageCache/fault、TLB、block I/O、host 资源计数选择单一最高热点；并行 rustc
+  SIGSEGV 未闭环前不叠加新的性能重构。
+- 后续影响：per-CPU runqueue、clean private file frame 共享、ext4 拆锁、异步 VirtIO、ASID 或
+  per-CPU allocator 都是候选而非预先批准的实现。没有前后数据、专项语义门禁和无 feature 正式复跑
+  的修改不进入下一层；优秀内核只提供机制参考，不能替代 RespOS 当前证据。
+
+## Frame-backed PageCache 保留 64 MiB 工作集并做 64 KiB 顺序预读
+
+- 状态：已采用，完整 BuildStorm 正确性/计时待验证
+- 适用范围：普通文件缓存 miss、lwext4 锁竞争、块请求合并、物理内存预算
+- 最后验证：2026-08-09
+- 证据：`os/src/fs/page_cache.rs`、`os/src/arch/{rv64,loongarch64}/config/fs.rs`；RV64 8 核
+  `buildstorm_file_probe` 和 BuildStorm minibuild
+- 内容：PageCache 数据已由物理 frame 承载，因此全局 resident 上限由 2 MiB 提高到 64 MiB。
+  有底层普通文件的 read miss 一次最多读取连续 16 页，在 PageCache 锁外完成 I/O 后逐页安装；写路径
+  不预读。预读插入使用文件长度代次拒绝并发 truncate 的过期快照。
+- 后续影响：缓存预算消耗物理页但每页元数据仍消耗 kernel heap；继续扩大前必须同时观察
+  `page_cache_pages`、free frames 和 heap peak。不得为减少锁次数而在 `EXT4_OP_LOCK` 之外并发调用
+  lwext4；随机 I/O 回归时应重新评估固定 16 页预读是否过量。
+
+## BuildStorm kernel heap 使用 256 MiB 容量
+
+- 状态：已采用，已越过旧 OOM 点，完整 BuildStorm 仍受并行 rustc SIGSEGV 阻断
+- 适用范围：RV64/LA64 kernel BSS、buddy allocator、高并发用户地址空间元数据
+- 最后验证：2026-08-09
+- 证据：`os/src/arch/{rv64,loongarch64}/config/mm.rs`；双架构 release、RV64 1/8 GiB 启动
+- 内容：128 MiB 完整运行失败时用户 live 请求约 93.5 MiB，但 buddy 按二次幂取整后的实际占用约
+  127.94 MiB。当前不替换 allocator，将两架构固定 heap 扩大到 256 MiB，为 resident page 的
+  `Arc<FrameTracker>`、BTreeMap 映射元数据和编译并发峰值留出余量。
+- 后续影响：这不是泄漏修复；若 256 MiB 仍随累计工作量单调耗尽，应继续查生命周期而不是再次扩容。
+  小内存 guest 会少 128 MiB 可分配物理页，但 1 GiB RV64 门禁已通过。
+
+## 普通文件 PageCache 与 MAP_SHARED 共用 FrameTracker
+
+- 状态：已采用，完整 BuildStorm 已越过旧 heap 阻断，当前并行 rustc SIGSEGV 待定位
+- 适用范围：普通文件 PageCache、MAP_SHARED、truncate、全局缓存回收
+- 最后验证：2026-08-09
+- 证据：`os/src/fs/page_cache.rs`、`os/src/fs/file.rs`、`os/src/mm/memory_set.rs`；RV64 8 核
+  `buildstorm_file_probe` 与 8 GiB 完整 BuildStorm 日志
+- 内容：一个普通文件缓存页由 PageCache 持有一个 `Arc<FrameTracker>`，共享文件映射克隆同一 frame，
+  不再维护第二份 mmap frame 和正常文件的全局弱引用索引。PageCache 回收必须把 frame 的额外强引用
+  视为 mmap pin；truncate 删除页前必须清零 frame。无 PageCache 文件可保留全局弱表作为兼容后备，
+  但失效弱引用必须被清除。
+- 后续影响：普通 buffered I/O 与共享映射天然观察同一物理页，不得重新添加 overlay/copy 同步热路径。
+  mmap 写回仍由现有 munmap/msync 快照路径标脏和提交；若以后引入 PTE dirty-bit writeback，需要在同一
+  PageCache 页上扩展状态，而不是恢复平行缓存。
+
 ## 普通 close 不执行全文件系统持久化屏障
 
 - 状态：已采用，完整 BuildStorm 计时待验证

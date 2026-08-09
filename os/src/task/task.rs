@@ -2193,17 +2193,21 @@ fn exit_process_group(task: Arc<TaskControlBlock>, cause: ExitCause) {
         .cloned()
         .unwrap_or_else(|| task.clone());
 
-    // Arc counts include one resource owner per TCB. Distinguish references
-    // held by this thread group from a separate CLONE_VM/CLONE_FILES process:
-    // group exit may tear down the former, but must preserve the latter.
+    // A separate CLONE_VM process can share this address space, but raw Arc
+    // counts cannot identify it: detached/deferred TCBs from this same thread
+    // group also retain their MemorySet handle for a short time.  Treat only
+    // a live task in another tgid as an external owner.  Otherwise a process
+    // whose worker threads exited just before its leader would skip recycling
+    // and leave all resident pages pinned by the zombie leader.
     let task_memory_set = task.memory_set_arc();
-    let memory_set_group_owners = threads
-        .iter()
-        .filter(|thread| Arc::ptr_eq(&thread.memory_set_arc(), &task_memory_set))
-        .count();
-    // task_memory_set itself contributes one temporary reference here.
-    let memory_set_owned_by_group =
-        Arc::strong_count(&task_memory_set) <= memory_set_group_owners + 1;
+    let live_tasks = TASK_MANAGER.snapshot();
+    let memory_set_shared_outside_group = live_tasks.iter().any(|other| {
+        if other.tgid() == tgid {
+            return false;
+        }
+        Arc::ptr_eq(&other.memory_set_arc(), &task_memory_set)
+    });
+    let memory_set_owned_by_group = !memory_set_shared_outside_group;
 
     let fd_table_ptr = {
         let fd_table = task.fd_table.lock();
@@ -2212,7 +2216,7 @@ fn exit_process_group(task: Arc<TaskControlBlock>, cause: ExitCause) {
     // Deferred TCBs can retain this FdTable after leaving `thread_group`, so
     // Arc counts cannot distinguish them from a live CLONE_FILES process.
     // Only a live task in another tgid makes clearing the shared table unsafe.
-    let fd_table_shared_outside_group = TASK_MANAGER.snapshot().into_iter().any(|other| {
+    let fd_table_shared_outside_group = live_tasks.iter().any(|other| {
         if other.tgid() == tgid {
             return false;
         }

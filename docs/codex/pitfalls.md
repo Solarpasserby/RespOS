@@ -14,17 +14,18 @@
 - 后续影响：稀疏回归不仅要 close/reopen 后读洞，还要覆盖新建文件 ftruncate 后立即 MAP_SHARED，
   并在用户首次写入前检查映射内容全零。
 
-## mmap 与 pwrite 共存时必须维护驻留共享页一致性
+## mmap 与 pwrite 共存时不能维护两份普通文件缓存页
 
 - 状态：已确认并修复专项回归
 - 适用范围：同一 inode 的 `MAP_SHARED`、read/write/pwrite、truncate
-- 最后验证：2026-08-08；RV64 8 核 `buildstorm_file_probe`
-- 证据：`os/src/fs/file.rs`、`os/src/mm/mod.rs`、`os/src/mm/memory_set.rs`
-- 内容：只共享各个 VMA fault 出来的 frame 仍不够；普通 write/pwrite 若绕过驻留 frame 写 backend，
-  mmap 会继续看到旧数据，反向 read 也可能忽略 mmap 中尚未写回的数据。当前以 backend inode 作为
-  file-page 身份，写入同步更新驻留共享页，读取叠加驻留内容，truncate shrink 清零新 EOF 后的字节。
+- 最后验证：2026-08-09；RV64 8 核 `buildstorm_file_probe` 与完整 BuildStorm OOM 边界
+- 证据：`os/src/fs/page_cache.rs`、`os/src/fs/file.rs`、`os/src/mm/memory_set.rs`
+- 内容：只在全局表中共享各个 VMA 的 frame 仍会与 PageCache 形成两份普通文件页，需要 read overlay、
+  write mirror 才能维持一致性，并会为累计 mmap 页留下大量弱引用树节点。当前普通文件 mmap 直接克隆
+  PageCache 的 `FrameTracker`；read/write 天然访问同页，truncate shrink 清零仍被映射持有的 frame。
+  全局弱表及 overlay/update 只用于没有 PageCache 的兼容后备文件，并会清理失效弱引用。
 - 后续影响：文件一致性 probe 应包含同页 mmap+pwrite 双向观察与 truncate/regrow 零填充，不能只在
-  munmap/close 后比较磁盘内容。
+  munmap/close 后比较磁盘内容；PageCache 回收也必须检查 frame 是否仍被 VMA pin。
 
 ## 用户栈溢出可能伪装成动态解释器权限故障
 
@@ -174,6 +175,21 @@
   因此 sparse unmap 优化不能作为 EOF 问题已解决的证据。
 - 后续影响：对 lazy 结构做回收、fork、mprotect 或统计时优先按 resident metadata 工作；需要改变
   整个 VMA 属性时操作区间元数据，不能隐式扫描每个潜在页。
+
+## 共享进程资源的退出归属不能用 `Arc::strong_count` 猜测
+
+- 状态：已确认并修复当前 BuildStorm 并行 rustc ENOMEM/SIGSEGV 根因
+- 适用范围：多线程进程组退出、延迟 TCB drop、zombie、`CLONE_VM`/`CLONE_FILES`
+- 最后验证：2026-08-09；RV64 1 GiB/8 核 `frame_reclaim_probe` A/B 与 8 GiB fault-only BuildStorm
+- 证据：`os/src/task/task.rs::exit_process_group()`、`user/src/bin/frame_reclaim_probe.rs`；guest
+  `/proc/respos_health` 前后值记录于 `current-status.md`
+- 内容：worker 可以已离开 thread group，却仍因 context-switch handoff 或 `DEAD_TASKS` 持有 TCB；
+  此时它对共享资源的临时强引用不是另一个存活进程。用强引用总数与当前成员数比较会误判外部 owner，
+  跳过地址空间清空；zombie leader 再把整个 resident set 固定到父进程 wait/reparent 之后。归属判断
+  应扫描 live task identity：只有不同 tgid、仍存活且指向同一资源的任务才阻止本组 teardown。
+- 后续影响：不要以扩大 guest 内存或 heap 掩盖线性 frame 泄漏。新增共享 TCB 资源时必须明确区分
+  live owner、zombie owner 与退出路径临时引用，并用“分配/触碰—多线程退出—wait—空闲量恢复”短测
+  建立门禁。
 
 ## pub 镜像不能在 QEMU 运行时由宿主修改
 
