@@ -63,31 +63,256 @@ RV64 多核下，task 恢复用户地址空间前在 `MemorySet` 读锁内设置
 
 ## 6.3 缺页、lazy allocation 与 COW
 
-RV64 与 LA64 trap handler 都把用户页错误转换为 `PageFaultCause::{Instruction, Load, Store}`，随后在对应 `MemorySet` 的写锁内调用 `handle_page_fault`。处理器先定位覆盖 fault VPN 的 VMA，再检查 `USER` 和本次访问需要的 R/W/X 权限，不存在 VMA、访问 trampoline 以上地址或权限不符均返回 `EFAULT`，最终由 trap 层转化为用户可观察的异常处理。
+缺页：CPU 访问虚拟地址时，页表无法给其提供合法的可访问的物理页映射。
 
-缺页决策可概括为：
+Lazy allocation：虚拟地址是合法的（在某个 VMA 范围内），但对应的物理页还没有分配，PTE 也没有建立成有效映射。
 
-```text
-用户 page fault
-  ├─ 无覆盖 VMA / 越界 / VMA 权限不允许 → EFAULT
-  ├─ 有效 PTE + store + COW
-  │    ├─ frame 仅一个所有者 → 清 COW，恢复写权限
-  │    └─ 多个所有者 → 分配新页、复制、原子替换 PTE
-  ├─ PTE 不存在或无效 → 按 VMA backing 建页并映射
-  ├─ 并发修改后 PTE 已具备所需权限 → 本地 sfence，重试指令
-  └─ 其他权限 fault → EFAULT
+```
+一个进程 → 虚拟地址空间 → VMA（内核数据结构）描述哪些区域合法 → 页表 → 物理内存 RAM
 ```
 
+Page fault 的几种情况：
+
+| 情况 | 说明 |
+|---|---|
+| PTE 不存在/无效 | lazy allocation，按需分配物理页 |
+| 物理页尚未加载 | demand paging，从磁盘/文件读入 |
+| 写只读页面 | COW，fork 后父子共享页被写入 |
+| 用户访问内核页 | 权限不足，SIGSEGV |
+| 执行不可执行页面 | 权限不足，SIGSEGV |
+| 地址不属于任何 VMA | 非法访问，杀进程 |
+
+
+缺页处理的全流程：
+
+```
+CPU 访问 VA → 查页表失败 → Page fault → 内核检查 VMA → 决定这个访问是否合法
+→ frame_alloc() → 拿到一个新的物理页 → 把数据放进去 → map(vpn, ppn)
+→ 创建/修改 PTE → VA→PA 建立映射 → 返回用户态 → 重新执行刚才失败的指令
+```
+
+### trap 入口
+
+RV64 的 trap handler 把用户页错误转成 `PageFaultCause::{Instruction, Load, Store}` 三种，然后在 `MemorySet` 的写锁里调用 `handle_page_fault`。
+
+发生 page fault 时 RISC-V 硬件把出错的虚拟地址写到 `stval` CSR，内核读出来转成 vpn（`memory_set.rs:2421`）：
+
+```rust
+let vpn = VirtAddr::from(stval).floor();
+```
+
+### handle_page_fault 处理顺序
+
+`handle_page_fault`（`memory_set.rs:2417-2503`）先定位覆盖 fault VPN 的 VMA，再检查 USER 和本次访问需要的 R/W/X 权限。不存在 VMA、访问 trampoline 以上地址或权限不符都返回 `EFAULT`，最终由 trap 层变成发给进程的 `SIGSEGV`。
+
+A. 找到这个虚拟页属于哪个 VMA
+
+```rust
+let area_idx = self.areas.iter().position(|a| a.vpn_range.contain(&vpn))?;
+```
+
+一个进程（`MemorySet`）有多个 `MapArea`：
+
+```
+self.areas = [
+    代码段 VMA,
+    数据段 VMA,
+    heap VMA,
+    mmap VMA,
+    stack VMA,
+]
+```
+
+每个 `MapArea` 描述一段连续的虚拟地址范围。`self.areas.iter()` 一个一个检查，`.position(...)` 找到满足条件的那个元素的位置（索引）。没有 VMA 覆盖就返回 `EFAULT`。
+
+B. 检查 VMA 权限
+
+```rust
+let area_perm = self.areas[area_idx].map_perm;
+if !area_perm.contains(MapPermission::USER) {
+    return Err(Errno::EFAULT);
+}
+```
+
+`area_perm` 是 VMA 的权限位，必须包含 `USER`，否则是内核页，用户态无权访问。
+
+C. 检查 PTE 并判断 fault 类型
+
+```rust
+let pte = self.page_table.translate(vpn);
+let is_store = matches!(cause, PageFaultCause::Store);
+let needed_perm = if is_store {
+    MapPermission::WRITE
+} else {
+    match cause {
+        PageFaultCause::Instruction => MapPermission::EXECUTE,
+        _ => MapPermission::READ,
+    }
+};
+```
+
+`self.page_table` 是当前进程的页表。`translate(vpn)` 走 SV39 页表 walk 找到对应的 PTE。`is_store` 判断这次 page fault 是不是写内存导致的。`needed_perm` 是本次访问需要的最小权限。
+
+D. 三个分支，按顺序匹配
+
+```
+用户 page fault
+  ├─ 无覆盖 VMA / 越界 / VMA 权限不允许 → EFAULT
+  ├─ 有效 PTE + store + COW         → 分支一（COW 写入）
+  ├─ PTE 不存在或无效               → 分支二（惰性分配）
+  ├─ 并发修改后 PTE 已具备所需权限   → 分支三（竞态重试）
+  └─ 其他权限 fault                → EFAULT
+```
+
+**分支一：COW 写入**（`memory_set.rs:2445-2471`）
+
+```rust
+if is_store && pte.is_some_and(|p| p.is_valid() && p.is_cow()) {
+    // 写操作 + PTE 有效 + PTE 标记为 COW
+    let count = Arc::strong_count(old_frame);
+    // count 表示现在还有多少地方共同持有这个物理页
+
+    if count == 1 {
+        // 最后一个引用：只需恢复写权限，无需复制
+        self.page_table.modify_pte(vpn, flags);
+        self.page_table.clear_pte_cow(vpn);
+    } else {
+        // 仍有共享者：分配新页，复制旧数据
+        // frame_alloc() → 分配一个新的物理页 B
+        // 把旧物理页 A 的内容复制到新物理页 B
+        // 修改当前进程的页表，让当前 vpn 不再映射 A，改成映射 B
+        // 新 PTE 设置 W=1，COW 清掉
+        self.areas[area_idx].remap_one_with_data(&mut self.page_table, vpn, old_data)?;
+    }
+    self.flush_tlb(); // 刷新 TLB
+    return Ok(());
+}
+```
+
+COW 的所有权由 `Arc<FrameTracker>` 表达。`strong_count == 1` 说明另一个进程已经退出或之前触发过自己的 COW fault 拿到了新页，这时只需要 `modify_pte` 恢复 `W=1`、`clear_pte_cow` 清除 COW 位——不分配、不复制，只改 PTE 标志位。`modify_pte` 只改标志位不改 PPN（`page_table.rs:267`），专门给 COW 恢复用的。
+
+`strong_count > 1` 说明还有别人共享这个页。`remap_one_with_data`（`memory_set.rs:2945`）做的事：`frame_alloc()` 拿一个新物理页 B → 把旧页 A 的内容 copy 到 B → `replace_pte` 用新 PTE 原子替换旧 PTE，新 PTE 设 `W=1`，COW 清掉 → 旧帧引用递减。
+
+关键设计：旧 PTE 和 frame 一直保留到新页分配和复制全部成功之后。如果 `frame_alloc()` 失败返回 `ENOMEM`，旧映射原封不动，地址空间里不会留一个洞。
+
+**分支二：惰性分配**（`memory_set.rs:2475-2483`）
+
+```rust
+if pte.is_none() || !pte.unwrap().is_valid() {
+    if !area_perm.contains(needed_perm) {
+        return Err(Errno::EFAULT);
+    }
+    self.areas[area_idx].map_one(&mut self.page_table, vpn)?;
+    // 给这个 VMA 里面的 vpn 真正分配一个物理页，并建立 VPN→PPN 的页表映射
+    self.flush_tlb();
+    return Ok(());
+}
+```
+
+`map_one`（`memory_set.rs:2897-2942`）做的事：
+1. `frame_alloc()` 从物理页帧分配器拿一个新物理页
+2. 如果是文件映射（`file_backing`），从文件读数据填进新页，不足部分保持零
+3. `page_table.map(vpn, ppn, flags)` 建立 PTE 映射
+4. 把 `FrameTracker` 插入 `data_frames`
+5. 如果 PTE 映射失败，从 `data_frames` 里删掉 frame 做清理
+
+**分支三：竞态重试**（`memory_set.rs:2491-2499`）
+
+```rust
+// CPU 的 TLB 还保存着旧的 PTE
+if area_perm.contains(needed_perm)
+    && pte.is_some_and(|pte| match cause {
+        PageFaultCause::Instruction => pte.executable(),
+        PageFaultCause::Load => pte.readable(),
+        PageFaultCause::Store => pte.writable(),
+    })
+{
+    sfence();  // 仅刷新本地 TLB，重试故障指令
+    return Ok(());
+}
+```
+
+多核上 fault 被本 hart 锁存了，但拿到 `MemorySet` 写锁之前另一个 hart 已经把页补好了。等到本 hart 拿到锁一看，PTE 已经是有效的。这时候只要 VMA 允许、PTE 也允许，直接 `sfence` 刷一下本 hart 的 TLB 然后重试就行，不用误报非法访问。这个修复帮 RV64 8 核 BuildStorm 越过了工具链启动，但不等于完整的 COW/mprotect 并发验证。
+
+### COW 完整生命周期
+
+#### COW PTE 位
+
+RV64 用 PTE 第 8 位标记 COW（`page_table.rs:332`）：
+
+```
+| 63..54 | 53..10 |  9 |  8 | 7 | 6 | 5 | 4 | 3 | 2 | 1 | 0 |
+| 保留   |  PPN   | RSW| COW| D | A | G | U | X | W | R | V |
+```
+
+硬件不认识这个位——纯粹是内核的软件约定。`MapPermission` 不含 COW，COW 只存在于 arch 层的 `PTEFlags`。
+
+#### fork 时建立 COW
+
+`MemorySet::from_existed_user`（`memory_set.rs:2215-2307`）是 fork 时构造子进程地址空间的函数，COW 就是在这建立的。
+
+fork 前：父进程独占可写页（PTE 里 `W=1, COW=0`，引用计数=1）。
+
+对每个私有可写 VMA 里的每个已分配物理页：
+
+```rust
+// 1. 先给子进程建 PTE，指向同一个物理页，去掉 WRITE|DIRTY
+let mut child_flags = parent_pte.flags();
+child_flags.remove(PTEFlags::WRITE | PTEFlags::DIRTY);
+memory_set.page_table.map(vpn, ppn, child_flags)?;
+
+// 2. 子进程 PTE 设 COW 位
+memory_set.page_table.make_pte_cow(vpn);
+
+// 3. 修改父进程 PTE，同样去掉 WRITE|DIRTY
+let mut flags = parent_pte.flags();
+flags.remove(PTEFlags::WRITE | PTEFlags::DIRTY);
+user_space.page_table.modify_pte(vpn, flags);
+
+// 4. 父进程 PTE 设 COW 位
+user_space.page_table.make_pte_cow(vpn);
+```
+
+fork 后，父子共享同一个物理帧：
+
+```
+父 PTE: V=1, R=1, W=0, COW=1
+子 PTE: V=1, R=1, W=0, COW=1
+Arc<FrameTracker>::strong_count = 2
+```
+
+关键设计：子进程的 PTE 先建。如果子进程因为 `ENOMEM` 失败，父进程的地址空间还是原样，不会留在半 COW 状态。
+
+三种特殊情况：
+- **惰性未分配页**（`data_frames` 没记录，PTE 无效）：父子都跳过，各自以后按需分配。
+- **只读页**：直接共享，保留原始标志位，不做 COW。
+- **共享映射**（`area.shared`）：直接共享，不做 COW。
+
+#### COW 写入时
+
+写一个 COW 页的时候触发 `handle_page_fault` 分支一，上面已经讲过了。两种情况对比：
+
+| | count == 1 | count > 1 |
+|---|---|---|
+| 分配新页 | 不需要 | frame_alloc() 分一个 |
+| 复制数据 | 不需要 | 旧页内容 copy 到新页 |
+| PTE 操作 | modify_pte（改标志位，PPN 不变） | replace_pte（原子替换成新 PPN） |
+| 旧帧引用 | 不变 | 减 1 |
+| 新帧引用 | — | = 1 |
+
+两种情况最后都 `flush_tlb()`。
+
+### 不同 VMA 类型的缺页行为
+
+`map_one` 里 `MapType` 和 `self.shared` 的组合决定了对每种 VMA 缺页时怎么处理：
+
 | VMA 类型 | 首次访问 | fork 后写入 | 页内容来源 |
-| --- | --- | --- | --- |
-| private anonymous | lazy 分配清零页 | private 可写页进入 COW | 零页语义 |
+|---|---|---|---|
+| private anonymous | lazy 分配清零页 | COW | 零页语义 |
 | private file | lazy 分配私有 frame | COW，不写回原文件 | 按 backing offset 读文件，不足部分保持零 |
 | shared anonymous | 共享 `Arc<FrameTracker>` | 直接写共享页，不做 COW | 初始清零 |
-| shared file | 建映射前取得全局共享 file frame | 直接写共享页 | `(dev, ino, page index)` 标识的共享页 |
+| shared file | 建映射前取得全局共享 file frame | 直接写共享页 | (dev, ino, page index) 标识的共享页 |
 
-COW 的所有权由 `Arc<FrameTracker>` 表达。若 fault 时强引用数为 1，说明已经没有其他地址空间共享该 frame，只需恢复 PTE 写权限；否则复制物理页并让当前地址空间独占新 frame。旧 PTE 和 frame 会一直保留到新页成功分配和复制之后，因此 `ENOMEM` 不会在地址空间中留下空洞。
-
-多核上还存在“fault 已被本 hart 锁存，但另一 hart 已完成补页”的合法竞态。当前 hart 等到 `MemorySet` 写锁后可能看到 PTE 已经有效；只要 VMA 和最终 PTE 都允许本次访问，处理器执行本地 `sfence` 并重试，而不是误报非法访问。该修复已帮助 RV64 8 核 BuildStorm 越过工具链启动阶段，但这不等价于完整 COW/mprotect 并发验证；当前状态记录仍将双线程 mprotect/COW 压力列为未完成项。
 
 ## 6.4 文件映射、共享写回与用户拷贝
 
