@@ -1,362 +1,195 @@
 # 6. 内存管理
 
-RespOS 的内存管理由三类资源共同构成：物理页帧分配器管理真实 RAM，内核堆为 Rust 动态对象提供小块内存，`MemorySet` 则统一维护进程的 VMA、页表项和驻留页帧。系统调用层只负责检查 Linux ABI 参数；地址空间的切分、缺页、COW 和映射生命周期均由 `MemorySet` 完成。
+RespOS 的内存管理经历过一次很实际的转变：早期实现首先追求“能够映射、能够运行”，进入决赛负载后，我们面对的则是大程序、多核和文件映射同时出现时，内存能否省着用、改得动、收得回来。
+
+围绕这个目标，我们没有重新堆砌一套复杂的分配算法，而是把页帧、页表、虚拟内存区域和进程生命周期连成了一条完整路径。现在，匿名内存、文件映射、`fork`、`exec` 和用户指针访问都由同一套地址空间模型管理；RISC-V 与 LoongArch 的硬件差异，也被收在各自的页表后端中。
 
 ## 6.1 物理内存、内核堆与 direct map
 
-物理页帧与内核堆是两套相互独立的分配机制。`StackFrameAllocator` 以 4 KiB 页为单位，从内核镜像结束位置与 `MEMORY_START` 的较大者开始分配，首次分配沿地址递增，释放页进入回收栈。`FrameTracker` 创建时清零页面，并在最后一个所有者释放时通过 `Drop` 自动归还页帧。它并不是 buddy allocator；`buddy_system_allocator::LockedHeap` 只服务于 `Vec`、`Arc`、`BTreeMap` 等内核动态对象。
+RespOS 中有两类容易混淆的“分配”。物理页帧分配器按 4 KiB 管理真实内存，页表页、用户页、内核栈和 DMA 最终都来自这里；内核堆则服务于 `Vec`、`Arc`、`BTreeMap` 等动态对象。两者分开后，大页面的归属和小对象的分配互不干扰。
 
-| 资源 | 管理对象 | 所有权与回收 | 当前边界 |
-| --- | --- | --- | --- |
-| `StackFrameAllocator` | 物理页、页表页、用户驻留页 | `FrameTracker`/`Arc<FrameTracker>` 最后引用释放时回收 | 全局锁，按页分配，无换出 |
-| `IrqSafeHeap<32>` | 内核动态对象 | Rust allocator 的 alloc/dealloc | RV64 为 64 MiB，LA64 为 48 MiB |
-| kernel direct map | RAM 与 MMIO 的高半区线性映射 | 内核页表长期持有 | 可访问窗口不等于可分配 RAM |
+| 部分 | 负责什么 | 我们保留的设计重点 |
+| --- | --- | --- |
+| 页帧分配器 | 物理页、页表页、用户驻留页、DMA 页 | 新页清零，`FrameTracker` 离开生命周期后自动归还 |
+| 内核堆 | 内核动态对象 | 分配期间关闭本地中断，避免同一 CPU 被中断后再次申请堆而自锁 |
+| direct map | 内核访问 RAM 与 MMIO | 可访问范围与可分配范围分开计算 |
 
-普通自旋锁只能排除其他 CPU，不能阻止同一 CPU 在持锁期间被 timer 中断后再次进入 allocator。为避免这种自锁，`IrqSafeHeap` 在所有分配、释放及直接取得 heap guard 的路径上先关闭本地中断，并保证先释放 heap lock、后恢复中断。该规则是 SMP 下内核堆的必要不变量。
-
-RV64 启动时的内存发现分为“先建立最大可达窗口”和“再确定实际可分配上限”两步：
+这里最值得一提的是 RISC-V 的内存发现过程。最初内核把可用内存固定在约 256 MiB，即使 QEMU 提供 8 GiB，页帧分配器也看不到。BuildStorm 启动 cargo 时，这个问题最终表现为用户缺页返回 `ENOMEM`。我们随后把启动过程拆成两步：早期页表只负责建立“最多能够访问 8 GiB”的窗口，启动 hart 再从 OpenSBI 传入的 FDT 中读取实际 RAM 大小，页帧分配器和 `/proc/meminfo` 都使用这个真实值。
 
 ```text
-entry.asm 建立 early page table（最多覆盖 8 GiB QEMU RAM）
-        ↓
-boot hart 解析 OpenSBI 传入的 FDT /memory reg
-        ↓
-physical_memory_end = clamp(FDT 末址, 256 MiB 基线, 8 GiB 上限)
-        ↓
-frame allocator 仅管理 [kernel_end, physical_memory_end)
-        ↓
-kernel MemorySet 建立相同实际范围的高半区 direct map
+early page table 建立最大可达窗口
+            ↓
+FDT 给出本次启动的真实 RAM 范围
+            ↓
+frame allocator 只管理真实存在的页帧
+            ↓
+kernel direct map 覆盖相同范围
 ```
 
-首个 RAM GiB 使用 4 KiB 页映射，以保持 `.text`、`.rodata`、`.data/.bss` 的细粒度执行和写权限；其后的完整 GiB 在 RV64 Sv39 页表中使用 1 GiB 叶页，避免 8 GiB direct map 消耗数千个页表页。LA64 当前没有对应的动态 FDT 路径，`physical_memory_end()` 固定返回 256 MiB。因而 early 页表能够覆盖 8 GiB，只说明 CPU 能访问该窗口，绝不意味着 frame allocator 可以把窗口中的全部地址当作真实 RAM。
+为了不让 8 GiB 的线性映射本身吃掉大量页表页，我们保留首个 GiB 的 4 KiB 映射，用于细分内核代码、只读数据和可写数据权限；后续完整 GiB 使用 Sv39 的 1 GiB 叶页。这个优化没有改变上层内存模型，却明显降低了扩大内存窗口的页表成本。
 
-动态内存路径已在 RV64 上分别验证：`-m 8G` 时 `/proc/meminfo` 报告 `MemTotal: 8386560 kB`，`-m 256M -smp 1` 时报告 `MemTotal: 260096 kB`，后者还能正常退出 QEMU。这些数字包含内核保留造成的差异，不应直接等同于空闲 frame 数。
+实际启动结果也能说明这条链路已经生效：RISC-V 在 `-m 8G` 下报告 `MemTotal: 8386560 kB`，切回 `-m 256M -smp 1` 后报告 `260096 kB`，并可正常退出。LoongArch 当前仍按板级配置管理 256 MiB，这是双架构实现中尚未统一的一处边界。
 
 ## 6.2 MemorySet、VMA、PTE 与用户地址空间
 
-`MemorySet` 是一个地址空间的语义所有者，包含页表、按地址有序的 `areas: Vec<MapArea>`、`brk/heap_bottom`、`mmap_start`，以及 RV64 上用于 TLB shootdown 的 active-hart mask。每个 `MapArea` 表示一段连续虚拟页范围，同时记录权限、映射类型、shared/locked/fork 标志、可选文件 backing，以及仅针对已驻留页面的 `data_frames`。
+我们把 `MemorySet` 作为一个进程地址空间的真正所有者。它不只保存页表，还保存一组按地址排列的 VMA，以及每个 VMA 中已经落到物理内存的页面。
 
 ```text
 MemorySet
- ├─ PageTable: VPN → PTE → PPN
- └─ MapArea (VMA): 地址范围 + 权限 + backing 语义
-       ├─ 尚未访问的 lazy 页：只有 VMA，没有 PTE/frame
-       └─ 已驻留页：data_frames[VPN] → Arc<FrameTracker>
-                                    └→ 与 PTE 指向同一 PPN
+ ├─ VMA：这段虚拟地址是否合法、有什么权限、是否来自文件
+ ├─ PTE：CPU 当前能否从这个虚拟页访问到物理页
+ └─ resident frame：真正占用的物理内存及其所有权
 ```
 
-这一区分使“大虚拟范围、少量实际访问”成为常态：VMA 描述用户可见的映射承诺，PTE 表示当前硬件可访问状态，`data_frames` 则承担物理页所有权。释放 lazy framed VMA 时只遍历 resident `data_frames`，而不是扫描整个虚拟跨度；只有恒等映射的 `Direct` area 才按范围逐页解除映射。
+这三层信息看起来有些重复，实际上各有用途。VMA 是内核对进程作出的映射承诺；PTE 是硬件眼中的当前状态；驻留页则决定物理内存何时释放。一个 1 GiB 的 lazy VMA 可以只使用几页真实内存，未访问的部分只有 VMA，没有 PTE 和页帧。
 
-地址空间修改遵守以下结构不变量：
+`munmap`、`mprotect`、`mremap` 和 `MAP_FIXED` 经常只修改一段映射的中间部分。RespOS 统一使用 `split_by_overlap` 把原 VMA 切成左、中、右三段，同时调整文件偏移和驻留页归属。这样，系统调用层只解释参数，不再各自维护一套容易分叉的切分逻辑。
 
-- VMA 非空、按起始地址有序且互不重叠；
-- `data_frames` 中的 VPN 必须属于本 VMA，并存在有效 PTE；
-- 用户 VMA 的 PTE 带 `USER`，PTE 读写执行权限与 VMA 相容；
-- private COW 页不能同时保持可写，shared mapping 不进入 private COW；
-- 所有长度加法、向上页对齐和地址上界检查必须在构造 `VirtAddr` 前完成，用户范围不得越过 `TRAMPOLINE`。
+我们还为地址空间修改保留了两个原则：先检查完整范围，再提交变化；新资源准备成功后，才替换旧 PTE。以 COW 为例，新页申请或复制失败时，旧页仍然可用，不会在进程地址空间中留下一个洞。
 
-`munmap`、`mprotect`、`mremap` 与 `MAP_FIXED` 都可能只覆盖 VMA 的中间部分。`MapArea::split_by_overlap` 将原 area 拆成 left/middle/right，并同步调整 resident frame 集合与文件 offset/len，避免 syscall 层维护另一套映射状态。debug 内核在修改后运行结构检查，并带有 VMA split 自检。
-
-失败原子性同样由 MM 层保证。例如 COW 复制先申请并填充新 frame，再以不会分配内存的 `replace_pte` 替换旧 PTE；若申请失败，旧映射仍保持有效。`mmap` 放置、重映射和范围删除也先校验完整范围及冲突，再提交 VMA/PTE 变化。
-
-RV64 多核下，task 恢复用户地址空间前在 `MemorySet` 读锁内设置本 hart 的 active bit，切回 per-CPU idle/kernel 页表后才清除。页表写入者持写锁，提交 PTE 后先执行本地 fence，再仅向仍 active 的远端 hart 发出 SBI RFENCE。该协议已通过 2 核 100 轮和 8 核 1000 轮固定地址反复 `munmap + MAP_FIXED mmap` 的共享地址空间测试；其同步完成语义目前只对所验证的 QEMU/OpenSBI 环境成立。
+多核使这套模型多了一层要求：一个 CPU 修改 PTE 时，另一个 CPU 可能仍在运行同一个 `MemorySet`。RISC-V 路径会记录当前正在使用该地址空间的 hart，修改后先刷新本地 TLB，再只向相关远端 hart 发出 RFENCE。`smp_shared_mm_probe` 将读写线程固定到不同 CPU，反复执行 `munmap + MAP_FIXED mmap`；8 核环境连续通过 10 轮、共 1000 次重映射，2 核环境又通过 100 次。这不是所有并发内存语义的证明，但它直接覆盖了共享地址空间中最危险的旧 TLB 窗口。
 
 ## 6.3 缺页、lazy allocation 与 COW
 
-缺页：CPU 访问虚拟地址时，页表无法给其提供合法的可访问的物理页映射。
-
-Lazy allocation：虚拟地址是合法的（在某个 VMA 范围内），但对应的物理页还没有分配，PTE 也没有建立成有效映射。
-
-```
-一个进程 → 虚拟地址空间 → VMA（内核数据结构）描述哪些区域合法 → 页表 → 物理内存 RAM
-```
-
-Page fault 的几种情况：
-
-| 情况 | 说明 |
-|---|---|
-| PTE 不存在/无效 | lazy allocation，按需分配物理页 |
-| 物理页尚未加载 | demand paging，从磁盘/文件读入 |
-| 写只读页面 | COW，fork 后父子共享页被写入 |
-| 用户访问内核页 | 权限不足，SIGSEGV |
-| 执行不可执行页面 | 权限不足，SIGSEGV |
-| 地址不属于任何 VMA | 非法访问，杀进程 |
-
-
-缺页处理的全流程：
-
-```
-CPU 访问 VA → 查页表失败 → Page fault → 内核检查 VMA → 决定这个访问是否合法
-→ frame_alloc() → 拿到一个新的物理页 → 把数据放进去 → map(vpn, ppn)
-→ 创建/修改 PTE → VA→PA 建立映射 → 返回用户态 → 重新执行刚才失败的指令
-```
+在 RespOS 中，缺页并不总是错误。很多时候，它是内核推迟工作的入口：先答应用户一段虚拟地址，等真正访问时再决定分配空白页、读取文件页，还是拆分一个 COW 共享页。
 
 ### trap 入口
 
-RV64 的 trap handler 把用户页错误转成 `PageFaultCause::{Instruction, Load, Store}` 三种，然后在 `MemorySet` 的写锁里调用 `handle_page_fault`。
+RISC-V 与 LoongArch 的异常寄存器和页表格式不同，但进入公共内存层后，都会归一成取指、读取、写入三类页错误。内存层再根据故障地址查找 VMA，并检查这次访问是否符合 VMA 权限。
 
-发生 page fault 时 RISC-V 硬件把出错的虚拟地址写到 `stval` CSR，内核读出来转成 vpn（`memory_set.rs:2421`）：
-
-```rust
-let vpn = VirtAddr::from(stval).floor();
-```
+合法访问进入按需处理；访问空洞、用户越界或违反读写执行权限，则走进程的错误信号路径。这样，架构层只负责说明“发生了什么访问”，地址空间本身决定“这次访问是否应该被满足”。
 
 ### handle_page_fault 处理顺序
 
-`handle_page_fault`（`memory_set.rs:2417-2503`）先定位覆盖 fault VPN 的 VMA，再检查 USER 和本次访问需要的 R/W/X 权限。不存在 VMA、访问 trampoline 以上地址或权限不符都返回 `EFAULT`，最终由 trap 层变成发给进程的 `SIGSEGV`。
+缺页处理按下面的顺序判断：
 
-A. 找到这个虚拟页属于哪个 VMA
-
-```rust
-let area_idx = self.areas.iter().position(|a| a.vpn_range.contain(&vpn))?;
+```text
+故障地址
+  ↓
+是否属于合法 VMA，权限是否允许？
+  ├─ 否：拒绝访问
+  └─ 是
+      ├─ 有效 PTE + COW 写入：恢复写权限或复制一页
+      ├─ PTE 不存在：分配匿名页，或从文件读入这一页
+      └─ PTE 已被另一 CPU 补好：刷新本地 TLB 后重试
 ```
 
-一个进程（`MemorySet`）有多个 `MapArea`：
-
-```
-self.areas = [
-    代码段 VMA,
-    数据段 VMA,
-    heap VMA,
-    mmap VMA,
-    stack VMA,
-]
-```
-
-每个 `MapArea` 描述一段连续的虚拟地址范围。`self.areas.iter()` 一个一个检查，`.position(...)` 找到满足条件的那个元素的位置（索引）。没有 VMA 覆盖就返回 `EFAULT`。
-
-B. 检查 VMA 权限
-
-```rust
-let area_perm = self.areas[area_idx].map_perm;
-if !area_perm.contains(MapPermission::USER) {
-    return Err(Errno::EFAULT);
-}
-```
-
-`area_perm` 是 VMA 的权限位，必须包含 `USER`，否则是内核页，用户态无权访问。
-
-C. 检查 PTE 并判断 fault 类型
-
-```rust
-let pte = self.page_table.translate(vpn);
-let is_store = matches!(cause, PageFaultCause::Store);
-let needed_perm = if is_store {
-    MapPermission::WRITE
-} else {
-    match cause {
-        PageFaultCause::Instruction => MapPermission::EXECUTE,
-        _ => MapPermission::READ,
-    }
-};
-```
-
-`self.page_table` 是当前进程的页表。`translate(vpn)` 走 SV39 页表 walk 找到对应的 PTE。`is_store` 判断这次 page fault 是不是写内存导致的。`needed_perm` 是本次访问需要的最小权限。
-
-D. 三个分支，按顺序匹配
-
-```
-用户 page fault
-  ├─ 无覆盖 VMA / 越界 / VMA 权限不允许 → EFAULT
-  ├─ 有效 PTE + store + COW         → 分支一（COW 写入）
-  ├─ PTE 不存在或无效               → 分支二（惰性分配）
-  ├─ 并发修改后 PTE 已具备所需权限   → 分支三（竞态重试）
-  └─ 其他权限 fault                → EFAULT
-```
-
-**分支一：COW 写入**（`memory_set.rs:2445-2471`）
-
-```rust
-if is_store && pte.is_some_and(|p| p.is_valid() && p.is_cow()) {
-    // 写操作 + PTE 有效 + PTE 标记为 COW
-    let count = Arc::strong_count(old_frame);
-    // count 表示现在还有多少地方共同持有这个物理页
-
-    if count == 1 {
-        // 最后一个引用：只需恢复写权限，无需复制
-        self.page_table.modify_pte(vpn, flags);
-        self.page_table.clear_pte_cow(vpn);
-    } else {
-        // 仍有共享者：分配新页，复制旧数据
-        // frame_alloc() → 分配一个新的物理页 B
-        // 把旧物理页 A 的内容复制到新物理页 B
-        // 修改当前进程的页表，让当前 vpn 不再映射 A，改成映射 B
-        // 新 PTE 设置 W=1，COW 清掉
-        self.areas[area_idx].remap_one_with_data(&mut self.page_table, vpn, old_data)?;
-    }
-    self.flush_tlb(); // 刷新 TLB
-    return Ok(());
-}
-```
-
-COW 的所有权由 `Arc<FrameTracker>` 表达。`strong_count == 1` 说明另一个进程已经退出或之前触发过自己的 COW fault 拿到了新页，这时只需要 `modify_pte` 恢复 `W=1`、`clear_pte_cow` 清除 COW 位——不分配、不复制，只改 PTE 标志位。`modify_pte` 只改标志位不改 PPN（`page_table.rs:267`），专门给 COW 恢复用的。
-
-`strong_count > 1` 说明还有别人共享这个页。`remap_one_with_data`（`memory_set.rs:2945`）做的事：`frame_alloc()` 拿一个新物理页 B → 把旧页 A 的内容 copy 到 B → `replace_pte` 用新 PTE 原子替换旧 PTE，新 PTE 设 `W=1`，COW 清掉 → 旧帧引用递减。
-
-关键设计：旧 PTE 和 frame 一直保留到新页分配和复制全部成功之后。如果 `frame_alloc()` 失败返回 `ENOMEM`，旧映射原封不动，地址空间里不会留一个洞。
-
-**分支二：惰性分配**（`memory_set.rs:2475-2483`）
-
-```rust
-if pte.is_none() || !pte.unwrap().is_valid() {
-    if !area_perm.contains(needed_perm) {
-        return Err(Errno::EFAULT);
-    }
-    self.areas[area_idx].map_one(&mut self.page_table, vpn)?;
-    // 给这个 VMA 里面的 vpn 真正分配一个物理页，并建立 VPN→PPN 的页表映射
-    self.flush_tlb();
-    return Ok(());
-}
-```
-
-`map_one`（`memory_set.rs:2897-2942`）做的事：
-1. `frame_alloc()` 从物理页帧分配器拿一个新物理页
-2. 如果是文件映射（`file_backing`），从文件读数据填进新页，不足部分保持零
-3. `page_table.map(vpn, ppn, flags)` 建立 PTE 映射
-4. 把 `FrameTracker` 插入 `data_frames`
-5. 如果 PTE 映射失败，从 `data_frames` 里删掉 frame 做清理
-
-**分支三：竞态重试**（`memory_set.rs:2491-2499`）
-
-```rust
-// CPU 的 TLB 还保存着旧的 PTE
-if area_perm.contains(needed_perm)
-    && pte.is_some_and(|pte| match cause {
-        PageFaultCause::Instruction => pte.executable(),
-        PageFaultCause::Load => pte.readable(),
-        PageFaultCause::Store => pte.writable(),
-    })
-{
-    sfence();  // 仅刷新本地 TLB，重试故障指令
-    return Ok(());
-}
-```
-
-多核上 fault 被本 hart 锁存了，但拿到 `MemorySet` 写锁之前另一个 hart 已经把页补好了。等到本 hart 拿到锁一看，PTE 已经是有效的。这时候只要 VMA 允许、PTE 也允许，直接 `sfence` 刷一下本 hart 的 TLB 然后重试就行，不用误报非法访问。这个修复帮 RV64 8 核 BuildStorm 越过了工具链启动，但不等于完整的 COW/mprotect 并发验证。
+最后一个分支来自真实的多核问题：页错误已经被当前 CPU 记录，但等它拿到 `MemorySet` 锁时，另一个 CPU 可能已经完成映射。如果此时仍按“异常”处理，就会误杀合法进程。RespOS 会重新检查最终 PTE，确认权限已经满足后只刷新本地 TLB，让原指令重试。
 
 ### COW 完整生命周期
 
+COW 主要解决 `fork` 的浪费问题。父进程创建子进程时，大部分页面很快会因为 `exec` 或进程退出而不再需要。如果一开始就复制全部内存，复制成本往往白白发生。RespOS 因此只共享已经存在的物理页，把真正的复制推迟到某一方首次写入。
+
 #### COW PTE 位
 
-RV64 用 PTE 第 8 位标记 COW（`page_table.rs:332`）：
-
-```
-| 63..54 | 53..10 |  9 |  8 | 7 | 6 | 5 | 4 | 3 | 2 | 1 | 0 |
-| 保留   |  PPN   | RSW| COW| D | A | G | U | X | W | R | V |
-```
-
-硬件不认识这个位——纯粹是内核的软件约定。`MapPermission` 不含 COW，COW 只存在于 arch 层的 `PTEFlags`。
+父子共享的可写页会暂时移除 PTE 的写权限，并设置一个软件 COW 标记。RISC-V 与 LoongArch 使用的硬件位布局不同，因此标记的编码由各自页表后端完成；公共 `MemorySet` 只关心“这是一个可恢复的 COW 写保护”，不直接操作架构位。
 
 #### fork 时建立 COW
 
-`MemorySet::from_existed_user`（`memory_set.rs:2215-2307`）是 fork 时构造子进程地址空间的函数，COW 就是在这建立的。
+`fork` 时，已经驻留的私有可写页由父子共同持有同一个 `Arc<FrameTracker>`，两边 PTE 都变成只读 COW。只读页可以直接共享；尚未访问的 lazy 页没有物理内容可复制，只复制 VMA 信息，父子以后各自按需分配。
 
-fork 前：父进程独占可写页（PTE 里 `W=1, COW=0`，引用计数=1）。
-
-对每个私有可写 VMA 里的每个已分配物理页：
-
-```rust
-// 1. 先给子进程建 PTE，指向同一个物理页，去掉 WRITE|DIRTY
-let mut child_flags = parent_pte.flags();
-child_flags.remove(PTEFlags::WRITE | PTEFlags::DIRTY);
-memory_set.page_table.map(vpn, ppn, child_flags)?;
-
-// 2. 子进程 PTE 设 COW 位
-memory_set.page_table.make_pte_cow(vpn);
-
-// 3. 修改父进程 PTE，同样去掉 WRITE|DIRTY
-let mut flags = parent_pte.flags();
-flags.remove(PTEFlags::WRITE | PTEFlags::DIRTY);
-user_space.page_table.modify_pte(vpn, flags);
-
-// 4. 父进程 PTE 设 COW 位
-user_space.page_table.make_pte_cow(vpn);
-```
-
-fork 后，父子共享同一个物理帧：
-
-```
-父 PTE: V=1, R=1, W=0, COW=1
-子 PTE: V=1, R=1, W=0, COW=1
-Arc<FrameTracker>::strong_count = 2
-```
-
-关键设计：子进程的 PTE 先建。如果子进程因为 `ENOMEM` 失败，父进程的地址空间还是原样，不会留在半 COW 状态。
-
-三种特殊情况：
-- **惰性未分配页**（`data_frames` 没记录，PTE 无效）：父子都跳过，各自以后按需分配。
-- **只读页**：直接共享，保留原始标志位，不做 COW。
-- **共享映射**（`area.shared`）：直接共享，不做 COW。
+建立子页表成功后，RespOS 才修改父页表。这样即使创建子地址空间中途内存不足，父进程也不会被留在一半正常、一半 COW 的状态。
 
 #### COW 写入时
 
-写一个 COW 页的时候触发 `handle_page_fault` 分支一，上面已经讲过了。两种情况对比：
+写入发生后，内核查看物理页的引用数。如果当前进程已经是最后一个持有者，只需恢复写权限，不做复制；如果仍有其他进程共享，才申请新页、复制 4 KiB 内容并替换当前进程的 PTE。
 
-| | count == 1 | count > 1 |
-|---|---|---|
-| 分配新页 | 不需要 | frame_alloc() 分一个 |
-| 复制数据 | 不需要 | 旧页内容 copy 到新页 |
-| PTE 操作 | modify_pte（改标志位，PPN 不变） | replace_pte（原子替换成新 PPN） |
-| 旧帧引用 | 不变 | 减 1 |
-| 新帧引用 | — | = 1 |
-
-两种情况最后都 `flush_tlb()`。
+新页总是先申请、先填好，最后再替换旧映射。因此 `ENOMEM` 只会让本次写入失败，不会破坏原来的共享页。这一点比“成功时能复制”更重要，它保证了内存紧张时地址空间仍然完整。
 
 ### 不同 VMA 类型的缺页行为
 
-`map_one` 里 `MapType` 和 `self.shared` 的组合决定了对每种 VMA 缺页时怎么处理：
+| VMA 类型 | 首次访问 | `fork` 后写入 |
+| --- | --- | --- |
+| 私有匿名内存 | 分配清零页 | 已驻留页按 COW 拆分 |
+| 私有文件映射 | 只读取被访问的文件页 | 保留进程自己的修改，不回写原文件 |
+| 共享匿名内存 | 建图时准备共享页 | 父子继续看到同一内容 |
+| 共享文件映射 | 使用同一文件页身份对应的共享 frame | 修改按共享写回协议进入文件 |
 
-| VMA 类型 | 首次访问 | fork 后写入 | 页内容来源 |
-|---|---|---|---|
-| private anonymous | lazy 分配清零页 | COW | 零页语义 |
-| private file | lazy 分配私有 frame | COW，不写回原文件 | 按 backing offset 读文件，不足部分保持零 |
-| shared anonymous | 共享 `Arc<FrameTracker>` | 直接写共享页，不做 COW | 初始清零 |
-| shared file | 建映射前取得全局共享 file frame | 直接写共享页 | (dev, ino, page index) 标识的共享页 |
-
+这套处理覆盖了堆、栈、匿名 `mmap`、文件 `mmap` 和 ELF 段。RespOS 当前没有 swap，所以这里的“按需”是延迟分配和按页读文件，不包含把冷页换出到磁盘。
 
 ## 6.4 文件映射、共享写回与用户拷贝
 
-`sys_mmap` 先验证长度、页对齐、用户上界、`MAP_SHARED`/`MAP_PRIVATE` 互斥关系、文件描述符和 offset，再把请求交给 `MemorySet::mmap_area`。匿名 private 映射保留为 lazy VMA；匿名 shared 和文件 shared 映射使用共享 frame；private file mapping 保存 file、offset 和有效长度，在首次 fault 时填页。`MAP_FIXED` 会替换原范围，`MAP_FIXED_NOREPLACE` 则在冲突时失败。
+文件映射真正困难的地方不在于建立一条 PTE，而在于修改何时能被其他映射看到、何时写回文件，以及发生错误后映射是否仍然完整。
 
-可写 `MAP_SHARED` 的关键不是“允许建立 PTE”，而是完整的写回生命周期。RespOS 采用锁外 I/O 协议：
+早期版本直接拒绝可写的 `MAP_SHARED`，结果 LTP 自身创建共享控制页时就失败，数百个测试还没进入主体便一起 `TBROK`。我们没有简单删除限制，而是补全了共享文件页的生命周期：同一文件页以文件身份和页号复用共享 frame；`msync`、`munmap`、固定映射替换、重映射收缩和进程退出都走同一条写回路径。
 
 ```text
-建立 shared file mapping
-  锁外按 (dev, ino, page index) 取得/读取共享 frames
-       → 持 MemorySet 写锁提交 VMA/PTE
-
-msync / munmap / MAP_FIXED / mremap / mprotect / exit
-  持 MemorySet 读锁复制 resident writable shared 页快照
-       → 释放 MM 锁
-       → FileOp write；MS_SYNC 再 fsync
-       → 成功后执行相应的地址空间变更
+MemorySet 锁内：确定范围，复制 resident 页的写回快照
+                         ↓ 解锁
+文件系统侧：写入页缓存；MS_SYNC 再执行 fsync
+                         ↓
+确认成功后：完成解除映射或其他地址空间变化
 ```
 
-当前硬件抽象未利用 dirty bit，因此所有 resident、writable、shared file pages 都会被保守写回。写回前重新读取文件长度，只写到当前 EOF，避免文件被 truncate 后由旧映射再次扩展。短写返回 `EIO`。`MS_INVALIDATE` 因缺少 inode-wide 共享 frame 失效协议而明确返回 `EOPNOTSUPP`；truncate 后访问越界页应产生 `SIGBUS` 的完整语义也尚未实现。
+这个顺序是一次重要优化。旧思路可能在持有地址空间锁时访问文件系统，既扩大临界区，也容易与文件锁形成锁序问题。现在共享写回的后端 I/O 位于 MM 锁外，内存层和文件系统层的边界更清楚。
 
-上述“锁外 I/O”只覆盖当前 shared file 建图和写回协议。private file-backed page fault（包括主程序 PT_LOAD 的按需装页）仍会在持有 `MemorySet` 写锁时调用文件读取，是后续需要继续拆分为 prepare/revalidate/commit 的锁序边界，不能据此宣称 MM 锁内已不存在后端 I/O。
+修复后的专项结果如下：
 
-用户拷贝不直接把用户指针转成 Rust slice 后解引用，因为该地址可能跨页、跨相邻 VMA，或正处于 lazy/COW 状态。`copy_from_user`/`copy_to_user` 先用 checked arithmetic 得到完整 VPNRange，在 `MemorySet` 写锁内检查整段 VMA 权限并调用 `ensure_user_page_access` 补齐 lazy/COW 页，然后逐页翻译 PTE，通过对应物理页复制。这样 kernel copy 不会因直接访问尚未映射的用户虚拟地址而触发不可恢复的 kernel page fault。futex 锁内的固定 4 字节比较则使用 no-fault 读取，可能缺页的预检查必须在 futex 全局锁外完成。
+| 验证项 | RISC-V 64 | LoongArch 64 |
+| --- | ---: | ---: |
+| mmap/munmap LTP 子集（musl） | 20 通过，2 个既有边界失败 | 15 通过，0 失败 |
+| mmap/munmap LTP 子集（glibc） | 20 通过，2 个既有边界失败 | 15 通过，0 失败 |
+| `mmap001`：1000 页映射、触碰、同步、解除 | 通过 | 通过 |
 
-## 6.5 exec 的 file-backed ELF 与内存压力
+用户指针访问也复用了同一套内存语义。`copy_from_user` 和 `copy_to_user` 不直接解引用用户虚拟地址，而是先检查完整范围和 VMA 权限，补齐可能的 lazy/COW 页，再逐页通过 PTE 找到物理页复制。这样既能处理跨页缓冲区，也不会让内核因为用户页尚未分配而在内核态再次缺页。
 
-旧的 filesystem exec 路径先用 `File::read_all()` 把完整 ELF 放入固定内核堆，再解析和复制每个 `PT_LOAD`。面对约 45 MiB 的 cargo 可执行文件时，这一临时 `Vec` 会直接挤压 64 MiB 的 RV64 kernel heap，而且程序页随后还要占用物理 frame，造成重复峰值。RespOS 没有通过扩大固定 heap 回避问题，而是增加了 `MemorySet::try_from_elf_file`：
+当前共享写回还没有利用硬件 dirty bit，因此会保守写回所有已驻留、可写的共享文件页。`MS_INVALIDATE` 和文件截断后的完整 `SIGBUS` 语义也仍待完善；私有文件页缺页时的读取尚未完全移出 `MemorySet` 锁。这些是下一步优化的明确位置。
 
-1. 先定长读取 64 字节 ELF64 header，验证 magic、位数与小端格式；
-2. 用 checked arithmetic 验证 program-header offset、56 字节 entry size、数量和文件边界；
-3. 只保留 program headers 与 `PT_INTERP` 字符串所需的元数据前缀，硬上限为 1 MiB；
-4. 对主程序的每个 `PT_LOAD` 建立 private file-backed lazy VMA，记录页内偏移、文件 offset 和 file size；
-5. fault 时只读取被访问的页，frame 初始清零，因此 `p_memsz - p_filesz` 的 BSS 部分自然保持为零。
+## 6.5 地址空间与进程生命周期
 
-| 指标 | eager `read_all` | 当前 file-backed 主程序 |
+内存管理最终要和进程的出生、换装和退出对上。RespOS 将这条关系收敛为：线程可以共享同一个地址空间，普通进程通过 COW 派生地址空间，`exec` 安装新地址空间，退出路径负责写回和回收旧地址空间。
+
+```text
+clone/fork：共享 MemorySet，或创建 COW 子地址空间
+     ↓
+exec：准备完整新映像，再替换旧 MemorySet
+     ↓
+exit：停止仍在使用旧地址空间的线程，写回并释放驻留页
+```
+
+### fork、clone 与共享地址空间
+
+带 `CLONE_VM` 的任务直接共享 `Arc<RwLock<MemorySet>>`，因此一个线程建立或删除映射，其他线程看到的是同一个地址空间。普通 `fork` 则创建新的 `MemorySet`，VMA 元数据独立，已经驻留的私有页暂时通过 COW 共享。
+
+这种区分由内存层完成，而不是让 task 层手工复制用户字节。共享匿名映射和 System V 共享内存也直接共享物理页所有权，不会误入私有 COW 路径。
+
+### exec、exit 与 wait
+
+`exec` 的关键不是“清空旧页表”，而是先把新映像准备完整，再选择一个安全时刻替换。多线程程序中，其他线程的 robust futex 和 `clear_child_tid` 仍指向旧用户地址；如果先换成新 `MemorySet` 再清理，这些旧地址可能写进新程序。RespOS 因此先请求其他线程停止，等待它们离开旧地址空间并完成相关清理，再安装新页表。
+
+退出时同样要确认没有远端 CPU 还在使用旧页表，然后执行共享文件页写回和页帧回收。`wait4` 负责最后的父子进程回收关系，不承担地址空间内部的逐页清理。
+
+这一路还带来过一个很直观的性能修复：lazy VMA 可能预留很大范围，却只访问几页。旧的退出路径按整个虚拟范围逐页检查，释放成本取决于“承诺了多大地址”，而不是“真正用了多少内存”。现在普通 framed VMA 只遍历 resident frame，进程退出和 `munmap` 的成本回到了实际工作集上。
+
+## 6.6 exec 的 file-backed ELF 与内存压力
+
+大程序暴露了早期 ELF 加载方式的上限。旧路径先把整个可执行文件读进固定大小的内核堆，再为每个 `PT_LOAD` 分配用户页。面对 45,559,552 字节的 cargo，这意味着一份约 45 MiB 的临时文件副本和用户页同时存在，而 RISC-V 内核堆本身只有 64 MiB。
+
+我们没有简单扩大堆，而是让文件系统中的主 ELF 直接成为 VMA 的 backing：`exec` 只读取 ELF 头、程序头和解释器名称，`PT_LOAD` 先记录文件偏移与权限，程序真正访问某一页时再从文件中读取这一页。
+
+| 对比项 | 原来的整文件加载 | 当前 file-backed ELF |
 | --- | --- | --- |
-| exec 临时 heap | 随 ELF 文件大小增长 | 随 header/`PT_INTERP` 元数据增长，最多 1 MiB |
-| `PT_LOAD` frame | exec 时全部建立 | 首次访问时逐页建立 |
-| 大 ELF 峰值 | 完整文件副本与程序页叠加 | 元数据与实际工作集为主 |
-| 畸形 ELF | 容易放大分配 | 越界、溢出或超限返回 `ENOEXEC` |
+| exec 临时内存 | 随 ELF 文件大小增长 | 只保留元数据，硬上限 1 MiB |
+| 用户段分配 | exec 时集中建立 | 首次访问时逐页建立 |
+| BSS | 装载时额外处理 | 新页先清零，只覆盖文件中实际存在的部分 |
+| 异常 ELF | 可能放大分配 | 偏移、长度或边界非法时返回 `ENOEXEC` |
 
-`execve_file` 在新 `MemorySet` 和用户栈准备完成后，先在旧地址空间仍安装时停止并清理 sibling thread，再替换进程映像。这一点与内存生命周期直接相关：robust list 和 `clear_child_tid` 保存的是旧用户地址，若先换 MM，清理动作可能写坏新程序映像。
+这条路径让上述 cargo 在 RISC-V `-smp 8 -m 8G` 环境中成功运行，并到达 `BUILDSTORM_TOOLCHAIN ok`。它同时说明动态内存发现、file-backed ELF 和 lazy fault 已经能够共同支撑大型工具链启动。
 
-该路径已经让 45,559,552 字节的 cargo 在 RV64 `-smp 8 -m 8G` 环境中完成 `BUILDSTORM_TOOLCHAIN ok`，并消除了此前由固定 256 MiB 管理上限和整文件加载导致的 `ENOMEM` 边界。但证据只能说明工具链发现和启动阶段已越过：BuildStorm minibuild/full compile 仍未完成，不能写成完整比赛负载通过。
+这里需要如实限定结论：BuildStorm 的 minibuild 和最终多核编译仍未完整通过，不能把“工具链已启动”写成“题目已经完成”。此外，动态链接器目前仍走整文件读取路径，尚未完全复用主程序的 file-backed loader。
 
-当前还有一个明确限制：动态链接器仍由 `read_dynamic_linker()` 整文件读取后 eager 建立 `PT_LOAD`，尚未复用主程序的 file-backed loader。因此本次设计显著降低了大主程序的内存峰值，但没有消除 interpreter 路径的整文件内核堆占用；后续应把文件身份、offset 和长度继续传入统一的 lazy ELF 映射流程。
+## 6.7 初赛到决赛的内存变化与当前边界
+
+回看开发过程，RespOS 的内存管理不是一次性写成的，而是在真实负载下逐层收紧：
+
+| 阶段 | 遇到的问题 | 最终形成的设计 |
+| --- | --- | --- |
+| 初期运行 | 地址空间能够工作，但分配与系统调用路径耦合较多 | 建立页帧、页表和 `MemorySet` 的基本模型 |
+| MM 重构 | VMA 切分、用户指针、COW 失败路径容易各自处理 | 统一 VMA/PTE/frame 所有权和范围修改规则 |
+| 文件映射加固 | 可写 `MAP_SHARED` 阻断 LTP，锁内 I/O 风险明显 | 共享 file frame 与锁外快照写回 |
+| 决赛大负载 | 256 MiB 固定上限、大 ELF 峰值、稀疏 VMA 退出慢 | FDT 动态内存、file-backed ELF、按 resident 页回收 |
+| 多核推进 | 同一地址空间可能在多个 CPU 上留下旧 TLB | active-hart 记录与定向 TLB shootdown |
+
+这些变化的共同思路很简单：虚拟范围可以大，但真实内存只为实际访问付费；状态可以共享，但所有权和回收必须有唯一落点；优化可以推迟工作，但不能把失败留成半完成状态。
+
+RespOS 当前仍没有 swap 和页面回收机制；LoongArch 的 RAM 上限还是静态配置；动态链接器仍是 eager load；私有文件页 fault 的锁外 I/O、文件截断后的映射边界也还没有完全收敛。我们保留这些边界，是因为这一章想呈现的不是一套“看起来什么都有”的内存管理，而是一条已经跑过真实程序、也清楚下一步该往哪里走的实现路线。
