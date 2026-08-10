@@ -88,6 +88,7 @@ pub const SEEK_END: usize = 2;
 pub const AT_FDCWD: isize = -100;
 
 pub const AF_INET: usize = 2;
+pub const AF_UNIX: usize = 1;
 pub const SOCK_STREAM: usize = 1;
 pub const SOCK_DGRAM: usize = 2;
 pub const IPPROTO_TCP: usize = 6;
@@ -245,6 +246,9 @@ pub fn close(fd: usize) -> isize {
 }
 pub fn mmap(addr: usize, len: usize, prot: usize, flags: usize, fd: isize, offset: usize) -> isize {
     sys_mmap(addr, len, prot, flags, fd, offset)
+}
+pub fn mprotect(addr: usize, len: usize, prot: usize) -> isize {
+    sys_mprotect(addr, len, prot)
 }
 pub fn munmap(addr: usize, len: usize) -> isize {
     sys_munmap(addr, len)
@@ -425,6 +429,10 @@ pub fn mmap_raw(
 
 pub fn socket(domain: usize, socket_type: usize, protocol: usize) -> isize {
     sys_socket(domain, socket_type, protocol)
+}
+
+pub fn socketpair(domain: usize, socket_type: usize, protocol: usize, fds: &mut [i32; 2]) -> isize {
+    sys_socketpair(domain, socket_type, protocol, fds)
 }
 
 pub fn bind(fd: usize, addr: &SockAddrIn) -> isize {

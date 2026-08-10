@@ -2,6 +2,240 @@
 
 本文件是快速变化的状态页。更新测试结论时必须同时更新日期、提交和命令。
 
+## 2026-08-10 ext4 inode 原始元数据快照缓存（未提交）
+
+- **实现与边界**：非 synthetic 普通文件/符号链接 `Ext4Inode` 保存一份
+  `ext4_raw_inode_fill` 结果，重复
+  stat 不再进入 lwext4 路径解析和全局 ext4 锁。size 仍与 PageCache 长度合并，mode/owner/
+  times/nlink 仍在每次 stat 动态应用内存 override。write、truncate、chmod、chown、link、
+  unlink、rename、orphan/restore 和可能更新 atime 的 read 成功后均失效 raw 快照；修改路径保持
+  先释放 ext4 锁再失效，不引入反向锁序。目录会被 create/unlink/跨目录 rename 间接修改，
+  在完整父 inode 失效协议建立前不跨 syscall 缓存目录 raw metadata。
+- **计数证据**：提交前审查收紧目录/read-atime 边界之前的 RV64 1 GiB/8 核
+  `perf_counters` snapshot 交互轮次记录
+  `stat_calls=1314`、`stat_cache_hits=1293`、`stat_cache_misses=21`、`stat_ticks=21066`
+  (`clock_hz=10MHz`)。该轮次仅证明原型命中和回源数量；当前收紧版命中率待干净窗口
+  重测，且没有同负载旧实现对照，不宣称加速比。
+- **语义验证**：在 ext4 根目录创建文件后，依次验证 append `7 -> 12 B`、truncate
+  `12 -> 2 B`、chmod `0644 -> 0600`、hardlink/unlink `1 -> 2 -> 1`、rename 后 inode/size/mode
+  保持，及现有 `/bin/busybox` symlink size=14。测试暴露并修复了原有 `nlink_override`
+  成功 unlink 后不递减的问题。
+- **门禁**：RV64 `perf_counters` 构建和 LA64 无 feature release 构建通过；RV64 1 GiB/8 核
+  snapshot 同一轮通过 Unix socket、file、private-map、shared-MM 和 frame-reclaim 五项 probe。尚缺
+  high uid/gid、>4 GiB 文件及干净 BuildStorm 固定窗口回归。
+
+## 2026-08-10 vendor allocator 长窗口、128 MiB PageCache 与 Unix socket 阻塞（未提交）
+
+- **allocator 600 秒 soak**：RV64 8 GiB/8 核、旧 pub image、冷 snapshot、`perf_counters` 下，vendor
+  allocator 共承受 `20,781,711 alloc/20,634,417 dealloc`，无 assertion、OOM、panic 或数据损坏；
+  dealloc total/core 为约 `13.51/8.39s`，相对旧 allocator 同口径 `369.2s` total 大幅下降。tg-xtask
+  `29.64s`，600 秒从旧窗口的 axklib 继续推进到 axplat-dyn/ax-hal；该旧镜像窗口仍 timeout，不是题二
+  完整通过。PageCache fill/eviction 为约 3.44 GiB/538,698，显示 allocator 闭环后的热点转向缓存 churn。
+- **128 MiB PageCache**：两架构 `PAGE_CACHE_GLOBAL_MAX_PAGES` 从 16K 增至 32K；数据仍为 frame-backed，
+  不占 256 MiB kernel heap。首轮 120 秒达到 26,744 页且 eviction=0；重复轮达到 32,765 页并发生
+  28,958 次 eviction。两轮期间用户确认宿主同时启动其他应用，tg-xtask 为 42.64/39.63 秒，故这些墙钟
+  和累计吞吐明确标记为受外部负载污染，不用于 64/128 MiB 速度结论。保留 128 MiB 是基于 600 秒 64 MiB
+  cache 已持续满载和 1 GiB guest 仍有足够 frame；干净容量 A/B 仍待复核。
+- **Unix socket event wait**：AF_UNIX read-empty、write-full 与 accept-empty 不再 yield polling；waiter 在
+  对应 buffer/pending lock 内登记并发布 Blocked，数据、空间、connect、peer close 或 signal 负责唤醒，
+  发布后重查 interrupt 关闭 lost-wakeup 窗口。新增 `unix_socket_block_probe` 用 128 KiB 流量覆盖空读、
+  64 KiB 满缓冲区写和 peer close，打印 `UNIX_SOCKET_BLOCK_PROBE_PASS bytes=131072`；专项计数为
+  `unix_yields=0 scheduler_yields=0 blocking_switches=5`。受宿主负载污染的 120 秒真实 Cargo 窗口仍可作
+  活性/语义证据：timeout 正常返回，`net=0 unix=0`，但不能作速度 A/B。
+- **最终门禁**：os/user fmt、vendor allocator tests、无 feature RV64/LA64 release 构建通过；RV64
+  1 GiB/8 核无 feature snapshot 同一轮通过 Unix socket、file、private-map、shared-MM、frame-reclaim
+  五项 probe。尚缺 AF_UNIX pathname accept/connect、非阻塞 EAGAIN 和 signal EINTR 的独立专项组合，
+  以及 128 MiB 配置下不受宿主干扰的长 BuildStorm；当前不宣称完整验收。
+
+## 2026-08-10 raw lookup 后的 600 秒 BuildStorm 窗口与 allocator 根因（未提交，继续优化）
+
+- **长窗口进展**：当前未提交 raw stat/lookup、4096 项 lwext4 metadata cache、signal blocking 和
+  private frame 共享工作树；RV64 8 GiB/8 核、旧 pub image、`perf_counters`、冷 `-snapshot`，在窗口
+  外预排环境和命令后执行
+  `timeout 600 cargo xtask arceos build -p arceos-helloworld --arch riscv64`。debug tg-xtask 用时
+  `33.65s`，随后进入 build-std 并推进到 `Compiling axklib`；600 秒由 timeout 返回 124，未见 fault、
+  panic 或 OOM，因此本轮是性能窗口而不是完整通过。
+- **调度与剩余串行域**：`task_running_ticks=25113288899`、`idle_ticks=21845338591`，按 8 个 vCPU 的
+  累计观测约 52.3% 时间在运行 task；旧 signal 风暴仍保持 `signal_time=0`。剩余 69,194 次 yield 全部
+  来自 Unix socket。ext4 lock wait/hold 分别约 66.4/216.1 CPU 秒；物理 block read/write 分别约
+  18.1/25.6 CPU 秒，说明磁盘请求已经不是唯一或最大成本。
+- **缓存与分配压力**：64 MiB PageCache 达到 16,384 页上限，600 秒窗口内有 360,749 次 eviction、
+  2,375,720,237 B fill；heap 共 17,954,099 alloc 和 17,838,374
+  dealloc，peak 约 41.8 MiB。原总计时为 alloc 94.7、dealloc 369.2 CPU 秒，但该数包含全局 heap lock
+  等待，不能直接断言都是 allocator 算法。
+- **allocator 拆分证据**：为避免误判，heap wrapper 新增 lock-wait/core 分桶；同配置冷 snapshot 的
+  120 秒窗口进入 build-std，dealloc 总计 `298181587 ticks`（29.82 CPU 秒），其中 lock wait
+  `29022698`（2.90 秒）、buddy core `262602329`（26.26 秒），core 占约 88%。依赖
+  `buddy_system_allocator 0.10.0` 的 dealloc 会逐项扫描对应 free list 查找 buddy，确认主要根因是
+  O(n) 合并查找而非多核锁等待。该轮 tg-xtask 35.45 秒，并推进到 ax-driver/somehal，阶段与此前接近。
+- **实现边界与下一步**：不能修改本机 `.cargo-home/registry` 作为交付；若替换 allocator，源码必须放入
+  仓库 `vendor/` 并由 `os/Cargo.toml` 使用 path dependency。新实现必须保持 Layout size/alignment、
+  split/coalesce、OOM、统计和 IRQ-safe 全局锁语义，增加随机 alloc/free 不重叠与完全回收测试，再通过
+  1 GiB SMP 内存/退出回收门禁。`copy_to_user/copy_from_user` 目前也在读写 syscall 的 kernel bounce
+  buffer 两侧形成额外复制，已加 calls/bytes/ticks 计数；在取得占比前不移除用户范围检查、lazy/COW
+  fault 处理或部分读写语义。
+- **vendor allocator A/B**：新增仓库内 `vendor/respos_buddy_allocator`，`os/Cargo.toml` 使用显式 path
+  dependency；没有修改或依赖本机 registry。它保留 8 B 最小 class 和原 buddy split/coalesce/accounting，
+  对至少 16 B 的 free block 使用 intrusive doubly-linked node 加 membership bitmap，8 B class 因容不下
+  两个指针继续兼容线性查找。120 秒同口径窗口中 tg-xtask `30.56s`，dealloc total/core 从
+  `29.82/26.26s` 降至 `4.42/2.88s`（约 -85%/-89%）；PageCache fill 从约 589 MB 增至 943 MB，窗口已
+  推进到 ax-driver/somehal。alloc total 为约 5.00 秒，未出现 OOM、allocator assertion 或 kernel panic。
+- **用户复制结论**：同一优化后窗口共 `copy_from_user=62,434 calls/19,319,240 B/0.129s`、
+  `copy_to_user=62,197 calls/86,632,228 B/0.295s`，合计约 0.424 CPU 秒。当前 bounce buffer 确有额外
+  copy 和 allocation，但复制本身不是主要热点；不为这点收益破坏预先 EFAULT 检查、lazy/COW fault、
+  file offset、short I/O 或锁顺序。后续只有在热点迁移且有 prepared user-page/scatter-gather 设计及专项
+  ABI 回归时才做零拷贝。
+- **稳定性门禁**：vendor crate 两组宿主测试覆盖 mixed size/alignment、不重叠、乱序释放、统计归零和
+  全释放后大块重新分配；无 feature RV64 与 LA64 release 均构建通过。最终 RV64 1 GiB/8 核无 feature
+  snapshot 同一轮依次通过 `BUILDSTORM_FILE_PROBE_PASS`、
+  `BUILDSTORM_PRIVATE_MAP_PROBE_PASS file_mb=64 workers=4`、
+  `SMP_SHARED_MM_PROBE_PASS rounds=100`、`FRAME_RECLAIM_PROBE_EXIT resident_mb=64 threads=7`。
+  这些门禁证明当前 allocator 在短时并发和回收路径稳定，但尚不能替代更长 BuildStorm/allocator soak。
+
+## 2026-08-10 ext4 stat/lookup 消除重复完整路径遍历（未提交，固定窗口 A/B 通过）
+
+- **分桶证据**：4096 项 metadata cache 下的 RV64 8 GiB/8 核旧 pub snapshot，干净 120 秒
+  `timeout cargo xtask ...` 窗口中，block read 与完整 `Ext4Inode::read_at` 分别只占约 2.55/2.76 秒，
+  但 `EXT4_OP_LOCK` hold 为约 103.2 秒。新增操作分桶后，`stat=26958 calls/39.82s`、
+  `lookup=6763 calls/46.87s`，两者合计约占锁内时间 84%；readdir/create/write 均不是该阶段主因。
+- **根因与修复**：旧 `stat()` 为同一路径先 open/close 取 size，再分别调用 mode、owner、atime、mtime、
+  ctime 五个 lwext4 API，每个 API 都重新完整遍历路径。现在一次 `ext4_raw_inode_fill()` 取得 packed inode，
+  按 ext4 little-endian 字段生成 size/mode/uid/gid/nlink/times，并继续应用现有 PageCache size、owner/mode/
+  time override。旧 lookup 先从 Rust 逐项调用 FFI 扫描父目录，再按 child path 查 mode；中间版复用 dirent
+  type 后仍受逐项 FFI/线性遍历限制。最终版直接对 child path 调一次 `ext4_raw_inode_fill()`，复用 lwext4
+  内部 `ext4_generic_open2` 的按名查找/目录索引，同时取得 inode number 和 mode type。
+- **同口径进展**：优化前 120 秒窗口 debug tg-xtask 尚未完成，操作分桶为上述 26,958 stat/6,763
+  lookup；优化后 debug tg-xtask 在 `1m34s` 完成并进入 ArceOS/build-std 前置，而此前 signal fix 后的
+  300 秒样本约 `2m15--2m19s` 才完成该阶段，缩短约 30%。优化后同一 120 秒已处理 59,371 stat 和
+  14,282 lookup；stat 总计 10.76 秒、lookup 60.82 秒。按调用数归一，stat 约
+  `1.477ms -> 0.181ms`（-87.7%），lookup 约 `6.93ms -> 4.26ms`（-38.5%），且实际完成工作量显著增加。
+- **最终 raw lookup A/B**：相对上述中间版，同口径 120 秒的 debug tg-xtask 再从 `1m34s` 降至
+  `41.73s`；lookup 由 14,282 calls/60.82s 变为 17,095 calls/4.26s，单次约
+  `4.26ms -> 0.249ms`（-94.2%）。窗口内 PageCache fill 从约 269 MB 增至 829 MB，ext4 lock hold
+  从约 98.5 秒降至 65.7 秒；优化版在相同时长已执行更多 stat/lookup 并进入 build-std，不能只比较累计
+  调用数。
+- **正确性与门禁**：`busybox stat /work/tgoskits/Cargo.toml` 返回 size 16825、inode 306533、mode 0644、
+  uid/gid 0；另创建 symlink `abcdef`，busybox stat 返回 type=symlink、size=6、mode 0777，readlink 内容
+  一致。无 feature RV64/LA64 release 均构建通过。最终无 feature RV64 1 GiB/8 核 snapshot 同一轮通过
+  file/private-map/shared-MM/frame-reclaim 四项 probe。尚未运行 high uid/gid/大于 4 GiB file 的专用
+  stat ABI probe；当前 raw inode 读取已显式处理 size/uid/gid 高位，但完整 BuildStorm 与更广 libc/LTP
+  stat 回归仍是验收要求。
+
+## 2026-08-10 lwext4 元数据 cache 从 16 项扩至 4096 项（未提交，固定窗口 A/B 通过）
+
+- **稳定热点与来源分解**：signal wait 修复后的 RV64 8 GiB/8 核旧 pub snapshot 中，重复的干净
+  300 秒窗口有两轮 `net=0`，因此此前单轮约 8.3 万次 net yield 不足以支持 socket 重构。相反，180 秒
+  `timeout cargo xtask ...` 基线稳定记录 `ext4_lock_hold_ticks=1633031097`（约 163.3 秒）、
+  `block_read_requests=1178126`、`block_read_bytes=4970704896`；其中 1,172,282 个请求位于 513 B--4 KiB
+  档。PageCache/Ext4Inode 实际只有 5,211 次、172,554,667 B file-data fill，底层块读取是用户文件内容的
+  约 28.8 倍，确认主要是路径查找/inode/extent 元数据放大，而不是继续扩大文件 PageCache 就能解决。
+- **根因与改动**：`vendor/lwext4_rust/c/lwext4/CMakeLists.txt` 原把
+  `CONFIG_BLOCK_DEV_CACHE_SIZE` 固定为 16；在 4 KiB ext4 上只有 64 KiB 元数据工作集。文件内容读取走
+  `ext4_blocks_get_direct()`，不会占用该 cache，因此将两个构建分支统一增至 4096 项（约 16 MiB）以
+  保留 Cargo 深目录树的目录块、inode table 和 extent metadata。
+- **同口径 4096 项 A/B**：180 秒窗口降至 `block_read_requests=25048`（-97.9%）和
+  `block_read_bytes=295823872`（-94.0%）；PageCache fill 已推进到 221,722,602 B，较基线同窗口多约
+  28.5%。累计 heap alloc bytes 从 6,382,606,173 降至 1,374,643,521；heap current/peak 为约
+  24.2/25.4 MiB，较基线约增加 16 MiB 常驻容量。ext4 hold 仍约 154.5 秒，只下降约 5.4%，说明同步
+  lwext4 CPU/锁域仍是后续热点，但已消除绝大多数实际 VirtIO 读和 allocator churn。
+- **容量选择**：另测 1024 项（约 4 MiB）：请求/读取已降至 26,966/255,742,464 B，但同窗口 file-data
+  fill 只有 172,748,123 B，接近 16 项基线而明显低于 4096 项；ext4 acquisitions 104,273，也高于
+  4096 项的 90,605。基于吞吐进度而非只看读取字节，最终保留 4096 项。
+- **门禁与边界**：无 feature RV64/LA64 release 均构建通过；RV64 1 GiB/8 核 snapshot 同一轮依次通过
+  `BUILDSTORM_FILE_PROBE_PASS`、`BUILDSTORM_PRIVATE_MAP_PROBE_PASS`、
+  `SMP_SHARED_MM_PROBE_PASS rounds=100` 和 `FRAME_RECLAIM_PROBE_EXIT resident_mb=64 threads=7`。
+  尚未用该 cache 容量完成无 feature 全量 BuildStorm；16 MiB cache 属于内核堆固定开销，后续完整
+  运行必须继续观察 heap peak/OOM，并处理 ext4 lock 内剩余 CPU 时间。
+
+## 2026-08-10 signal wait 忙轮询改为阻塞唤醒（未提交，专项与真实 Cargo 窗口通过）
+
+- **定位证据**：旧 `perf_counters` 内核在 RV64 8 GiB/8 核、旧 pub snapshot 的固定 600 秒
+  `timeout 600 cargo xtask arceos build ...` 窗口中记录
+  `scheduler_yields=19618748`、`signal_time=19618691`、`context_switches=19658036` 和
+  `scheduler_ipis=19658737`。FS/stdio/futex/net 分桶均不是该轮主因；源码确认
+  `rt_sigtimedwait` 与 `rt_sigsuspend` 每次检查失败后直接 `yield_current_task()`，使外层
+  `timeout` 在整个编译期间占用调度器。
+- **实现**：两条 signal wait 路径现在把任务发布到 blocked queue，并在发布后重查 pending/interrupted/
+  deadline 以关闭 lost-wakeup 窗口。`rt_sigtimedwait` 另在 TCB 发布 wanted mask：进程级信号优先选择
+  真正的 waiter，即使该信号按 POSIX 用法已被用户掩码阻塞；目标信号只唤醒并由 sigtimedwait 消费，
+  其他可投递信号仍设置 interrupted 并返回 `EINTR`。有限等待复用 timer timeout registry 到期唤醒。
+- **专项验证**：RV64 1 GiB/8 核、`perf_counters`、snapshot 中预排
+  `busybox timeout 3 busybox sleep 60`、读取计数和 quit，约 3.2 秒返回，sleep 进程由 SIGTERM 结束；
+  窗口为 `signal_time=0 scheduler_yields=0 context_switches=18 blocking_switches=9`，证明超时和目标信号
+  唤醒均不再轮询。
+- **真实 Cargo 窗口**：同一旧镜像、RV64 8 GiB/8 核冷 snapshot，先在窗口外构建 tg-xtask，再将
+  reset、`timeout 300 cargo xtask arceos build -p arceos-helloworld --arch riscv64`、proc read 和 quit
+  一次性预排。窗口内 debug tg-xtask 用时 `2m15s`（修复前 600 秒样本为 `2m55s`），随后进入
+  build-std 并编译到 `ax-alloc`；计数为 `signal_time=0 stdio=0`、`scheduler_yields=83911`（其中
+  `net=83099`）、`context_switches=106956`、`scheduler_ipis=107932`、`task_running_ticks=3191284229`、
+  `idle_ticks=20802628171`。它与旧 600 秒样本时长不同，不能直接比较累计 ticks，但已把每分钟约
+  196 万次 signal yield 降为零。另一次未预排 proc read 的 600 秒样本被 shell stdin 轮询污染，明确
+  不用于 running/idle 对比。
+- **门禁与边界**：os 格式检查、无 feature RV64/LA64 release 构建通过；第一次 RV64 构建曾在 lwext4
+  CMake 重建目录缺少 dependency file，原命令重跑通过，未涉及本次 Rust 代码。尚未重跑无 feature
+  完整 BuildStorm，不能据 300 秒窗口宣称题二达标。signal 风暴消除后干净窗口的最大 yield 分桶转为
+  net，ext4 hold 约 262.5 CPU 秒；下一轮应先精确解释 net wait 与 ext4 串行占比，再决定后续改动。
+
+## 2026-08-10 private frame 共享后的完整 BuildStorm 运行（主动停止，吞吐仍不足）
+
+- **配置**：`4d41e26` 加当前未提交 private PageCache frame 共享和诊断工作树；无 kernel/user feature
+  release，旧 RV64 pub 镜像 SHA-256
+  `9d163855dbb67da561925c74666d0e4fc1856e118640cb4889e88dcaf5f8e25f`，QEMU
+  `-snapshot -m 8G -smp 8`，执行原始 `/glibc/buildstorm_testcode.sh`。这仍不是公告的 16 GiB 新镜像
+  正式环境。
+- **阶段结果**：`BUILDSTORM_TOOLCHAIN ok`、`BUILDSTORM_MINIBUILD ok`；旧镜像 untimed `tg-xtask`
+  预构建 `3m15s`，正式窗口内 debug `tg-xtask` 构建 `4m20s` 后成功进入 ArceOS/build-std。最新输出已
+  编译到 `ax-task`、`ax-runtime`、`ax-posix-api`、`alloc`、`panic_abort`、`unwind` 和
+  `rustc-std-workspace-*`，全程未见 SIGSEGV、ENOMEM、kernel panic 或 heap allocation failure。
+- **停止边界**：QEMU 总运行约 2128 秒（35 分 28 秒）时，正式主构建仍处于上述库编译阶段，未生成
+  `BUILDSTORM_COMPILE` 或计分产物。宿主侧 QEMU user+sys CPU 约 7548 秒，折合总运行期间平均约
+  3.55 个 CPU；available memory 约 6.9 GiB，swap 使用约 2.2 GiB。基于剩余 build-std/ArceOS 工作量
+  与此前 6250 秒超时边界，继续运行大概率只能再次得到 timeout，故通过 QEMU `Ctrl-A x` 主动停止。
+  该轮不是脚本失败，也不能记为通过或精确正式耗时。
+- **结论与下一步**：private frame 共享已显著改善 minibuild 和真实 cargo/rustc 短测，但仍不足以让
+  完整 BuildStorm 达标。下一轮不再立即重复完整构建；应使用 `perf_counters` 对 build-std 的固定
+  10--15 分钟窗口采样，重点比较 ext4 hold、block 请求、task running/idle、PageCache eviction 和
+  allocator，再只处理最高占比热点。当前约 3.55/8 的平均 host CPU 利用提示仍有较大串行/等待比例，
+  但在取得正式窗口计数前不直接归因于 ext4、scheduler 或宿主 swap。
+
+## 2026-08-10 BuildStorm 私有只读映射共享 PageCache（未提交，专项 A/B 通过）
+
+- **目的与配置**：基线 `4d41e26` 加未提交的 `buildstorm_private_map_probe`；RV64 1 GiB/8 核、
+  `perf_counters` release kernel、旧 pub 镜像 SHA-256
+  `9d163855dbb67da561925c74666d0e4fc1856e118640cb4889e88dcaf5f8e25f`、`-snapshot`。探针先创建并
+  写回 64 MiB 普通文件，再清零 `/proc/respos_perf`，让 4 个独立进程同步开始逐页读取各自的只读
+  `MAP_PRIVATE` 映射；文件准备不计入窗口。
+- **修复前基线**：探针打印 `BUILDSTORM_PRIVATE_MAP_PROBE_PASS file_mb=64 workers=4`。干净窗口记录
+  `private_file_faults=65812`，接近 4×16384 个数据页加各进程少量装载 fault；PageCache 为
+  `hits=65786 misses=36`、最终 16384 页，说明输入已在缓存中，但旧 private fault 仍为每个进程分配并
+  复制独立 frame。窗口内 ext4 lock wait/hold 仅约 0.00016/0.40 秒，不支持先拆 ext4 全局锁。
+- **测量污染纠正**：最初在 probe 返回 shell 提示符后才交互发送 `cat /proc/respos_perf`，空窗中的
+  `Stdin::read()` 轮询累计约 46--113 万次 yield/context switch。将 probe、读取计数和 `quit` 一次性
+  预排入串口后，修复前干净窗口只有 `context_switches=369 scheduler_yields=0 timer_preemptions=360`。
+  因此历史“private fault 引发调度风暴”结论已撤销；stdio 空闲轮询是真实但独立的问题，不能混入本
+  probe 或 BuildStorm 判断。
+- **实现与语义边界**：无写权限的普通文件 `MAP_PRIVATE` fault 现在直接引用 PageCache frame，保留只读
+  PTE；原生可写 private mapping 继续逐页私有分配。若后续 `mprotect(PROT_WRITE)`，先为所有 resident
+  页分配和复制 private frame，再授予写权限，避免修改 PageCache 或其他进程映射。probe 在计数窗口前
+  覆盖“只读 private mmap → mprotect 可写 → 写入 → backing file 保持原值”。
+- **专项 A/B**：同一 RV64 1 GiB/8 核 snapshot 中，预排命令后的宿主观察墙钟约 `7.1s -> 3.7s`，
+  `task_running_ticks 204344690 -> 65740621`，`heap_alloc_bytes 28295957 -> 12900635`；PageCache
+  hit/miss 与 `private_file_faults=65812` 基本不变，说明收益来自消除重复 frame/copy，而非隐藏磁盘 I/O。
+  修复后 `context_switches=299 scheduler_yields=0`，未引入调度副作用。
+- **真实 Cargo A/B**：旧官方镜像、RV64 8 GiB/8 核、`perf_counters`、每轮冷启动 snapshot；先
+  `cargo new`，随后 reset 计数并编译同一空 binary crate。优化版 Cargo 自报 `1m16s`，临时仅关闭
+  private frame 共享的对照版为 `2m42s`，完成时间缩短约 53%。优化版/对照版的
+  `task_running_ticks=844161965/1966678543`、`ext4_lock_acquisitions=74708/186873`、
+  `ext4_lock_hold_ticks=680276909/1452468515`、`heap_alloc_bytes=8056249042/10259796996`；两轮均
+  `MINIBUILD_RC=0`，无 fault/panic。旧镜像该启动方式没有 `/proc/uptime` 节点，因此不伪造 guest timed
+  秒数，A/B 时间采用 Cargo 自身输出；它证明真实 cargo/rustc 路径收益，但仍不替代正式 BuildStorm。
+- **门禁**：最终工作树通过 os/user `cargo fmt --check`、`git diff --check`、
+  `make build-rv RV_USER_FEATURES= RV_KERNEL_FEATURES=` 和
+  `make build-la LA_USER_FEATURES= LA_KERNEL_FEATURES=`。无 feature RV64 1 GiB/8 核同一轮依次通过
+  `BUILDSTORM_PRIVATE_MAP_PROBE_PASS`、`BUILDSTORM_FILE_PROBE_PASS`、
+  `SMP_SHARED_MM_PROBE_PASS rounds=100` 与 `FRAME_RECLAIM_PROBE_EXIT resident_mb=64 threads=7`。
+  尚未重跑完整 BuildStorm，本节不等同于正式题二成绩。
+
 ## 2026-08-09 正常宿主调度优先级下的完整 BuildStorm 复跑（正式阶段超时）
 
 - **基线与配置**：`dev` HEAD `7cb282a` 加当前未提交的 PageCache、退出页回收、诊断和

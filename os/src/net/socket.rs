@@ -17,7 +17,9 @@ use crate::{
     fs::{FileOp, KStat, OpenFlags},
     mutex::SpinLock,
     syscall::{Errno, SysResult},
-    task::{current_task, yield_current_task},
+    task::{
+        current_task, prepare_current_task_blocked, remove_task, switch_to_next_task, wakeup_task,
+    },
 };
 
 use super::{
@@ -72,8 +74,8 @@ enum SocketInner {
 }
 
 struct UnixSocket {
-    rx: Arc<SpinLock<VecDeque<u8>>>,
-    peer_rx: SpinLock<Option<Arc<SpinLock<VecDeque<u8>>>>>,
+    rx: Arc<SpinLock<UnixBuffer>>,
+    peer_rx: SpinLock<Option<Arc<SpinLock<UnixBuffer>>>>,
     closed: Arc<AtomicBool>,
     peer_closed: SpinLock<Option<Arc<AtomicBool>>>,
     bound_key: Mutex<Option<String>>,
@@ -82,13 +84,37 @@ struct UnixSocket {
 }
 
 struct UnixListener {
-    pending: SpinLock<VecDeque<UnixSocket>>,
+    pending: SpinLock<UnixPending>,
+}
+
+struct UnixBuffer {
+    data: VecDeque<u8>,
+    read_waiters: VecDeque<usize>,
+    write_waiters: VecDeque<usize>,
+}
+
+struct UnixPending {
+    sockets: VecDeque<UnixSocket>,
+    accept_waiters: VecDeque<usize>,
+}
+
+impl UnixBuffer {
+    fn new() -> Self {
+        Self {
+            data: VecDeque::new(),
+            read_waiters: VecDeque::new(),
+            write_waiters: VecDeque::new(),
+        }
+    }
 }
 
 impl UnixListener {
     fn new() -> Self {
         Self {
-            pending: SpinLock::new(VecDeque::new()),
+            pending: SpinLock::new(UnixPending {
+                sockets: VecDeque::new(),
+                accept_waiters: VecDeque::new(),
+            }),
         }
     }
 }
@@ -96,7 +122,7 @@ impl UnixListener {
 impl UnixSocket {
     fn new() -> Self {
         Self {
-            rx: Arc::new(SpinLock::new(VecDeque::new())),
+            rx: Arc::new(SpinLock::new(UnixBuffer::new())),
             peer_rx: SpinLock::new(None),
             closed: Arc::new(AtomicBool::new(false)),
             peer_closed: SpinLock::new(None),
@@ -140,19 +166,16 @@ impl UnixSocket {
         self.nonblock.load(Ordering::Acquire)
     }
 
-    fn wait_interruptible(&self) -> SysResult {
-        if self.is_nonblocking() {
-            return Err(Errno::EAGAIN);
-        }
+    fn finish_interruptible_wait(&self) -> SysResult {
         let task = current_task().ok_or(Errno::ESRCH)?;
-        task.set_interruptible(true);
-        task.check_real_timer();
-        if task.check_signal_interrupt() || task.is_interrupted() {
-            task.clear_interrupted();
-            task.set_interruptible(false);
-            return Err(Errno::EINTR);
+        if task.is_ready() {
+            // The producer won the race after we published Blocked but before
+            // this CPU switched away.  Consume the ready publication locally.
+            remove_task(task.tid());
+            task.set_running();
+        } else {
+            switch_to_next_task();
         }
-        yield_current_task();
         task.check_real_timer();
         if task.check_signal_interrupt() || task.is_interrupted() {
             task.clear_interrupted();
@@ -171,26 +194,55 @@ impl UnixSocket {
             return Err(Errno::ENOTCONN);
         }
         let peer_closed = self.peer_closed.lock().clone().ok_or(Errno::ENOTCONN)?;
+        let task = current_task().ok_or(Errno::ESRCH)?;
         loop {
             let mut rx = self.rx.lock();
-            if !rx.is_empty() {
+            if !rx.data.is_empty() {
                 let mut read_len = 0;
                 for byte in buf {
-                    let Some(value) = rx.pop_front() else {
+                    let Some(value) = rx.data.pop_front() else {
                         break;
                     };
                     *byte = value;
                     read_len += 1;
                 }
+                let wake_writer = rx.write_waiters.pop_front();
+                drop(rx);
+                if let Some(tid) = wake_writer {
+                    wakeup_task(tid);
+                }
                 return Ok(read_len);
             }
-            drop(rx);
             // A stream socket reports EOF once the last reference to the peer
             // endpoint is closed and all bytes already sent have been drained.
             if peer_closed.load(Ordering::Acquire) {
                 return Ok(0);
             }
-            self.wait_interruptible()?;
+            if self.is_nonblocking() {
+                return Err(Errno::EAGAIN);
+            }
+            task.set_interruptible(true);
+            task.check_real_timer();
+            if task.check_signal_interrupt() || task.is_interrupted() {
+                task.clear_interrupted();
+                task.set_interruptible(false);
+                return Err(Errno::EINTR);
+            }
+            rx.read_waiters.push_back(task.tid());
+            let should_block = prepare_current_task_blocked();
+            if !should_block {
+                task.set_interruptible(false);
+                rx.read_waiters.retain(|tid| *tid != task.tid());
+                return Err(Errno::ESRCH);
+            }
+            let interrupted = task.check_signal_interrupt() || task.is_interrupted();
+            drop(rx);
+            if interrupted {
+                wakeup_task(task.tid());
+            }
+            let result = self.finish_interruptible_wait();
+            self.rx.lock().read_waiters.retain(|tid| *tid != task.tid());
+            result?;
         }
     }
 
@@ -200,24 +252,56 @@ impl UnixSocket {
         }
         let peer_rx = self.peer_rx.lock().clone().ok_or(Errno::ENOTCONN)?;
         let peer_closed = self.peer_closed.lock().clone().ok_or(Errno::ENOTCONN)?;
+        let task = current_task().ok_or(Errno::ESRCH)?;
         loop {
             if peer_closed.load(Ordering::Acquire) {
                 return Err(Errno::EPIPE);
             }
             let mut rx = peer_rx.lock();
-            let available = UNIX_SOCKET_BUFFER_LIMIT.saturating_sub(rx.len());
+            let available = UNIX_SOCKET_BUFFER_LIMIT.saturating_sub(rx.data.len());
             if available > 0 {
                 let write_len = available.min(buf.len());
-                rx.extend(buf[..write_len].iter().copied());
+                rx.data.extend(buf[..write_len].iter().copied());
+                let wake_reader = rx.read_waiters.pop_front();
+                drop(rx);
+                if let Some(tid) = wake_reader {
+                    wakeup_task(tid);
+                }
                 return Ok(write_len);
             }
+            if self.is_nonblocking() {
+                return Err(Errno::EAGAIN);
+            }
+            task.set_interruptible(true);
+            task.check_real_timer();
+            if task.check_signal_interrupt() || task.is_interrupted() {
+                task.clear_interrupted();
+                task.set_interruptible(false);
+                return Err(Errno::EINTR);
+            }
+            rx.write_waiters.push_back(task.tid());
+            let should_block = prepare_current_task_blocked();
+            if !should_block {
+                task.set_interruptible(false);
+                rx.write_waiters.retain(|tid| *tid != task.tid());
+                return Err(Errno::ESRCH);
+            }
+            let interrupted = task.check_signal_interrupt() || task.is_interrupted();
             drop(rx);
-            self.wait_interruptible()?;
+            if interrupted {
+                wakeup_task(task.tid());
+            }
+            let result = self.finish_interruptible_wait();
+            peer_rx
+                .lock()
+                .write_waiters
+                .retain(|tid| *tid != task.tid());
+            result?;
         }
     }
 
     fn read_ready(&self) -> bool {
-        !self.rx.lock().is_empty()
+        !self.rx.lock().data.is_empty()
             || self
                 .peer_closed
                 .lock()
@@ -229,7 +313,7 @@ impl UnixSocket {
         self.peer_rx
             .lock()
             .as_ref()
-            .is_some_and(|rx| rx.lock().len() < UNIX_SOCKET_BUFFER_LIMIT)
+            .is_some_and(|rx| rx.lock().data.len() < UNIX_SOCKET_BUFFER_LIMIT)
             && !self
                 .peer_closed
                 .lock()
@@ -267,22 +351,57 @@ impl UnixSocket {
         *self.peer_closed.lock() = Some(server.closed.clone());
 
         let mut pending = listener.pending.lock();
-        if pending.len() >= UNIX_LISTEN_QUEUE_LIMIT {
+        if pending.sockets.len() >= UNIX_LISTEN_QUEUE_LIMIT {
             *self.peer_rx.lock() = None;
             *self.peer_closed.lock() = None;
             return Err(Errno::EAGAIN);
         }
-        pending.push_back(server);
+        pending.sockets.push_back(server);
+        let wake_accept = pending.accept_waiters.pop_front();
+        drop(pending);
+        if let Some(tid) = wake_accept {
+            wakeup_task(tid);
+        }
         Ok(())
     }
 
     fn accept(&self) -> SysResult<UnixSocket> {
         let listener = self.listener.lock().clone().ok_or(Errno::EINVAL)?;
+        let task = current_task().ok_or(Errno::ESRCH)?;
         loop {
-            if let Some(socket) = listener.pending.lock().pop_front() {
+            let mut pending = listener.pending.lock();
+            if let Some(socket) = pending.sockets.pop_front() {
                 return Ok(socket);
             }
-            self.wait_interruptible()?;
+            if self.is_nonblocking() {
+                return Err(Errno::EAGAIN);
+            }
+            task.set_interruptible(true);
+            task.check_real_timer();
+            if task.check_signal_interrupt() || task.is_interrupted() {
+                task.clear_interrupted();
+                task.set_interruptible(false);
+                return Err(Errno::EINTR);
+            }
+            pending.accept_waiters.push_back(task.tid());
+            let should_block = prepare_current_task_blocked();
+            if !should_block {
+                task.set_interruptible(false);
+                pending.accept_waiters.retain(|tid| *tid != task.tid());
+                return Err(Errno::ESRCH);
+            }
+            let interrupted = task.check_signal_interrupt() || task.is_interrupted();
+            drop(pending);
+            if interrupted {
+                wakeup_task(task.tid());
+            }
+            let result = self.finish_interruptible_wait();
+            listener
+                .pending
+                .lock()
+                .accept_waiters
+                .retain(|tid| *tid != task.tid());
+            result?;
         }
     }
 
@@ -303,6 +422,14 @@ impl UnixSocket {
 impl Drop for UnixSocket {
     fn drop(&mut self) {
         self.closed.store(true, Ordering::Release);
+        let mut wake = VecDeque::new();
+        if let Some(peer_rx) = self.peer_rx.lock().clone() {
+            wake.append(&mut peer_rx.lock().read_waiters);
+        }
+        wake.append(&mut self.rx.lock().write_waiters);
+        for tid in wake {
+            wakeup_task(tid);
+        }
         self.close();
     }
 }
@@ -690,7 +817,7 @@ impl Socket {
                             .listener
                             .lock()
                             .as_ref()
-                            .is_some_and(|listener| !listener.pending.lock().is_empty())
+                            .is_some_and(|listener| !listener.pending.lock().sockets.is_empty())
                 } else {
                     unix.write_ready()
                 }

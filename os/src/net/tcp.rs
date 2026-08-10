@@ -272,6 +272,8 @@ impl TcpSocket {
                                     switch_to_next_task();
                                 }
                             } else {
+                                crate::perf::net_yield(1);
+                                crate::perf::tcp_wait_yield(1);
                                 yield_current_task();
                             }
                             let _ = finish_task_timeout(task.tid());
@@ -417,6 +419,8 @@ impl TcpSocket {
             return Err(Errno::EINPROGRESS);
         }
 
+        crate::perf::net_yield(1);
+        crate::perf::tcp_connect_yield(1);
         yield_current_task();
 
         self.block_on(|| {

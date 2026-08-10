@@ -4,7 +4,10 @@ use crate::signal::sig_handler::SigAction;
 use crate::signal::sig_stack::{SS_DISABLE, SignalStack};
 use crate::signal::sig_struct::{FrameFlags, Sig, SigFrame, SigRTFrame, SigSet};
 use crate::signal::{LinuxSigInfo, SiField, SigInfo};
-use crate::task::{TASK_MANAGER, current_task, yield_current_task};
+use crate::task::{
+    TASK_MANAGER, current_task, prepare_current_task_blocked, remove_task, switch_to_next_task,
+    yield_current_task,
+};
 use crate::timer::{TimeSpec, get_timeout_ms};
 use alloc::vec::Vec;
 
@@ -252,8 +255,18 @@ pub fn sys_rt_sigsuspend(mask: *const SigSet, sigsetsize: usize) -> SysResult<us
             task.clear_interrupted();
             break;
         }
-        task.check_real_timer();
-        yield_current_task();
+        if prepare_current_task_blocked() {
+            // Close the arrival-before-Blocked lost-wakeup window.
+            if task.is_ready() || task.check_signal_interrupt() || task.is_interrupted() {
+                remove_task(task.tid());
+                task.set_running();
+            } else {
+                switch_to_next_task();
+            }
+        } else {
+            crate::perf::signal_time_yield(1);
+            yield_current_task();
+        }
         if task.check_signal_interrupt() || task.is_interrupted() {
             task.clear_interrupted();
             break;
@@ -461,7 +474,7 @@ fn take_sigtimedwait_signal(
 /// sigtimedwait: 等待 set 中的某个信号，带超时
 /// 1. 读入目标信号集
 /// 2. 检查是否有已挂起的信号 → 有则立即返回
-/// 3. 挂起等待（轮询方式，直到信号到达或超时）
+/// 3. 阻塞等待，直到目标信号、其他可投递信号或超时唤醒
 pub fn sys_rt_sigtimedwait(
     set_ptr: usize,     // 等待的信号集合的指针
     info_ptr: usize,    // 收到信号后把收到的信号的详细信息放在这里
@@ -496,6 +509,7 @@ pub fn sys_rt_sigtimedwait(
 
     // ----- 3. 需要等待 -----
     task.set_interruptible(true);
+    task.set_sigtimedwait_mask(wanted_set);
     if timeout_ptr != 0 {
         // 3a. 有限等待
         let mut timeout = TimeSpec::default();
@@ -505,12 +519,14 @@ pub fn sys_rt_sigtimedwait(
             1,
         );
         if let Err(err) = timeout_result {
+            task.clear_sigtimedwait_mask();
             task.set_interruptible(false);
             return Err(err);
         }
         let total_ms = match timeout.checked_duration_ms() {
             Some(total_ms) => total_ms,
             None => {
+                task.clear_sigtimedwait_mask();
                 task.set_interruptible(false);
                 return Err(Errno::EINVAL);
             }
@@ -518,22 +534,25 @@ pub fn sys_rt_sigtimedwait(
 
         // timeout == 0 → 立即轮询返回 EAGAIN
         if timeout.is_zero() {
+            task.clear_sigtimedwait_mask();
             task.set_interruptible(false);
             return Err(Errno::EAGAIN);
         }
 
-        let start_ms = get_timeout_ms();
+        let deadline_ms = get_timeout_ms().saturating_add(total_ms);
 
         loop {
             // 检查信号
             match take_sigtimedwait_signal(wanted_set, info_ptr, &task) {
                 Ok(Some(sig)) => {
                     info!("[sys_rt_sigtimedwait] received signal: {}", sig);
+                    task.clear_sigtimedwait_mask();
                     task.set_interruptible(false);
                     return Ok(sig);
                 }
                 Ok(None) => {}
                 Err(err) => {
+                    task.clear_sigtimedwait_mask();
                     task.set_interruptible(false);
                     return Err(err);
                 }
@@ -541,19 +560,42 @@ pub fn sys_rt_sigtimedwait(
 
             if task.check_signal_interrupt() || task.is_interrupted() {
                 task.clear_interrupted();
+                task.clear_sigtimedwait_mask();
                 task.set_interruptible(false);
                 return Err(Errno::EINTR);
             }
 
             // 检查超时
-            if get_timeout_ms().saturating_sub(start_ms) >= total_ms {
+            if get_timeout_ms() >= deadline_ms {
                 info!("[sys_rt_sigtimedwait] timeout");
+                task.clear_sigtimedwait_mask();
                 task.set_interruptible(false);
                 return Err(Errno::EAGAIN);
             }
 
-            task.check_real_timer();
-            yield_current_task();
+            if !prepare_current_task_blocked() {
+                crate::perf::signal_time_yield(1);
+                yield_current_task();
+                continue;
+            }
+            super::register_task_timeout(task.tid(), deadline_ms);
+
+            // Signal/timeout can win after the checks above but before the
+            // blocked state becomes visible. Never sleep through that race.
+            let wanted_pending =
+                task.op_sig_pending(|pending| !(pending.pending & wanted_set).is_empty());
+            if task.is_ready()
+                || wanted_pending
+                || task.check_signal_interrupt()
+                || task.is_interrupted()
+                || get_timeout_ms() >= deadline_ms
+            {
+                remove_task(task.tid());
+                task.set_running();
+            } else {
+                switch_to_next_task();
+            }
+            super::finish_task_timeout(task.tid());
         }
     } else {
         // 3b. 无限等待
@@ -562,11 +604,13 @@ pub fn sys_rt_sigtimedwait(
             match take_sigtimedwait_signal(wanted_set, info_ptr, &task) {
                 Ok(Some(sig)) => {
                     info!("[sys_rt_sigtimedwait] received signal: {}", sig);
+                    task.clear_sigtimedwait_mask();
                     task.set_interruptible(false);
                     return Ok(sig);
                 }
                 Ok(None) => {}
                 Err(err) => {
+                    task.clear_sigtimedwait_mask();
                     task.set_interruptible(false);
                     return Err(err);
                 }
@@ -574,12 +618,28 @@ pub fn sys_rt_sigtimedwait(
 
             if task.check_signal_interrupt() || task.is_interrupted() {
                 task.clear_interrupted();
+                task.clear_sigtimedwait_mask();
                 task.set_interruptible(false);
                 return Err(Errno::EINTR);
             }
 
-            task.check_real_timer();
-            yield_current_task();
+            if !prepare_current_task_blocked() {
+                crate::perf::signal_time_yield(1);
+                yield_current_task();
+                continue;
+            }
+            let wanted_pending =
+                task.op_sig_pending(|pending| !(pending.pending & wanted_set).is_empty());
+            if task.is_ready()
+                || wanted_pending
+                || task.check_signal_interrupt()
+                || task.is_interrupted()
+            {
+                remove_task(task.tid());
+                task.set_running();
+            } else {
+                switch_to_next_task();
+            }
         }
     }
 }

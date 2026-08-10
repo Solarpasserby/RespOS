@@ -34,7 +34,10 @@ elseif(LIB_ONLY)
     add_definitions(-DCONFIG_DEBUG_ASSERT=0)
     add_definitions(-DCONFIG_HAVE_OWN_OFLAGS=1)
     add_definitions(-DCONFIG_HAVE_OWN_ERRNO=0)
-    add_definitions(-DCONFIG_BLOCK_DEV_CACHE_SIZE=16)
+    # BuildStorm traverses deep Cargo source/target trees. File data uses the
+    # direct multi-block path, so this cache is primarily for ext4 metadata;
+    # 16 entries (64 KiB on a 4 KiB filesystem) thrashes on every path lookup.
+    add_definitions(-DCONFIG_BLOCK_DEV_CACHE_SIZE=4096)
 else()
     #Generic example target
     if (WIN32)
@@ -51,7 +54,7 @@ else()
     add_definitions(-DCONFIG_HAVE_OWN_ERRNO=1)
     add_definitions(-DCONFIG_HAVE_OWN_ASSERT=1)
     add_definitions(-DCONFIG_USE_USER_MALLOC=0)
-    add_definitions(-DCONFIG_BLOCK_DEV_CACHE_SIZE=16)
+    add_definitions(-DCONFIG_BLOCK_DEV_CACHE_SIZE=4096)
 
     add_subdirectory(fs_test)
 endif()

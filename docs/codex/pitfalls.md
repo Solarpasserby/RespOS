@@ -1,5 +1,86 @@
 # RespOS 已确认易错点
 
+## buddy allocator 的 free-list 线性 buddy 查找会在编译负载下吞掉大量 CPU
+
+- 状态：已确认并由 vendor allocator 修复短窗口热点
+- 适用范围：kernel heap 高频小对象释放、8 核 Cargo/rustc、allocator 归因
+- 最后验证：2026-08-10；RV64 8 核固定 120 秒 A/B
+- 证据：旧 allocator dealloc total/core 29.82/26.26 CPU 秒，vendor bitmap+doubly-list 后为
+  4.42/2.88 秒
+- 内容：总 heap ticks 同时包含 spin-lock wait 和 allocator core，不能只凭总数归因锁竞争。拆分后旧
+  `buddy_system_allocator 0.10.0` 的 core 占 dealloc 约 88%，源码对应逐项扫描 free list 寻找 buddy。
+- 后续影响：先拆 lock/core 再选择方案；禁止简单关闭 coalesce（长期会碎片/OOM），也不能只在本机
+  registry 打补丁。可交付实现必须位于 `vendor/` 并保持完整 split/coalesce 与 Layout 语义。
+
+## bounce buffer 看起来是双拷贝，但不能在无占比和无 fault 协议时直接删除
+
+- 状态：已确认当前不是主要热点
+- 适用范围：用户 I/O buffer、copy_to/from_user、read/write/socket 零拷贝设想
+- 最后验证：2026-08-10；RV64 8 核固定 120 秒 Cargo 窗口
+- 证据：约 106 MB user copy 的 calls/bytes/ticks 合计只有约 0.424 CPU 秒
+- 内容：copy helper 本身只执行一次 kernel↔user copy；“第二次”来自 FileOp/Socket 与 kernel bounce
+  buffer。helper 同时承担 VMA permission、lazy/COW resolution 和 PTE translation，直接传 user pointer
+  会在 kernel page fault、并发 munmap 和部分 I/O side effect 上改变语义。
+- 后续影响：性能优化按计数占比排序。若未来做 prepared pages，必须先固定/验证所有 user span，再允许
+  file offset 或外部设备产生副作用，并覆盖 EFAULT、跨页 COW、short I/O 与并发地址空间修改。
+
+## 一个 stat 不能为每个字段重新遍历一次完整路径
+
+- 状态：已确认并修复专项性能窗口
+- 适用范围：lwext4 `stat` 字段读取、directory lookup、Cargo 深路径元数据负载
+- 最后验证：2026-08-10；RV64 8 核固定 120 秒 Cargo 窗口
+- 证据：优化前 stat/lookup 占约 84% ext4 lock hold；raw-inode/dirent 优化后 tg-xtask 约
+  `2m15--2m19s -> 1m34s`
+- 内容：即使 metadata block 已缓存，`ext4_mode_get`、owner/time getters 每次仍执行 pathname walk，
+  同一 stat 连续调用六次会把瓶颈从 I/O 变为锁内 CPU。Rust 通过 FFI 逐项扫描父目录同样昂贵，即便
+  不再二次查 mode，仍显著慢于让 lwext4 内部按 child path/目录索引完成查找。一次 raw inode 快照既
+  减少遍历，也保证各字段来自同一时刻。
+- 后续影响：看到 block I/O 已很低但 ext4 hold 仍高时，应按操作和调用数归一，不能继续只调 cache。
+  优化不得直接读取未对齐 packed 字段引用；需按值读取并做 endian/high-bit 处理，同时保留 UNKNOWN
+  dirent fallback。跨 syscall 缓存 raw inode 时，read/atime、write、truncate、chmod/chown、link/unlink、
+  rename 和 orphan 都是必须审计的失效点；父目录还会被 namespace 操作间接修改，失效不完整时
+  不应缓存目录。成功 unlink 还必须递减 `nlink_override`。锁序保持
+  “释放 ext4 锁后再失效 inode 快照”。
+
+## lwext4 的 16 项 block cache 会把路径元数据放大成海量 4 KiB I/O
+
+- 状态：已确认并修复专项性能窗口
+- 适用范围：Cargo 深目录树、lwext4 path lookup/inode/extent、PageCache 与 block I/O 归因
+- 最后验证：2026-08-10；RV64 8 核固定 180 秒 Cargo 窗口
+- 证据：16 项时 172.6 MB inode data read 对应 4.97 GB block read；4096 项时 221.7 MB data read只对应
+  295.8 MB block read
+- 内容：`block_read_bytes` 不等于应用文件内容。lwext4 的 file data 使用 direct path，但目录块、inode
+  table 和 extent lookup 使用内部 bcache；只有 16 个 4 KiB entry 时，每次重新 open 深路径都会淘汰
+  元数据，形成近 29 倍读取放大。只扩大上层 PageCache 或继续合并连续 data blocks无法命中这一层。
+- 后续影响：分析文件系统热点时同时记录 PageCache fill bytes、Ext4Inode requested/completed bytes、
+  block size buckets 和 ext4 lock hold。cache 容量 A/B 必须比较同窗口完成进度与 heap current/peak；
+  单看 block bytes 可能偏好容量不足但进度更慢的配置。
+
+## sigtimedwait 的目标信号通常已被 mask，不能只套普通 interruptible sleep
+
+- 状态：已确认并修复 signal/time 调度风暴
+- 适用范围：`rt_sigtimedwait`、`rt_sigsuspend`、busybox/coreutils timeout、进程级 signal 选路
+- 最后验证：2026-08-10；RV64 8 核 timeout 专项与 Cargo 固定窗口
+- 证据：修复前 600 秒窗口约 1962 万次 `signal_time` yield；修复后 busybox 3 秒 timeout 和干净
+  300 秒 Cargo 窗口均为 `signal_time=0`
+- 内容：简单把轮询替换为普通可中断阻塞仍会死锁：调用者按 POSIX 习惯先 block wanted signal，而普通
+  `check_signal_interrupt()` 会跳过 masked signal。必须另外登记 sigwait wanted set，让投递端选择并
+  唤醒 waiter，同时保留该信号 pending 供 sigtimedwait 消费，不能把它转换成 `EINTR`。
+- 后续影响：验证必须同时覆盖目标信号唤醒、有限 timeout、非目标信号 EINTR 和信号到达/发布 Blocked
+  的 lost-wakeup 窗口；只测“超时最终返回”不足以证明 signal selection 正确。
+
+## 交互式 probe 返回后的 stdin 轮询会污染调度计数
+
+- 状态：已确认
+- 适用范围：`user_shell` 下的 `/proc/respos_perf` 专项测量、stdin、scheduler yield/IPI
+- 最后验证：2026-08-10；RV64 1 GiB/8 核 `buildstorm_private_map_probe`
+- 证据：`os/src/fs/stdio.rs::Stdin::read()` 与 yield 子系统分桶；分开发送命令时约 46--113 万次
+  `stdio_yields`，预排 probe/read/quit 后同一工作窗口为 0
+- 内容：probe 返回提示符后，若宿主过一段时间才发送读取计数的命令，shell 会在 SBI console 无字符时
+  反复 `yield_current_task()`。这些切换发生在被测 workload 之后，却仍落在尚未再次 reset 的窗口内。
+- 后续影响：交互式性能 probe 必须把工作命令、读取 `/proc/respos_perf` 和 `quit` 一次性写入串口输入；
+  已出现的高 scheduler yield 必须先按调用点分桶，不能直接归因于刚结束的 workload。
+
 ## lwext4 读取稀疏洞时不能把未分配块号当物理块 0
 
 - 状态：已确认并修复 tg-xtask 链接产物损坏
@@ -84,6 +165,19 @@
   peer close 后 read 先排空已有数据再返回 0，write 返回 `EPIPE`，poll 同时报告相应 readiness。
 - 后续影响：修改 UNIX socket clone/drop/connect/pair 时需一起审查端点引用和 close 状态，不能只修
   阻塞 read 分支，否则 poll 或 write 会继续产生不一致行为。
+
+## UNIX socket 的空读/满写/accept 不能用 yield 轮询
+
+- 状态：已确认并修复专项与真实 Cargo 活性窗口
+- 适用范围：AF_UNIX socketpair、pathname listener、Cargo/rustc IPC、多核调度
+- 最后验证：2026-08-10
+- 证据：旧 600 秒窗口最多 69,194 次 unix yield；event waiter 专项为 unix/scheduler yield 0、
+  blocking switch 5，真实 Cargo timeout 窗口 net/unix 仍为 0
+- 内容：只把 yield 换成 sleep 会增加延迟且仍需轮询；只在条件检查后再登记 waiter 会丢失恰好发生的
+  write/read/connect/close。条件状态、waiter 登记和 blocked 发布必须与同一 buffer/pending lock 配合，
+  producer 在修改条件后取出 waiter，并在释放数据锁后唤醒。
+- 后续影响：验证不能只看“没有 yield”，还要验证 data integrity、buffer-full backpressure、peer EOF/
+  EPIPE、nonblock EAGAIN、accept/connect、signal EINTR 和 producer-before-switch 竞态。
 
 ## RV64 `sret` 前不能提前恢复 SIE 或 user trap vector
 

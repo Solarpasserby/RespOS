@@ -1,0 +1,8 @@
+[package]
+name = "respos_buddy_allocator"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "IRQ-agnostic bitmap-assisted buddy heap used by RespOS"
+
+[dependencies]

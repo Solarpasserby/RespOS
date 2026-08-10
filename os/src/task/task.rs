@@ -25,7 +25,7 @@ use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use bitflags::bitflags;
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
 use lazy_static::lazy_static;
 use spin::RwLock;
 
@@ -420,6 +420,10 @@ pub struct TaskControlBlock {
     // ===== 新增：可中断状态标记 =====
     // 标记当前线程是否处于"可被信号中断"的阻塞中（futex_wait / sigtimedwait / wait4）
     interruptible: AtomicBool,
+    // Non-zero while rt_sigtimedwait sleeps for one of these (normally
+    // blocked) signals. Signal delivery uses it to select and wake the actual
+    // waiter without turning the wanted signal into EINTR.
+    sigtimedwait_mask: AtomicU64,
     // wait4/waitid 可由线程组中任意线程执行；子进程状态变化时需要
     // 唤醒真正的等待者，而不能只唤醒进程组长。
     waiting_for_child: AtomicBool,
@@ -502,6 +506,7 @@ impl TaskControlBlock {
 
             // 可中断状态
             interruptible: AtomicBool::new(false),
+            sigtimedwait_mask: AtomicU64::new(0),
             waiting_for_child: AtomicBool::new(false),
             interrupted: AtomicBool::new(false),
             itimers: Arc::new(TaskTimers::new()),
@@ -594,6 +599,7 @@ impl TaskControlBlock {
 
             // 可中断状态
             interruptible: AtomicBool::new(false),
+            sigtimedwait_mask: AtomicU64::new(0),
             waiting_for_child: AtomicBool::new(false),
             interrupted: AtomicBool::new(false),
             itimers: Arc::new(TaskTimers::new()),
@@ -804,6 +810,7 @@ impl TaskControlBlock {
 
             // 可中断状态
             interruptible: AtomicBool::new(false),
+            sigtimedwait_mask: AtomicU64::new(0),
             waiting_for_child: AtomicBool::new(false),
             interrupted: AtomicBool::new(false),
             itimers,
@@ -1156,6 +1163,19 @@ impl TaskControlBlock {
         self.interruptible.store(val, Ordering::Relaxed);
     }
 
+    pub fn set_sigtimedwait_mask(&self, mask: SigSet) {
+        self.sigtimedwait_mask.store(mask.bits(), Ordering::Release);
+    }
+
+    pub fn clear_sigtimedwait_mask(&self) {
+        self.sigtimedwait_mask.store(0, Ordering::Release);
+    }
+
+    fn is_sigtimedwait_waiter_for(&self, sig: Sig) -> bool {
+        let bit = 1u64 << (sig.raw() - 1);
+        self.sigtimedwait_mask.load(Ordering::Acquire) & bit != 0
+    }
+
     /// 是否处于可中断状态
     fn is_interruptible(&self) -> bool {
         self.interruptible.load(Ordering::Relaxed)
@@ -1433,6 +1453,7 @@ impl TaskControlBlock {
         }
 
         while tasks.iter().any(|task| task.has_cpu_owner()) {
+            crate::perf::quiescence_yield(1);
             crate::task::yield_current_task();
         }
         if !tasks.is_empty() {
@@ -1583,8 +1604,11 @@ impl TaskControlBlock {
             true => {
                 self.op_sig_pending_mut(|pending| pending.add_signal(siginfo));
 
+                if self.is_sigtimedwait_waiter_for(sig) && self.is_blocked() {
+                    crate::task::scheduler::wakeup_task(self.tid());
+                }
                 // ★ 改动：不只是 KILL/STOP 才唤醒，而是调用 check_signal_interrupt
-                if self.check_signal_interrupt() && !self.is_disabled_musl_sigcancel(sig) {
+                else if self.check_signal_interrupt() && !self.is_disabled_musl_sigcancel(sig) {
                     self.interrupted.store(true, Ordering::Relaxed);
                     crate::task::futex::interrupt_futex_wait(self.tid());
                     if self.is_blocked() {
@@ -1601,8 +1625,14 @@ impl TaskControlBlock {
 
             // ===== 进程级信号 =====
             false => {
-                // 原来的逻辑：找线程组中第一个能接收的线程
+                // A process-directed signal waited by sigtimedwait must go to
+                // the waiter even though userspace normally blocks that signal.
                 let target = self.op_thread_group(|tg| {
+                    if let Some(waiter) =
+                        tg.iter().find(|task| task.is_sigtimedwait_waiter_for(sig))
+                    {
+                        return Some(waiter);
+                    }
                     let mut fallback = None;
                     let mut leader = None;
                     for task in tg.iter() {
@@ -1625,8 +1655,12 @@ impl TaskControlBlock {
                 if let Some(task) = target {
                     task.op_sig_pending_mut(|pending| pending.add_signal(siginfo));
 
+                    if task.is_sigtimedwait_waiter_for(sig) && task.is_blocked() {
+                        crate::task::scheduler::wakeup_task(task.tid());
+                    }
                     // ★ 改动：同样使用 check_signal_interrupt
-                    if task.check_signal_interrupt() && !task.is_disabled_musl_sigcancel(sig) {
+                    else if task.check_signal_interrupt() && !task.is_disabled_musl_sigcancel(sig)
+                    {
                         task.interrupted.store(true, Ordering::Relaxed);
                         crate::task::futex::interrupt_futex_wait(task.tid());
                         if task.is_blocked() {
@@ -2158,6 +2192,7 @@ fn exit_process_group(task: Arc<TaskControlBlock>, cause: ExitCause) {
         // exit.  Yield until the teardown owner commits this TCB to Exited;
         // an exited handoff is never republished by the idle loop.
         while !task.is_exited() {
+            crate::perf::quiescence_yield(1);
             crate::task::yield_current_task();
         }
         return;
@@ -2179,6 +2214,7 @@ fn exit_process_group(task: Arc<TaskControlBlock>, cause: ExitCause) {
         .filter(|thread| thread.tid() != task.tid())
         .any(|thread| thread.has_cpu_owner())
     {
+        crate::perf::quiescence_yield(1);
         crate::task::yield_current_task();
     }
     debug_trace!(

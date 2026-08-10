@@ -350,6 +350,8 @@ impl FileOp for Pipe {
             } else {
                 // prepare_current_task_blocked 返回 false：
                 // 缓冲区可能在我们入队前恰好被写端填了数据，yield 让出 CPU 后重试
+                crate::perf::fs_yield(1);
+                crate::perf::pipe_yield(1);
                 yield_current_task();
             }
         }
@@ -422,6 +424,8 @@ impl FileOp for Pipe {
                     return Err(Errno::EINTR);
                 }
             } else {
+                crate::perf::fs_yield(1);
+                crate::perf::pipe_yield(1);
                 yield_current_task();
             }
         }

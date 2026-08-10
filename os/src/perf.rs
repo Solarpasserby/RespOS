@@ -58,13 +58,37 @@ counters!(
     filesystem_flushes,
     block_read_requests,
     block_read_bytes,
+    block_read_ticks,
+    block_read_512_or_less,
+    block_read_4k_or_less,
+    block_read_64k_or_less,
+    block_read_over_64k,
     block_write_requests,
     block_write_bytes,
+    block_write_ticks,
     block_flushes,
     page_cache_hits,
     page_cache_misses,
     page_cache_evictions,
     page_cache_writeback_bytes,
+    page_cache_fill_calls,
+    page_cache_fill_bytes,
+    inode_read_calls,
+    inode_read_requested_bytes,
+    inode_read_completed_bytes,
+    inode_read_ticks,
+    ext4_stat_calls,
+    ext4_stat_ticks,
+    ext4_stat_cache_hits,
+    ext4_stat_cache_misses,
+    ext4_lookup_calls,
+    ext4_lookup_ticks,
+    ext4_readdir_calls,
+    ext4_readdir_ticks,
+    ext4_create_calls,
+    ext4_create_ticks,
+    ext4_write_calls,
+    ext4_write_ticks,
     dirty_pages_peak,
     anonymous_faults,
     private_file_faults,
@@ -74,6 +98,25 @@ counters!(
     local_sfences,
     remote_rfences,
     scheduler_ipis,
+    scheduler_yields,
+    syscall_yields,
+    quiescence_yields,
+    fs_yields,
+    stdio_yields,
+    tty_yields,
+    pipe_yields,
+    fs_syscall_yields,
+    futex_yields,
+    net_yields,
+    unix_socket_yields,
+    tcp_wait_yields,
+    tcp_connect_yields,
+    udp_wait_yields,
+    process_yields,
+    signal_time_yields,
+    special_fd_yields,
+    timer_preemptions,
+    blocking_switches,
     task_running_ticks,
     idle_ticks,
     ext4_lock_acquisitions,
@@ -89,8 +132,18 @@ counters!(
     heap_peak_bytes,
     heap_alloc_ticks,
     heap_dealloc_ticks,
+    heap_alloc_lock_wait_ticks,
+    heap_dealloc_lock_wait_ticks,
+    heap_alloc_core_ticks,
+    heap_dealloc_core_ticks,
     heap_max_alloc_ticks,
     heap_max_dealloc_ticks,
+    copy_from_user_calls,
+    copy_from_user_bytes,
+    copy_from_user_ticks,
+    copy_to_user_calls,
+    copy_to_user_bytes,
+    copy_to_user_ticks,
 );
 
 #[cfg(feature = "perf_counters")]
@@ -125,13 +178,33 @@ increment_functions!(
     (filesystem_flush, filesystem_flushes),
     (block_read_request, block_read_requests),
     (block_read_bytes, block_read_bytes),
+    (block_read_ticks, block_read_ticks),
     (block_write_request, block_write_requests),
     (block_write_bytes, block_write_bytes),
+    (block_write_ticks, block_write_ticks),
     (block_flush, block_flushes),
     (page_cache_hit, page_cache_hits),
     (page_cache_miss, page_cache_misses),
     (page_cache_eviction, page_cache_evictions),
     (page_cache_writeback_bytes, page_cache_writeback_bytes),
+    (page_cache_fill_call, page_cache_fill_calls),
+    (page_cache_fill_bytes, page_cache_fill_bytes),
+    (inode_read_call, inode_read_calls),
+    (inode_read_requested_bytes, inode_read_requested_bytes),
+    (inode_read_completed_bytes, inode_read_completed_bytes),
+    (inode_read_ticks, inode_read_ticks),
+    (ext4_stat_call, ext4_stat_calls),
+    (ext4_stat_ticks, ext4_stat_ticks),
+    (ext4_stat_cache_hit, ext4_stat_cache_hits),
+    (ext4_stat_cache_miss, ext4_stat_cache_misses),
+    (ext4_lookup_call, ext4_lookup_calls),
+    (ext4_lookup_ticks, ext4_lookup_ticks),
+    (ext4_readdir_call, ext4_readdir_calls),
+    (ext4_readdir_ticks, ext4_readdir_ticks),
+    (ext4_create_call, ext4_create_calls),
+    (ext4_create_ticks, ext4_create_ticks),
+    (ext4_write_call, ext4_write_calls),
+    (ext4_write_ticks, ext4_write_ticks),
     (anonymous_fault, anonymous_faults),
     (private_file_fault, private_file_faults),
     (shared_file_fault, shared_file_faults),
@@ -140,12 +213,49 @@ increment_functions!(
     (local_sfence, local_sfences),
     (remote_rfence, remote_rfences),
     (scheduler_ipi, scheduler_ipis),
+    (scheduler_yield, scheduler_yields),
+    (syscall_yield, syscall_yields),
+    (quiescence_yield, quiescence_yields),
+    (fs_yield, fs_yields),
+    (stdio_yield, stdio_yields),
+    (tty_yield, tty_yields),
+    (pipe_yield, pipe_yields),
+    (fs_syscall_yield, fs_syscall_yields),
+    (futex_yield, futex_yields),
+    (net_yield, net_yields),
+    (unix_socket_yield, unix_socket_yields),
+    (tcp_wait_yield, tcp_wait_yields),
+    (tcp_connect_yield, tcp_connect_yields),
+    (udp_wait_yield, udp_wait_yields),
+    (process_yield, process_yields),
+    (signal_time_yield, signal_time_yields),
+    (special_fd_yield, special_fd_yields),
+    (timer_preemption, timer_preemptions),
+    (blocking_switch, blocking_switches),
     (task_running_ticks, task_running_ticks),
     (idle_ticks, idle_ticks),
     (ext4_lock_acquisition, ext4_lock_acquisitions),
     (ext4_lock_wait_ticks, ext4_lock_wait_ticks),
     (ext4_lock_hold_ticks, ext4_lock_hold_ticks),
 );
+
+#[inline(always)]
+pub fn block_read_size(size: usize) {
+    #[cfg(feature = "perf_counters")]
+    let counter = if size <= 512 {
+        &COUNTERS.block_read_512_or_less
+    } else if size <= 4096 {
+        &COUNTERS.block_read_4k_or_less
+    } else if size <= 65536 {
+        &COUNTERS.block_read_64k_or_less
+    } else {
+        &COUNTERS.block_read_over_64k
+    };
+    #[cfg(feature = "perf_counters")]
+    counter.fetch_add(1, Ordering::Relaxed);
+    #[cfg(not(feature = "perf_counters"))]
+    let _ = size;
+}
 
 #[inline(always)]
 pub fn observe_dirty_pages(value: usize) {
@@ -171,13 +281,25 @@ pub fn observe_ext4_lock_hold(value: usize) {
 }
 
 #[inline(always)]
-pub fn heap_alloc(size: usize, ticks: usize, succeeded: bool) {
+pub fn heap_alloc(
+    size: usize,
+    ticks: usize,
+    lock_wait_ticks: usize,
+    core_ticks: usize,
+    succeeded: bool,
+) {
     #[cfg(feature = "perf_counters")]
     {
         COUNTERS.heap_alloc_calls.fetch_add(1, Ordering::Relaxed);
         COUNTERS
             .heap_alloc_ticks
             .fetch_add(ticks, Ordering::Relaxed);
+        COUNTERS
+            .heap_alloc_lock_wait_ticks
+            .fetch_add(lock_wait_ticks, Ordering::Relaxed);
+        COUNTERS
+            .heap_alloc_core_ticks
+            .fetch_add(core_ticks, Ordering::Relaxed);
         observe_max(&COUNTERS.heap_max_alloc_ticks, ticks);
         if succeeded {
             COUNTERS.heap_alloc_bytes.fetch_add(size, Ordering::Relaxed);
@@ -189,11 +311,11 @@ pub fn heap_alloc(size: usize, ticks: usize, succeeded: bool) {
         }
     }
     #[cfg(not(feature = "perf_counters"))]
-    let _ = (size, ticks, succeeded);
+    let _ = (size, ticks, lock_wait_ticks, core_ticks, succeeded);
 }
 
 #[inline(always)]
-pub fn heap_dealloc(size: usize, ticks: usize) {
+pub fn heap_dealloc(size: usize, ticks: usize, lock_wait_ticks: usize, core_ticks: usize) {
     #[cfg(feature = "perf_counters")]
     {
         COUNTERS.heap_dealloc_calls.fetch_add(1, Ordering::Relaxed);
@@ -204,12 +326,52 @@ pub fn heap_dealloc(size: usize, ticks: usize) {
             .heap_dealloc_ticks
             .fetch_add(ticks, Ordering::Relaxed);
         COUNTERS
+            .heap_dealloc_lock_wait_ticks
+            .fetch_add(lock_wait_ticks, Ordering::Relaxed);
+        COUNTERS
+            .heap_dealloc_core_ticks
+            .fetch_add(core_ticks, Ordering::Relaxed);
+        COUNTERS
             .heap_current_bytes
             .fetch_sub(size, Ordering::Relaxed);
         observe_max(&COUNTERS.heap_max_dealloc_ticks, ticks);
     }
     #[cfg(not(feature = "perf_counters"))]
-    let _ = (size, ticks);
+    let _ = (size, ticks, lock_wait_ticks, core_ticks);
+}
+
+#[inline(always)]
+pub fn copy_from_user(bytes: usize, ticks: usize) {
+    #[cfg(feature = "perf_counters")]
+    {
+        COUNTERS
+            .copy_from_user_calls
+            .fetch_add(1, Ordering::Relaxed);
+        COUNTERS
+            .copy_from_user_bytes
+            .fetch_add(bytes, Ordering::Relaxed);
+        COUNTERS
+            .copy_from_user_ticks
+            .fetch_add(ticks, Ordering::Relaxed);
+    }
+    #[cfg(not(feature = "perf_counters"))]
+    let _ = (bytes, ticks);
+}
+
+#[inline(always)]
+pub fn copy_to_user(bytes: usize, ticks: usize) {
+    #[cfg(feature = "perf_counters")]
+    {
+        COUNTERS.copy_to_user_calls.fetch_add(1, Ordering::Relaxed);
+        COUNTERS
+            .copy_to_user_bytes
+            .fetch_add(bytes, Ordering::Relaxed);
+        COUNTERS
+            .copy_to_user_ticks
+            .fetch_add(ticks, Ordering::Relaxed);
+    }
+    #[cfg(not(feature = "perf_counters"))]
+    let _ = (bytes, ticks);
 }
 
 pub fn render() -> String {
@@ -228,12 +390,22 @@ pub fn render() -> String {
     );
     let _ = writeln!(
         out,
-        "block_read_requests={} block_read_bytes={} block_write_requests={} block_write_bytes={} block_flushes={}",
+        "block_read_requests={} block_read_bytes={} block_read_ticks={} block_write_requests={} block_write_bytes={} block_write_ticks={} block_flushes={}",
         s.block_read_requests,
         s.block_read_bytes,
+        s.block_read_ticks,
         s.block_write_requests,
         s.block_write_bytes,
+        s.block_write_ticks,
         s.block_flushes
+    );
+    let _ = writeln!(
+        out,
+        "block_read_sizes_le512={} le4k={} le64k={} gt64k={}",
+        s.block_read_512_or_less,
+        s.block_read_4k_or_less,
+        s.block_read_64k_or_less,
+        s.block_read_over_64k
     );
     let _ = writeln!(
         out,
@@ -243,6 +415,16 @@ pub fn render() -> String {
         s.page_cache_evictions,
         s.page_cache_writeback_bytes,
         s.dirty_pages_peak
+    );
+    let _ = writeln!(
+        out,
+        "page_cache_fill_calls={} page_cache_fill_bytes={} inode_read_calls={} inode_read_requested_bytes={} inode_read_completed_bytes={} inode_read_ticks={}",
+        s.page_cache_fill_calls,
+        s.page_cache_fill_bytes,
+        s.inode_read_calls,
+        s.inode_read_requested_bytes,
+        s.inode_read_completed_bytes,
+        s.inode_read_ticks
     );
     let _ = writeln!(
         out,
@@ -261,13 +443,37 @@ pub fn render() -> String {
     );
     let _ = writeln!(
         out,
-        "context_switches={} local_sfences={} remote_rfences={} scheduler_ipis={} task_running_ticks={} idle_ticks={}",
+        "context_switches={} local_sfences={} remote_rfences={} scheduler_ipis={} scheduler_yields={} syscall_yields={} quiescence_yields={} timer_preemptions={} blocking_switches={} task_running_ticks={} idle_ticks={}",
         s.context_switches,
         s.local_sfences,
         s.remote_rfences,
         s.scheduler_ipis,
+        s.scheduler_yields,
+        s.syscall_yields,
+        s.quiescence_yields,
+        s.timer_preemptions,
+        s.blocking_switches,
         s.task_running_ticks,
         s.idle_ticks
+    );
+    let _ = writeln!(
+        out,
+        "yield_breakdown_fs={} stdio={} tty={} pipe={} fs_syscall={} futex={} net={} process={} signal_time={} special_fd={}",
+        s.fs_yields,
+        s.stdio_yields,
+        s.tty_yields,
+        s.pipe_yields,
+        s.fs_syscall_yields,
+        s.futex_yields,
+        s.net_yields,
+        s.process_yields,
+        s.signal_time_yields,
+        s.special_fd_yields
+    );
+    let _ = writeln!(
+        out,
+        "net_yield_breakdown_unix={} tcp_wait={} tcp_connect={} udp_wait={}",
+        s.unix_socket_yields, s.tcp_wait_yields, s.tcp_connect_yields, s.udp_wait_yields
     );
     let _ = writeln!(
         out,
@@ -277,6 +483,22 @@ pub fn render() -> String {
         s.ext4_lock_hold_ticks,
         s.ext4_lock_max_wait_ticks,
         s.ext4_lock_max_hold_ticks
+    );
+    let _ = writeln!(
+        out,
+        "ext4_ops_stat_calls={} stat_ticks={} stat_cache_hits={} stat_cache_misses={} lookup_calls={} lookup_ticks={} readdir_calls={} readdir_ticks={} create_calls={} create_ticks={} write_calls={} write_ticks={}",
+        s.ext4_stat_calls,
+        s.ext4_stat_ticks,
+        s.ext4_stat_cache_hits,
+        s.ext4_stat_cache_misses,
+        s.ext4_lookup_calls,
+        s.ext4_lookup_ticks,
+        s.ext4_readdir_calls,
+        s.ext4_readdir_ticks,
+        s.ext4_create_calls,
+        s.ext4_create_ticks,
+        s.ext4_write_calls,
+        s.ext4_write_ticks
     );
     let _ = writeln!(
         out,
@@ -296,6 +518,24 @@ pub fn render() -> String {
         s.heap_max_alloc_ticks,
         s.heap_max_dealloc_ticks,
         crate::timer::get_hardware_clock_freq()
+    );
+    let _ = writeln!(
+        out,
+        "heap_alloc_lock_wait_ticks={} heap_dealloc_lock_wait_ticks={} heap_alloc_core_ticks={} heap_dealloc_core_ticks={}",
+        s.heap_alloc_lock_wait_ticks,
+        s.heap_dealloc_lock_wait_ticks,
+        s.heap_alloc_core_ticks,
+        s.heap_dealloc_core_ticks
+    );
+    let _ = writeln!(
+        out,
+        "copy_from_user_calls={} copy_from_user_bytes={} copy_from_user_ticks={} copy_to_user_calls={} copy_to_user_bytes={} copy_to_user_ticks={}",
+        s.copy_from_user_calls,
+        s.copy_from_user_bytes,
+        s.copy_from_user_ticks,
+        s.copy_to_user_calls,
+        s.copy_to_user_bytes,
+        s.copy_to_user_ticks
     );
     out
 }

@@ -64,6 +64,7 @@ const SYSCALL_GETTIMEOFDAY: usize = 169;
 const SYSCALL_GETPID: usize = 172;
 const SYSCALL_GETPPID: usize = 173;
 const SYSCALL_SOCKET: usize = 198;
+const SYSCALL_SOCKETPAIR: usize = 199;
 const SYSCALL_BIND: usize = 200;
 const SYSCALL_LISTEN: usize = 201;
 const SYSCALL_ACCEPT: usize = 202;
@@ -75,6 +76,7 @@ const SYSCALL_MUNMAP: usize = 215;
 const SYSCALL_CLONE: usize = 220;
 const SYSCALL_EXECVE: usize = 221;
 const SYSCALL_MMAP: usize = 222;
+const SYSCALL_MPROTECT: usize = 226;
 const SYSCALL_MEMFD_CREATE: usize = 279;
 const SYSCALL_RENAMEAT2: usize = 276;
 const SYSCALL_WAIT4: usize = 260;
@@ -770,6 +772,25 @@ pub fn sys_socket(domain: usize, socket_type: usize, protocol: usize) -> isize {
     syscall(SYSCALL_SOCKET, [domain, socket_type, protocol, 0, 0, 0])
 }
 
+pub fn sys_socketpair(
+    domain: usize,
+    socket_type: usize,
+    protocol: usize,
+    fds: &mut [i32; 2],
+) -> isize {
+    syscall(
+        SYSCALL_SOCKETPAIR,
+        [
+            domain,
+            socket_type,
+            protocol,
+            fds.as_mut_ptr() as usize,
+            0,
+            0,
+        ],
+    )
+}
+
 pub fn sys_bind(fd: usize, addr: usize, addrlen: usize) -> isize {
     syscall(SYSCALL_BIND, [fd, addr, addrlen, 0, 0, 0])
 }
@@ -831,4 +852,8 @@ pub fn sys_mmap(
     offset: usize,
 ) -> isize {
     syscall(SYSCALL_MMAP, [addr, len, prot, flags, fd as usize, offset])
+}
+
+pub fn sys_mprotect(addr: usize, len: usize, prot: usize) -> isize {
+    syscall(SYSCALL_MPROTECT, [addr, len, prot, 0, 0, 0])
 }

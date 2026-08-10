@@ -148,6 +148,7 @@ fn wait_block_current(task: &Arc<TaskControlBlock>) -> bool {
             switch_to_next_task();
         }
     } else {
+        crate::perf::process_yield(1);
         yield_current_task();
     }
     let interrupted = task.is_interrupted() || task.check_signal_interrupt();
@@ -330,6 +331,8 @@ pub fn sys_exit_group(exit_code: i32) -> ! {
 }
 
 pub fn sys_sched_yield() -> SysResult<usize> {
+    crate::perf::syscall_yield(1);
+    crate::perf::process_yield(1);
     yield_current_task();
     Ok(0)
 }

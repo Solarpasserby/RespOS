@@ -309,6 +309,76 @@ LA64 对应使用 `LA_USER_FEATURES=` 和 `LA_KERNEL_FEATURES=perf_counters`。�
 heap 和文件关闭活动，因此分析大工作负载时忽略最后一次读取造成的常数扰动。未带 feature 的 kernel
 仍保留该 proc 路径，但只输出 `enabled=0`。
 
+修改 signal wait 或 timeout wakeup 后，先用短命令检查功能与调度计数；工作命令、proc read 和 quit
+必须一次性预排，避免 user_shell stdin 空轮询混入窗口：
+
+```text
+/> /bin/busybox echo reset > /proc/respos_perf
+/> /bin/busybox timeout 3 /bin/busybox sleep 60
+/> cat /proc/respos_perf
+/> quit
+```
+
+期望约 3 秒返回，`signal_time=0`、`scheduler_yields=0`，并出现少量 `blocking_switches`。真实 Cargo
+固定窗口同样把 reset、`timeout N cargo ...`、proc read、quit 预排；旧实现每分钟约 196 万次
+`signal_time` yield 可作为回归量级。专项还应补充非目标信号产生 `EINTR` 的用例；busybox timeout
+只覆盖当前 BuildStorm 使用的主要路径。
+
+定位 lwext4 读取放大时，计数内核还会输出 `block_read_sizes_*`、`page_cache_fill_*` 和
+`inode_read_*`。使用相同冷 snapshot 和固定时长；计算：
+
+```text
+block amplification = block_read_bytes / inode_read_completed_bytes
+```
+
+若大多数请求在 `le4k` 且放大倍数远大于 1，应先检查 lwext4 metadata cache/path lookup，不要把所有
+读取都归因于 PageCache miss。调整 `CONFIG_BLOCK_DEV_CACHE_SIZE` 时同时比较固定窗口内
+`page_cache_fill_bytes`（进度代理）、ext4 acquisitions/hold 和 heap current/peak；容量更小产生的块
+读取略少但完成工作也更少，并不代表更快。普通数据由 direct multi-block path读取，因此当前 4096 项
+主要是元数据预算，约占 16 MiB kernel heap。
+
+当 block read ticks 已远小于 ext4 lock hold 时，使用 `ext4_ops_*` 分桶比较 stat、lookup、readdir、
+create、write 的 calls/ticks，并计算每次平均时间。当前旧镜像 tg-xtask 前段已验证的判读示例是：stat
+和 lookup 合计占约 84% lock hold，说明应减少 pathname walk，而不是继续扩大 block cache。修改 raw
+inode/dirent 快路径后至少运行：
+
+```text
+/> /bin/busybox stat /work/tgoskits/Cargo.toml
+/> buildstorm_file_probe
+/> buildstorm_private_map_probe
+/> smp_shared_mm_probe
+/> frame_reclaim_probe
+```
+
+stat 输出需核对 size/inode/mode/uid/gid；最终还需覆盖 symlink size、uid/gid 高位、超过 4 GiB size 和
+LTP stat/fstatat。固定窗口比较必须同时报告阶段进度，不能因优化版在同一时间内执行了更多调用而只比较
+累计 ticks。
+
+开启 inode raw-metadata 跨 syscall 缓存后，不能只用重复只读 stat 证明正确。在 `-snapshot` 的 ext4
+目录中必须先 stat 填充缓存，再依次执行 append、truncate、chmod/chown、hardlink/unlink 和
+rename，每步重新核对 size/mode/uid/gid/nlink/inode。同时读取 `/proc/respos_perf` 的
+`stat_cache_hits/misses`；命中率只证明缓存生效，没有同阶段、同宿主负载旧版对照时不报加速比。
+
+分析 kernel heap 时使用 `heap_*_lock_wait_ticks` 与 `heap_*_core_ticks` 拆分总耗时；8 核累计 ticks
+可以超过墙钟，不能当作单核 elapsed。修改仓库内 allocator 后先运行：
+
+```bash
+cargo test --manifest-path vendor/respos_buddy_allocator/Cargo.toml
+make build-rv RV_USER_FEATURES= RV_KERNEL_FEATURES=
+make build-la LA_USER_FEATURES= LA_KERNEL_FEATURES=
+```
+
+然后在 RV64 1 GiB/8 核无 feature snapshot 同一轮运行 file/private-map/shared-MM/frame-reclaim probes，
+最后再进真实 Cargo 固定窗口。`copy_from_user_*`/`copy_to_user_*` 用来判断用户复制是否值得重构；必须同时
+报告 calls、bytes、ticks。仅观察到 syscall 使用 bounce buffer 不构成零拷贝依据，prepared user pages
+还需覆盖 EFAULT-before-side-effect、lazy/COW、short I/O、共享 offset 和并发 munmap。
+
+修改 AF_UNIX wait/wakeup 后，先运行 `unix_socket_block_probe`，并在 perf kernel 下确认
+`unix_yields=0 scheduler_yields=0` 且存在 `blocking_switches`；再跑真实 Cargo timeout 窗口确认 IPC 活性。
+专项至少传输超过 `UNIX_SOCKET_BUFFER_LIMIT` 的数据，才能覆盖满写 backpressure，不能只测一条短消息。
+容量/墙钟 A/B 期间若宿主启动其他重负载应用，应把该轮明确标记为污染并重跑，不使用其 tg-xtask 或
+ext4 ticks 作容量选择。
+
 历史进程/退出/pipe/timer/futex 详细串口输出由独立的 `debug_traces` feature 控制。它会显著扰动
 QEMU wall time，不得用于正式成绩或性能计数对照：
 
@@ -375,6 +445,25 @@ cat /proc/respos_health
 
 该 probe 针对 exit/reap 生命周期，不替代共享 MM/TLB 的 `smp_shared_mm_probe` 或文件一致性的
 `buildstorm_file_probe`。
+
+大型只读 `MAP_PRIVATE` 的重复 fault/copy 使用嵌入式 `buildstorm_private_map_probe`。RV64 1 GiB/8 核、
+`perf_counters`、`-snapshot` 进入 `user_shell` 后直接运行；探针先准备并写回 64 MiB 文件、验证
+`mprotect(PROT_WRITE)` 的 private-copy 语义，再自行清零计数器，让 4 个进程同步逐页读取。为避免
+probe 返回后交互 shell 的 stdin 空轮询污染计数，必须把 probe、读取和退出命令一次性预排入串口：
+
+```text
+/> buildstorm_private_map_probe
+BUILDSTORM_PRIVATE_MAP_PROBE_PASS file_mb=64 workers=4
+/> /bin/sh
+cat /proc/respos_perf
+exit
+/> quit
+```
+
+重点比较 `private_file_faults`、PageCache hit/miss/eviction、free frames、heap alloc/dealloc ticks、
+context switch/IPI 和 ext4 lock 时间。该探针复用已缓存输入，主要测 fault/copy/回收路径，不替代冷缓存
+块 I/O 或官方 timed build；每个样本仍须从冷启动 snapshot 开始。若分开发送命令，提示符空窗中的
+`Stdin::read()` 会产生大量 `scheduler_yields`，不得归因于 probe 负载。
 
 每个样本至少保存：
 

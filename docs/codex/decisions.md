@@ -3,6 +3,84 @@
 这里只收录能解释当前代码形态或避免重复踩坑的决策。日期是当前证据最后核验时间，不一定是
 最初提出时间。
 
+## kernel heap allocator 必须仓库内 vendor，并以 O(1) membership/unlink 合并普通 free block
+
+- 状态：已采用，长时 BuildStorm soak 待验证
+- 适用范围：kernel global allocator、SMP/IRQ-safe allocation、依赖可复现性
+- 最后验证：2026-08-10
+- 证据：`vendor/respos_buddy_allocator`、`os/src/mm/heap_allocator.rs`；RV64 120 秒 Cargo A/B、双架构
+  no-feature build、RV64 1 GiB/8 核四项 probe
+- 内容：kernel 不再从 crates.io 使用 `buddy_system_allocator`，而由 `os/Cargo.toml` 显式引用仓库内
+  vendor crate。保留 Layout 对齐、8 B 最小 class、buddy split/coalesce、OOM 和 user/actual/total
+  accounting；至少 16 B 的 free block 使用 intrusive doubly-linked node，并用 caller-owned bitmap
+  O(1) 判断和摘除 buddy。bitmap 由 kernel BSS 提供，不从 global allocator 自举分配；外层仍先关本地
+  中断再取得全局 heap lock。
+- 后续影响：不能直接修改 `.cargo-home/registry` 或依赖比赛机缓存中的 fork。allocator 变更必须通过
+  mixed-layout/乱序释放/完全 coalesce 测试、双架构构建、1 GiB SMP probe 和真实 Cargo soak；不得用
+  “更快但不合并”或无界 per-CPU cache 换取短窗口成绩。
+
+## 当前保留 copy_to/from_user 语义边界，不实施未经准备的零拷贝
+
+- 状态：已采用，随热点迁移复核
+- 适用范围：read/write/pread/pwrite、socket I/O、lazy/COW user pages、EFAULT/partial I/O
+- 最后验证：2026-08-10
+- 证据：`os/src/mm/mod.rs`、`os/src/syscall/{fs,net}.rs`；RV64 120 秒 Cargo copy calls/bytes/ticks
+- 内容：用户复制 helper 继续逐页验证 VMA 权限、resolve lazy/COW、翻译 PTE 后复制；不能直接解引用
+  user VA。文件/socket syscall 的 bounce buffer 是潜在额外复制，但当前窗口 copy 总计仅约 0.424 CPU 秒，
+  不足以支持高风险接口重构。
+- 后续影响：若以后优化，先设计可复用的 prepared/pinned user-page span 和 scatter/gather FileOp/Socket
+  接口，明确 fault-before-side-effect、共享 file offset、short I/O、并发 munmap/COW 和锁顺序；必须有
+  专项 ABI/竞态测试后才能替换 bounce buffer。
+
+## ext4 stat 缓存同一 inode 快照，lookup 每次只做一次必要的路径解析
+
+- 状态：已采用，完整 BuildStorm/LTP 回归待验证
+- 适用范围：VFS stat/lstat/fstatat、namei lookup、lwext4 raw inode/dirent ABI
+- 最后验证：2026-08-10
+- 证据：`os/src/fs/ext4/inode.rs`、`os/src/perf.rs`；RV64 8 核固定 120 秒 Cargo A/B、busybox stat 和
+  四项无 feature probe
+- 内容：非 synthetic inode 的 stat 以一次 `ext4_raw_inode_fill` 返回的 packed inode生成 size、mode、
+  owner、link count 和 timestamps，不再为每个字段重走路径。lookup 同样对完整 child path执行一次
+  `ext4_raw_inode_fill`，让 lwext4 内部完成按名/目录索引查找，避免 Rust 逐 dirent FFI 扫描和第二次
+  mode path walk。on-disk 数值显式按 little-endian 解码，uid/gid/size 高位保留。raw inode 结果在
+  同一普通文件/符号链接 `Ext4Inode` 内缓存，read/write/truncate/chmod/chown/link/unlink/
+  rename/orphan 成功后失效；失效在释放 ext4 锁后执行。目录在完整父 inode 失效协议建立前
+  不跨 syscall 缓存。VFS 内已有 override 与 PageCache 逻辑继续在每次 stat 动态覆盖 raw 值。
+- 后续影响：新增 stat/lookup 字段优先从同一 raw inode 快照解释，不应重新引入按字段 path API 或 Rust
+  逐目录项扫描。修改 packed inode解释时必须做双架构构建，并补充 symlink、高 uid/gid、大文件与 LTP
+  stat/namei ABI 回归。新增修改 inode 元数据的路径必须同时失效快照，不得为命中率容忍陈旧
+  size/mode/owner/time/nlink。
+
+## lwext4 元数据 block cache 使用 4096 个 filesystem blocks
+
+- 状态：已采用，完整 BuildStorm 计时待验证
+- 适用范围：lwext4 路径遍历、inode/extent 元数据、kernel heap 固定预算、BuildStorm Cargo 树
+- 最后验证：2026-08-10
+- 证据：`vendor/lwext4_rust/c/lwext4/CMakeLists.txt`、`os/src/perf.rs`；RV64 8 核 16/1024/4096 项
+  固定 180 秒 A/B 和无 feature 文件/内存门禁
+- 内容：将 `CONFIG_BLOCK_DEV_CACHE_SIZE` 从 16 增至 4096。4 KiB 文件系统下对应约 16 MiB，保存
+  lwext4 元数据；普通文件 bulk data 继续走 direct multi-block 路径和内核 PageCache，不用该 cache
+  再复制一份。选择 4096 是因为同窗口实际 file-data fill 比 1024 项多约 28%，而不是只按最低块读取量
+  选择容量。
+- 后续影响：该容量从 256 MiB kernel heap 中常驻占用约 16 MiB；完整 BuildStorm 必须监控 heap peak。
+  不得把它误当作可无限扩大的通用文件缓存。若以后为元数据建立独立缓存或复用打开 inode handle，应
+  重新测 256/1024/4096 容量曲线，并相应缩回固定 cache。
+
+## signal wait 必须阻塞，并显式登记 sigtimedwait 目标集合
+
+- 状态：已采用，完整 BuildStorm 计时待验证
+- 适用范围：`rt_sigtimedwait`、`rt_sigsuspend`、进程/线程级信号投递、timer timeout
+- 最后验证：2026-08-10
+- 证据：`os/src/syscall/signal.rs`、`os/src/task/task.rs`；RV64 8 核 busybox timeout 专项和 300 秒
+  Cargo/perf 窗口
+- 内容：信号等待不得用 `yield_current_task()` 轮询 pending/deadline；任务进入 blocked queue，并由目标
+  信号、其他可投递信号或 timeout registry 唤醒。由于 sigtimedwait 的目标信号通常被用户 mask，TCB
+  必须单独发布 wanted set；进程级投递优先选择对应 waiter，目标信号唤醒时不设置普通 EINTR 标记。
+  发布 Blocked 后必须重查所有完成条件，避免信号在“首次检查—入队”之间到达而永久睡眠。
+- 后续影响：新增信号等待接口应复用同一阻塞/竞态模型。不能为了让 blocked task 醒来而临时解屏蔽
+  wanted set，也不能把目标信号按普通 interrupt 处理，否则 handler/EINTR 会抢先消费 sigtimedwait
+  语义。timer 注册必须在所有返回路径清理。
+
 ## BuildStorm 采用三层级、测量驱动的优化路线
 
 - 状态：已采用
@@ -18,19 +96,46 @@
   per-CPU allocator 都是候选而非预先批准的实现。没有前后数据、专项语义门禁和无 feature 正式复跑
   的修改不进入下一层；优秀内核只提供机制参考，不能替代 RespOS 当前证据。
 
-## Frame-backed PageCache 保留 64 MiB 工作集并做 64 KiB 顺序预读
+## Frame-backed PageCache 保留 128 MiB 工作集并做 64 KiB 顺序预读
 
-- 状态：已采用，完整 BuildStorm 正确性/计时待验证
+- 状态：已采用，干净容量 A/B 与完整 BuildStorm 待验证
 - 适用范围：普通文件缓存 miss、lwext4 锁竞争、块请求合并、物理内存预算
-- 最后验证：2026-08-09
+- 最后验证：2026-08-10
 - 证据：`os/src/fs/page_cache.rs`、`os/src/arch/{rv64,loongarch64}/config/fs.rs`；RV64 8 核
   `buildstorm_file_probe` 和 BuildStorm minibuild
-- 内容：PageCache 数据已由物理 frame 承载，因此全局 resident 上限由 2 MiB 提高到 64 MiB。
+- 内容：PageCache 数据已由物理 frame 承载；在 64 MiB 长窗口持续满载并发生约 53.9 万次 eviction 后，
+  全局 resident 上限提高到 128 MiB。
   有底层普通文件的 read miss 一次最多读取连续 16 页，在 PageCache 锁外完成 I/O 后逐页安装；写路径
   不预读。预读插入使用文件长度代次拒绝并发 truncate 的过期快照。
 - 后续影响：缓存预算消耗物理页但每页元数据仍消耗 kernel heap；继续扩大前必须同时观察
   `page_cache_pages`、free frames 和 heap peak。不得为减少锁次数而在 `EXT4_OP_LOCK` 之外并发调用
   lwext4；随机 I/O 回归时应重新评估固定 16 页预读是否过量。
+
+## AF_UNIX 阻塞 I/O 使用条件 waiter，不使用 yield polling
+
+- 状态：已采用，pathname accept/connect 与 EINTR 专项待补
+- 适用范围：socketpair/pathname Unix socket read/write/accept、peer close、signal interruption
+- 最后验证：2026-08-10
+- 证据：`os/src/net/socket.rs`、`user/src/bin/unix_socket_block_probe.rs`；RV64 专项和 120 秒 Cargo 活性窗口
+- 内容：reader、writer、accept waiter 分别与接收 buffer 或 listener pending queue 共锁登记；登记后
+  发布 blocked，并在切换前处理 producer-wins 和 signal-wins 竞态。写入唤醒 reader、读取唤醒 writer、
+  connect 唤醒 accept、endpoint drop 唤醒 EOF/EPIPE 对端。非阻塞路径继续直接返回 EAGAIN。
+- 后续影响：不得改回固定 sleep/yield。新增 shutdown、dup-close 或 poll waiter 时必须一起验证 EOF、
+  EPIPE、lost wake、EINTR 和 single-winner；唤醒 scheduler 必须在释放 socket data lock 后执行。
+
+## 只读 MAP_PRIVATE 文件映射共享 PageCache frame
+
+- 状态：已采用，完整 BuildStorm 计时待验证
+- 适用范围：普通文件只读/可执行 private mmap、动态库与编译器映像、mprotect
+- 最后验证：2026-08-10
+- 证据：`os/src/mm/memory_set.rs`、`user/src/bin/buildstorm_private_map_probe.rs`；RV64 1 GiB/8 核
+  `perf_counters` A/B 与无 feature private/file/shared-MM/frame-reclaim 门禁
+- 内容：没有 WRITE 权限的 file-backed `MAP_PRIVATE` PTE 直接引用 PageCache 的 `FrameTracker`，避免
+  多进程对同一动态库逐页分配和复制。原生可写 private mapping 仍使用独立 frame；只读映射通过
+  `mprotect(PROT_WRITE)` 升权时，必须先把所有 resident 页私有化，成功后才更新 PTE 权限。
+- 后续影响：PageCache reclaim 把这些 frame 引用视为 mmap pin；退出/munmap 释放引用后才能淘汰。
+  不得直接给共享 cache frame 增加 WRITE PTE。后续 truncate/SIGBUS 语义完善必须同时覆盖 private 与
+  shared cache-frame 映射；完整 BuildStorm 仍需确认 300 MiB 级工具链映像的实际收益。
 
 ## BuildStorm kernel heap 使用 256 MiB 容量
 

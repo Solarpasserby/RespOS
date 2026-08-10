@@ -1551,6 +1551,8 @@ pub fn sys_flock(fd: usize, operation: usize) -> SysResult<usize> {
                             task.set_interruptible(false);
                             return Err(Errno::EINTR);
                         }
+                        crate::perf::fs_yield(1);
+                        crate::perf::fs_syscall_yield(1);
                         yield_current_task();
                         task.set_interruptible(false);
                     }
@@ -2665,6 +2667,8 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SysResult<usize> {
                                 task.set_interruptible(false);
                                 return Err(Errno::EINTR);
                             }
+                            crate::perf::fs_yield(1);
+                            crate::perf::fs_syscall_yield(1);
                             yield_current_task();
                             task.set_interruptible(false);
                         }
@@ -3261,6 +3265,8 @@ fn block_for_poll(
     if !registration.event_driven {
         registration.clear();
         task.set_interruptible(false);
+        crate::perf::fs_yield(1);
+        crate::perf::fs_syscall_yield(1);
         yield_current_task();
         return Ok(PollWake::Retry);
     }
@@ -3275,6 +3281,8 @@ fn block_for_poll(
         }
         registration.clear();
         task.set_interruptible(false);
+        crate::perf::fs_yield(1);
+        crate::perf::fs_syscall_yield(1);
         yield_current_task();
         return Ok(PollWake::Retry);
     }

@@ -175,6 +175,7 @@ pub fn switch_to_next_task() {
     let Some(current) = current_task() else {
         crate::arch::idle();
     };
+    crate::perf::blocking_switch(1);
 
     loop {
         // A timer interrupt may have switched away from this blocked context.
@@ -201,6 +202,7 @@ pub fn yield_current_task() {
     let Some(task) = current_task() else {
         return;
     };
+    crate::perf::scheduler_yield(1);
     handoff_current_to_idle(task);
 }
 
@@ -215,6 +217,7 @@ pub fn preempt_current_task() {
     let Some(task) = current_task() else {
         return;
     };
+    crate::perf::timer_preemption(1);
 
     // A timer interrupt can arrive while switch_to_next_task is waiting for
     // the first runnable task. Do not turn that blocked/stopped/exited current

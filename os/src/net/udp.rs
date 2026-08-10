@@ -320,6 +320,8 @@ impl UdpSocket {
                     Ok(res) => break Ok(res),
                     Err(e) => {
                         if e == Errno::EAGAIN {
+                            crate::perf::net_yield(1);
+                            crate::perf::udp_wait_yield(1);
                             yield_current_task();
                             task.check_real_timer();
                             if task.check_signal_interrupt() || task.is_interrupted() {

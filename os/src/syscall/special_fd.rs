@@ -337,6 +337,7 @@ fn wait_for_file_event(
             switch_to_next_task();
         }
     } else {
+        crate::perf::special_fd_yield(1);
         yield_current_task();
     }
 
@@ -793,6 +794,7 @@ pub fn sys_epoll_pwait(
             let registered = epoll.register_waiters(task.tid());
             if registered.is_empty() {
                 task.set_interruptible(false);
+                crate::perf::special_fd_yield(1);
                 yield_current_task();
                 continue;
             }
@@ -813,6 +815,7 @@ pub fn sys_epoll_pwait(
                     switch_to_next_task();
                 }
             } else {
+                crate::perf::special_fd_yield(1);
                 yield_current_task();
             }
 

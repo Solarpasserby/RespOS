@@ -38,6 +38,8 @@ impl InodeOp for TtyInode {
             let c = console_getchar();
             match c {
                 0 | 256.. => {
+                    crate::perf::fs_yield(1);
+                    crate::perf::tty_yield(1);
                     yield_current_task();
                     continue;
                 }

@@ -1434,6 +1434,17 @@ impl MemorySet {
                 middle.notify_mmap_close();
             }
 
+            // A read-only MAP_PRIVATE file page may directly reference the
+            // clean PageCache frame.  Before mprotect makes such a VMA
+            // writable, replace every resident page with a private copy so a
+            // later store cannot modify the cache or another process's map.
+            if !middle.shared && middle.file_backing.is_some() && !old_writable && new_writable {
+                let mapped_vpns: Vec<_> = middle.data_frames.keys().copied().collect();
+                for vpn in mapped_vpns {
+                    middle.privatize_one(&mut self.page_table, vpn)?;
+                }
+            }
+
             // 修改中间段已映射页的 PTE 权限
             let mapped_vpns: Vec<_> = middle.data_frames.keys().copied().collect();
             for vpn in mapped_vpns {
@@ -3043,7 +3054,16 @@ impl MapArea {
             // 随机映射，物理页号和虚拟页号无关，用于用户程序，分配页帧统一管理
             MapType::Framed => {
                 let page_offset = (vpn - self.vpn_range.get_start()) * PAGE_SIZE;
-                let frame = if self.shared {
+                let frame = if let Some(backing) = &self.file_backing
+                    && (self.shared || !self.map_perm.contains(MapPermission::WRITE))
+                {
+                    // Clean read-only MAP_PRIVATE pages have the same bytes
+                    // as PageCache and cannot be modified through this PTE.
+                    // Sharing avoids one frame allocation and 4 KiB copy per
+                    // process while writable private mappings retain their
+                    // existing copy-on-fault behavior.
+                    shared_file_frame(backing, page_offset)?
+                } else if self.shared {
                     if let Some(backing) = &self.file_backing {
                         shared_file_frame(backing, page_offset)?
                     } else {
@@ -3077,6 +3097,17 @@ impl MapArea {
             }
             return Err(err);
         }
+        Ok(())
+    }
+
+    fn privatize_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) -> SysResult {
+        let old_frame = self.data_frames.get(&vpn).cloned().ok_or(Errno::EFAULT)?;
+        let frame = frame_alloc().ok_or(Errno::ENOMEM)?;
+        let ppn = frame.ppn();
+        ppn.get_bytes_array()
+            .copy_from_slice(old_frame.ppn().get_bytes_array());
+        page_table.replace_pte(vpn, ppn, PTEFlags::from(self.map_perm))?;
+        self.data_frames.insert(vpn, Arc::new(frame));
         Ok(())
     }
 

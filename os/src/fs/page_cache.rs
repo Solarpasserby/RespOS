@@ -306,6 +306,8 @@ impl PageCache {
                 .map_err(|_| Errno::ENOMEM)?;
             read_buf.resize(read_len, 0);
             if let Some((inode, path)) = lower {
+                crate::perf::page_cache_fill_call(1);
+                crate::perf::page_cache_fill_bytes(read_len);
                 match inode.read_at(path, page_start, &mut read_buf) {
                     Ok(_) | Err(Errno::ENOENT) => {}
                     Err(err) => return Err(err),

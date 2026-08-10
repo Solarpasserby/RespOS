@@ -878,6 +878,7 @@ fn sleep_until_us(
             return Err(Errno::EINTR);
         }
         if !prepare_current_task_blocked() {
+            crate::perf::signal_time_yield(1);
             yield_current_task();
             task.set_interruptible(false);
             continue;

@@ -49,25 +49,30 @@ impl<H: Hal + 'static, T: Transport + 'static> BlockDevice for VirtIoBlkDev<H, T
     }
 
     fn read_block(&self, block_id: usize, buf: &mut [u8]) -> DevResult {
+        let started = crate::perf::now_ticks();
         let result = self
             .inner
             .lock()
             .read_blocks(block_id as _, buf)
             .map_err(as_dev_err);
         if result.is_ok() {
+            crate::perf::block_read_ticks(crate::perf::elapsed_since(started));
             crate::perf::block_read_request(1);
             crate::perf::block_read_bytes(buf.len());
+            crate::perf::block_read_size(buf.len());
         }
         result
     }
 
     fn write_block(&self, block_id: usize, buf: &[u8]) -> DevResult {
+        let started = crate::perf::now_ticks();
         let result = self
             .inner
             .lock()
             .write_blocks(block_id as _, buf)
             .map_err(as_dev_err);
         if result.is_ok() {
+            crate::perf::block_write_ticks(crate::perf::elapsed_since(started));
             crate::perf::block_write_request(1);
             crate::perf::block_write_bytes(buf.len());
         }

@@ -545,6 +545,7 @@ fn futex_wait_timed_common(
                     .bucket_by_idx(hash_idx)
                     .retain(|q| !(q.tid == task.tid() && q.key == key));
                 drop(queues);
+                crate::perf::futex_yield(1);
                 yield_current_task();
                 continue;
             }
@@ -656,6 +657,7 @@ fn futex_requeue_common(
         check_user_readable(uaddr as *const u32, 1)?;
         if let (true, Some(expected_val)) = (FUTEX_CMP_REQUEUE_TEST_YIELD, expected_val) {
             while read_futex_value(uaddr)? == expected_val {
+                crate::perf::futex_yield(1);
                 yield_current_task();
             }
         }

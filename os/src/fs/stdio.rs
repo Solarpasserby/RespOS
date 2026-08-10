@@ -33,6 +33,8 @@ impl FileOp for Stdin {
             match c {
                 // `c > 255`是为了兼容OPENSBI，OPENSBI未获取字符时会返回-1
                 0 | 256.. => {
+                    crate::perf::fs_yield(1);
+                    crate::perf::stdio_yield(1);
                     yield_current_task();
                     continue;
                 }

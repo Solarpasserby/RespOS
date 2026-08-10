@@ -145,7 +145,10 @@ pub fn copy_from_user<T: Copy>(dst: *mut T, src: *const T, len: usize) -> SysRes
         return Err(Errno::EFAULT);
     }
     let dst_bytes = unsafe { core::slice::from_raw_parts_mut(dst as *mut u8, byte_len) };
-    copy_user_bytes_to_kernel(src as usize, dst_bytes)?;
+    let started = crate::perf::now_ticks();
+    let result = copy_user_bytes_to_kernel(src as usize, dst_bytes);
+    crate::perf::copy_from_user(byte_len, crate::perf::elapsed_since(started));
+    result?;
     Ok(len)
 }
 
@@ -167,7 +170,10 @@ pub fn copy_to_user<T: Copy>(dst: *mut T, src: *const T, len: usize) -> SysResul
         return Err(Errno::EFAULT);
     }
     let src_bytes = unsafe { core::slice::from_raw_parts(src as *const u8, byte_len) };
-    copy_kernel_bytes_to_user(dst as usize, src_bytes)?;
+    let started = crate::perf::now_ticks();
+    let result = copy_kernel_bytes_to_user(dst as usize, src_bytes);
+    crate::perf::copy_to_user(byte_len, crate::perf::elapsed_since(started));
+    result?;
     Ok(len)
 }
 
