@@ -4,7 +4,7 @@ use super::vfs::{InodeOp, InodeType, LinuxDirent64};
 use crate::config::{KERNEL_HEAP_SIZE, PAGE_SIZE};
 use crate::fs::ext4::Ext4Inode;
 use crate::fs::mount::{MS_NOATIME, MS_NODIRATIME, MS_STRICTATIME, check_mount_file_growth};
-use crate::fs::page_cache::PageCache;
+use crate::fs::page_cache::{PageCache, WritebackErrorCursor};
 use crate::fs::{KStat, Path, PollEvents};
 use crate::mm::FrameTracker;
 use crate::syscall::{Errno, SysResult};
@@ -37,6 +37,9 @@ struct FileInner {
     dirent_cache: Option<Arc<Vec<LinuxDirent64>>>,
     /// 普通文件共享 inode 上的页缓存；tmpfile 使用独立页缓存。
     page_cache: Option<Arc<PageCache>>,
+    /// Writeback errors are reported once per open-file description. dup and
+    /// fork share this cursor together with the rest of `FileInner`.
+    writeback_error_cursor: Option<WritebackErrorCursor>,
     write_back: bool,
     tmpfile_meta: Option<TmpFileMeta>,
     atime_override: Option<TimeSpec>,
@@ -182,6 +185,9 @@ impl File {
                 pc.resize(size);
             }
         }
+        let writeback_error_cursor = page_cache
+            .as_ref()
+            .map(|page_cache| page_cache.sample_writeback_error());
         Self {
             inode,
             shared_page_identity,
@@ -191,6 +197,7 @@ impl File {
                 flags,
                 dirent_cache: None,
                 page_cache,
+                writeback_error_cursor,
                 write_back,
                 tmpfile_meta: None,
                 atime_override: None,
@@ -207,6 +214,9 @@ impl File {
         meta: TmpFileMeta,
     ) -> Self {
         let page_cache = Some(PageCache::new(0));
+        let writeback_error_cursor = page_cache
+            .as_ref()
+            .map(|page_cache| page_cache.sample_writeback_error());
         Self {
             inode,
             shared_page_identity: None,
@@ -216,6 +226,7 @@ impl File {
                 flags,
                 dirent_cache: None,
                 page_cache,
+                writeback_error_cursor,
                 write_back: false,
                 tmpfile_meta: Some(meta),
                 atime_override: None,
@@ -456,6 +467,17 @@ impl File {
             crate::perf::close_data_writeback(1);
         }
         Ok(())
+    }
+
+    fn check_writeback_error(&self) -> SysResult {
+        let mut inner = self.inner.lock();
+        let Some(page_cache) = inner.page_cache.clone() else {
+            return Ok(());
+        };
+        let Some(cursor) = inner.writeback_error_cursor.as_mut() else {
+            return Ok(());
+        };
+        page_cache.check_writeback_error(cursor)
     }
 
     pub fn truncate(&self, size: usize) -> SysResult<usize> {
@@ -850,7 +872,13 @@ impl FileOp for File {
     fn fsync(&self) -> SysResult<usize> {
         crate::perf::explicit_fsync(1);
         let superblock = self.inner.lock().path.mnt.fs.clone();
-        self.sync_cached_data(false)?;
+        let data_result = self.sync_cached_data(false);
+        // Consume an error recorded by this attempt as well as an earlier
+        // close/threshold writeback. This prevents a single failure from
+        // being reported twice by the same open-file description.
+        let writeback_error = self.check_writeback_error();
+        data_result?;
+        writeback_error?;
         superblock.sync()?;
         Ok(0)
     }

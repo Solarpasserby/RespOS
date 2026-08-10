@@ -32,15 +32,18 @@
 
 ### RV64 物理内存上限来自 OpenSBI FDT
 
-- 状态：已实现，8 GiB 识别与 256 MiB 兼容启动已验证
+- 状态：已实现到 8 GiB；16 GiB 尚不可启动
 - 适用范围：RV64 early page table、frame allocator、kernel direct map、procfs/sysinfo
-- 最后验证：2026-08-07
+- 最后验证：2026-08-10
 - 证据：`os/src/arch/rv64/entry/entry.asm`、`os/src/arch/rv64/config/board.rs`、
   `os/src/mm/{frame_allocator,memory_set}.rs`；`/tmp/respos-buildstorm-dynamic-memory.log`、
   `/tmp/respos-dynamic-memory-256m.log`
 - 内容：early root page table 只提供最大 8 GiB QEMU RAM 的可达窗口；boot hart 从 FDT
   `/memory` `reg` 取实际末址并发布。frame allocator 严格以该实际末址为上限。
   首个 RAM GiB 保留 4 KiB 页以分离 kernel section 权限，后续整 GiB 用 Sv39 level-2 leaf。
+  当前 `-m 16G` 时 OpenSBI 把 FDT 放在 `0x47fe00000`，超过 early/direct-map 上界
+  `0x280000000`，因此进入内核后在读取 FDT 前即无串口输出；这不是简单扩大 frame allocator 上限即可
+  解决的问题。
 - 后续影响：不得把 early “最大可达窗口”当成真实 RAM 分配上限；增大支持内存时
   必须同时审计 Sv39 物理地址范围、FDT 位置、direct-map leaf 和最小内存启动。
 
@@ -215,10 +218,26 @@ FdTable slot (FdEntry: descriptor flags)
 - 内容：每个 PageCache page 持有一个 `Arc<FrameTracker>`；普通文件共享映射克隆同一 frame，VMA 的
   frame 强引用同时充当 cache pin。PageCache 元数据仍负责 dirty/version/LRU，truncate 在移除页前
   清零 frame，从而让仍存活的映射同步观察 EOF 后清零。无 PageCache 文件才使用 MM 全局弱表后备。
-  当前全局工作集上限为 16384 页（64 MiB），底层文件 read miss 最多做 16 页顺序预读；I/O 在缓存锁
+  当前全局工作集上限为 32768 页（128 MiB），底层文件 read miss 最多做 16 页顺序预读；I/O 在缓存锁
   外完成，安装前以文件长度代次排除并发 truncate 的旧快照。
 - 后续影响：回收页时必须同时检查 Page 对象和 frame 的强引用；普通文件 read/write 不应再复制或
   overlay 一份 mmap 缓冲。若修改 mmap writeback，dirty 状态仍应归并到该唯一 PageCache page。
+
+### PageCache 写回完成与错误按 batch/version 提交
+
+- 状态：Phase 3 首轮已实现，后台 writeback 与全局 sync 尚未建立
+- 适用范围：普通文件 buffered I/O、close、fsync/fdatasync、MAP_SHARED 间接写回
+- 最后验证：2026-08-10；RV64/LA64 release、RV64 debug fault probe
+- 证据：`os/src/fs/{page_cache.rs,file.rs,proc/perf_stats.rs}`、
+  `user/src/bin/fs_writeback_probe.rs`
+- 内容：页在 dirty 之外保存 write-version、当前 writeback batch id 和最近错误。锁外 lower I/O 返回后，
+  只有仍持有该 batch id 的完成者能结束 writeback；仅当 write-version 未改变时清 dirty，并发 write 或
+  truncate 会使旧快照失效。PageCache 另维护单调 error sequence；每个独立 open 的 `FileInner` 保存
+  cursor，dup/fork 共享，因而一次失败可由所有错误发生前已打开的 description 各观察一次，而新 open
+  不继承历史错误。
+- 后续影响：任何新 writeback 入口都必须通过同一完成/错误发布协议，不能在 lower 返回前清 dirty，
+  也不能只把错误返回给发起写回的 syscall。引入后台线程后仍需保留 inode/PageCache 强生命周期，并
+  单独定义 `sync`/`syncfs`/unmount 的全局遍历边界。
 
 ### filesystem ELF 使用按需 private file backing
 

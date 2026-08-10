@@ -16,10 +16,12 @@
 
 ### 当前基线
 
-- 代码基线：`7cdae1e`（`perf: 合并 ext4 时间戳更新并修复 relatime 写放大`）。
-- 本地完整结果：旧 RV64 pub 镜像、8 GiB/8 核、无 feature release，BuildStorm timed build
-  `1348.08s`，最终 `ok=true`、产物 1,681,000 B。
-- 资源限制：当前宿主不能安全启动公告要求的 16 GiB guest；本地结果不等于评测平台成绩。
+- 代码基线：`ab893b0`（`fix: 下沉 ext4 inode 操作并按 VFS 引用延迟回收`）。
+- 最近已完成本地结果：`6636cfe`、旧 RV64 pub 镜像、8 GiB/8 核、无 feature release，BuildStorm
+  timed build `1459.33s`，最终 `ok=true`、产物 1,681,000 B；`ab893b0` 的最新复跑状态见
+  [current-status.md](./current-status.md)。
+- 资源限制：当前宿主可创建 16 GiB QEMU，但 RV64 early/direct map 只能访问 8 GiB，OpenSBI 传入的
+  16 GiB FDT 位于映射外而无法进入内核；本地 8 GiB 结果不等于评测平台成绩。
 - 现有门禁：RV64/LA64 release 构建，RV64 Unix socket、file、private-map、shared-MM、frame-reclaim
   五项 probe，以及 `cargo fmt`、`git diff --check`。
 
@@ -273,7 +275,8 @@ frame_reclaim_probe
 - 固定旧 pub 镜像、8 GiB/8 核、窗口外预构建 tg-xtask，运行 120 秒无关变量受控的 Cargo 窗口；
 - 记录完成阶段、PageCache fill、ext4 lock classes、block I/O、heap、fault、scheduler idle；
 - Phase 1、Phase 3、Phase 6 收口时各跑一次无 feature 完整 BuildStorm；
-- 获得官方新镜像和足够宿主资源后，按 16 GiB/8 核重新建立正式 RV64 基线；LA64 按公告资源独立验证。
+- 修复 RV64 early FDT/direct-map 的 16 GiB 可达性并获得官方新镜像后，按 16 GiB/8 核重新建立正式
+  RV64 基线；LA64 按公告资源独立验证。
 
 ## 暂停、回退与提交规则
 
@@ -291,6 +294,8 @@ POSIX probe 成功也不能替代压力和资源闭环。
 
 ## 下一步
 
-进入 Phase 3：建立 PageCache clean/dirty/writeback/error 状态机及同步接口的错误可见性，先固定
-close/fsync/fdatasync/sync/msync 的当前契约与失败 probe，再改变写回所有权。Phase 1 的时间精度与
-realtime 边界继续保留，不得由 PageCache 内存时间戳掩盖。
+Phase 3 首轮已为 PageCache 增加 batch/version writeback 状态、inode 共享 error sequence 和
+open-file cursor，并用 debug-only 一次性 EIO probe 固定 fsync/fdatasync 的错误可见性。下一轮先补
+`sync`/`syncfs` 与 unmount 的 inode-wide dirty 遍历和错误边界，再建立受控后台 writeback；在强引用
+生命周期闭合前不取消 close 数据提交。Phase 1 的时间精度与 realtime 边界继续保留，不得由
+PageCache 内存时间戳掩盖。

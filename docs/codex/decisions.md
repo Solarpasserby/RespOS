@@ -236,6 +236,21 @@
 - 后续影响：若改为强引用 inode/page cache 和后台 writeback，可进一步取消 close 数据写回；在此之前
   不能以性能为由直接丢弃脏页。崩溃一致性和正常 shutdown 的 virtio FLUSH 门禁保持不变。
 
+## PageCache 写回错误使用 inode 共享序列与 open-file cursor
+
+- 状态：已采用
+- 适用范围：PageCache、close、fsync/fdatasync、dup/fork、独立 open
+- 最后验证：2026-08-10
+- 证据：`os/src/fs/{page_cache.rs,file.rs}`、`user/src/bin/fs_writeback_probe.rs`；RV64
+  `debug_traces` 一次性 EIO probe
+- 内容：lower 写回失败先保留页 dirty，再递增 PageCache error sequence。每个新 open-file description
+  采样当前 sequence；dup/fork 共享 cursor，独立 open 拥有独立 cursor。同步接口在重试写回后推进 cursor，
+  使同一旧错误对每个受影响 description 最多报告一次；错误发生后才 open 的 description 不接收历史错。
+  debug fault control 只在 `debug_traces` 构建中接受命令，release 不提供故障入口。
+- 后续影响：不能把 cursor 放进 `FdEntry`，否则 dup 会错误地各自消费；也不能只在 `fsync` 调用栈上传递
+  lower error，否则 close/阈值/未来后台写回的异步错误会静默丢失。后续若需要保留多个不同错误，扩展
+  sequence 记录而不是退回全局单个 errno。
+
 ## lwext4 连续对齐块使用 multi-block VirtIO 请求
 
 - 状态：已采用，完整 BuildStorm 计时待验证

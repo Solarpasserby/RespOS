@@ -451,6 +451,17 @@ make build-rv RV_USER_FEATURES= RV_KERNEL_FEATURES=
 hart/tid/tgid、cause、sepc、stval、sp、ra 和 errno；它不会打印成功的 demand/COW fault。它适合
 正确性复现，不是性能内核，结束诊断后仍须恢复无 feature kernel。
 
+Phase 3 写回错误游标可用同一个 `debug_traces` 构建做确定性一次性故障验证。必须使用 `-snapshot`
+客体；控制命令只影响下一批 PageCache lower write，触发后自动解除：
+
+```text
+/> fs_writeback_probe fault
+FS_WRITEBACK_FAULT_PASS
+```
+
+probe 通过 `/proc/respos_perf` 写入 `fail_writeback`，覆盖旧 observer 重试、独立 open 和 dup 共享 cursor。
+release 内核不接受该命令；正常语义门禁在无 feature 客体运行 `fs_writeback_probe normal`。
+
 ### BuildStorm CPU/jobs 缩放矩阵
 
 正式 judge 只接受最终平台规定的 RV64 8 核、LA64 12 核配置；下列矩阵只用于选择优化方向，日志必须
@@ -544,7 +555,9 @@ Linux baseline 为 RV64 1616.09 秒、LA64 1985.21 秒；此前 4655.23 / 6223.0
 计时范围，已被上游明确替换。资源参数来自群公告，仓库 README 仍写 RV64 8 GiB，两者冲突处必须以
 最终平台启动命令为准；本地取得更新后的镜像后仍须核对镜像 hash、脚本和实际启动命令。
 
-BuildStorm 使用 release kernel、无 `eval` user feature。诊断必须带 `-snapshot`，当前 RV64 命令为：
+BuildStorm 使用 release kernel、无 `eval` user feature。诊断必须带 `-snapshot`。下列 16 GiB 命令是
+正式目标配置；截至 2026-08-10 当前 RV64 early map 无法访问位于 `0x47fe00000` 的 FDT，本机回归在
+修复前应改用 `-m 8G`，不能把 OpenSBI 后无内核输出记作 BuildStorm 失败：
 
 ```bash
 make build-rv RV_USER_FEATURES=

@@ -8,6 +8,8 @@ use crate::syscall::{Errno, SysResult};
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
+#[cfg(feature = "debug_traces")]
+use core::sync::atomic::AtomicBool;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use lazy_static::lazy_static;
 use spin::Mutex;
@@ -20,8 +22,11 @@ lazy_static! {
 
 static NEXT_PAGE_CACHE_ID: AtomicUsize = AtomicUsize::new(1);
 static NEXT_LRU_GENERATION: AtomicUsize = AtomicUsize::new(1);
+static NEXT_WRITEBACK_ID: AtomicUsize = AtomicUsize::new(1);
 static PAGE_CACHE_PAGE_COUNT: AtomicUsize = AtomicUsize::new(0);
 static PAGE_CACHE_DIRTY_PAGE_COUNT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "debug_traces")]
+static WRITEBACK_FAULT_ARMED: AtomicBool = AtomicBool::new(false);
 
 const WRITEBACK_BATCH_PAGES: usize = 32;
 const DIRTY_PAGES_PER_CACHE_HIGH_WATERMARK: usize = 256;
@@ -43,6 +48,21 @@ pub fn page_cache_lru_entry_count() -> usize {
     PAGE_CACHE_LRU.lock().len()
 }
 
+#[cfg(feature = "debug_traces")]
+pub fn arm_writeback_fault() {
+    WRITEBACK_FAULT_ARMED.store(true, Ordering::Release);
+}
+
+#[cfg(feature = "debug_traces")]
+fn take_writeback_fault() -> bool {
+    WRITEBACK_FAULT_ARMED.swap(false, Ordering::AcqRel)
+}
+
+#[cfg(not(feature = "debug_traces"))]
+fn take_writeback_fault() -> bool {
+    false
+}
+
 #[derive(Clone, Copy)]
 struct LruEntry {
     cache_id: usize,
@@ -60,6 +80,12 @@ pub struct Page {
     frame: Arc<FrameTracker>,
     dirty: bool,
     write_version: usize,
+    /// The batch currently writing this page. Dirty may remain set when a
+    /// concurrent writer changes the page after the batch took its snapshot.
+    writeback: Option<usize>,
+    /// Last failed writeback attempt for diagnostics. Observable error
+    /// delivery is tracked per PageCache by `WritebackErrorState` below.
+    writeback_error: Option<Errno>,
     generation: usize,
     queued: bool,
 }
@@ -70,6 +96,8 @@ impl Page {
             frame: Arc::new(frame_alloc().ok_or(Errno::ENOMEM)?),
             dirty: false,
             write_version: 0,
+            writeback: None,
+            writeback_error: None,
             generation,
             queued: false,
         })
@@ -78,6 +106,16 @@ impl Page {
     fn bytes(&mut self) -> &mut [u8] {
         self.frame.ppn().get_bytes_array()
     }
+}
+
+#[derive(Clone, Copy)]
+pub struct WritebackErrorCursor {
+    sequence: usize,
+}
+
+struct WritebackErrorState {
+    sequence: usize,
+    error: Option<Errno>,
 }
 
 /// 共享页缓存，挂在 inode 上。内部用 Mutex 保护 BTreeMap，
@@ -89,6 +127,7 @@ pub struct PageCache {
     /// 每次可见文件长度变化都递增。写回用它识别与 truncate/extend 的竞争。
     size_version: AtomicUsize,
     dirty_pages: AtomicUsize,
+    writeback_error: Mutex<WritebackErrorState>,
 }
 
 impl PageCache {
@@ -100,6 +139,10 @@ impl PageCache {
             file_size: Mutex::new(file_size),
             size_version: AtomicUsize::new(0),
             dirty_pages: AtomicUsize::new(0),
+            writeback_error: Mutex::new(WritebackErrorState {
+                sequence: 0,
+                error: None,
+            }),
         });
         PAGE_CACHE_REGISTRY
             .lock()
@@ -122,6 +165,31 @@ impl PageCache {
 
     pub fn has_dirty_pages(&self) -> bool {
         self.dirty_pages.load(Ordering::Relaxed) != 0
+    }
+
+    /// Start an open-file-description error cursor at the current sequence.
+    /// Errors that predate open are not reported through the new descriptor.
+    pub fn sample_writeback_error(&self) -> WritebackErrorCursor {
+        WritebackErrorCursor {
+            sequence: self.writeback_error.lock().sequence,
+        }
+    }
+
+    /// Report the newest writeback error once to this open-file description.
+    /// Duplicated descriptors share the cursor because they share `File`.
+    pub fn check_writeback_error(&self, cursor: &mut WritebackErrorCursor) -> SysResult {
+        let state = self.writeback_error.lock();
+        if cursor.sequence == state.sequence {
+            return Ok(());
+        }
+        cursor.sequence = state.sequence;
+        state.error.map_or(Ok(()), Err)
+    }
+
+    fn record_writeback_error(&self, error: Errno) {
+        let mut state = self.writeback_error.lock();
+        state.sequence = state.sequence.wrapping_add(1);
+        state.error = Some(error);
     }
 
     fn next_generation() -> usize {
@@ -500,8 +568,30 @@ impl PageCache {
         Self::reclaim_global();
     }
 
-    /// 将脏页写回
+    fn finish_writeback_batch(
+        snapshots: &[(Arc<Mutex<Page>>, usize)],
+        writeback_id: usize,
+        error: Option<Errno>,
+    ) {
+        for (page, _) in snapshots {
+            let mut page = page.lock();
+            if page.writeback == Some(writeback_id) {
+                page.writeback = None;
+                page.writeback_error = error;
+            }
+        }
+    }
+
+    /// 将脏页写回。失败保留 dirty，并发布给所有已打开文件的错误游标。
     pub fn sync(&self, inode: &Arc<dyn InodeOp>, path: &str) -> SysResult {
+        let result = self.sync_inner(inode, path);
+        if let Err(error) = result {
+            self.record_writeback_error(error);
+        }
+        result
+    }
+
+    fn sync_inner(&self, inode: &Arc<dyn InodeOp>, path: &str) -> SysResult {
         let file_size = *self.file_size.lock();
         let size_version = self.size_version.load(Ordering::Acquire);
         let pages: Vec<_> = self
@@ -531,6 +621,7 @@ impl PageCache {
             let mut expected_page_idx = first_page_idx;
             let mut snapshots = Vec::new();
             let mut data = Vec::new();
+            let writeback_id = NEXT_WRITEBACK_ID.fetch_add(1, Ordering::Relaxed);
 
             while cursor < pages.len() && snapshots.len() < WRITEBACK_BATCH_PAGES {
                 let (page_idx, page) = &pages[cursor];
@@ -547,6 +638,8 @@ impl PageCache {
                     break;
                 }
                 data.extend_from_slice(&page_guard.bytes()[..page_len]);
+                page_guard.writeback = Some(writeback_id);
+                page_guard.writeback_error = None;
                 snapshots.push((page.clone(), page_guard.write_version));
                 drop(page_guard);
                 expected_page_idx += 1;
@@ -554,8 +647,22 @@ impl PageCache {
             }
 
             let offset = first_page_idx * PAGE_SIZE;
-            let written = inode.write_at(path, offset, &data)?;
+            // A feature-gated one-shot fault keeps the release path free of a
+            // control surface while allowing the error/cursor protocol to be
+            // exercised deterministically in a disposable test guest.
+            if take_writeback_fault() {
+                Self::finish_writeback_batch(&snapshots, writeback_id, Some(Errno::EIO));
+                return Err(Errno::EIO);
+            }
+            let written = match inode.write_at(path, offset, &data) {
+                Ok(written) => written,
+                Err(error) => {
+                    Self::finish_writeback_batch(&snapshots, writeback_id, Some(error));
+                    return Err(error);
+                }
+            };
             if written != data.len() {
+                Self::finish_writeback_batch(&snapshots, writeback_id, Some(Errno::EIO));
                 return Err(Errno::EIO);
             }
             crate::perf::page_cache_writeback_bytes(written);
@@ -566,13 +673,22 @@ impl PageCache {
             if self.size_version.load(Ordering::Acquire) != size_version {
                 let current_size = *self.file_size.lock();
                 if offset.saturating_add(written) > current_size {
-                    inode.truncate(path, current_size)?;
+                    if let Err(error) = inode.truncate(path, current_size) {
+                        Self::finish_writeback_batch(&snapshots, writeback_id, Some(error));
+                        return Err(error);
+                    }
                 }
+                Self::finish_writeback_batch(&snapshots, writeback_id, None);
                 continue;
             }
 
             for (page_offset, (page, version)) in snapshots.into_iter().enumerate() {
                 let mut page_guard = page.lock();
+                if page_guard.writeback != Some(writeback_id) {
+                    continue;
+                }
+                page_guard.writeback = None;
+                page_guard.writeback_error = None;
                 if page_guard.dirty && page_guard.write_version == version {
                     page_guard.dirty = false;
                     self.dirty_pages.fetch_sub(1, Ordering::Relaxed);

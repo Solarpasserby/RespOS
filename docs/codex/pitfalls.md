@@ -1,5 +1,19 @@
 # RespOS 已确认易错点
 
+## RV64 `-m 16G` 的 FDT 在当前 early map 外
+
+- 状态：已确认，尚未修复
+- 适用范围：RV64 QEMU 内存配置、early page table、FDT 解析、direct map
+- 最后验证：2026-08-10
+- 证据：QEMU 10.0.2/OpenSBI `-m 16G -smp 8` 输出 FDT `0x47fe00000`；
+  `os/src/arch/rv64/{entry/entry.asm,config/board.rs}` 的上界 `0x280000000`
+- 内容：16 GiB guest 的 OpenSBI 阶段正常，但 FDT 被放到 RAM 顶部附近，超过当前只覆盖 8 GiB RAM 的
+  early/direct-map 窗口；内核在能解析真实内存范围前就无法访问传入 FDT，因此表现为 OpenSBI 后无任何
+  kernel 串口输出。增加 QEMU `-m` 或只改 frame allocator 常量都不能修复。
+- 后续影响：扩到 16 GiB 必须把 early FDT 可达性、Sv39 direct-map leaf 数量/范围、物理地址上界和
+  256 MiB 最小配置一起设计与回归；在此之前正式本机回归继续使用 8 GiB，不能把 16 GiB 无输出误判为
+  inode、调度或 BuildStorm 死锁。
+
 ## 自动 atime 更新不能复用会刷新 ctime 的显式 utimens 路径
 
 - 状态：已确认并修复 BuildStorm 写放大

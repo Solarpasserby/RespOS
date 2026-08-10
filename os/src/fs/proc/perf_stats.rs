@@ -42,6 +42,11 @@ impl InodeOp for PerfStatsInode {
             return Err(Errno::EINVAL);
         }
         let command = core::str::from_utf8(buf).map_err(|_| Errno::EINVAL)?;
+        #[cfg(feature = "debug_traces")]
+        if command.trim() == "fail_writeback" {
+            crate::fs::page_cache::arm_writeback_fault();
+            return Ok(buf.len());
+        }
         if command.trim() != "reset" {
             return Err(Errno::EINVAL);
         }

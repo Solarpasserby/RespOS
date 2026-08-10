@@ -11,7 +11,41 @@
 - 当前已知优先缺口包括目录 chmod 未持久化、属性 override 先于底层成功发布、时间纳秒/realtime
   不完整；ext4 C 库线程安全未证明前继续保留唯一全局锁。
 
-### inode-number 下沉与最后 VFS 引用回收（未提交）
+### Phase 3 首轮：PageCache 写回状态与 open-file error cursor（本次提交）
+
+- **状态机**：PageCache page 在原有 dirty/write-version 之外记录当前 writeback batch id 与最近失败；
+  锁外 I/O 完成后只有 batch id 仍匹配的完成者能结束该页 writeback，且只有内容 version 未变化时才能
+  清 dirty。短写、lower write 和 truncate 恢复失败均保留 dirty，并发布到 inode 共享 PageCache 的
+  error sequence。
+- **错误可见性**：每个新 `File` 在 open 时采样 PageCache error sequence；dup/fork 因共享同一个
+  `FileInner` 而共享 cursor，独立 open 各自推进。`fsync`/当前较强实现的 `fdatasync` 在重试数据写回后
+  消费一次旧错误；新 open 不继承 open 前已发生的错误。close 仍不返回后台错误，但若同 inode 还有旧
+  open-file description 存活，其后续同步接口可观察该错误。
+- **受控失败 probe**：`fs_writeback_probe normal` 验证只读 fd 可同步 inode 共享 PageCache、
+  `fdatasync`/`fsync` 正常返回及 pipe `EINVAL`。`debug_traces` 内核额外接受
+  `/proc/respos_perf` 的一次性 `fail_writeback` 命令；`fs_writeback_probe fault` 已验证 observer 首次
+  `fsync -> EIO`、重试成功、新 open 不继承旧错、另一旧 writer 独立收到一次 `EIO`。release 路径既不
+  导出也不接受该故障控制命令。
+- **门禁**：RV64/LA64 无 feature release 与 RV64 `debug_traces` 构建通过；RV64 1 GiB/8 核、
+  `-snapshot`、QEMU `NI=-10/CLS=TS` 同轮通过 writeback normal、metadata、namespace、xattr、Unix
+  socket、file、private-map、shared-MM 与 frame-reclaim，debug 客体通过 writeback fault。格式与
+  `git diff --check` 通过。
+- **完整 BuildStorm**：当前无 feature RV64 工作树、旧 pub 镜像、8 GiB/8 核、`-snapshot`、
+  `NI=-10/CLS=TS` 输出 toolchain/minibuild PASS，并最终输出
+  `BUILDSTORM_COMPILE mode=multi ok=true cores=8 bytes=1681000 arch=riscv64`，脚本退出 0；Cargo 为
+  `31m11s`、axbuild 1896.55 秒。宿主同时运行基线 `debug_traces` BuildStorm，因此墙钟受诊断并行负载
+  污染，只作当前改动的完整正确性回归，不作性能比较。
+- **交接 trace 复核与 16 GiB 边界**：先在 `ab893b0` 构建 `debug_traces`。宿主能以
+  `NI=-10/CLS=TS` 创建 16 GiB QEMU，但 OpenSBI 把 FDT 放在 `0x47fe00000`，超过当前 8 GiB
+  early/direct-map 上界 `0x280000000`，因此无内核输出；该地址空间扩展未混入本轮。改用 8 GiB/8 核后
+  trace 通过 toolchain/minibuild 并持续进入正式编译，3 小时诊断截止时到达 `irq-framework`，QEMU 仍约
+  524% CPU、RSS 3.0 GiB，宿主 swap 约 2 MiB，未见 panic、fault、OOM 或 ext4 错误。该 trace 没有最终
+  `BUILDSTORM_COMPILE`，只证明先前长静默不是 inode/ext4 死锁；完整通过结论来自上一条无 feature 轮次。
+- **保留边界**：当前 `fdatasync` 仍比 Linux 最小保证更强，等价走完整 `fsync`；系统调用 `sync`/
+  `syncfs`、unmount 前 inode-wide dirty flush、后台 writeback 与硬件 dirty-bit 精确 mmap 写回仍未实现。
+  本轮不取消 close 数据提交，也不声称已完成 Phase 3。
+
+### inode-number 下沉与最后 VFS 引用回收（已提交 `ab893b0`）
 
 - **状态收敛**：Ext4Inode 不再保存 pathname aliases、hidden orphan path、mode/owner/nlink override 或
   内存 xattr；数据、属性、readdir、readlink 和 xattr 均通过真实后端 inode number 操作。metadata raw
@@ -41,8 +75,8 @@
   QEMU 使用 `-snapshot`，原始 pub 镜像未被本轮修改；进程已终止，无残留 QEMU。
 - **未关闭边界**：lwext4 vendor 当前没有完整 orphan-list mount recovery；异常断电恰好发生在 nlink=0
   提交与安全点回收之间时，可能遗留泄漏 inode。当前不以提前 free 换取表面上的即时回收，也不宣称
-  已达到 Linux ext4 崩溃恢复。该工作树尚未完成最新完整 BuildStorm；此前长运行经 PC/trace 证明确实
-  持续编译而非 inode/ext4 死锁，历史完整 BuildStorm 本身约需 24 分钟。
+  已达到 Linux ext4 崩溃恢复。`ab893b0` 的高量 trace 在三小时截止前未完成，但已证明持续编译而非
+  inode/ext4 死锁；后续 Phase 3 无 feature 工作树的完整 BuildStorm 已通过，见本页首节。
 
 ### Phase 0 语义回归框架（已提交 `4dc52ef`，Phase 1 已校正基线）
 
@@ -80,7 +114,7 @@
 - **保留边界**：ext4 vendor 仍只持久化 32-bit 秒，wall clock 尚未从平台 RTC 初始化；纳秒、负时间和
   真实 `CLOCK_REALTIME` 是明确未关闭项，不能据本阶段结果宣称完整 POSIX 时间模型。
 
-### Phase 2 inode identity 与 namespace 一致性（本次提交）
+### Phase 2 inode identity 与 namespace 一致性（首轮已提交 `6636cfe`）
 
 - **身份与缓存**：删除新建文件使用的 synthetic inode，所有 ext4 dentry 以真实后端 inode number
   进入 weak inode cache；hardlink、rename、reopen 与打开 fd 因而共享同一 inode/PageCache。目录 raw
@@ -126,8 +160,9 @@
   `BUILDSTORM_TOOLCHAIN ok`、`BUILDSTORM_MINIBUILD ok` 和
   `BUILDSTORM_COMPILE mode=multi ok=true cores=8 bytes=1681000 arch=riscv64`，脚本退出 0。
   axbuild 报告 timed build `1348.08s`（Cargo 为 `22m16s`）；guest 时间戳 5 -> 1399 秒包含前置检查和
-  未计时 tg-xtask。旧镜像脚本打印 `elapsed_s=0.00`，不作为计时依据。宿主只有约 15 GiB，无法启动
-  公告要求的 16 GiB guest，因此这是完整正确性回归与本机 8 GiB 数据，不冒充正式平台成绩。
+  未计时 tg-xtask。旧镜像脚本打印 `elapsed_s=0.00`，不作为计时依据。后续实测宿主能创建 16 GiB
+  QEMU，但当前 RV64 early map 无法访问其 FDT；因此这是完整正确性回归与本机 8 GiB 数据，不冒充
+  正式平台成绩。
 - **门禁**：无 feature RV64/LA64 release 构建通过；RV64 1 GiB/8 核无 feature snapshot 同轮通过
   Unix socket、file、private-map、shared-MM 与 frame-reclaim 五项 probe。`cargo fmt` 和
   `git diff --check` 通过。另用 ext4 临时文件验证普通读取为 `atime 190 -> 204`、ctime 保持 190；随后
@@ -137,7 +172,7 @@
 
 - **环境**：宿主 available memory 9.7 GiB，load average 约 `0.50/1.79/3.26`；旧 RV64 pub
   image SHA-256 为 `9d163855dbb67da561925c74666d0e4fc1856e118640cb4889e88dcaf5f8e25f`，
-  QEMU 10.0.2。因宿主只有 15 GiB RAM，继续使用可复现的 RV64 8 GiB/8 核、`-snapshot`、
+  QEMU 10.0.2。该历史轮基于宿主 15 GiB RAM 余量继续使用可复现的 RV64 8 GiB/8 核、`-snapshot`、
   `perf_counters`；窗口外预构建 tg-xtask，reset 后执行 120 秒 arceos build。
 - **inode 缓存基线**：`da957ea` 收紧版 tg-xtask 19.29 秒，继续编译至 `ax-posix-api`；
   139,908 次 stat 中 91,509 次命中、48,399 次回源，命中率 65.4%，stat 平均约
@@ -400,8 +435,8 @@
   devcontainer 工作树；RV64 pub 镜像 SHA-256 为
   `9d163855dbb67da561925c74666d0e4fc1856e118640cb4889e88dcaf5f8e25f`。使用无 kernel feature、
   无 user `eval` feature 的 release kernel，以旧 pub 镜像、`-snapshot -m 8G -smp 8` 运行
-  `/glibc/buildstorm_testcode.sh`。本机只有约 15 GiB RAM，因此本轮不是公告要求的 RV64 16 GiB
-  正式资源配置，也不能作为最终比赛成绩。
+  `/glibc/buildstorm_testcode.sh`。该轮使用 8 GiB，且当前内核后来确认无法访问 16 GiB guest 顶部的
+  FDT，因此不是公告要求的 RV64 16 GiB 正式资源配置，也不能作为最终比赛成绩。
 - **宿主调度前提**：QEMU 启动后实测为 `NI=-10`、`CLS=TS`，不再继承历史 Codex 会话的
   `nice=16/SCHED_IDLE`。运行中 QEMU RSS 主要约 1.2--2.0 GiB，宿主 swap 使用量从约 2.0 GiB
   增至约 4.7 GiB，但 available memory 仍约 7 GiB；本轮超时不能继续归因于 QEMU 被
