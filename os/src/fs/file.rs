@@ -813,11 +813,7 @@ impl FileOp for File {
         let visible_path = inner.path.abs_path();
         let path = self.storage_path(&visible_path);
         if let Some(ref pc) = inner.page_cache {
-            let mut stat = match self.inode.stat(&path) {
-                Ok(stat) => stat,
-                Err(Errno::ENOENT) => KStat::minimal(0, InodeType::Regular),
-                Err(err) => return Err(err),
-            };
+            let mut stat = self.inode.stat(&path)?;
             stat.size = pc.len();
             stat.blocks = KStat::blocks_for_size(stat.size as u64);
             if let Some(meta) = inner.tmpfile_meta {

@@ -145,6 +145,17 @@ path。Linux/RV64 对照、双架构构建、五项 SMP probe 与完整 BuildSto
 
 ## Phase 2：inode/dentry 与 namespace 一致性
 
+### 2026-08-10 阶段结果
+
+Phase 2 已完成第一轮收敛：ext4 全部使用真实后端 inode identity，同 inode hardlink/rename/open fd
+共享对象与 PageCache；存活 alias、目录后代 rename 和普通文件/空目录 orphan 生命周期由 inode 统一
+维护。目录 raw metadata 使用 per-inode generation，mutation 在底层成功后失效实际父目录。Linux 与
+RespOS namespace probe、双架构构建、五项 SMP probe 和完整 BuildStorm 均通过。
+
+由于 lwext4 数据 API 仍以 pathname 为入口，alias 集是当前受控适配层，不宣称已经获得真正的
+inode-number handle；lookup 与 mutation 的完整 seqlock/RCU 可见性协议也保留为后续 VFS 并发工作，
+不在本阶段以拆除全局 lwext4 锁换取性能。
+
 ### 目标
 
 - 以稳定 inode identity 统一同 inode 对象，减少 path-keyed 状态；
@@ -280,6 +291,6 @@ POSIX probe 成功也不能替代压力和资源闭环。
 
 ## 下一步
 
-进入 Phase 2：以当前已通过的 hardlink alias 属性基线为前提，收敛 inode/dentry identity、negative
-dentry 和 namespace generation。时间精度与 realtime 边界仍保留在 Phase 1 的已知限制清单中；若
-Phase 2 修改触及 times，必须先关闭相应限制，不能沿用秒级 override 掩盖。
+进入 Phase 3：建立 PageCache clean/dirty/writeback/error 状态机及同步接口的错误可见性，先固定
+close/fsync/fdatasync/sync/msync 的当前契约与失败 probe，再改变写回所有权。Phase 1 的时间精度与
+realtime 边界继续保留，不得由 PageCache 内存时间戳掩盖。

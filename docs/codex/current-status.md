@@ -29,7 +29,7 @@
   相关的最小 LTP 清单已写入重构方案；现有完整 LTP 仍受 writable `MAP_SHARED` 测试框架阻断，未
   声称通过。
 
-### Phase 1 inode 属性事务与 fd 生命周期（本次提交）
+### Phase 1 inode 属性事务与 fd 生命周期（已提交 `ea7aaa2`）
 
 - **事务模型**：vendor lwext4 新增 `ext4_setattr()`，在一次 pathname lookup、inode ref 和 transaction
   内按 mask 更新 mode、uid/gid、atime/mtime/ctime。目录不再绕过底层 `chmod`；`chown` 与 suid/sgid
@@ -46,6 +46,25 @@
   `1232.95s`。宿主本轮 swap 增长约 1 GiB，故只作为正确性回归，不作性能提升结论。
 - **保留边界**：ext4 vendor 仍只持久化 32-bit 秒，wall clock 尚未从平台 RTC 初始化；纳秒、负时间和
   真实 `CLOCK_REALTIME` 是明确未关闭项，不能据本阶段结果宣称完整 POSIX 时间模型。
+
+### Phase 2 inode identity 与 namespace 一致性（本次提交）
+
+- **身份与缓存**：删除新建文件使用的 synthetic inode，所有 ext4 dentry 以真实后端 inode number
+  进入 weak inode cache；hardlink、rename、reopen 与打开 fd 因而共享同一 inode/PageCache。目录 raw
+  metadata 从全局 generation 改为每 inode generation，成功 mutation 只失效实际源/目标父目录。
+- **路径兼容层**：lwext4 尚无可直接用于所有数据操作的 inode handle，因此 Ext4Inode 暂存全部存活
+  alias；rename 同时迁移被缓存目录的后代前缀，unlink 注销单个 alias，最后目录项或 rename 覆盖目标
+  进入 orphan path。普通文件与空目录的最后 fd 关闭后再清理 orphan；清理失败保留状态以便后续重试。
+- **可观察语义**：删除 `File::get_stat()` 的 ENOENT fake stat 和 `Stat` 转换中的 `nlink.max(1)`；打开
+  后 unlink/覆盖 rename 的 fd 现在观察真实 inode 且 `st_nlink=0`。新增 Linux/RespOS namespace probe，
+  覆盖 inode 稳定性、hardlink、跨目录/覆盖 rename、目录 nlink、打开后 unlink、打开目录被覆盖及
+  fork rename/open 竞态；Linux `/dev/shm` 为 1069 次、RespOS 8 核为 1200 次有效竞态观测，均 PASS。
+- **门禁**：2026-08-10 RV64/LA64 无 feature release 构建通过；RV64 1 GiB/8 核 snapshot 同轮通过
+  metadata、Unix socket、file、private-map、shared-MM、frame-reclaim。8 GiB/8 核 snapshot 完整
+  BuildStorm 在 `NI=-10/CLS=TS` 下输出 `ok=true`、1,681,000 B、脚本退出 0；axbuild 1459.33 秒，
+  Cargo 24m07s。该数据是本机正确性回归，不代替评测平台结果。
+- **保留边界**：alias 集仍是 lwext4 pathname API 的受控适配，不是真正 path-independent inode handle；
+  mutation writer 由 NAMEI 锁串行，lookup 与 mutation 的完整 seqlock/RCU 可见性协议仍待后续 VFS 演进。
 
 ## 2026-08-10 ext4 时间戳合并更新（已提交 `7cdae1e`）
 

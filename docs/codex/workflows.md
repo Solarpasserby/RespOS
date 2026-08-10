@@ -189,6 +189,18 @@ fs_metadata_probe cleanup
 `FS_METADATA_EXPECTED_FAIL` 表示探针成功捕获尚未修复的差异，不表示该语义通过；只有对应的
 `FS_METADATA_*_PASS` 且无该项 expected failure 才能用于关闭缺陷。
 
+namespace identity/rename/unlink 对照：
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror -O2 scripts/fs_namespace_probe_linux.c \
+  -o /tmp/fs_namespace_probe_linux
+/tmp/fs_namespace_probe_linux
+```
+
+RespOS 无 feature、至少 2 核的 snapshot guest 中运行 `fs_namespace_probe`。它覆盖 hardlink identity、
+跨目录与覆盖 rename、打开后 unlink、打开目录被覆盖、目录 nlink/后代路径和 fork rename/open 竞态；
+以 `FS_NAMESPACE_PROBE_PASS race_observations=N` 为通过标志。
+
 题一 CAgent 的 guest 入口是 `/glibc/cagent_testcode.sh`，不是内置 `testrunner`。它会启动
 `simple_llm_server`，并行运行 10 个 `agent_lite`，最终由上游
 [`judge_cagent-glibc.py`](https://github.com/oscomp/testsuits-for-oskernel/blob/final-2026/judge/judge_cagent-glibc.py)

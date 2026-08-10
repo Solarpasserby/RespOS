@@ -23,7 +23,7 @@
 
 - 状态：已确认
 - 适用范围：`os/src/main.rs` 与各全局子系统
-- 最后验证：2026-08-01
+- 最后验证：2026-08-10
 - 证据：`os/src/main.rs`、`os/src/mm/mod.rs`、`os/src/net/mod.rs`
 - 内容：MM 初始化先于网络全局对象和 initproc，initproc 入队后才开启周期调度。LoongArch 在
   进入公共高半区路径前还有早期分页和架构扩展初始化。
@@ -271,8 +271,14 @@ FdTable slot (FdEntry: descriptor flags)
   `os/src/fs/mount.rs`
 - 内容：`Path` 是 mount+dentry；dentry 表达目录项身份和父子关系；inode 表达文件对象；路径
   查找由 namei 处理 `dirfd`、`.`/`..`、symlink 与 mount crossing。
-- 后续影响：不能用 `Arc::strong_count` 推断 inode 是否仍被打开；当前 ext4 使用明确 open-file
-  计数。多硬链接与 rename 仍受后端 path API 限制，见 `pitfalls.md`。
+- ext4 inode cache 以真实后端 inode number 为 identity，不再为新建文件生成 synthetic inode。同 inode
+  的所有 hardlink alias 登记在 inode；rename 迁移 alias（目录同时迁移已缓存后代前缀），unlink 只注销
+  被删除 alias。最后目录项及 rename 覆盖目标通过隐藏 orphan path 延长到最后 open File 关闭。
+- 每个 ext4 目录 inode 持有独立 metadata generation；成功 namespace mutation 在 lower commit 后失效
+  实际源/目标父目录，不再用全局 generation 使所有目录快照失效。
+- 后续影响：不能用 `Arc::strong_count` 推断 inode 是否仍被打开；使用明确 open-file 计数。alias 集是
+  lwext4 pathname API 的兼容边界，不等价于真正的 inode handle；新增 mutation 必须同步维护 alias、
+  orphan 生命周期、相关父目录 generation 与 dentry cache。
 
 ## 网络模型
 

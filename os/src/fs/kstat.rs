@@ -139,7 +139,7 @@ impl From<KStat> for Stat {
             st_dev: kstat.dev,
             st_ino: kstat.ino,
             st_mode,
-            st_nlink: kstat.nlink.max(1),
+            st_nlink: kstat.nlink,
             st_uid: kstat.uid,
             st_gid: kstat.gid,
             st_rdev: kstat.rdev,

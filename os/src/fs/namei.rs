@@ -190,6 +190,12 @@ fn child_abs_path(parent: &Arc<Dentry>, name: &str) -> alloc::string::String {
     }
 }
 
+fn invalidate_directory_metadata(dentry: &Arc<Dentry>) {
+    if let Some(inode) = dentry.get_inode().as_any().downcast_ref::<Ext4Inode>() {
+        inode.namespace_changed();
+    }
+}
+
 fn dentry_name(dentry: &Arc<Dentry>) -> SysResult<String> {
     dentry
         .current_abs_path()
@@ -836,7 +842,7 @@ pub fn filename_unlink(dirfd: isize, path: &str, remove_dir: bool) -> SysResult 
             .as_any()
             .downcast_ref::<Ext4Inode>()
             .filter(|inode| inode.has_open_files())
-            .map(|inode| inode.orphan_regular_file(&target_path))
+            .map(|inode| inode.orphan_regular_file(&target_path, &parent.get_inode()))
             .transpose()?
             .is_some()
     } else {
@@ -1028,7 +1034,7 @@ pub fn filename_rename(
 
     // 防止 ext4_frename 在目标为非空目录时产生嵌套语义，损坏文件系统。
     let mut replaced_regular: Option<(Arc<dyn super::vfs::InodeOp>, bool)> = None;
-    let mut replaced_directory: Option<(Arc<Dentry>, String)> = None;
+    let mut replaced_directory: Option<(Arc<Dentry>, bool)> = None;
     if let Ok(existing) = lookup_dentry(&mut nd) {
         if no_replace {
             return Err(Errno::EEXIST);
@@ -1060,7 +1066,7 @@ pub fn filename_rename(
                     .downcast_ref::<Ext4Inode>()
                     .ok_or(Errno::EXDEV)?;
                 let was_open = ext4_inode.has_open_files();
-                ext4_inode.orphan_regular_file(&existing_path)?;
+                ext4_inode.orphan_regular_file(&existing_path, &nd.dentry.get_inode())?;
                 replaced_regular = Some((existing_inode, was_open));
             } else {
                 nd.dentry.get_inode().unlink(&existing)?;
@@ -1073,13 +1079,14 @@ pub fn filename_rename(
             if has_content {
                 return Err(Errno::ENOTEMPTY);
             }
-            let backup_path = alloc::format!(
-                "{}.respos_rename_backup_{}",
-                existing_path,
-                existing.get_inode().stat(&existing_path)?.ino
-            );
-            Ext4Inode::file_rename(&existing_path, &backup_path)?;
-            replaced_directory = Some((existing.clone(), backup_path));
+            let existing_inode = existing.get_inode();
+            let ext4_inode = existing_inode
+                .as_any()
+                .downcast_ref::<Ext4Inode>()
+                .ok_or(Errno::EXDEV)?;
+            let was_open = ext4_inode.has_open_files();
+            ext4_inode.orphan_directory(&existing_path, &nd.dentry.get_inode())?;
+            replaced_directory = Some((existing.clone(), was_open));
         }
         nd.dentry.remove_child(name.as_str());
         remove_dentry_cache_tree(&existing_path);
@@ -1091,15 +1098,18 @@ pub fn filename_rename(
                 let _ = inode.restore_orphan(&new_abs);
             }
         }
-        if let Some((_, backup_path)) = replaced_directory.as_ref() {
-            let _ = Ext4Inode::file_rename(backup_path, &new_abs);
+        if let Some((existing, _)) = replaced_directory.as_ref()
+            && let Some(inode) = existing.get_inode().as_any().downcast_ref::<Ext4Inode>()
+        {
+            let _ = inode.restore_orphan(&new_abs);
         }
         return Err(err);
     }
 
-    let old_inode = old.dentry.get_inode();
-    if let Some(inode) = old_inode.as_any().downcast_ref::<Ext4Inode>() {
-        inode.set_renamed_path(&new_abs);
+    Ext4Inode::rename_cached_paths(&old.abs_path(), &new_abs);
+    invalidate_directory_metadata(&old_parent);
+    if !Arc::ptr_eq(&old_parent, &nd.dentry) {
+        invalidate_directory_metadata(&nd.dentry);
     }
 
     if let Some((inode, was_open)) = replaced_regular {
@@ -1109,15 +1119,13 @@ pub fn filename_rename(
             }
         }
     }
-    if let Some((existing, backup_path)) = replaced_directory {
-        let backup = Arc::new(Dentry::new(
-            backup_path,
-            Some(nd.dentry.clone()),
-            existing.get_inode(),
-        ));
+    if let Some((existing, was_open)) = replaced_directory {
         // 主 rename 已提交，清理暂存目录失败不能再向用户报告 rename 失败，
         // 否则会造成“返回错误但命名空间已改变”的 ABI。残留备份可在后续维护清理。
-        let _ = nd.dentry.get_inode().unlink(&backup);
+        if !was_open && let Some(inode) = existing.get_inode().as_any().downcast_ref::<Ext4Inode>()
+        {
+            inode.cleanup_orphan();
+        }
     }
 
     // 保持 dentry identity：已打开 File、cwd 以及后代 Path 都应观察到新父链。
