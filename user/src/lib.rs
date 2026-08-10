@@ -238,6 +238,24 @@ pub fn chdir(path: &str) -> isize {
 pub fn chmod(path: &str, mode: usize) -> isize {
     sys_fchmodat(AT_FDCWD, path, mode, 0)
 }
+pub fn fchmod(fd: usize, mode: usize) -> isize {
+    sys_fchmod(fd, mode)
+}
+pub fn chown(path: &str, owner: usize, group: usize) -> isize {
+    sys_fchownat(AT_FDCWD, path, owner, group, 0)
+}
+pub fn fchown(fd: usize, owner: usize, group: usize) -> isize {
+    sys_fchown(fd, owner, group)
+}
+pub fn getuid() -> isize {
+    sys_getuid()
+}
+pub fn getgid() -> isize {
+    sys_getgid()
+}
+pub fn utimens(path: &str, times: &[TimeSpec; 2]) -> isize {
+    sys_utimensat(AT_FDCWD, path, times, 0)
+}
 pub fn open(path: &str, flags: usize, mode: usize) -> isize {
     sys_openat(AT_FDCWD, path, flags, mode)
 }

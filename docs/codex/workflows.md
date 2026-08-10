@@ -162,6 +162,33 @@ QEMU 必须附 `-snapshot`，并保存完整串口日志。`task_a_futex_cmp_req
   HART、256M 内存加载 `img/sdcard-rv-pub.img`，并显示 `Rust user shell` 的 `/>` 提示符；
   未进入 `testrunner`。LA 入口已做同样的配置检查，但尚未完成本轮启动验证。
 
+### 文件元数据 Linux/POSIX 对照
+
+Linux 参考程序不依赖 RespOS 私有输出：
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror -O2 scripts/fs_metadata_probe_linux.c \
+  -o /tmp/fs_metadata_probe_linux
+/tmp/fs_metadata_probe_linux normal
+/tmp/fs_metadata_probe_linux prepare
+/tmp/fs_metadata_probe_linux verify
+/tmp/fs_metadata_probe_linux cleanup
+```
+
+RespOS 无 feature 交互内核中运行：
+
+```text
+fs_metadata_probe normal
+fs_metadata_probe prepare
+# 使用同一可写镜像重新启动 guest
+fs_metadata_probe verify
+fs_metadata_probe cleanup
+```
+
+跨启动检查必须使用原始 raw 镜像的临时 qcow2 backing overlay，不得直接写 pub 镜像。输出中的
+`FS_METADATA_EXPECTED_FAIL` 表示探针成功捕获尚未修复的差异，不表示该语义通过；只有对应的
+`FS_METADATA_*_PASS` 且无该项 expected failure 才能用于关闭缺陷。
+
 题一 CAgent 的 guest 入口是 `/glibc/cagent_testcode.sh`，不是内置 `testrunner`。它会启动
 `simple_llm_server`，并行运行 10 个 `agent_lite`，最终由上游
 [`judge_cagent-glibc.py`](https://github.com/oscomp/testsuits-for-oskernel/blob/final-2026/judge/judge_cagent-glibc.py)

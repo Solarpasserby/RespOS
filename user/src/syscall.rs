@@ -19,7 +19,10 @@ const SYSCALL_TRUNCATE: usize = 45;
 const SYSCALL_FTRUNCATE: usize = 46;
 const SYSCALL_FALLOCATE: usize = 47;
 const SYSCALL_CHDIR: usize = 49;
+const SYSCALL_FCHMOD: usize = 52;
 const SYSCALL_FCHMODAT: usize = 53;
+const SYSCALL_FCHOWNAT: usize = 54;
+const SYSCALL_FCHOWN: usize = 55;
 const SYSCALL_OPENAT: usize = 56;
 const SYSCALL_CLOSE: usize = 57;
 const SYSCALL_PIPE2: usize = 59;
@@ -32,6 +35,7 @@ const SYSCALL_PWRITE64: usize = 68;
 const SYSCALL_PREADV: usize = 69;
 const SYSCALL_PWRITEV: usize = 70;
 const SYSCALL_READLINKAT: usize = 78;
+const SYSCALL_UTIMENSAT: usize = 88;
 const SYSCALL_STAT: usize = 79;
 const SYSCALL_FSTAT: usize = 80;
 const SYSCALL_FSYNC: usize = 82;
@@ -63,6 +67,8 @@ const SYSCALL_REBOOT: usize = 142;
 const SYSCALL_GETTIMEOFDAY: usize = 169;
 const SYSCALL_GETPID: usize = 172;
 const SYSCALL_GETPPID: usize = 173;
+const SYSCALL_GETUID: usize = 174;
+const SYSCALL_GETGID: usize = 176;
 const SYSCALL_SOCKET: usize = 198;
 const SYSCALL_SOCKETPAIR: usize = 199;
 const SYSCALL_BIND: usize = 200;
@@ -396,6 +402,42 @@ pub fn sys_fchmodat(dirfd: isize, path: &str, mode: usize, flags: usize) -> isiz
     )
 }
 
+pub fn sys_fchmod(fd: usize, mode: usize) -> isize {
+    syscall(SYSCALL_FCHMOD, [fd, mode, 0, 0, 0, 0])
+}
+
+pub fn sys_fchownat(dirfd: isize, path: &str, owner: usize, group: usize, flags: usize) -> isize {
+    syscall(
+        SYSCALL_FCHOWNAT,
+        [
+            dirfd as usize,
+            path.as_ptr() as usize,
+            owner,
+            group,
+            flags,
+            0,
+        ],
+    )
+}
+
+pub fn sys_fchown(fd: usize, owner: usize, group: usize) -> isize {
+    syscall(SYSCALL_FCHOWN, [fd, owner, group, 0, 0, 0])
+}
+
+pub fn sys_utimensat(dirfd: isize, path: &str, times: &[TimeSpec; 2], flags: usize) -> isize {
+    syscall(
+        SYSCALL_UTIMENSAT,
+        [
+            dirfd as usize,
+            path.as_ptr() as usize,
+            times.as_ptr() as usize,
+            flags,
+            0,
+            0,
+        ],
+    )
+}
+
 pub fn sys_openat(dirfd: isize, path: &str, flags: usize, mode: usize) -> isize {
     syscall(
         SYSCALL_OPENAT,
@@ -501,6 +543,14 @@ pub fn sys_gettimeofday(tv: &mut TimeVal, tz: usize) -> isize {
         SYSCALL_GETTIMEOFDAY,
         [tv as *mut _ as usize, tz, 0, 0, 0, 0],
     )
+}
+
+pub fn sys_getuid() -> isize {
+    syscall(SYSCALL_GETUID, [0, 0, 0, 0, 0, 0])
+}
+
+pub fn sys_getgid() -> isize {
+    syscall(SYSCALL_GETGID, [0, 0, 0, 0, 0, 0])
 }
 
 pub fn sys_clone(flags: usize, stack: usize, ptid: usize, tls: usize, ctid: usize) -> isize {

@@ -2,7 +2,37 @@
 
 本文件是快速变化的状态页。更新测试结论时必须同时更新日期、提交和命令。
 
-## 2026-08-10 ext4 时间戳合并更新（`3265e0f` + 未提交）
+## 2026-08-10 Linux/POSIX 语义与模型重构路线（`7cdae1e` 后）
+
+- 已建立 [linux-posix-refactor-plan.md](./linux-posix-refactor-plan.md)，后续以保持 BuildStorm 不回退、
+  修复 Linux/POSIX 可观察差异和收敛内核状态所有权为共同目标。
+- 第一阶段先建立 `fs_metadata_probe`，固定目录 chmod 持久化、chmod/chown 失败原子性、hardlink alias
+  和时间戳行为；取得 Linux 对照后再修改属性模型。
+- 当前已知优先缺口包括目录 chmod 未持久化、属性 override 先于底层成功发布、时间纳秒/realtime
+  不完整；ext4 C 库线程安全未证明前继续保留唯一全局锁。
+
+### Phase 0 语义回归框架（待提交）
+
+- **实现**：新增可独立运行的 `fs_metadata_probe normal|prepare|verify|cleanup`，记录 mode/uid/gid/
+  nlink/times、hardlink alias、close/reopen、跨启动目录属性及打开后 unlink 的 `fchmod`；新增同场景 Linux
+  C 对照。已知差异使用 `FS_METADATA_EXPECTED_FAIL`，探针继续执行且不会打印对应 PASS。
+- **Linux 对照**：2026-08-10 使用
+  `cc -std=c11 -Wall -Wextra -Werror -O2 scripts/fs_metadata_probe_linux.c -o /tmp/fs_metadata_probe_linux`
+  构建；`normal`、`prepare`、`verify` 均通过，包括 hardlink identity、unlink 后 fd chmod 和目录 mode
+  `0711` 跨进程保持。
+- **RespOS 基线**：RV64、1 GiB/1 核、旧 pub 镜像，普通场景输出：成功 `link` 后 source/alias 的
+  `stat` 均为 `-ENOENT`；已 unlink 的打开 fd 上 `fchmod` 返回 `-ENOENT`，但 `fstat` mode 已由 `0640`
+  改为 `0600`，直接证明当前属性更新失败非原子。探针随后输出 `FS_METADATA_PROBE_PASS`，表示框架完成，
+  不表示 expected failure 已修复。
+- **持久化基线**：以原始 pub raw 镜像为只读 backing、独立 qcow2 为写层，第一次启动执行 `prepare`，
+  第二次启动同一覆盖层执行 `verify`。目录在 chmod 后立即查询与重启后查询均为 `-ENOENT`；两步均明确
+  输出 expected failure 并正常退出。临时覆盖层位于 `/tmp/respos-fsmeta.oSk0oH/`，不属于仓库交付物。
+- **门禁状态**：RV64/LA64 无 feature release 构建通过；RV64 实机运行上述 probe。Linux 对照以
+  `-Wall -Wextra -Werror` 重编译复跑通过，`cargo fmt` 与 `git diff --check` 通过。与属性/namei 直接
+  相关的最小 LTP 清单已写入重构方案；现有完整 LTP 仍受 writable `MAP_SHARED` 测试框架阻断，未
+  声称通过。
+
+## 2026-08-10 ext4 时间戳合并更新（已提交 `7cdae1e`）
 
 - **热点拆分**：在 `perf_counters` 下把唯一的 `EXT4_OP_LOCK` 按 stat/lookup/read/write/readdir/
   namespace/attributes/superblock 分类；这只是诊断分类，不拆锁。旧 RV64 pub image、8 GiB/8 核、
@@ -36,7 +66,7 @@
   `git diff --check` 通过。另用 ext4 临时文件验证普通读取为 `atime 190 -> 204`、ctime 保持 190；随后
   显式 `touch -a` 使 atime/ctime 同步变为 206。后续仍应补 chmod/chown 与跨重新挂载持久化专项。
 
-## 2026-08-10 目录 metadata generation 与 16K dentry cache（已提交 `3265e0f`）
+## 2026-08-10 目录 metadata generation 与 16K dentry cache（已提交 `edc0623`）
 
 - **环境**：宿主 available memory 9.7 GiB，load average 约 `0.50/1.79/3.26`；旧 RV64 pub
   image SHA-256 为 `9d163855dbb67da561925c74666d0e4fc1856e118640cb4889e88dcaf5f8e25f`，

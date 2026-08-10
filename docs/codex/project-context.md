@@ -8,13 +8,14 @@
 队友同步仓库后，建议按以下顺序阅读：
 
 1. [current-status.md](./current-status.md)：当前提交、已验证结果和正在进行的阻断；
-2. [workflows.md](./workflows.md)：构建、镜像恢复和 QEMU 运行命令；
-3. [../cagent/day1.md](../cagent/day1.md)：题目一当天的三人分工、边界、命令和验收标准；
+2. [linux-posix-refactor-plan.md](./linux-posix-refactor-plan.md)：BuildStorm 跑通后的语义与模型重构路线；
+3. [workflows.md](./workflows.md)：构建、镜像恢复和 QEMU 运行命令；
 4. [architecture.md](./architecture.md)：修改内核前需要遵守的调用链和不变量；
-5. [pitfalls.md](./pitfalls.md)：已知失败模式和排查顺序。
+5. [pitfalls.md](./pitfalls.md)：已知失败模式和排查顺序；
+6. [../cagent/day1.md](../cagent/day1.md)：题目一历史协作材料。
 
-当前协作目标是先在 `SMP=1` 下完成题目一的 CAgent 固定命令闭环；不要把题目二的 SMP 或
-BuildStorm 要求带入题目一的第一轮开发。
+当前协作目标是在提交 `7cdae1e` 已跑通本地 RV64 8 GiB/8 核 BuildStorm 的基础上，保持性能门禁，
+按 Linux/POSIX 可观察语义重构文件属性、inode/dentry、PageCache/writeback，再扩展到其他子系统。
 
 ## 项目定位
 
