@@ -36,7 +36,7 @@ const SYSCALL_PREADV: usize = 69;
 const SYSCALL_PWRITEV: usize = 70;
 const SYSCALL_READLINKAT: usize = 78;
 const SYSCALL_UTIMENSAT: usize = 88;
-const SYSCALL_STAT: usize = 79;
+const SYSCALL_FSTATAT: usize = 79;
 const SYSCALL_FSTAT: usize = 80;
 const SYSCALL_FSYNC: usize = 82;
 const SYSCALL_FDATASYNC: usize = 83;
@@ -438,6 +438,10 @@ pub fn sys_utimensat(dirfd: isize, path: &str, times: &[TimeSpec; 2], flags: usi
     )
 }
 
+pub fn sys_futimens(fd: usize, times: &[TimeSpec; 2]) -> isize {
+    syscall(SYSCALL_UTIMENSAT, [fd, 0, times.as_ptr() as usize, 0, 0, 0])
+}
+
 pub fn sys_openat(dirfd: isize, path: &str, flags: usize, mode: usize) -> isize {
     syscall(
         SYSCALL_OPENAT,
@@ -466,8 +470,15 @@ pub fn sys_lseek(fd: usize, offset: isize, whence: usize) -> isize {
 
 pub fn sys_stat(path: &str, stat: &mut Stat) -> isize {
     syscall(
-        SYSCALL_STAT,
-        [path.as_ptr() as usize, stat as *mut _ as usize, 0, 0, 0, 0],
+        SYSCALL_FSTATAT,
+        [
+            crate::AT_FDCWD as usize,
+            path.as_ptr() as usize,
+            stat as *mut _ as usize,
+            0,
+            0,
+            0,
+        ],
     )
 }
 

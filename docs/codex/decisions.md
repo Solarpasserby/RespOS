@@ -3,6 +3,19 @@
 这里只收录能解释当前代码形态或避免重复踩坑的决策。日期是当前证据最后核验时间，不一定是
 最初提出时间。
 
+## ext4 setattr 使用单 inode transaction，缓存只在成功后发布
+
+- 状态：已采用
+- 适用范围：chmod/chown/utimens、目录属性、打开后 unlink、hardlink alias
+- 最后验证：2026-08-10
+- 证据：`vendor/lwext4_rust/c/lwext4/{include/ext4.h,src/ext4.c}`、
+  `os/src/fs/{ext4/inode.rs,file.rs}`、`user/src/bin/fs_metadata_probe.rs`
+- 内容：mode、owner 与选定时间字段由 `ext4_setattr` 在一次 pathname lookup、inode ref 和 transaction
+  中提交；chown 引起的 suid/sgid 清除与 owner 变更同事务完成。Rust 缓存只在返回成功后发布。fd 属性
+  修改使用 File 的 storage path；unlink 后仍打开的普通文件通过 orphan 名字访问底层 inode。
+- 后续影响：不再接受“底层 ENOENT 但内存 override 成功”的兼容语义，也不得重新拆分 chown 的 owner/
+  mode 提交。底层时间精度扩展和真正 inode-number handle 仍是后续独立设计，不用更多路径特判替代。
+
 ## ext4 目录 metadata 用 namespace generation 失效，dentry cache 保留 16K 工作集
 
 - 状态：已采用，完整 BuildStorm 待验证

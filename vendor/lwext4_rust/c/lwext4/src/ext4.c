@@ -2425,6 +2425,51 @@ int ext4_times_set(const char *path, uint32_t mask, uint32_t atime,
 	return r;
 }
 
+int ext4_setattr(const char *path, uint32_t mask, uint32_t mode,
+		 uint32_t uid, uint32_t gid, uint32_t atime,
+		 uint32_t mtime, uint32_t ctime)
+{
+	struct ext4_inode_ref inode_ref;
+	struct ext4_mountpoint *mp = ext4_get_mount(path);
+	uint32_t orig_mode;
+	int r;
+
+	if (!mp)
+		return ENOENT;
+	if (mp->fs.read_only)
+		return EROFS;
+	if (mask & ~31U)
+		return EINVAL;
+
+	EXT4_MP_LOCK(mp);
+	r = ext4_trans_get_inode_ref(path, mp, &inode_ref);
+	if (r != EOK)
+		goto Finish;
+
+	if (mask & 1U) {
+		orig_mode = ext4_inode_get_mode(&mp->fs.sb, inode_ref.inode);
+		orig_mode &= ~0xFFF;
+		orig_mode |= mode & 0xFFF;
+		ext4_inode_set_mode(&mp->fs.sb, inode_ref.inode, orig_mode);
+	}
+	if (mask & 2U) {
+		ext4_inode_set_uid(inode_ref.inode, uid);
+		ext4_inode_set_gid(inode_ref.inode, gid);
+	}
+	if (mask & 4U)
+		ext4_inode_set_access_time(inode_ref.inode, atime);
+	if (mask & 8U)
+		ext4_inode_set_modif_time(inode_ref.inode, mtime);
+	if (mask & 16U)
+		ext4_inode_set_change_inode_time(inode_ref.inode, ctime);
+
+	inode_ref.dirty = true;
+	r = ext4_trans_put_inode_ref(mp, &inode_ref);
+Finish:
+	EXT4_MP_UNLOCK(mp);
+	return r;
+}
+
 int ext4_atime_get(const char *path, uint32_t *atime)
 {
 	struct ext4_inode_ref inode_ref;

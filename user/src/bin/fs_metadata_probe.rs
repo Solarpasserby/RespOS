@@ -6,7 +6,8 @@ extern crate user_lib;
 
 use user_lib::{
     O_CREATE, O_DIRECTORY, O_RDONLY, O_RDWR, O_TRUNC, Stat, TimeSpec, chmod, chown, close, fchmod,
-    fstat, fsync, getgid, getuid, link, mkdir, open, rmdir, stat, unlink, utimens, write,
+    fchown, fstat, fsync, futimens, getgid, getuid, link, mkdir, open, rmdir, stat, unlink,
+    utimens, write,
 };
 
 const FILE_PATH: &str = "/respos-fsmeta-file\0";
@@ -128,14 +129,26 @@ fn run_normal() {
     let unlinked = unlinked as usize;
     let before = fd_stat(unlinked);
     assert_eq!(unlink(UNLINKED_PATH), 0);
-    let ret = fchmod(unlinked, 0o600);
+    let chmod_ret = fchmod(unlinked, 0o600);
+    let chown_ret = fchown(unlinked, uid as usize, gid as usize);
+    let unlinked_times = [TimeSpec { sec: 3, nsec: 0 }, TimeSpec { sec: 4, nsec: 0 }];
+    let futimens_ret = futimens(unlinked, &unlinked_times);
     let after = fd_stat(unlinked);
-    if ret == 0 && mode(&after) == 0o600 {
-        println!("FS_METADATA_UNLINKED_FCHMOD_PASS");
+    if chmod_ret == 0
+        && chown_ret == 0
+        && futimens_ret == 0
+        && mode(&after) == 0o600
+        && (after.st_uid, after.st_gid) == (uid as u32, gid as u32)
+        && after.st_atime.sec == 3
+        && after.st_mtime.sec == 4
+    {
+        println!("FS_METADATA_UNLINKED_FD_ATTRIBUTES_PASS");
     } else {
         println!(
-            "FS_METADATA_EXPECTED_FAIL name=unlinked_fchmod ret={} before={:o} after={:o}",
-            ret,
+            "FS_METADATA_EXPECTED_FAIL name=unlinked_fd_attributes chmod_ret={} chown_ret={} futimens_ret={} before={:o} after={:o}",
+            chmod_ret,
+            chown_ret,
+            futimens_ret,
             mode(&before),
             mode(&after)
         );
@@ -164,6 +177,9 @@ fn prepare_directory_persistence() {
     let fd = open(DIR_PATH, O_RDONLY | O_DIRECTORY, 0);
     if fd >= 0 {
         let fd = fd as usize;
+        let value = fd_stat(fd);
+        assert_eq!(mode(&value), 0o711, "directory fd mode after chmod");
+        println!("FS_METADATA_DIRECTORY_FD_MODE_PASS mode=711");
         assert_eq!(fsync(fd), 0);
         assert_eq!(close(fd), 0);
     } else {

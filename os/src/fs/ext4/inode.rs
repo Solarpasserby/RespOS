@@ -455,24 +455,70 @@ impl Ext4Inode {
         self.ino >= CREATED_INODE_BASE
     }
 
-    fn write_lower_time(
-        c_path: *const core::ffi::c_char,
-        ts: TimeSpec,
-        setter: unsafe extern "C" fn(*const core::ffi::c_char, u32) -> i32,
+    fn current_times(&self, path: &str) -> SysResult<InodeTimes> {
+        if let Some(times) = *self.times.lock() {
+            return Ok(times);
+        }
+        if self.is_synthetic_created_inode() {
+            let now = Self::now_timespec();
+            return Ok(InodeTimes {
+                atime: now,
+                mtime: now,
+                ctime: now,
+            });
+        }
+        self.stat(path).map(|stat| InodeTimes {
+            atime: stat.atime,
+            mtime: stat.mtime,
+            ctime: stat.ctime,
+        })
+    }
+
+    fn commit_lower_setattr(
+        &self,
+        path: &str,
+        mode: Option<u32>,
+        owner: Option<(u32, u32)>,
+        atime: Option<TimeSpec>,
+        mtime: Option<TimeSpec>,
+        ctime: Option<TimeSpec>,
     ) -> SysResult {
-        if ts.sec < 0 || ts.sec > u32::MAX as isize {
+        if self.is_synthetic_created_inode() {
             return Ok(());
         }
-        let ret = unsafe { setter(c_path, ts.sec as u32) };
-        if ret != 0 {
-            return match Self::map_lwext4_err(ret) {
-                // fd 指向的文件可能已经 unlink；此时 VFS 层仍要允许 futimens/fstat
-                // 作用在打开文件对象上，无法同步到底层路径时只更新 inode 缓存。
-                Errno::ENOENT => Ok(()),
-                err => Err(err),
-            };
+
+        let lower_time = |time: Option<TimeSpec>| {
+            time.filter(|time| time.sec >= 0 && time.sec <= u32::MAX as isize)
+                .map(|time| time.sec as u32)
+        };
+        let lower_atime = lower_time(atime);
+        let lower_mtime = lower_time(mtime);
+        let lower_ctime = lower_time(ctime);
+        let mask = u32::from(mode.is_some())
+            | (u32::from(owner.is_some()) << 1)
+            | (u32::from(lower_atime.is_some()) << 2)
+            | (u32::from(lower_mtime.is_some()) << 3)
+            | (u32::from(lower_ctime.is_some()) << 4);
+        let (uid, gid) = owner.unwrap_or_default();
+        let c_path = CString::new(path).map_err(|_| Errno::EINVAL)?;
+        let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Attributes);
+        let ret = unsafe {
+            bindings::ext4_setattr(
+                c_path.as_ptr(),
+                mask,
+                mode.unwrap_or(0) & 0o7777,
+                uid,
+                gid,
+                lower_atime.unwrap_or(0),
+                lower_mtime.unwrap_or(0),
+                lower_ctime.unwrap_or(0),
+            )
+        };
+        if ret == 0 {
+            Ok(())
+        } else {
+            Err(Self::map_lwext4_err(ret))
         }
-        Ok(())
     }
 
     fn set_times_impl(
@@ -482,24 +528,7 @@ impl Ext4Inode {
         mtime: Option<TimeSpec>,
         update_ctime: bool,
     ) -> SysResult {
-        let mut times = if let Some(times) = *self.times.lock() {
-            times
-        } else {
-            self.stat(path)
-                .map(|stat| InodeTimes {
-                    atime: stat.atime,
-                    mtime: stat.mtime,
-                    ctime: stat.ctime,
-                })
-                .unwrap_or_else(|_| {
-                    let now = Self::now_timespec();
-                    InodeTimes {
-                        atime: now,
-                        mtime: now,
-                        ctime: now,
-                    }
-                })
-        };
+        let mut times = self.current_times(path)?;
 
         if let Some(atime) = atime {
             times.atime = atime;
@@ -511,11 +540,6 @@ impl Ext4Inode {
             times.ctime = Self::now_timespec();
         }
 
-        if self.is_synthetic_created_inode() {
-            self.set_cached_times(times);
-            return Ok(());
-        }
-
         crate::perf::ext4_set_times_call(1);
         if atime.is_some() {
             crate::perf::ext4_set_times_atime_update(1);
@@ -523,36 +547,14 @@ impl Ext4Inode {
         if mtime.is_some() {
             crate::perf::ext4_set_times_mtime_update(1);
         }
-        let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Attributes);
-        let c_path = CString::new(path).map_err(|_| Errno::EINVAL)?;
-        let lower_time = |time: Option<TimeSpec>| {
-            time.filter(|time| time.sec >= 0 && time.sec <= u32::MAX as isize)
-                .map(|time| time.sec as u32)
-        };
-        let lower_atime = lower_time(atime);
-        let lower_mtime = lower_time(mtime);
-        let lower_ctime = update_ctime
-            .then(|| lower_time(Some(times.ctime)))
-            .flatten();
-        let mask = u32::from(lower_atime.is_some())
-            | (u32::from(lower_mtime.is_some()) << 1)
-            | (u32::from(lower_ctime.is_some()) << 2);
-        let ret = unsafe {
-            bindings::ext4_times_set(
-                c_path.as_ptr(),
-                mask,
-                lower_atime.unwrap_or(0),
-                lower_mtime.unwrap_or(0),
-                lower_ctime.unwrap_or(0),
-            )
-        };
-        if ret != 0 {
-            match Self::map_lwext4_err(ret) {
-                // fd 指向的文件可能已经 unlink；此时只更新 inode 缓存。
-                Errno::ENOENT => {}
-                err => return Err(err),
-            }
-        }
+        self.commit_lower_setattr(
+            path,
+            None,
+            None,
+            atime,
+            mtime,
+            update_ctime.then_some(times.ctime),
+        )?;
         self.set_cached_times(times);
         Ok(())
     }
@@ -875,52 +877,41 @@ impl InodeOp for Ext4Inode {
     }
 
     fn set_mode(&self, path: &str, mode: u32) -> SysResult {
-        self.set_cached_mode(mode);
-        let mut cached_times = self.times.lock();
-        if let Some(mut times) = *cached_times {
-            times.ctime = Self::now_timespec();
-            *cached_times = Some(times);
-        }
-
-        if self.node_type() == InodeType::Directory {
-            return Ok(());
-        }
-        drop(cached_times);
-
         crate::perf::ext4_set_mode_call(1);
-        let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Attributes);
-        let c_path = CString::new(path).map_err(|_| Errno::EINVAL)?;
-        let ret = unsafe { bindings::ext4_mode_set(c_path.as_ptr(), mode & 0o7777) };
-        if ret != 0 {
-            return Err(Self::map_lwext4_err(ret));
-        }
-        let mut cached_times = self.times.lock();
-        if let Some(mut times) = *cached_times {
-            times.ctime = Self::now_timespec();
-            Self::write_lower_time(c_path.as_ptr(), times.ctime, bindings::ext4_ctime_set)?;
-            *cached_times = Some(times);
-        }
-        drop(_guard);
+        let mut times = self.current_times(path)?;
+        times.ctime = Self::now_timespec();
+        self.commit_lower_setattr(path, Some(mode), None, None, None, Some(times.ctime))?;
         self.invalidate_raw_metadata();
         self.set_cached_mode(mode);
+        self.set_cached_times(times);
         Ok(())
     }
 
     fn set_owner(&self, path: &str, uid: u32, gid: u32) -> SysResult {
-        self.set_cached_owner(uid, gid);
-        if self.is_synthetic_created_inode() {
-            return Ok(());
-        }
-
         crate::perf::ext4_set_owner_call(1);
-        let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Attributes);
-        let c_path = CString::new(path).map_err(|_| Errno::EINVAL)?;
-        let ret = unsafe { bindings::ext4_owner_set(c_path.as_ptr(), uid, gid) };
-        if ret != 0 {
-            return Err(Self::map_lwext4_err(ret));
-        }
-        drop(_guard);
+        let mut times = self.current_times(path)?;
+        times.ctime = Self::now_timespec();
+        self.commit_lower_setattr(path, None, Some((uid, gid)), None, None, Some(times.ctime))?;
         self.invalidate_raw_metadata();
+        self.set_cached_owner(uid, gid);
+        self.set_cached_times(times);
+        Ok(())
+    }
+
+    fn set_owner_and_mode(&self, path: &str, uid: u32, gid: u32, mode: Option<u32>) -> SysResult {
+        crate::perf::ext4_set_owner_call(1);
+        if mode.is_some() {
+            crate::perf::ext4_set_mode_call(1);
+        }
+        let mut times = self.current_times(path)?;
+        times.ctime = Self::now_timespec();
+        self.commit_lower_setattr(path, mode, Some((uid, gid)), None, None, Some(times.ctime))?;
+        self.invalidate_raw_metadata();
+        self.set_cached_owner(uid, gid);
+        if let Some(mode) = mode {
+            self.set_cached_mode(mode);
+        }
+        self.set_cached_times(times);
         Ok(())
     }
 

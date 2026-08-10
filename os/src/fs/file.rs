@@ -354,6 +354,11 @@ impl File {
         self.inner.lock().path.clone()
     }
 
+    pub fn metadata_path(&self) -> alloc::string::String {
+        let visible_path = self.inner.lock().path.abs_path();
+        self.storage_path(&visible_path)
+    }
+
     pub fn tmpfile_meta(&self) -> Option<TmpFileMeta> {
         self.inner.lock().tmpfile_meta
     }
@@ -377,12 +382,7 @@ impl File {
         };
 
         if !tmpfile {
-            match self.inode.set_times(path.as_str(), atime, mtime) {
-                // 参数已在 utimensat 层校验。lwext4 对仍打开但路径已 unlink
-                // 的 inode 返回 ENOENT/EINVAL；fd 级时间覆盖仍然有效。
-                Ok(_) | Err(Errno::ENOENT | Errno::EINVAL) => {}
-                Err(err) => return Err(err),
-            }
+            self.inode.set_times(path.as_str(), atime, mtime)?;
         }
 
         let ctime = Self::now_timespec();

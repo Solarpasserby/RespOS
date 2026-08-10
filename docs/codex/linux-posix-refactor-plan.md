@@ -71,9 +71,9 @@ Phase 0 已完成，后续修改从 Phase 1 开始。仓库内新增 RespOS 用�
 当前偏差打印为 `FS_METADATA_EXPECTED_FAIL` 并以零退出码完成其余检查；Linux 对照遇到同类偏差则
 直接失败，避免把内核缺陷伪装成共同预期。
 
-当前基线稳定暴露三项问题：成功 `link` 后新旧路径均无法 `stat`；已 unlink 的打开文件上 `fchmod`
-返回 `ENOENT`，但随后 `fstat` 已观察到 mode 改变；目录 `mkdir`/`chmod` 后立即查询以及跨两次启动查询
-均返回 `ENOENT`。这些是 Phase 1/2 的输入，本阶段只固定可观察行为，不修改内核实现。
+Phase 1 复核发现最初的 hardlink 与目录 `ENOENT` 来自用户库 `stat()` 的 syscall 79 参数布局错误，
+不是内核缺陷；修正为 `newfstatat(AT_FDCWD,...)` 后两项正常。unlink 后 fd 的 `fchmod` 路径依赖是真实
+缺陷，并由 Phase 1 修复。该校正说明 probe 本身也必须按 Linux ABI 审查，expected failure 不是免审标签。
 
 最小 LTP 清单采用仓库现有用例：`chmod01/03/05/07`、`chown01/02/03/05`、
 `fchmod01..05`、`fchmodat01/02`、`fchown01/02/03/05`、`fstat02/03`、`link02/04`、
@@ -98,15 +98,25 @@ Phase 0 已完成，后续修改从 Phase 1 开始。仓库内新增 RespOS 用�
 
 这是第一项实施工作。
 
+### 2026-08-10 阶段结果
+
+mode/owner/显式时间的提交协议已完成第一轮收敛：ext4 使用单 inode transaction，Rust 缓存只在底层
+成功后发布，目录 chmod 可跨启动保持，unlink 后打开 fd 的 fchmod/fchown/futimens 使用 orphan storage
+path。Linux/RV64 对照、双架构构建、五项 SMP probe 与完整 BuildStorm 均通过。
+
+本阶段同时校正了 Phase 0 用户库把 syscall 79 错当二参数 stat 的测试缺陷；此前 hardlink/目录
+`ENOENT` 结论作废。ext4 纳秒/负时间持久化和平台 `CLOCK_REALTIME` 初始化仍未完成，作为明确边界保留，
+不得用当前秒级通过结果宣称完整 POSIX 时间模型；进入相关时间语义修改前必须先补对应跨重启 probe。
+
 ### 已知或待验证问题
 
-- 已确认：ext4 目录 `set_mode()` 当前只更新内存缓存，不持久化底层 inode；
-- 已确认：mode/owner override 在底层操作前发布，底层失败时可能破坏失败原子性；
+- 已修复：ext4 目录 `set_mode()` 只更新内存缓存、不持久化底层 inode；
+- 已修复：mode/owner override 在底层操作前发布，底层失败时可能破坏失败原子性；
 - 已确认：ext4 时间持久化主要使用 32-bit 秒，纳秒与真实 `CLOCK_REALTIME` 模型不完整；
 - 待验证：`UTIME_NOW`、`UTIME_OMIT`、负时间和溢出边界；
 - 待验证：read EOF、零长度 read、readdir、`O_NOATIME`、relatime/strictatime 的完整行为；
-- 待验证：unlink 后打开 fd 的 futimens/fchmod/fchown 是否真正作用于 inode，而不是依赖旧 path；
-- 待验证：同 inode 不同 hardlink path 的属性缓存是否始终一致。
+- 已验证：unlink 后打开 fd 的 futimens/fchmod/fchown 通过 orphan storage path 作用于同一 inode；
+- 已验证（单线程及 reopen）：同 inode 不同 hardlink path 的属性缓存一致；并发与缓存回收仍待 Phase 2。
 
 ### 目标模型
 
@@ -270,6 +280,6 @@ POSIX probe 成功也不能替代压力和资源闭环。
 
 ## 下一步
 
-进入 Phase 1：先修目录 chmod 持久化及 chmod/chown 失败原子性，再收敛 inode 级属性状态；每项修复均
-用 Phase 0 探针与 Linux 对照复验。hardlink 路径可见性属于 Phase 2 的 namespace/dentry 模型问题，
-Phase 1 可以诊断和保留 expected failure，但不得以 path override 掩盖。
+进入 Phase 2：以当前已通过的 hardlink alias 属性基线为前提，收敛 inode/dentry identity、negative
+dentry 和 namespace generation。时间精度与 realtime 边界仍保留在 Phase 1 的已知限制清单中；若
+Phase 2 修改触及 times，必须先关闭相应限制，不能沿用秒级 override 掩盖。

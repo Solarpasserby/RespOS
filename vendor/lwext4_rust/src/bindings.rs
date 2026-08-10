@@ -1903,6 +1903,19 @@ unsafe extern "C" {
     ) -> ::core::ffi::c_int;
 }
 unsafe extern "C" {
+    #[doc = "Atomically set selected inode metadata with one inode transaction."]
+    pub fn ext4_setattr(
+        path: *const ::core::ffi::c_char,
+        mask: u32,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+        atime: u32,
+        mtime: u32,
+        ctime: u32,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
     #[doc = "@brief Get file/directory/link access time.\n\n @param path  Path to file/dir/link.\n @param atime Access timestamp.\n\n @return  Standard error code."]
     pub fn ext4_atime_get(path: *const ::core::ffi::c_char, atime: *mut u32) -> ::core::ffi::c_int;
 }

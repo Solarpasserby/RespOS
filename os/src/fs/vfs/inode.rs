@@ -38,6 +38,15 @@ pub trait InodeOp: Any + Send + Sync {
     fn set_owner(&self, _path: &str, _uid: u32, _gid: u32) -> SysResult {
         Err(Errno::EINVAL)
     }
+    fn set_owner_and_mode(
+        &self,
+        _path: &str,
+        _uid: u32,
+        _gid: u32,
+        _mode: Option<u32>,
+    ) -> SysResult {
+        Err(Errno::EOPNOTSUPP)
+    }
     fn set_xattr(&self, _name: String, _value: Vec<u8>, _flags: usize) -> SysResult {
         Err(Errno::EPERM)
     }

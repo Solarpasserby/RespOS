@@ -256,6 +256,9 @@ pub fn getgid() -> isize {
 pub fn utimens(path: &str, times: &[TimeSpec; 2]) -> isize {
     sys_utimensat(AT_FDCWD, path, times, 0)
 }
+pub fn futimens(fd: usize, times: &[TimeSpec; 2]) -> isize {
+    sys_futimens(fd, times)
+}
 pub fn open(path: &str, flags: usize, mode: usize) -> isize {
     sys_openat(AT_FDCWD, path, flags, mode)
 }

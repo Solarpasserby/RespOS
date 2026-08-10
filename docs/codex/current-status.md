@@ -11,7 +11,7 @@
 - 当前已知优先缺口包括目录 chmod 未持久化、属性 override 先于底层成功发布、时间纳秒/realtime
   不完整；ext4 C 库线程安全未证明前继续保留唯一全局锁。
 
-### Phase 0 语义回归框架（待提交）
+### Phase 0 语义回归框架（已提交 `4dc52ef`，Phase 1 已校正基线）
 
 - **实现**：新增可独立运行的 `fs_metadata_probe normal|prepare|verify|cleanup`，记录 mode/uid/gid/
   nlink/times、hardlink alias、close/reopen、跨启动目录属性及打开后 unlink 的 `fchmod`；新增同场景 Linux
@@ -20,17 +20,32 @@
   `cc -std=c11 -Wall -Wextra -Werror -O2 scripts/fs_metadata_probe_linux.c -o /tmp/fs_metadata_probe_linux`
   构建；`normal`、`prepare`、`verify` 均通过，包括 hardlink identity、unlink 后 fd chmod 和目录 mode
   `0711` 跨进程保持。
-- **RespOS 基线**：RV64、1 GiB/1 核、旧 pub 镜像，普通场景输出：成功 `link` 后 source/alias 的
-  `stat` 均为 `-ENOENT`；已 unlink 的打开 fd 上 `fchmod` 返回 `-ENOENT`，但 `fstat` mode 已由 `0640`
-  改为 `0600`，直接证明当前属性更新失败非原子。探针随后输出 `FS_METADATA_PROBE_PASS`，表示框架完成，
-  不表示 expected failure 已修复。
-- **持久化基线**：以原始 pub raw 镜像为只读 backing、独立 qcow2 为写层，第一次启动执行 `prepare`，
-  第二次启动同一覆盖层执行 `verify`。目录在 chmod 后立即查询与重启后查询均为 `-ENOENT`；两步均明确
-  输出 expected failure 并正常退出。临时覆盖层位于 `/tmp/respos-fsmeta.oSk0oH/`，不属于仓库交付物。
+- **基线校正**：Phase 0 用户库 `stat()` 错把 Linux syscall 79 当作二参数旧式 stat；该编号在
+  RV64/LA64 实际是 `newfstatat(dirfd,path,buf,flags)`。因此当时 hardlink 和目录查询的 `-ENOENT` 是
+  探针 ABI 假阴性，不是内核 namespace 缺陷。Phase 1 已改为 `AT_FDCWD` 四参数调用并重新验证。unlink
+  后 fd 的 `fchmod` 失败则是真实路径依赖，已由 Phase 1 修复。
 - **门禁状态**：RV64/LA64 无 feature release 构建通过；RV64 实机运行上述 probe。Linux 对照以
   `-Wall -Wextra -Werror` 重编译复跑通过，`cargo fmt` 与 `git diff --check` 通过。与属性/namei 直接
   相关的最小 LTP 清单已写入重构方案；现有完整 LTP 仍受 writable `MAP_SHARED` 测试框架阻断，未
   声称通过。
+
+### Phase 1 inode 属性事务与 fd 生命周期（本次提交）
+
+- **事务模型**：vendor lwext4 新增 `ext4_setattr()`，在一次 pathname lookup、inode ref 和 transaction
+  内按 mask 更新 mode、uid/gid、atime/mtime/ctime。目录不再绕过底层 `chmod`；`chown` 与 suid/sgid
+  清除不再拆成两个可部分成功的提交。Rust inode 只在底层成功后失效 raw metadata 并发布缓存，删除
+  原先吞掉 `ENOENT` 后仍发布覆盖值的兼容路径。
+- **打开后 unlink**：fd 级 `fchmod/fchown/futimens` 使用 ext4 orphan storage path，而不是失效的可见
+  旧路径。RV64 probe 中三项均返回 0，随后 `fstat` 观察到 mode `0600`、当前 uid/gid、atime 3 与
+  mtime 4；hardlink 两个别名的 inode/nlink/属性一致，normal 场景无 expected failure。
+- **目录持久化**：全新 qcow2 overlay 第一次启动 `prepare` 后 fd 与 pathname 均观察 mode `0711`；
+  第二次启动同一 overlay 的 `verify` 输出 `FS_METADATA_DIRECTORY_PERSISTENCE_PASS mode=711`。
+- **回归**：RV64/LA64 无 feature release 构建通过；RV64 1 GiB/8 核通过 Unix socket、file、
+  private-map、shared-MM、frame-reclaim 五项 probe。Linux C 对照同步覆盖 unlink 后三种 fd 属性操作。
+  RV64 8 GiB/8 核完整 BuildStorm 输出 `ok=true`、1,681,000 B、脚本退出 0；axbuild timed build
+  `1232.95s`。宿主本轮 swap 增长约 1 GiB，故只作为正确性回归，不作性能提升结论。
+- **保留边界**：ext4 vendor 仍只持久化 32-bit 秒，wall clock 尚未从平台 RTC 初始化；纳秒、负时间和
+  真实 `CLOCK_REALTIME` 是明确未关闭项，不能据本阶段结果宣称完整 POSIX 时间模型。
 
 ## 2026-08-10 ext4 时间戳合并更新（已提交 `7cdae1e`）
 

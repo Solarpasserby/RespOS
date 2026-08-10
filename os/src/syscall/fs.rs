@@ -7,7 +7,7 @@ use crate::fs::mount::{do_mount, do_umount2};
 use crate::fs::vfs::{InodeOp, InodeType};
 use crate::fs::{
     AT_EMPTY_PATH, AT_FDCWD, AT_NO_AUTOMOUNT, AT_SYMLINK_NOFOLLOW, FdEntry, File, FileOp, KStat,
-    OpenFlags, POLL_READ, POLL_WRITE, Path, Pipe, PollEvents, SpecialFd, Stat, Statfs64,
+    OpenFlags, POLL_READ, POLL_WRITE, Pipe, PollEvents, SpecialFd, Stat, Statfs64,
     check_dir_search_permission, filename_create, filename_link, filename_link_tmpfile,
     filename_lookup, filename_lookup_no_follow_final_symlink, filename_rename, filename_symlink,
     filename_unlink, init_fdset, make_pipe, open_named_fifo, path_open,
@@ -1823,18 +1823,7 @@ fn set_fd_mode(fd: isize, mode: u32) -> SysResult {
     let task = current_task().expect("[kernel] current task is None.");
     let file = task.get_fd_entry(fd as usize)?.file;
     let file = file.as_any().downcast_ref::<File>().ok_or(Errno::EINVAL)?;
-    let path = file.path();
-    set_inode_mode(&path.dentry.get_inode(), &path.abs_path(), mode)
-}
-
-fn file_path_from_fd(fd: isize) -> SysResult<Arc<Path>> {
-    if fd < 0 {
-        return Err(Errno::EBADF);
-    }
-    let task = current_task().expect("[kernel] current task is None.");
-    let file = task.get_fd_entry(fd as usize)?.file;
-    let file = file.as_any().downcast_ref::<File>().ok_or(Errno::EINVAL)?;
-    Ok(file.path())
+    set_inode_mode(&file.inode(), &file.metadata_path(), mode)
 }
 
 fn chmod_effective_mode(stat: &KStat, requested: u32) -> SysResult<u32> {
@@ -1927,18 +1916,18 @@ fn do_chown_inode(
     check_chown_permission(&stat, owner, group)?;
     let uid = resolve_chown_id(owner, stat.uid)?;
     let gid = resolve_chown_id(group, stat.gid)?;
-    if uid != stat.uid || gid != stat.gid {
-        inode.set_owner(abs_path, uid, gid)?;
-    }
-    if let Some(mode) = chown_cleared_mode(&stat, owner, group) {
-        inode.set_mode(abs_path, mode)?;
+    let mode = chown_cleared_mode(&stat, owner, group);
+    if uid != stat.uid || gid != stat.gid || mode.is_some() {
+        inode.set_owner_and_mode(abs_path, uid, gid, mode)?;
     }
     Ok(())
 }
 
 pub fn sys_fchown(fd: usize, owner: usize, group: usize) -> SysResult<usize> {
-    let path = file_path_from_fd(fd as isize)?;
-    do_chown_inode(&path.dentry.get_inode(), &path.abs_path(), owner, group)?;
+    let task = current_task().expect("[kernel] current task is None.");
+    let file = task.get_fd_entry(fd)?.file;
+    let file = file.as_any().downcast_ref::<File>().ok_or(Errno::EINVAL)?;
+    do_chown_inode(&file.inode(), &file.metadata_path(), owner, group)?;
     Ok(0)
 }
 

@@ -482,6 +482,12 @@ int ext4_ctime_set(const char *path, uint32_t ctime);
 int ext4_times_set(const char *path, uint32_t mask, uint32_t atime,
 		   uint32_t mtime, uint32_t ctime);
 
+/**@brief Atomically set selected inode metadata with one inode transaction.
+ * @param mask Bit 0 mode, bit 1 owner, bit 2 atime, bit 3 mtime, bit 4 ctime.*/
+int ext4_setattr(const char *path, uint32_t mask, uint32_t mode,
+		 uint32_t uid, uint32_t gid, uint32_t atime,
+		 uint32_t mtime, uint32_t ctime);
+
 /**@brief Get file/directory/link access time.
  *
  * @param path  Path to file/dir/link.

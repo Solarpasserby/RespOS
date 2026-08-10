@@ -105,10 +105,18 @@ static void run_normal(void)
 	require(unlinked >= 0, "create unlinked");
 	require(unlink(UNLINKED_PATH) == 0, "unlink open file");
 	require(fchmod(unlinked, 0600) == 0, "unlinked fchmod");
+	require(fchown(unlinked, getuid(), getgid()) == 0, "unlinked fchown");
+	times[0].tv_sec = 3;
+	times[1].tv_sec = 4;
+	require(futimens(unlinked, times) == 0, "unlinked futimens");
 	after = fd_stat(unlinked);
 	require(permission_bits(&after) == 0600, "unlinked fchmod mode");
+	require(after.st_uid == getuid() && after.st_gid == getgid(),
+		"unlinked fchown owner");
+	require(after.st_atim.tv_sec == 3 && after.st_mtim.tv_sec == 4,
+		"unlinked futimens times");
 	require(close(unlinked) == 0, "close unlinked");
-	puts("FS_METADATA_UNLINKED_FCHMOD_PASS");
+	puts("FS_METADATA_UNLINKED_FD_ATTRIBUTES_PASS");
 
 	cleanup();
 	puts("FS_METADATA_PROBE_PASS");

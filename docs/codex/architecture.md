@@ -193,6 +193,19 @@ FdTable slot (FdEntry: descriptor flags)
   flags。dup 后 descriptor 可独立设置 CLOEXEC，但共享同一个 open-file offset/status。
 - 后续影响：实现新 fcntl 或 clone/exec 行为时，不得把 CLOEXEC 写进共享 `File` flags。
 
+### ext4 inode 属性以底层 transaction 成功为发布点
+
+- 状态：已实现 mode/owner/秒级 times 组合提交
+- 适用范围：chmod/chown/utimens、目录属性、hardlink alias、unlink 后打开 fd
+- 最后验证：2026-08-10
+- 证据：`os/src/fs/{ext4/inode.rs,file.rs}`、`vendor/lwext4_rust/c/lwext4/src/ext4.c`；
+  `fs_metadata_probe` Linux/RV64 对照与跨启动 qcow2 检查
+- 内容：`ext4_setattr` 在一个 inode ref/transaction 内更新选定字段；Rust mode/owner/times cache 仅在
+  lower commit 成功后发布。fd 操作从 `File` 取得 inode 与 storage path，已 unlink regular file 使用
+  orphan path，不依赖已从 namespace 移除的旧名字。同 inode hardlink 共享属性缓存。
+- 后续影响：新增 setattr 字段必须加入同一 prepare/commit/publish 协议；不得把 `ENOENT` 转成成功后只改
+  Rust override。持久层仍只有 32-bit 秒精度，纳秒/epoch 扩展需另做 on-disk 设计与跨重启测试。
+
 ### PageCache 是普通文件驻留页的唯一所有者
 
 - 状态：已实现，完整 BuildStorm 已越过旧 heap 阻断；并行 rustc SIGSEGV 已定位为独立退出回收缺陷
