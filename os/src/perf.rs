@@ -92,6 +92,11 @@ counters!(
     ext4_create_ticks,
     ext4_write_calls,
     ext4_write_ticks,
+    ext4_set_times_calls,
+    ext4_set_times_atime_updates,
+    ext4_set_times_mtime_updates,
+    ext4_set_mode_calls,
+    ext4_set_owner_calls,
     dentry_cache_hits,
     dentry_cache_misses,
     dentry_cache_evictions,
@@ -130,6 +135,30 @@ counters!(
     ext4_lock_hold_ticks,
     ext4_lock_max_wait_ticks,
     ext4_lock_max_hold_ticks,
+    ext4_lock_stat_acquisitions,
+    ext4_lock_stat_wait_ticks,
+    ext4_lock_stat_hold_ticks,
+    ext4_lock_lookup_acquisitions,
+    ext4_lock_lookup_wait_ticks,
+    ext4_lock_lookup_hold_ticks,
+    ext4_lock_read_acquisitions,
+    ext4_lock_read_wait_ticks,
+    ext4_lock_read_hold_ticks,
+    ext4_lock_write_acquisitions,
+    ext4_lock_write_wait_ticks,
+    ext4_lock_write_hold_ticks,
+    ext4_lock_readdir_acquisitions,
+    ext4_lock_readdir_wait_ticks,
+    ext4_lock_readdir_hold_ticks,
+    ext4_lock_namespace_acquisitions,
+    ext4_lock_namespace_wait_ticks,
+    ext4_lock_namespace_hold_ticks,
+    ext4_lock_attributes_acquisitions,
+    ext4_lock_attributes_wait_ticks,
+    ext4_lock_attributes_hold_ticks,
+    ext4_lock_superblock_acquisitions,
+    ext4_lock_superblock_wait_ticks,
+    ext4_lock_superblock_hold_ticks,
     heap_alloc_calls,
     heap_dealloc_calls,
     heap_alloc_bytes,
@@ -214,6 +243,11 @@ increment_functions!(
     (ext4_create_ticks, ext4_create_ticks),
     (ext4_write_call, ext4_write_calls),
     (ext4_write_ticks, ext4_write_ticks),
+    (ext4_set_times_call, ext4_set_times_calls),
+    (ext4_set_times_atime_update, ext4_set_times_atime_updates),
+    (ext4_set_times_mtime_update, ext4_set_times_mtime_updates),
+    (ext4_set_mode_call, ext4_set_mode_calls),
+    (ext4_set_owner_call, ext4_set_owner_calls),
     (dentry_cache_hit, dentry_cache_hits),
     (dentry_cache_miss, dentry_cache_misses),
     (dentry_cache_eviction, dentry_cache_evictions),
@@ -249,6 +283,60 @@ increment_functions!(
     (ext4_lock_acquisition, ext4_lock_acquisitions),
     (ext4_lock_wait_ticks, ext4_lock_wait_ticks),
     (ext4_lock_hold_ticks, ext4_lock_hold_ticks),
+    (ext4_lock_stat_acquisition, ext4_lock_stat_acquisitions),
+    (ext4_lock_stat_wait_ticks, ext4_lock_stat_wait_ticks),
+    (ext4_lock_stat_hold_ticks, ext4_lock_stat_hold_ticks),
+    (ext4_lock_lookup_acquisition, ext4_lock_lookup_acquisitions),
+    (ext4_lock_lookup_wait_ticks, ext4_lock_lookup_wait_ticks),
+    (ext4_lock_lookup_hold_ticks, ext4_lock_lookup_hold_ticks),
+    (ext4_lock_read_acquisition, ext4_lock_read_acquisitions),
+    (ext4_lock_read_wait_ticks, ext4_lock_read_wait_ticks),
+    (ext4_lock_read_hold_ticks, ext4_lock_read_hold_ticks),
+    (ext4_lock_write_acquisition, ext4_lock_write_acquisitions),
+    (ext4_lock_write_wait_ticks, ext4_lock_write_wait_ticks),
+    (ext4_lock_write_hold_ticks, ext4_lock_write_hold_ticks),
+    (
+        ext4_lock_readdir_acquisition,
+        ext4_lock_readdir_acquisitions
+    ),
+    (ext4_lock_readdir_wait_ticks, ext4_lock_readdir_wait_ticks),
+    (ext4_lock_readdir_hold_ticks, ext4_lock_readdir_hold_ticks),
+    (
+        ext4_lock_namespace_acquisition,
+        ext4_lock_namespace_acquisitions
+    ),
+    (
+        ext4_lock_namespace_wait_ticks,
+        ext4_lock_namespace_wait_ticks
+    ),
+    (
+        ext4_lock_namespace_hold_ticks,
+        ext4_lock_namespace_hold_ticks
+    ),
+    (
+        ext4_lock_attributes_acquisition,
+        ext4_lock_attributes_acquisitions
+    ),
+    (
+        ext4_lock_attributes_wait_ticks,
+        ext4_lock_attributes_wait_ticks
+    ),
+    (
+        ext4_lock_attributes_hold_ticks,
+        ext4_lock_attributes_hold_ticks
+    ),
+    (
+        ext4_lock_superblock_acquisition,
+        ext4_lock_superblock_acquisitions
+    ),
+    (
+        ext4_lock_superblock_wait_ticks,
+        ext4_lock_superblock_wait_ticks
+    ),
+    (
+        ext4_lock_superblock_hold_ticks,
+        ext4_lock_superblock_hold_ticks
+    ),
 );
 
 #[inline(always)]
@@ -498,6 +586,42 @@ pub fn render() -> String {
     );
     let _ = writeln!(
         out,
+        "ext4_lock_acquisitions_by_class_stat={} lookup={} read={} write={} readdir={} namespace={} attributes={} superblock={}",
+        s.ext4_lock_stat_acquisitions,
+        s.ext4_lock_lookup_acquisitions,
+        s.ext4_lock_read_acquisitions,
+        s.ext4_lock_write_acquisitions,
+        s.ext4_lock_readdir_acquisitions,
+        s.ext4_lock_namespace_acquisitions,
+        s.ext4_lock_attributes_acquisitions,
+        s.ext4_lock_superblock_acquisitions
+    );
+    let _ = writeln!(
+        out,
+        "ext4_lock_wait_by_class_stat={} lookup={} read={} write={} readdir={} namespace={} attributes={} superblock={}",
+        s.ext4_lock_stat_wait_ticks,
+        s.ext4_lock_lookup_wait_ticks,
+        s.ext4_lock_read_wait_ticks,
+        s.ext4_lock_write_wait_ticks,
+        s.ext4_lock_readdir_wait_ticks,
+        s.ext4_lock_namespace_wait_ticks,
+        s.ext4_lock_attributes_wait_ticks,
+        s.ext4_lock_superblock_wait_ticks
+    );
+    let _ = writeln!(
+        out,
+        "ext4_lock_hold_by_class_stat={} lookup={} read={} write={} readdir={} namespace={} attributes={} superblock={}",
+        s.ext4_lock_stat_hold_ticks,
+        s.ext4_lock_lookup_hold_ticks,
+        s.ext4_lock_read_hold_ticks,
+        s.ext4_lock_write_hold_ticks,
+        s.ext4_lock_readdir_hold_ticks,
+        s.ext4_lock_namespace_hold_ticks,
+        s.ext4_lock_attributes_hold_ticks,
+        s.ext4_lock_superblock_hold_ticks
+    );
+    let _ = writeln!(
+        out,
         "ext4_ops_stat_calls={} stat_ticks={} stat_cache_hits={} stat_cache_misses={} stat_cache_refills={} stat_cache_uncacheable={} stat_cache_invalidations={} lookup_calls={} lookup_ticks={} readdir_calls={} readdir_ticks={} create_calls={} create_ticks={} write_calls={} write_ticks={}",
         s.ext4_stat_calls,
         s.ext4_stat_ticks,
@@ -514,6 +638,15 @@ pub fn render() -> String {
         s.ext4_create_ticks,
         s.ext4_write_calls,
         s.ext4_write_ticks
+    );
+    let _ = writeln!(
+        out,
+        "ext4_attributes_set_times_calls={} atime_updates={} mtime_updates={} set_mode_calls={} set_owner_calls={}",
+        s.ext4_set_times_calls,
+        s.ext4_set_times_atime_updates,
+        s.ext4_set_times_mtime_updates,
+        s.ext4_set_mode_calls,
+        s.ext4_set_owner_calls
     );
     let _ = writeln!(
         out,

@@ -96,6 +96,21 @@
   wanted set，也不能把目标信号按普通 interrupt 处理，否则 handler/EINTR 会抢先消费 sigtimedwait
   语义。timer 注册必须在所有返回路径清理。
 
+## ext4 多字段时间戳在一次 inode transaction 中提交
+
+- 状态：已采用，当前工作树待提交
+- 适用范围：ext4 atime/mtime/ctime 更新、BuildStorm 高频文件写回、lwext4 vendor API
+- 最后验证：2026-08-10
+- 证据：`vendor/lwext4_rust/c/lwext4/{include/ext4.h,src/ext4.c}`、
+  `os/src/fs/ext4/inode.rs`；RV64 8 GiB/8 核固定 120 秒 A/B 与五项无 feature probe
+- 内容：一次 VFS `set_times` 需要更新多个字段时，不再为每个字段各做一次 pathname walk 和 inode
+  transaction。vendor API 接收字段 mask，在同一个 inode ref 上更新所选 atime/mtime/ctime 后一次提交；
+  Rust 层继续负责范围过滤、打开后 unlink 的 ENOENT 兼容和缓存时间语义。read/readdir 的自动 atime
+  使用独立入口，只更新 atime；显式 utimens 及 mtime 修改仍更新 ctime。
+- 后续影响：不得通过延迟或丢弃可见时间戳来复制本轮收益。自动 atime 不得更新 ctime，否则 relatime
+  会在 `atime <= ctime` 上自我触发；显式时间修改又必须更新 ctime。继续优化前需验证跨 reopen、stat
+  和同步边界；所有 lwext4 调用仍复用唯一 `EXT4_OP_LOCK`。
+
 ## BuildStorm 采用三层级、测量驱动的优化路线
 
 - 状态：已采用

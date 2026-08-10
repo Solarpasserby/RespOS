@@ -30,6 +30,18 @@ pub(super) struct ProfiledExt4Lock {
     inner: Mutex<()>,
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum Ext4LockClass {
+    Stat,
+    Lookup,
+    Read,
+    Write,
+    Readdir,
+    Namespace,
+    Attributes,
+    Superblock,
+}
+
 impl ProfiledExt4Lock {
     const fn new() -> Self {
         Self {
@@ -37,13 +49,49 @@ impl ProfiledExt4Lock {
         }
     }
 
-    pub(super) fn lock(&self) -> ProfiledExt4Guard<'_> {
+    pub(super) fn lock_class(&self, class: Ext4LockClass) -> ProfiledExt4Guard<'_> {
         let started = crate::perf::now_ticks();
         let guard = self.inner.lock();
-        crate::perf::observe_ext4_lock_wait(crate::perf::elapsed_since(started));
+        let waited = crate::perf::elapsed_since(started);
+        crate::perf::observe_ext4_lock_wait(waited);
+        match class {
+            Ext4LockClass::Stat => {
+                crate::perf::ext4_lock_stat_acquisition(1);
+                crate::perf::ext4_lock_stat_wait_ticks(waited);
+            }
+            Ext4LockClass::Lookup => {
+                crate::perf::ext4_lock_lookup_acquisition(1);
+                crate::perf::ext4_lock_lookup_wait_ticks(waited);
+            }
+            Ext4LockClass::Read => {
+                crate::perf::ext4_lock_read_acquisition(1);
+                crate::perf::ext4_lock_read_wait_ticks(waited);
+            }
+            Ext4LockClass::Write => {
+                crate::perf::ext4_lock_write_acquisition(1);
+                crate::perf::ext4_lock_write_wait_ticks(waited);
+            }
+            Ext4LockClass::Readdir => {
+                crate::perf::ext4_lock_readdir_acquisition(1);
+                crate::perf::ext4_lock_readdir_wait_ticks(waited);
+            }
+            Ext4LockClass::Namespace => {
+                crate::perf::ext4_lock_namespace_acquisition(1);
+                crate::perf::ext4_lock_namespace_wait_ticks(waited);
+            }
+            Ext4LockClass::Attributes => {
+                crate::perf::ext4_lock_attributes_acquisition(1);
+                crate::perf::ext4_lock_attributes_wait_ticks(waited);
+            }
+            Ext4LockClass::Superblock => {
+                crate::perf::ext4_lock_superblock_acquisition(1);
+                crate::perf::ext4_lock_superblock_wait_ticks(waited);
+            }
+        }
         ProfiledExt4Guard {
             _guard: guard,
             acquired: crate::perf::now_ticks(),
+            class,
         }
     }
 }
@@ -51,11 +99,23 @@ impl ProfiledExt4Lock {
 pub(super) struct ProfiledExt4Guard<'a> {
     _guard: spin::MutexGuard<'a, ()>,
     acquired: usize,
+    class: Ext4LockClass,
 }
 
 impl Drop for ProfiledExt4Guard<'_> {
     fn drop(&mut self) {
-        crate::perf::observe_ext4_lock_hold(crate::perf::elapsed_since(self.acquired));
+        let held = crate::perf::elapsed_since(self.acquired);
+        crate::perf::observe_ext4_lock_hold(held);
+        match self.class {
+            Ext4LockClass::Stat => crate::perf::ext4_lock_stat_hold_ticks(held),
+            Ext4LockClass::Lookup => crate::perf::ext4_lock_lookup_hold_ticks(held),
+            Ext4LockClass::Read => crate::perf::ext4_lock_read_hold_ticks(held),
+            Ext4LockClass::Write => crate::perf::ext4_lock_write_hold_ticks(held),
+            Ext4LockClass::Readdir => crate::perf::ext4_lock_readdir_hold_ticks(held),
+            Ext4LockClass::Namespace => crate::perf::ext4_lock_namespace_hold_ticks(held),
+            Ext4LockClass::Attributes => crate::perf::ext4_lock_attributes_hold_ticks(held),
+            Ext4LockClass::Superblock => crate::perf::ext4_lock_superblock_hold_ticks(held),
+        }
     }
 }
 
@@ -176,7 +236,7 @@ impl Ext4Inode {
 
     fn file_link(old_path: &str, hardlink_path: &str) -> SysResult {
         {
-            let _guard = EXT4_OP_LOCK.lock();
+            let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Namespace);
             let old_path = CString::new(old_path).map_err(|_| Errno::EINVAL)?;
             let new_path = CString::new(hardlink_path).map_err(|_| Errno::EINVAL)?;
             let ret = unsafe { bindings::ext4_flink(old_path.as_ptr(), new_path.as_ptr()) };
@@ -190,7 +250,7 @@ impl Ext4Inode {
 
     fn file_symlink(target: &str, path: &str) -> SysResult {
         {
-            let _guard = EXT4_OP_LOCK.lock();
+            let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Namespace);
             // lwext4 负责选择 fast symlink 或普通数据块存储；VFS 层只传入目标字符串和新路径。
             let target = CString::new(target).map_err(|_| Errno::EINVAL)?;
             let path = CString::new(path).map_err(|_| Errno::EINVAL)?;
@@ -206,7 +266,7 @@ impl Ext4Inode {
     fn file_readlink(path: &str) -> SysResult<String> {
         const MAX_LINK_TARGET: usize = 4096;
 
-        let _guard = EXT4_OP_LOCK.lock();
+        let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Read);
         let path = CString::new(path).map_err(|_| Errno::EINVAL)?;
         // ext4_readlink 返回裸字节和读取长度，不保证 C 字符串结尾，因此按 rcnt 截断。
         let mut buf = Vec::from([0u8; MAX_LINK_TARGET]);
@@ -228,7 +288,7 @@ impl Ext4Inode {
 
     pub(crate) fn file_rename(old_path: &str, new_path: &str) -> SysResult {
         {
-            let _guard = EXT4_OP_LOCK.lock();
+            let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Namespace);
             let c_old = CString::new(old_path).map_err(|_| Errno::EINVAL)?;
             let c_new = CString::new(new_path).map_err(|_| Errno::EINVAL)?;
             let ret = unsafe { bindings::ext4_frename(c_old.as_ptr(), c_new.as_ptr()) };
@@ -242,7 +302,7 @@ impl Ext4Inode {
 
     fn file_remove(path: &str, ty: InodeType) -> SysResult {
         {
-            let _guard = EXT4_OP_LOCK.lock();
+            let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Namespace);
             let file = &mut Ext4File::new(path, ty.into());
             file.file_remove(path).map_err(Self::map_lwext4_err)?;
         }
@@ -314,7 +374,7 @@ impl Ext4Inode {
     }
 
     fn lookup_dirent(parent_path: &str, name: &str) -> SysResult<(u64, Ext4InodeTypes)> {
-        let _guard = EXT4_OP_LOCK.lock();
+        let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Lookup);
         let child_path = Self::child_path(parent_path, name);
         let c_path = CString::new(child_path).map_err(|_| Errno::EINVAL)?;
         let mut ino = 0u32;
@@ -415,6 +475,94 @@ impl Ext4Inode {
         Ok(())
     }
 
+    fn set_times_impl(
+        &self,
+        path: &str,
+        atime: Option<TimeSpec>,
+        mtime: Option<TimeSpec>,
+        update_ctime: bool,
+    ) -> SysResult {
+        let mut times = if let Some(times) = *self.times.lock() {
+            times
+        } else {
+            self.stat(path)
+                .map(|stat| InodeTimes {
+                    atime: stat.atime,
+                    mtime: stat.mtime,
+                    ctime: stat.ctime,
+                })
+                .unwrap_or_else(|_| {
+                    let now = Self::now_timespec();
+                    InodeTimes {
+                        atime: now,
+                        mtime: now,
+                        ctime: now,
+                    }
+                })
+        };
+
+        if let Some(atime) = atime {
+            times.atime = atime;
+        }
+        if let Some(mtime) = mtime {
+            times.mtime = mtime;
+        }
+        if update_ctime {
+            times.ctime = Self::now_timespec();
+        }
+
+        if self.is_synthetic_created_inode() {
+            self.set_cached_times(times);
+            return Ok(());
+        }
+
+        crate::perf::ext4_set_times_call(1);
+        if atime.is_some() {
+            crate::perf::ext4_set_times_atime_update(1);
+        }
+        if mtime.is_some() {
+            crate::perf::ext4_set_times_mtime_update(1);
+        }
+        let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Attributes);
+        let c_path = CString::new(path).map_err(|_| Errno::EINVAL)?;
+        let lower_time = |time: Option<TimeSpec>| {
+            time.filter(|time| time.sec >= 0 && time.sec <= u32::MAX as isize)
+                .map(|time| time.sec as u32)
+        };
+        let lower_atime = lower_time(atime);
+        let lower_mtime = lower_time(mtime);
+        let lower_ctime = update_ctime
+            .then(|| lower_time(Some(times.ctime)))
+            .flatten();
+        let mask = u32::from(lower_atime.is_some())
+            | (u32::from(lower_mtime.is_some()) << 1)
+            | (u32::from(lower_ctime.is_some()) << 2);
+        let ret = unsafe {
+            bindings::ext4_times_set(
+                c_path.as_ptr(),
+                mask,
+                lower_atime.unwrap_or(0),
+                lower_mtime.unwrap_or(0),
+                lower_ctime.unwrap_or(0),
+            )
+        };
+        if ret != 0 {
+            match Self::map_lwext4_err(ret) {
+                // fd 指向的文件可能已经 unlink；此时只更新 inode 缓存。
+                Errno::ENOENT => {}
+                err => return Err(err),
+            }
+        }
+        self.set_cached_times(times);
+        Ok(())
+    }
+
+    /// Automatic read/readdir atime updates do not change ctime. Explicit
+    /// timestamp changes continue through `InodeOp::set_times` and do.
+    pub(crate) fn touch_atime(&self, path: &str, atime: TimeSpec) -> SysResult {
+        self.set_times_impl(path, Some(atime), None, false)
+    }
+
     fn init_inode_times(&self) {
         let now = Self::now_timespec();
         *self.times.lock() = Some(InodeTimes {
@@ -465,7 +613,7 @@ impl Ext4Inode {
             crate::perf::ext4_stat_cache_uncacheable(1);
         }
 
-        let _guard = EXT4_OP_LOCK.lock();
+        let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Stat);
         let c_path = CString::new(path).map_err(|_| Errno::EINVAL)?;
         let mut raw_ino = 0u32;
         let mut raw_inode: bindings::ext4_inode = unsafe { core::mem::zeroed() };
@@ -639,7 +787,7 @@ impl InodeOp for Ext4Inode {
 
         let started = crate::perf::now_ticks();
         let read_size = {
-            let _guard = EXT4_OP_LOCK.lock();
+            let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Read);
             let file = &mut Ext4File::new(path, self.ty.clone());
             file.file_open(path, bindings::O_RDONLY)
                 .map_err(Self::map_lwext4_err)?;
@@ -667,7 +815,7 @@ impl InodeOp for Ext4Inode {
         let started = crate::perf::now_ticks();
 
         let write_size = {
-            let _guard = EXT4_OP_LOCK.lock();
+            let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Write);
             let file = &mut Ext4File::new(path, self.ty.clone());
             file.file_open(path, bindings::O_RDWR)
                 .map_err(Self::map_lwext4_err)?;
@@ -705,7 +853,7 @@ impl InodeOp for Ext4Inode {
         self.check_type(InodeType::Regular)?;
 
         {
-            let _guard = EXT4_OP_LOCK.lock();
+            let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Write);
             let file = &mut Ext4File::new(path, self.ty.clone());
             file.file_open(path, bindings::O_RDWR)
                 .map_err(Self::map_lwext4_err)?;
@@ -723,51 +871,7 @@ impl InodeOp for Ext4Inode {
     }
 
     fn set_times(&self, path: &str, atime: Option<TimeSpec>, mtime: Option<TimeSpec>) -> SysResult {
-        let mut times = if let Some(times) = *self.times.lock() {
-            times
-        } else {
-            self.stat(path)
-                .map(|stat| InodeTimes {
-                    atime: stat.atime,
-                    mtime: stat.mtime,
-                    ctime: stat.ctime,
-                })
-                .unwrap_or_else(|_| {
-                    let now = Self::now_timespec();
-                    InodeTimes {
-                        atime: now,
-                        mtime: now,
-                        ctime: now,
-                    }
-                })
-        };
-
-        if let Some(atime) = atime {
-            times.atime = atime;
-        }
-        if let Some(mtime) = mtime {
-            times.mtime = mtime;
-        }
-        times.ctime = Self::now_timespec();
-
-        if self.is_synthetic_created_inode() {
-            self.set_cached_times(times);
-            return Ok(());
-        }
-
-        let _guard = EXT4_OP_LOCK.lock();
-        let c_path = CString::new(path).map_err(|_| Errno::EINVAL)?;
-
-        if let Some(atime) = atime {
-            Self::write_lower_time(c_path.as_ptr(), atime, bindings::ext4_atime_set)?;
-        }
-        if let Some(mtime) = mtime {
-            Self::write_lower_time(c_path.as_ptr(), mtime, bindings::ext4_mtime_set)?;
-        }
-
-        Self::write_lower_time(c_path.as_ptr(), times.ctime, bindings::ext4_ctime_set)?;
-        self.set_cached_times(times);
-        Ok(())
+        self.set_times_impl(path, atime, mtime, true)
     }
 
     fn set_mode(&self, path: &str, mode: u32) -> SysResult {
@@ -783,7 +887,8 @@ impl InodeOp for Ext4Inode {
         }
         drop(cached_times);
 
-        let _guard = EXT4_OP_LOCK.lock();
+        crate::perf::ext4_set_mode_call(1);
+        let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Attributes);
         let c_path = CString::new(path).map_err(|_| Errno::EINVAL)?;
         let ret = unsafe { bindings::ext4_mode_set(c_path.as_ptr(), mode & 0o7777) };
         if ret != 0 {
@@ -807,7 +912,8 @@ impl InodeOp for Ext4Inode {
             return Ok(());
         }
 
-        let _guard = EXT4_OP_LOCK.lock();
+        crate::perf::ext4_set_owner_call(1);
+        let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Attributes);
         let c_path = CString::new(path).map_err(|_| Errno::EINVAL)?;
         let ret = unsafe { bindings::ext4_owner_set(c_path.as_ptr(), uid, gid) };
         if ret != 0 {
@@ -873,7 +979,7 @@ impl InodeOp for Ext4Inode {
         self.check_type(InodeType::Directory)?;
         let started = crate::perf::now_ticks();
 
-        let _guard = EXT4_OP_LOCK.lock();
+        let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Readdir);
         let c_path = CString::new(path).map_err(|_| Errno::EINVAL)?;
         let c_path = c_path.into_raw();
         let mut dir: bindings::ext4_dir = unsafe { core::mem::zeroed() };
@@ -952,7 +1058,7 @@ impl InodeOp for Ext4Inode {
         let path = Self::child_path(parent_path, name);
         let ext4_ty = Ext4InodeTypes::from(ty);
         {
-            let _guard = EXT4_OP_LOCK.lock();
+            let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Namespace);
             let file = &mut Ext4File::new(parent_path, self.ty.clone());
 
             if file.check_inode_exist(&path, ext4_ty.clone()) {
@@ -1065,7 +1171,7 @@ impl InodeOp for Ext4Inode {
             if has_content {
                 return Err(Errno::ENOTEMPTY);
             }
-            let _guard = EXT4_OP_LOCK.lock();
+            let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Namespace);
             let file = &mut Ext4File::new(child_abs_path, self.ty.clone());
             file.dir_rm(child_abs_path).map_err(Self::map_lwext4_err)?;
             if current_path.contains("/emlink_dir/testdir") {
@@ -1074,7 +1180,7 @@ impl InodeOp for Ext4Inode {
         } else {
             // lwext4_rust 包中 `file_remove` 的语义是 unlink 而非删除文件
             {
-                let _guard = EXT4_OP_LOCK.lock();
+                let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Namespace);
                 let file = &mut Ext4File::new(child_abs_path, child_inode.node_type().into());
                 file.file_remove(child_abs_path)
                     .map_err(Self::map_lwext4_err)?;

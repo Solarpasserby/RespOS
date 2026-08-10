@@ -2,7 +2,41 @@
 
 本文件是快速变化的状态页。更新测试结论时必须同时更新日期、提交和命令。
 
-## 2026-08-10 目录 metadata generation 与 16K dentry cache（`da957ea` + 未提交）
+## 2026-08-10 ext4 时间戳合并更新（`3265e0f` + 未提交）
+
+- **热点拆分**：在 `perf_counters` 下把唯一的 `EXT4_OP_LOCK` 按 stat/lookup/read/write/readdir/
+  namespace/attributes/superblock 分类；这只是诊断分类，不拆锁。旧 RV64 pub image、8 GiB/8 核、
+  `-snapshot`、窗口外预构建 tg-xtask 后固定 120 秒 Cargo 窗口中，总 hold 约 68.82 CPU 秒；其中
+  attributes 57,751 次获取、hold 54.60 秒（79.3%），namespace 仅 375 次、0.82 秒，确认剩余热点
+  主要是时间戳/属性而非目录增删改名。
+- **根因与实现**：`Ext4Inode::set_times()` 原按 atime/mtime/ctime 分别调用三个 lwext4 API；每个 API
+  都重新执行 pathname walk、inode ref 获取与提交。仓库内 vendor lwext4 新增 `ext4_times_set()`，在
+  一次 inode lookup/ref 生命周期内按 mask 更新所选字段并一次提交。Rust 层仍做原有秒值范围过滤、
+  ENOENT 打开后 unlink 兼容和内存 time override；全局 lwext4 锁、只读挂载检查及错误返回均保留。
+- **同口径 A/B**：组合更新后的 120 秒窗口总 ext4 hold `68.82 -> 44.62s`（-35.2%），attributes hold
+  `54.60 -> 30.46s`（-44.2%），block write requests `573,253 -> 295,585`（-48.4%）。两轮均推进至
+  `ax-posix-api`；优化轮 PageCache fill `255.8 -> 273.5 MB`，没有以减少完成工作换取低计数，也未见
+  panic、fault 或文件系统错误。该窗口仍由 timeout 结束，不代表完整题二通过。
+- **自动 atime 语义修复**：进一步计数发现 58,692 次 set-times 中 58,682 次是 read/readdir 自动
+  atime，而 mtime 只有 10 次。旧路径把自动 atime 当作显式 utimens，同时刷新 ctime；relatime 随后
+  总满足 `atime <= ctime`，导致每次读取重复落盘。自动 atime 现只更新 atime，显式时间修改仍更新
+  ctime。最终 120 秒窗口 atime updates `58,682 -> 1,185`、attributes acquisitions
+  `59,062 -> 1,565`、attributes hold `28.56 -> 0.95s`，总 ext4 hold `42.75 -> 14.43s`，block write
+  requests `293,980 -> 9,663`；PageCache fill 同时 `276.7 -> 321.0 MB`。
+- **完整 BuildStorm**：最终无 feature RV64 release、旧 pub image SHA-256
+  `9d163855dbb67da561925c74666d0e4fc1856e118640cb4889e88dcaf5f8e25f`、QEMU
+  10.0.2、8 GiB/8 核、`-snapshot` 运行 `/glibc/buildstorm_testcode.sh`。依次输出
+  `BUILDSTORM_TOOLCHAIN ok`、`BUILDSTORM_MINIBUILD ok` 和
+  `BUILDSTORM_COMPILE mode=multi ok=true cores=8 bytes=1681000 arch=riscv64`，脚本退出 0。
+  axbuild 报告 timed build `1348.08s`（Cargo 为 `22m16s`）；guest 时间戳 5 -> 1399 秒包含前置检查和
+  未计时 tg-xtask。旧镜像脚本打印 `elapsed_s=0.00`，不作为计时依据。宿主只有约 15 GiB，无法启动
+  公告要求的 16 GiB guest，因此这是完整正确性回归与本机 8 GiB 数据，不冒充正式平台成绩。
+- **门禁**：无 feature RV64/LA64 release 构建通过；RV64 1 GiB/8 核无 feature snapshot 同轮通过
+  Unix socket、file、private-map、shared-MM 与 frame-reclaim 五项 probe。`cargo fmt` 和
+  `git diff --check` 通过。另用 ext4 临时文件验证普通读取为 `atime 190 -> 204`、ctime 保持 190；随后
+  显式 `touch -a` 使 atime/ctime 同步变为 206。后续仍应补 chmod/chown 与跨重新挂载持久化专项。
+
+## 2026-08-10 目录 metadata generation 与 16K dentry cache（已提交 `3265e0f`）
 
 - **环境**：宿主 available memory 9.7 GiB，load average 约 `0.50/1.79/3.26`；旧 RV64 pub
   image SHA-256 为 `9d163855dbb67da561925c74666d0e4fc1856e118640cb4889e88dcaf5f8e25f`，

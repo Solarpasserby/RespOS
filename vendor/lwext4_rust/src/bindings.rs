@@ -1893,6 +1893,16 @@ unsafe extern "C" {
     pub fn ext4_ctime_set(path: *const ::core::ffi::c_char, ctime: u32) -> ::core::ffi::c_int;
 }
 unsafe extern "C" {
+    #[doc = "@brief Set selected file/directory/link timestamps with one inode lookup.\n\n @param path  Path to file/dir/link.\n @param mask  Bit 0 selects atime, bit 1 mtime, bit 2 ctime.\n @param atime Access timestamp.\n @param mtime Modify timestamp.\n @param ctime Change timestamp.\n\n @return  Standard error code."]
+    pub fn ext4_times_set(
+        path: *const ::core::ffi::c_char,
+        mask: u32,
+        atime: u32,
+        mtime: u32,
+        ctime: u32,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
     #[doc = "@brief Get file/directory/link access time.\n\n @param path  Path to file/dir/link.\n @param atime Access timestamp.\n\n @return  Standard error code."]
     pub fn ext4_atime_get(path: *const ::core::ffi::c_char, atime: *mut u32) -> ::core::ffi::c_int;
 }

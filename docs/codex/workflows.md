@@ -354,6 +354,12 @@ stat 输出需核对 size/inode/mode/uid/gid；最终还需覆盖 symlink size�
 LTP stat/fstatat。固定窗口比较必须同时报告阶段进度，不能因优化版在同一时间内执行了更多调用而只比较
 累计 ticks。
 
+当 stat/lookup 降低后，继续查看 `ext4_lock_*_by_class`。class 只用于分析，所有 class 仍必须串行于
+同一把 `EXT4_OP_LOCK`；不能据此拆成多把锁。若 attributes 占主要 hold，同时对照每类 acquisitions：
+当前工作负载曾有约 5.8 万次 attributes 获取，而 namespace 仅约 375 次。检查一次 VFS 操作是否连续调用
+多个 lwext4 pathname API；合并底层 inode transaction 后再用同镜像、同阶段的固定窗口比较 hold、block
+write requests 与 PageCache fill。时间戳优化还需保留显式 utimens、unlink 后打开 fd 和跨 reopen 语义。
+
 开启 inode raw-metadata 跨 syscall 缓存后，不能只用重复只读 stat 证明正确。在 `-snapshot` 的 ext4
 目录中必须先 stat 填充缓存，再依次执行 append、truncate、chmod/chown、hardlink/unlink 和
 rename，每步重新核对 size/mode/uid/gid/nlink/inode。同时读取 `/proc/respos_perf` 的

@@ -470,6 +470,18 @@ int ext4_mtime_set(const char *path, uint32_t mtime);
  * @return  Standard error code.*/
 int ext4_ctime_set(const char *path, uint32_t ctime);
 
+/**@brief Set selected file/directory/link timestamps with one inode lookup.
+ *
+ * @param path  Path to file/dir/link.
+ * @param mask  Bit 0 selects atime, bit 1 mtime, bit 2 ctime.
+ * @param atime Access timestamp.
+ * @param mtime Modify timestamp.
+ * @param ctime Change timestamp.
+ *
+ * @return  Standard error code.*/
+int ext4_times_set(const char *path, uint32_t mask, uint32_t atime,
+		   uint32_t mtime, uint32_t ctime);
+
 /**@brief Get file/directory/link access time.
  *
  * @param path  Path to file/dir/link.

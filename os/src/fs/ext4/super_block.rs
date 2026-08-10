@@ -1,6 +1,6 @@
 // os/src/ext4/super_block.rs
 
-use super::{EXT4_OP_LOCK, Ext4Inode};
+use super::{EXT4_OP_LOCK, Ext4Inode, Ext4LockClass};
 use crate::drivers::Disk;
 use crate::fs::Statfs64;
 use crate::fs::vfs::{InodeOp, SuperBlockOp};
@@ -36,7 +36,7 @@ impl Ext4SuperBlock {
         // Use the same lock as inode operations.  `inner` only protects the
         // Rust wrapper's lifetime; it does not serialize lwext4's global
         // mount/block-cache state against create/write/rename on other CPUs.
-        let _op_guard = EXT4_OP_LOCK.lock();
+        let _op_guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Superblock);
         let inner = self.inner.lock();
         if inner.is_none() {
             return Err(Errno::EIO);
@@ -49,7 +49,7 @@ impl Ext4SuperBlock {
 
     pub fn shutdown(&self) -> SysResult {
         self.flush_cache()?;
-        let _op_guard = EXT4_OP_LOCK.lock();
+        let _op_guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Superblock);
         let mut inner = self.inner.lock();
         let mut wrapper = inner.take();
         drop(inner);
@@ -70,7 +70,7 @@ impl SuperBlockOp for Ext4SuperBlock {
     }
 
     fn statfs(&self) -> SysResult<Statfs64> {
-        let _op_guard = EXT4_OP_LOCK.lock();
+        let _op_guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Superblock);
         let mut stats: bindings::ext4_mount_stats = unsafe { core::mem::zeroed() };
         let mount_point = CString::new("/").map_err(|_| Errno::EINVAL)?;
         let rc = unsafe {

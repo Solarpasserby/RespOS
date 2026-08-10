@@ -652,9 +652,8 @@ impl File {
         }
 
         if !tmpfile {
-            if self.inode.as_any().downcast_ref::<Ext4Inode>().is_some() {
-                self.inode
-                    .set_times(storage_path.as_str(), Some(now), None)?;
+            if let Some(inode) = self.inode.as_any().downcast_ref::<Ext4Inode>() {
+                inode.touch_atime(storage_path.as_str(), now)?;
             }
         }
         Ok(Some(now))

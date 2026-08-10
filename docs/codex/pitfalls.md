@@ -1,5 +1,31 @@
 # RespOS 已确认易错点
 
+## 自动 atime 更新不能复用会刷新 ctime 的显式 utimens 路径
+
+- 状态：已确认并修复 BuildStorm 写放大
+- 适用范围：relatime、read/readdir、ctime、ext4 metadata writeback
+- 最后验证：2026-08-10
+- 证据：RV64 8 GiB/8 核固定 120 秒 attributes 计数 A/B；临时 ext4 文件 stat/cat/touch 专项
+- 内容：旧实现每次自动 atime 都同时把 ctime 更新为 now，使下一次 relatime 判断继续满足
+  `atime <= ctime`。58,692 次 set-times 中有 58,682 次来自自动 atime，形成约 29 万次块写请求。
+  自动访问更新改为不碰 ctime 后，atime 落盘降至 1,185 次，块写请求降至 9,663；显式 `touch -a`
+  仍同时更新 ctime。
+- 后续影响：自动访问时间和显式 `utimensat/futimens` 必须走语义不同的入口。不能为复用代码让普通
+  read 改 ctime，也不能反向让显式时间修改漏掉 ctime；relatime 回归需检查第二次读取不重复落盘。
+
+## 多个 lwext4 时间 setter 会为同一 inode 重复完整路径遍历
+
+- 状态：已确认并由组合 vendor API 修复当前热点
+- 适用范围：atime/mtime/ctime、文件写回、Cargo/rustc 高频 metadata 更新
+- 最后验证：2026-08-10
+- 证据：RV64 8 GiB/8 核固定 120 秒 class A/B；`vendor/lwext4_rust/c/lwext4/src/ext4.c`
+- 内容：`ext4_atime_set`、`ext4_mtime_set`、`ext4_ctime_set` 各自获取 path 对应 inode ref 并提交。
+  即便 Rust 已持全局 ext4 锁，连续调用仍重复 pathname walk 和 metadata transaction。组合更新把多个
+  字段放入一次 inode ref 生命周期，attributes hold 从 54.60 降至 30.46 CPU 秒。
+- 后续影响：多字段 metadata 更新应优先审查能否在一个底层 transaction 中完成；不能仅因外层已有锁
+  就假设多个 C API 调用成本很低。合并必须保持字段选择、范围过滤、只读检查、错误和持久化语义，不能
+  用跳过时间戳更新换取速度。
+
 ## 过小 dentry cache 会同时丢掉 inode metadata 和 PageCache identity
 
 - 状态：已确认并由 16K cache 修复当前窗口
