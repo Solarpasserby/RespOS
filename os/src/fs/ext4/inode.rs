@@ -61,6 +61,7 @@ impl Drop for ProfiledExt4Guard<'_> {
 
 const CREATED_INODE_BASE: u64 = 1 << 62;
 static CREATED_INODE_ALLOC: AtomicU64 = AtomicU64::new(CREATED_INODE_BASE);
+static EXT4_NAMESPACE_GENERATION: AtomicUsize = AtomicUsize::new(1);
 const MAX_TEST_HARDLINKS: u32 = 32;
 const MAX_TEST_SUBDIRS: usize = 32;
 
@@ -97,6 +98,7 @@ struct RawInodeMetadata {
     ctime: u32,
     size: u64,
     nlink: u32,
+    namespace_generation: usize,
 }
 
 unsafe impl Send for Ext4Inode {}
@@ -173,25 +175,31 @@ impl Ext4Inode {
     }
 
     fn file_link(old_path: &str, hardlink_path: &str) -> SysResult {
-        let _guard = EXT4_OP_LOCK.lock();
-        let old_path = CString::new(old_path).map_err(|_| Errno::EINVAL)?;
-        let new_path = CString::new(hardlink_path).map_err(|_| Errno::EINVAL)?;
-        let ret = unsafe { bindings::ext4_flink(old_path.as_ptr(), new_path.as_ptr()) };
-        if ret != 0 {
-            return Err(Self::map_lwext4_err(ret));
+        {
+            let _guard = EXT4_OP_LOCK.lock();
+            let old_path = CString::new(old_path).map_err(|_| Errno::EINVAL)?;
+            let new_path = CString::new(hardlink_path).map_err(|_| Errno::EINVAL)?;
+            let ret = unsafe { bindings::ext4_flink(old_path.as_ptr(), new_path.as_ptr()) };
+            if ret != 0 {
+                return Err(Self::map_lwext4_err(ret));
+            }
         }
+        Self::namespace_changed();
         Ok(())
     }
 
     fn file_symlink(target: &str, path: &str) -> SysResult {
-        let _guard = EXT4_OP_LOCK.lock();
-        // lwext4 负责选择 fast symlink 或普通数据块存储；VFS 层只传入目标字符串和新路径。
-        let target = CString::new(target).map_err(|_| Errno::EINVAL)?;
-        let path = CString::new(path).map_err(|_| Errno::EINVAL)?;
-        let ret = unsafe { bindings::ext4_fsymlink(target.as_ptr(), path.as_ptr()) };
-        if ret != 0 {
-            return Err(Self::map_lwext4_err(ret));
+        {
+            let _guard = EXT4_OP_LOCK.lock();
+            // lwext4 负责选择 fast symlink 或普通数据块存储；VFS 层只传入目标字符串和新路径。
+            let target = CString::new(target).map_err(|_| Errno::EINVAL)?;
+            let path = CString::new(path).map_err(|_| Errno::EINVAL)?;
+            let ret = unsafe { bindings::ext4_fsymlink(target.as_ptr(), path.as_ptr()) };
+            if ret != 0 {
+                return Err(Self::map_lwext4_err(ret));
+            }
         }
+        Self::namespace_changed();
         Ok(())
     }
 
@@ -219,21 +227,31 @@ impl Ext4Inode {
     }
 
     pub(crate) fn file_rename(old_path: &str, new_path: &str) -> SysResult {
-        let _guard = EXT4_OP_LOCK.lock();
-        let c_old = CString::new(old_path).map_err(|_| Errno::EINVAL)?;
-        let c_new = CString::new(new_path).map_err(|_| Errno::EINVAL)?;
-        let ret = unsafe { bindings::ext4_frename(c_old.as_ptr(), c_new.as_ptr()) };
-        if ret != 0 {
-            return Err(Self::map_lwext4_err(ret));
+        {
+            let _guard = EXT4_OP_LOCK.lock();
+            let c_old = CString::new(old_path).map_err(|_| Errno::EINVAL)?;
+            let c_new = CString::new(new_path).map_err(|_| Errno::EINVAL)?;
+            let ret = unsafe { bindings::ext4_frename(c_old.as_ptr(), c_new.as_ptr()) };
+            if ret != 0 {
+                return Err(Self::map_lwext4_err(ret));
+            }
         }
+        Self::namespace_changed();
         Ok(())
     }
 
     fn file_remove(path: &str, ty: InodeType) -> SysResult {
-        let _guard = EXT4_OP_LOCK.lock();
-        let file = &mut Ext4File::new(path, ty.into());
-        file.file_remove(path).map_err(Self::map_lwext4_err)?;
+        {
+            let _guard = EXT4_OP_LOCK.lock();
+            let file = &mut Ext4File::new(path, ty.into());
+            file.file_remove(path).map_err(Self::map_lwext4_err)?;
+        }
+        Self::namespace_changed();
         Ok(())
+    }
+
+    fn namespace_changed() {
+        EXT4_NAMESPACE_GENERATION.fetch_add(1, Ordering::AcqRel);
     }
 
     pub fn storage_path(&self, path: &str) -> String {
@@ -419,21 +437,33 @@ impl Ext4Inode {
     }
 
     fn invalidate_raw_metadata(&self) {
-        *self.raw_metadata.lock() = None;
+        if self.raw_metadata.lock().take().is_some() {
+            crate::perf::ext4_stat_cache_invalidation(1);
+        }
     }
 
     fn raw_metadata(&self, path: &str) -> SysResult<RawInodeMetadata> {
-        // Parent-directory metadata changes indirectly on create, unlink and
-        // cross-directory rename.  Until those namespace mutations provide a
-        // complete parent-inode invalidation protocol, only cache inode types
-        // whose metadata changes through the audited inode-local paths below.
-        let cacheable = matches!(self.node_type(), InodeType::Regular | InodeType::SymLink);
+        let ty = self.node_type();
+        let cacheable = matches!(
+            ty,
+            InodeType::Regular | InodeType::SymLink | InodeType::Directory
+        );
+        let namespace_generation = EXT4_NAMESPACE_GENERATION.load(Ordering::Acquire);
         let mut cached = self.raw_metadata.lock();
         if cacheable && let Some(metadata) = *cached {
-            crate::perf::ext4_stat_cache_hit(1);
-            return Ok(metadata);
+            if ty != InodeType::Directory || metadata.namespace_generation == namespace_generation {
+                crate::perf::ext4_stat_cache_hit(1);
+                return Ok(metadata);
+            }
+            *cached = None;
+            crate::perf::ext4_stat_cache_invalidation(1);
         }
         crate::perf::ext4_stat_cache_miss(1);
+        if cacheable {
+            crate::perf::ext4_stat_cache_refill(1);
+        } else {
+            crate::perf::ext4_stat_cache_uncacheable(1);
+        }
 
         let _guard = EXT4_OP_LOCK.lock();
         let c_path = CString::new(path).map_err(|_| Errno::EINVAL)?;
@@ -444,6 +474,10 @@ impl Ext4Inode {
         if ret != 0 {
             return Err(Self::map_lwext4_err(ret));
         }
+        // Namespace mutations use the same ext4 lock and publish their new
+        // generation after releasing it.  Reload here so a stat that waited
+        // behind a mutation does not cache fresh metadata with its old tag.
+        let namespace_generation = EXT4_NAMESPACE_GENERATION.load(Ordering::Acquire);
 
         let osd2 = unsafe { core::ptr::addr_of!(raw_inode.osd2).read_unaligned() };
         let linux2 = unsafe { osd2.linux2 };
@@ -459,6 +493,7 @@ impl Ext4Inode {
             size: (u32::from_le(raw_inode.size_lo) as u64)
                 | ((u32::from_le(raw_inode.size_hi) as u64) << 32),
             nlink: u16::from_le(raw_inode.links_count) as u32,
+            namespace_generation,
         };
         if cacheable {
             *cached = Some(metadata);
@@ -892,6 +927,10 @@ impl InodeOp for Ext4Inode {
         if ret != 0 {
             return Err(Self::map_lwext4_err(ret));
         }
+        drop(_guard);
+        // Directory iteration may update atime in lwext4.  Do not retain a
+        // raw timestamp snapshot across a successful readdir operation.
+        self.invalidate_raw_metadata();
 
         crate::perf::ext4_readdir_call(1);
         crate::perf::ext4_readdir_ticks(crate::perf::elapsed_since(started));
@@ -950,6 +989,7 @@ impl InodeOp for Ext4Inode {
                 _ => return Err(Errno::ENOSYS),
             }
         }
+        Self::namespace_changed();
 
         // 目录必须绑定到真实的 ext4 inode。否则 mkdir 后紧接着解析
         // "dir/file" 时，路径遍历会把 synthetic inode 当作父目录传给
@@ -1044,6 +1084,7 @@ impl InodeOp for Ext4Inode {
                 inode.drop_cached_nlink();
             }
         };
+        Self::namespace_changed();
         Ok(())
     }
 

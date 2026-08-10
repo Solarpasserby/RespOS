@@ -2,7 +2,34 @@
 
 本文件是快速变化的状态页。更新测试结论时必须同时更新日期、提交和命令。
 
-## 2026-08-10 ext4 inode 原始元数据快照缓存（未提交）
+## 2026-08-10 目录 metadata generation 与 16K dentry cache（`da957ea` + 未提交）
+
+- **环境**：宿主 available memory 9.7 GiB，load average 约 `0.50/1.79/3.26`；旧 RV64 pub
+  image SHA-256 为 `9d163855dbb67da561925c74666d0e4fc1856e118640cb4889e88dcaf5f8e25f`，
+  QEMU 10.0.2。因宿主只有 15 GiB RAM，继续使用可复现的 RV64 8 GiB/8 核、`-snapshot`、
+  `perf_counters`；窗口外预构建 tg-xtask，reset 后执行 120 秒 arceos build。
+- **inode 缓存基线**：`da957ea` 收紧版 tg-xtask 19.29 秒，继续编译至 `ax-posix-api`；
+  139,908 次 stat 中 91,509 次命中、48,399 次回源，命中率 65.4%，stat 平均约
+  0.131 ms。ext4 lock wait/hold 约 90.7/78.8 CPU 秒，说明主要限制已转向 ext4 串行域。
+- **目录缓存**：48,043 次 stat miss 中 24,781 次来自原本不缓存的目录。现为 ext4
+  namespace 维护全局 generation；成功 create/link/symlink/unlink/rename/orphan cleanup 后递增，
+  目录 raw metadata 只在 generation 匹配时命中，可能更新 atime 的 readdir 后也做 inode 局部失效。
+  专项验证 mkdir/rmdir 后父目录
+  `nlink 2 -> 3 -> 2`、普通创建和跨目录 rename；385 次 stat 中 367 命中、18 回源、
+  11 次有效失效，五项 1 GiB/8 核 probe 通过。
+- **收益**：相对不缓存目录的收紧版，stat miss `48,043 -> 30,113` (-37.3%)、
+  命中率 `65.1% -> 77.9%`、stat CPU `20.05 -> 17.50s` (-12.7%)、ext4 acquisitions
+  `170,405 -> 158,992` (-6.7%)、hold `81.84 -> 78.65s` (-3.9%)。优化轮 PageCache fill 约
+  914 MB，高于对照的 348 MB 且达到同一可见阶段，不是完成工作更少。
+- **16K dentry cache**：原 1024 项在 Cargo 树中反复任意淘汰叶 dentry。增至 8192 后，
+  lookup calls/ticks `30,616/14.03s -> 6,007/3.40s`，stat miss `30,113 -> 8,666`，
+  ext4 acquisitions `158,992 -> 102,815`，heap peak `45.6 -> 62.2 MiB`。16K 轮进一步将
+  lookup 降至 4,019，eviction `5,426 -> 0`，heap peak 仅增至 65.0 MiB；lookup ticks 已基本
+  持平，因此保留 16K 而不继续扩容。最终无 feature RV64/LA64 release 构建通过，
+  RV64 1 GiB/8 核同轮通过 Unix/file/private-map/shared-MM/frame-reclaim 五项 probe。性能窗口仍在
+  120 秒 timeout，不是完整题二通过。
+
+## 2026-08-10 ext4 inode 原始元数据快照缓存（已提交 `da957ea`）
 
 - **实现与边界**：非 synthetic 普通文件/符号链接 `Ext4Inode` 保存一份
   `ext4_raw_inode_fill` 结果，重复
@@ -24,7 +51,7 @@
   snapshot 同一轮通过 Unix socket、file、private-map、shared-MM 和 frame-reclaim 五项 probe。尚缺
   high uid/gid、>4 GiB 文件及干净 BuildStorm 固定窗口回归。
 
-## 2026-08-10 vendor allocator 长窗口、128 MiB PageCache 与 Unix socket 阻塞（未提交）
+## 2026-08-10 vendor allocator 长窗口、128 MiB PageCache 与 Unix socket 阻塞（已提交 `da957ea`）
 
 - **allocator 600 秒 soak**：RV64 8 GiB/8 核、旧 pub image、冷 snapshot、`perf_counters` 下，vendor
   allocator 共承受 `20,781,711 alloc/20,634,417 dealloc`，无 assertion、OOM、panic 或数据损坏；

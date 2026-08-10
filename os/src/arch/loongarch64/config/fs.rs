@@ -10,7 +10,7 @@ pub const PIPE_BUFFER_SIZE: usize = 64 * 1024;
 pub const INODE_CACHE_CAPACITY: usize = 1024;
 
 /// 目录项缓存容量上限
-pub const DENTRY_CACHE_CAPACITY: usize = 1024;
+pub const DENTRY_CACHE_CAPACITY: usize = 16 * 1024;
 
 /// 页缓存容量上限
 /// Frame-backed file cache budget. Cache data consumes physical frames rather

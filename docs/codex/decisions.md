@@ -3,6 +3,21 @@
 这里只收录能解释当前代码形态或避免重复踩坑的决策。日期是当前证据最后核验时间，不一定是
 最初提出时间。
 
+## ext4 目录 metadata 用 namespace generation 失效，dentry cache 保留 16K 工作集
+
+- 状态：已采用，完整 BuildStorm 待验证
+- 适用范围：ext4 stat/namei、dentry/inode/PageCache 生命周期、kernel heap 预算
+- 最后验证：2026-08-10
+- 证据：`os/src/fs/{dentry_cache.rs,ext4/inode.rs}`、两架构 fs config；RV64 8 GiB/8 核固定
+  120 秒 1024/8192/16384 项窗口和 RV64 1 GiB namespace/probe 门禁
+- 内容：目录 raw inode 允许跨 syscall 缓存，但必须匹配 ext4 namespace generation。所有成功
+  create/link/symlink/unlink/rename 和 orphan cleanup 统一递增 generation，使父 dentry 不可达的
+  延迟清理也不会留下陈旧目录快照；readdir 可能更新 atime，成功后做 inode 局部失效。
+  dentry cache 从 1024 增至 16K，以保留 Cargo 树的
+  dentry/inode/PageCache identity；16K 窗口无 eviction，heap peak 约 65 MiB/256 MiB。
+- 后续影响：新增任何 ext4 namespace 修改必须发布 generation；不能只失效直接 child。
+  cache 不继续无数据扩容；完整负载需监控 heap peak、dentry eviction 和 PageCache registry。
+
 ## kernel heap allocator 必须仓库内 vendor，并以 O(1) membership/unlink 合并普通 free block
 
 - 状态：已采用，长时 BuildStorm soak 待验证

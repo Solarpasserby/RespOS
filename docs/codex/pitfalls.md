@@ -1,5 +1,18 @@
 # RespOS 已确认易错点
 
+## 过小 dentry cache 会同时丢掉 inode metadata 和 PageCache identity
+
+- 状态：已确认并由 16K cache 修复当前窗口
+- 适用范围：Cargo 深目录树、VFS dentry/inode cache、ext4 lookup/stat、kernel heap 权衡
+- 最后验证：2026-08-10
+- 证据：1024/8192/16384 项 RV64 8 GiB/8 核 120 秒窗口；lookup 30,616 -> 6,007 ->
+  4,019，8192 项 eviction 5,426，16K 为 0
+- 内容：全局 dentry cache 满后每次 insert 扫描并任意移除一个只有 cache 引用的叶节点。
+  叶 dentry 消失后 inode 的 weak cache 也无法升级，连带丢失 raw metadata 和 inode PageCache；
+  后续访问不只多一次 dentry lookup，还会重新读文件页。
+- 后续影响：调容量时同时看 lookup calls/ticks、stat miss、PageCache fill/registry、eviction 和
+  heap peak。短窗口没有 eviction 不代表完整构建永不达容量，也不应为零 eviction 无界扩容。
+
 ## buddy allocator 的 free-list 线性 buddy 查找会在编译负载下吞掉大量 CPU
 
 - 状态：已确认并由 vendor allocator 修复短窗口热点

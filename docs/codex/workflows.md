@@ -358,6 +358,12 @@ LTP stat/fstatat。固定窗口比较必须同时报告阶段进度，不能因�
 目录中必须先 stat 填充缓存，再依次执行 append、truncate、chmod/chown、hardlink/unlink 和
 rename，每步重新核对 size/mode/uid/gid/nlink/inode。同时读取 `/proc/respos_perf` 的
 `stat_cache_hits/misses`；命中率只证明缓存生效，没有同阶段、同宿主负载旧版对照时不报加速比。
+目录缓存还必须验证 mkdir/rmdir 的父目录 nlink、普通创建、跨目录 rename 和延迟 orphan
+cleanup；它们必须通过 namespace generation 使旧快照失效。
+
+调整 `DENTRY_CACHE_CAPACITY` 时，打开 `perf_counters` 并同时报告 `dentry_cache_hits/misses/evictions`、
+`ext4_ops_lookup_calls/ticks`、stat miss、PageCache fill/registry 和 heap peak。dentry 持强引用会同时延长
+inode 及 PageCache identity，所以 fill 下降可能是避免重读而非负载进展变少；仍需对照编译阶段。
 
 分析 kernel heap 时使用 `heap_*_lock_wait_ticks` 与 `heap_*_core_ticks` 拆分总耗时；8 核累计 ticks
 可以超过墙钟，不能当作单核 elapsed。修改仓库内 allocator 后先运行：

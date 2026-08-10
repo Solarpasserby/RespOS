@@ -18,7 +18,13 @@ lazy_static! {
 
 /// 查全局 dentry 缓存，命中返回 dentry，未命中返回 None
 pub fn lookup_dentry_cache(abs_path: &str) -> Option<Arc<Dentry>> {
-    DENTRY_CACHE.lock().get(abs_path).cloned()
+    let result = DENTRY_CACHE.lock().get(abs_path).cloned();
+    if result.is_some() {
+        crate::perf::dentry_cache_hit(1);
+    } else {
+        crate::perf::dentry_cache_miss(1);
+    }
+    result
 }
 
 /// 将 dentry 插入全局缓存，若已满则踢掉一个只有缓存引用的条目腾位
@@ -31,6 +37,7 @@ pub fn insert_dentry_cache(dentry: Arc<Dentry>) {
             .map(|(k, _)| k.clone());
         if let Some(key) = victim_key {
             cache.remove(&key);
+            crate::perf::dentry_cache_eviction(1);
         }
     }
     cache.insert(dentry.current_abs_path(), dentry);

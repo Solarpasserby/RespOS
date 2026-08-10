@@ -81,6 +81,9 @@ counters!(
     ext4_stat_ticks,
     ext4_stat_cache_hits,
     ext4_stat_cache_misses,
+    ext4_stat_cache_refills,
+    ext4_stat_cache_uncacheable,
+    ext4_stat_cache_invalidations,
     ext4_lookup_calls,
     ext4_lookup_ticks,
     ext4_readdir_calls,
@@ -89,6 +92,9 @@ counters!(
     ext4_create_ticks,
     ext4_write_calls,
     ext4_write_ticks,
+    dentry_cache_hits,
+    dentry_cache_misses,
+    dentry_cache_evictions,
     dirty_pages_peak,
     anonymous_faults,
     private_file_faults,
@@ -197,6 +203,9 @@ increment_functions!(
     (ext4_stat_ticks, ext4_stat_ticks),
     (ext4_stat_cache_hit, ext4_stat_cache_hits),
     (ext4_stat_cache_miss, ext4_stat_cache_misses),
+    (ext4_stat_cache_refill, ext4_stat_cache_refills),
+    (ext4_stat_cache_uncacheable, ext4_stat_cache_uncacheable),
+    (ext4_stat_cache_invalidation, ext4_stat_cache_invalidations),
     (ext4_lookup_call, ext4_lookup_calls),
     (ext4_lookup_ticks, ext4_lookup_ticks),
     (ext4_readdir_call, ext4_readdir_calls),
@@ -205,6 +214,9 @@ increment_functions!(
     (ext4_create_ticks, ext4_create_ticks),
     (ext4_write_call, ext4_write_calls),
     (ext4_write_ticks, ext4_write_ticks),
+    (dentry_cache_hit, dentry_cache_hits),
+    (dentry_cache_miss, dentry_cache_misses),
+    (dentry_cache_eviction, dentry_cache_evictions),
     (anonymous_fault, anonymous_faults),
     (private_file_fault, private_file_faults),
     (shared_file_fault, shared_file_faults),
@@ -486,11 +498,14 @@ pub fn render() -> String {
     );
     let _ = writeln!(
         out,
-        "ext4_ops_stat_calls={} stat_ticks={} stat_cache_hits={} stat_cache_misses={} lookup_calls={} lookup_ticks={} readdir_calls={} readdir_ticks={} create_calls={} create_ticks={} write_calls={} write_ticks={}",
+        "ext4_ops_stat_calls={} stat_ticks={} stat_cache_hits={} stat_cache_misses={} stat_cache_refills={} stat_cache_uncacheable={} stat_cache_invalidations={} lookup_calls={} lookup_ticks={} readdir_calls={} readdir_ticks={} create_calls={} create_ticks={} write_calls={} write_ticks={}",
         s.ext4_stat_calls,
         s.ext4_stat_ticks,
         s.ext4_stat_cache_hits,
         s.ext4_stat_cache_misses,
+        s.ext4_stat_cache_refills,
+        s.ext4_stat_cache_uncacheable,
+        s.ext4_stat_cache_invalidations,
         s.ext4_lookup_calls,
         s.ext4_lookup_ticks,
         s.ext4_readdir_calls,
@@ -509,6 +524,11 @@ pub fn render() -> String {
         s.heap_dealloc_bytes,
         s.heap_current_bytes,
         s.heap_peak_bytes
+    );
+    let _ = writeln!(
+        out,
+        "dentry_cache_hits={} dentry_cache_misses={} dentry_cache_evictions={}",
+        s.dentry_cache_hits, s.dentry_cache_misses, s.dentry_cache_evictions
     );
     let _ = writeln!(
         out,
