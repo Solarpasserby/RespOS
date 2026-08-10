@@ -4,9 +4,10 @@ use crate::config::INODE_CACHE_CAPACITY;
 use alloc::ffi::CString;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
+use alloc::vec;
 use alloc::vec::Vec;
 use core::any::Any;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
 use hashbrown::HashMap;
 use lazy_static::lazy_static;
 use lwext4_rust::{Ext4File, InodeTypes as Ext4InodeTypes, bindings};
@@ -20,11 +21,14 @@ use crate::timer::{TimeSpec, get_time_ms};
 lazy_static! {
     static ref EXT4_INODE_CACHE: Mutex<HashMap<u64, Weak<dyn InodeOp>>> =
         Mutex::new(HashMap::new());
+    static ref DEFERRED_INODE_DISCARDS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
     /// lwext4 keeps mount, block-cache, and directory traversal state in
     /// shared C objects.  Every entry into lwext4, including superblock
     /// operations, must be serialized by this one lock on SMP.
     pub(super) static ref EXT4_OP_LOCK: ProfiledExt4Lock = ProfiledExt4Lock::new();
 }
+
+static DEFERRED_INODE_DISCARD_PENDING: AtomicBool = AtomicBool::new(false);
 
 pub(super) struct ProfiledExt4Lock {
     inner: Mutex<()>,
@@ -119,25 +123,19 @@ impl Drop for ProfiledExt4Guard<'_> {
     }
 }
 
-const MAX_TEST_HARDLINKS: u32 = 32;
-const MAX_TEST_SUBDIRS: usize = 32;
-
 pub struct Ext4Inode {
     pub ino: u64,
     ty: Ext4InodeTypes,
-    times: Mutex<Option<InodeTimes>>,
-    mode_override: Mutex<Option<u32>>,
-    owner_override: Mutex<Option<(u32, u32)>>,
-    nlink_override: Mutex<Option<u32>>,
-    raw_metadata: Mutex<Option<RawInodeMetadata>>,
-    metadata_generation: AtomicUsize,
-    orphan_path: Mutex<Option<String>>,
-    orphan_parent: Mutex<Option<Weak<dyn InodeOp>>>,
-    aliases: Mutex<Vec<String>>,
-    open_files: AtomicUsize,
+    metadata: Mutex<MetadataState>,
+    unlinked: AtomicBool,
     /// 共享页缓存，挂载在 inode 上，同一 inode 的所有 File 共享
     page_cache: Arc<PageCache>,
-    xattrs: Mutex<HashMap<String, Vec<u8>>>,
+}
+
+struct MetadataState {
+    raw: Option<RawInodeMetadata>,
+    times: Option<InodeTimes>,
+    generation: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -163,23 +161,63 @@ struct RawInodeMetadata {
 unsafe impl Send for Ext4Inode {}
 unsafe impl Sync for Ext4Inode {}
 
+impl Drop for Ext4Inode {
+    fn drop(&mut self) {
+        if self.unlinked.load(Ordering::Acquire) {
+            DEFERRED_INODE_DISCARDS.lock().push(self.ino as u32);
+            DEFERRED_INODE_DISCARD_PENDING.store(true, Ordering::Release);
+        }
+    }
+}
+
+/// Reclaim an unlinked lower inode only after its final VFS `Arc` disappears.
+/// Drop merely queues work so it never enters lwext4 under an unrelated lock.
+pub fn reap_deferred_inodes() {
+    if !DEFERRED_INODE_DISCARD_PENDING.swap(false, Ordering::AcqRel) {
+        return;
+    }
+
+    let pending = core::mem::take(&mut *DEFERRED_INODE_DISCARDS.lock());
+    if pending.is_empty() {
+        return;
+    }
+
+    {
+        let mut cache = EXT4_INODE_CACHE.lock();
+        for ino in &pending {
+            cache.remove(&(*ino as u64));
+        }
+    }
+
+    let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Namespace);
+    let mount = c"/";
+    let mut retry = Vec::new();
+    for ino in pending {
+        let ret = unsafe { bindings::ext4_inode_discard(mount.as_ptr(), ino) };
+        if ret != 0 && ret != 22 {
+            retry.push(ino);
+        }
+    }
+    drop(_guard);
+
+    if !retry.is_empty() {
+        DEFERRED_INODE_DISCARDS.lock().extend(retry);
+        DEFERRED_INODE_DISCARD_PENDING.store(true, Ordering::Release);
+    }
+}
+
 impl Ext4Inode {
     pub fn new(ino: u64, ty: Ext4InodeTypes) -> Self {
         Self {
             ino,
             ty,
-            times: Mutex::new(None),
-            mode_override: Mutex::new(None),
-            owner_override: Mutex::new(None),
-            nlink_override: Mutex::new(None),
-            raw_metadata: Mutex::new(None),
-            metadata_generation: AtomicUsize::new(1),
-            orphan_path: Mutex::new(None),
-            orphan_parent: Mutex::new(None),
-            aliases: Mutex::new(Vec::new()),
-            open_files: AtomicUsize::new(0),
+            metadata: Mutex::new(MetadataState {
+                raw: None,
+                times: None,
+                generation: 1,
+            }),
+            unlinked: AtomicBool::new(false),
             page_cache: PageCache::new(0),
-            xattrs: Mutex::new(HashMap::new()),
         }
     }
 
@@ -231,6 +269,10 @@ impl Ext4Inode {
             28 => Errno::ENOSPC,
             30 => Errno::EROFS,
             39 => Errno::ENOTEMPTY,
+            16 => Errno::EBUSY,
+            34 => Errno::ERANGE,
+            61 => Errno::ENODATA,
+            95 => Errno::EOPNOTSUPP,
             _ => Errno::EIO,
         }
     }
@@ -262,29 +304,6 @@ impl Ext4Inode {
         Ok(())
     }
 
-    fn file_readlink(path: &str) -> SysResult<String> {
-        const MAX_LINK_TARGET: usize = 4096;
-
-        let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Read);
-        let path = CString::new(path).map_err(|_| Errno::EINVAL)?;
-        // ext4_readlink 返回裸字节和读取长度，不保证 C 字符串结尾，因此按 rcnt 截断。
-        let mut buf = Vec::from([0u8; MAX_LINK_TARGET]);
-        let mut read_len = 0usize;
-        let ret = unsafe {
-            bindings::ext4_readlink(
-                path.as_ptr(),
-                buf.as_mut_ptr().cast(),
-                buf.len(),
-                &mut read_len,
-            )
-        };
-        if ret != 0 {
-            return Err(Self::map_lwext4_err(ret));
-        }
-        buf.truncate(read_len);
-        String::from_utf8(buf).map_err(|_| Errno::EINVAL)
-    }
-
     pub(crate) fn file_rename(old_path: &str, new_path: &str) -> SysResult {
         {
             let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Namespace);
@@ -298,162 +317,33 @@ impl Ext4Inode {
         Ok(())
     }
 
-    fn file_remove(path: &str, ty: InodeType) -> SysResult {
-        {
-            let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Namespace);
-            let file = &mut Ext4File::new(path, ty.into());
-            file.file_remove(path).map_err(Self::map_lwext4_err)?;
+    pub(crate) fn remove_path(path: &str, ty: InodeType, deferred: bool) -> SysResult {
+        let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Namespace);
+        let path = CString::new(path).map_err(|_| Errno::EINVAL)?;
+        let ret = unsafe {
+            match (ty, deferred) {
+                (InodeType::Directory, true) => bindings::ext4_dir_rm_deferred(path.as_ptr()),
+                (InodeType::Directory, false) => bindings::ext4_dir_rm(path.as_ptr()),
+                (_, true) => bindings::ext4_fremove_deferred(path.as_ptr()),
+                (_, false) => bindings::ext4_fremove(path.as_ptr()),
+            }
+        };
+        if ret == 0 {
+            Ok(())
+        } else {
+            Err(Self::map_lwext4_err(ret))
         }
-        Ok(())
     }
 
     pub(crate) fn namespace_changed(&self) {
-        self.metadata_generation.fetch_add(1, Ordering::AcqRel);
+        let mut metadata = self.metadata.lock();
+        metadata.generation = metadata.generation.wrapping_add(1);
+        metadata.raw = None;
+    }
+
+    pub(crate) fn mark_unlinked(&self) {
+        self.unlinked.store(true, Ordering::Release);
         self.invalidate_raw_metadata();
-    }
-
-    pub fn storage_path(&self, path: &str) -> String {
-        self.orphan_path
-            .lock()
-            .clone()
-            .or_else(|| {
-                let aliases = self.aliases.lock();
-                aliases
-                    .iter()
-                    .find(|alias| alias.as_str() == path)
-                    .or_else(|| aliases.first())
-                    .cloned()
-            })
-            .unwrap_or_else(|| String::from(path))
-    }
-
-    fn register_alias(&self, path: &str) {
-        let mut aliases = self.aliases.lock();
-        if !aliases.iter().any(|alias| alias == path) {
-            aliases.push(String::from(path));
-        }
-    }
-
-    fn unregister_alias(&self, path: &str) {
-        self.aliases.lock().retain(|alias| alias != path);
-    }
-
-    pub(crate) fn rename_cached_paths(old_path: &str, new_path: &str) {
-        let prefix = alloc::format!("{}/", old_path.trim_end_matches('/'));
-        let new_prefix = alloc::format!("{}/", new_path.trim_end_matches('/'));
-        let inodes: Vec<_> = EXT4_INODE_CACHE
-            .lock()
-            .values()
-            .filter_map(Weak::upgrade)
-            .collect();
-        for inode in inodes {
-            let Some(inode) = inode.as_any().downcast_ref::<Ext4Inode>() else {
-                continue;
-            };
-            let mut aliases = inode.aliases.lock();
-            for alias in aliases.iter_mut() {
-                if alias == old_path {
-                    *alias = String::from(new_path);
-                } else if alias.starts_with(&prefix) {
-                    *alias = alloc::format!("{}{}", new_prefix, &alias[prefix.len()..]);
-                }
-            }
-            drop(aliases);
-            inode.invalidate_raw_metadata();
-        }
-    }
-
-    pub(crate) fn unregister_cached_path(&self, path: &str) {
-        self.unregister_alias(path);
-        self.invalidate_raw_metadata();
-    }
-
-    pub fn open_file(&self) {
-        self.open_files.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub fn has_open_files(&self) -> bool {
-        self.open_files.load(Ordering::Acquire) != 0
-    }
-
-    /// 返回关闭后是否已没有 File 对象引用该 inode。
-    pub fn close_file(&self) -> bool {
-        self.open_files.fetch_sub(1, Ordering::AcqRel) == 1
-    }
-
-    pub fn cleanup_orphan(&self) {
-        let orphan_path = { self.orphan_path.lock().clone() };
-        if let Some(path) = orphan_path {
-            let removed = if self.node_type() == InodeType::Directory {
-                let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Namespace);
-                let file = &mut Ext4File::new(&path, self.ty.clone());
-                file.dir_rm(&path).map(|_| ()).map_err(Self::map_lwext4_err)
-            } else {
-                Self::file_remove(&path, self.node_type())
-            };
-            if removed.is_ok() {
-                *self.orphan_path.lock() = None;
-                self.invalidate_raw_metadata();
-                if let Some(parent) = self
-                    .orphan_parent
-                    .lock()
-                    .take()
-                    .and_then(|parent| parent.upgrade())
-                    && let Some(parent) = parent.as_any().downcast_ref::<Ext4Inode>()
-                {
-                    parent.namespace_changed();
-                }
-            }
-        }
-    }
-
-    pub fn orphan_regular_file(&self, old_path: &str, parent: &Arc<dyn InodeOp>) -> SysResult {
-        let orphan_path = alloc::format!("{}.respos_orphan_{}", old_path, self.ino);
-        self.orphan_inode(old_path, &orphan_path, parent)
-    }
-
-    pub fn orphan_directory(&self, old_path: &str, parent: &Arc<dyn InodeOp>) -> SysResult<String> {
-        let orphan_path = alloc::format!("{}.respos_rename_backup_{}", old_path, self.ino);
-        self.orphan_inode(old_path, &orphan_path, parent)?;
-        Ok(orphan_path)
-    }
-
-    fn orphan_inode(
-        &self,
-        old_path: &str,
-        orphan_path: &str,
-        parent: &Arc<dyn InodeOp>,
-    ) -> SysResult {
-        Self::file_rename(old_path, &orphan_path)?;
-        self.unregister_alias(old_path);
-        *self.orphan_path.lock() = Some(String::from(orphan_path));
-        *self.orphan_parent.lock() = Some(Arc::downgrade(parent));
-        *self.nlink_override.lock() = Some(0);
-        self.invalidate_raw_metadata();
-        if let Some(parent) = parent.as_any().downcast_ref::<Ext4Inode>() {
-            parent.namespace_changed();
-        }
-        Ok(())
-    }
-
-    /// rename 覆盖目标后端失败时，把暂存的目标恢复到原名字。
-    pub fn restore_orphan(&self, original_path: &str) -> SysResult {
-        let orphan_path = self.orphan_path.lock().clone().ok_or(Errno::EINVAL)?;
-        Self::file_rename(&orphan_path, original_path)?;
-        *self.orphan_path.lock() = None;
-        self.register_alias(original_path);
-        if let Some(parent) = self
-            .orphan_parent
-            .lock()
-            .take()
-            .and_then(|parent| parent.upgrade())
-            && let Some(parent) = parent.as_any().downcast_ref::<Ext4Inode>()
-        {
-            parent.namespace_changed();
-        }
-        *self.nlink_override.lock() = None;
-        self.invalidate_raw_metadata();
-        Ok(())
     }
 
     fn dirent64_reclen(name_len: usize) -> usize {
@@ -517,7 +407,7 @@ impl Ext4Inode {
     }
 
     fn cached_times(&self, atime: u32, mtime: u32, ctime: u32) -> InodeTimes {
-        if let Some(times) = *self.times.lock() {
+        if let Some(times) = self.metadata.lock().times {
             return times;
         }
         InodeTimes {
@@ -528,7 +418,7 @@ impl Ext4Inode {
     }
 
     fn current_times(&self, path: &str) -> SysResult<InodeTimes> {
-        if let Some(times) = *self.times.lock() {
+        if let Some(times) = self.metadata.lock().times {
             return Ok(times);
         }
         self.stat(path).map(|stat| InodeTimes {
@@ -540,7 +430,7 @@ impl Ext4Inode {
 
     fn commit_lower_setattr(
         &self,
-        path: &str,
+        _path: &str,
         mode: Option<u32>,
         owner: Option<(u32, u32)>,
         atime: Option<TimeSpec>,
@@ -560,11 +450,12 @@ impl Ext4Inode {
             | (u32::from(lower_mtime.is_some()) << 3)
             | (u32::from(lower_ctime.is_some()) << 4);
         let (uid, gid) = owner.unwrap_or_default();
-        let c_path = CString::new(path).map_err(|_| Errno::EINVAL)?;
+        let mount = b"/\0";
         let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Attributes);
         let ret = unsafe {
-            bindings::ext4_setattr(
-                c_path.as_ptr(),
+            bindings::ext4_setattr_ino(
+                mount.as_ptr().cast(),
+                self.ino as u32,
                 mask,
                 mode.unwrap_or(0) & 0o7777,
                 uid,
@@ -627,7 +518,7 @@ impl Ext4Inode {
 
     fn init_inode_times(&self) {
         let now = Self::now_timespec();
-        *self.times.lock() = Some(InodeTimes {
+        self.metadata.lock().times = Some(InodeTimes {
             atime: now,
             mtime: now,
             ctime: now,
@@ -635,37 +526,29 @@ impl Ext4Inode {
     }
 
     fn set_cached_times(&self, times: InodeTimes) {
-        *self.times.lock() = Some(times);
+        self.metadata.lock().times = Some(times);
     }
 
-    fn set_cached_mode(&self, mode: u32) {
-        *self.mode_override.lock() = Some(mode & 0o7777);
-    }
-
-    fn set_cached_owner(&self, uid: u32, gid: u32) {
-        *self.owner_override.lock() = Some((uid, gid));
-    }
-
-    fn invalidate_raw_metadata(&self) {
-        if self.raw_metadata.lock().take().is_some() {
+    pub(crate) fn invalidate_raw_metadata(&self) {
+        if self.metadata.lock().raw.take().is_some() {
             crate::perf::ext4_stat_cache_invalidation(1);
         }
     }
 
-    fn raw_metadata(&self, path: &str) -> SysResult<RawInodeMetadata> {
+    fn raw_metadata(&self, _path: &str) -> SysResult<RawInodeMetadata> {
         let ty = self.node_type();
         let cacheable = matches!(
             ty,
             InodeType::Regular | InodeType::SymLink | InodeType::Directory
         );
-        let namespace_generation = self.metadata_generation.load(Ordering::Acquire);
-        let mut cached = self.raw_metadata.lock();
-        if cacheable && let Some(metadata) = *cached {
+        let mut state = self.metadata.lock();
+        let namespace_generation = state.generation;
+        if cacheable && let Some(metadata) = state.raw {
             if ty != InodeType::Directory || metadata.namespace_generation == namespace_generation {
                 crate::perf::ext4_stat_cache_hit(1);
                 return Ok(metadata);
             }
-            *cached = None;
+            state.raw = None;
             crate::perf::ext4_stat_cache_invalidation(1);
         }
         crate::perf::ext4_stat_cache_miss(1);
@@ -675,18 +558,27 @@ impl Ext4Inode {
             crate::perf::ext4_stat_cache_uncacheable(1);
         }
 
-        let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Stat);
-        let c_path = CString::new(path).map_err(|_| Errno::EINVAL)?;
-        let mut raw_ino = 0u32;
-        let mut raw_inode: bindings::ext4_inode = unsafe { core::mem::zeroed() };
-        let ret =
-            unsafe { bindings::ext4_raw_inode_fill(c_path.as_ptr(), &mut raw_ino, &mut raw_inode) };
-        if ret != 0 {
-            return Err(Self::map_lwext4_err(ret));
-        }
+        drop(state);
+        let raw_inode = {
+            let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Stat);
+            let mut raw_inode: bindings::ext4_inode = unsafe { core::mem::zeroed() };
+            let mount = b"/\0";
+            let ret = unsafe {
+                bindings::ext4_raw_inode_fill_ino(
+                    mount.as_ptr().cast(),
+                    self.ino as u32,
+                    &mut raw_inode,
+                )
+            };
+            if ret != 0 {
+                return Err(Self::map_lwext4_err(ret));
+            }
+            raw_inode
+        };
         // Reload after lower I/O so a mutation of this directory cannot make
         // a fresh snapshot carry the generation observed before the I/O.
-        let namespace_generation = self.metadata_generation.load(Ordering::Acquire);
+        let mut state = self.metadata.lock();
+        let namespace_generation = state.generation;
 
         let osd2 = unsafe { core::ptr::addr_of!(raw_inode.osd2).read_unaligned() };
         let linux2 = unsafe { osd2.linux2 };
@@ -705,39 +597,9 @@ impl Ext4Inode {
             namespace_generation,
         };
         if cacheable {
-            *cached = Some(metadata);
+            state.raw = Some(metadata);
         }
         Ok(metadata)
-    }
-
-    fn bump_cached_nlink(&self) {
-        let mut nlink = self.nlink_override.lock();
-        *nlink = Some(nlink.unwrap_or(1).saturating_add(1));
-    }
-
-    fn drop_cached_nlink(&self) {
-        let mut nlink = self.nlink_override.lock();
-        if let Some(value) = *nlink {
-            *nlink = Some(value.saturating_sub(1));
-        }
-    }
-
-    fn cached_nlink(&self) -> u32 {
-        self.nlink_override.lock().unwrap_or(1)
-    }
-
-    fn bump_cached_dir_nlink(&self) {
-        let mut nlink = self.nlink_override.lock();
-        *nlink = Some(nlink.unwrap_or(2).saturating_add(1));
-    }
-
-    fn drop_cached_dir_nlink(&self) {
-        let mut nlink = self.nlink_override.lock();
-        *nlink = Some(nlink.unwrap_or(2).saturating_sub(1).max(2));
-    }
-
-    pub(crate) fn test_dir_link_limit_reached(&self) -> bool {
-        self.cached_nlink() >= MAX_TEST_SUBDIRS as u32 + 2
     }
 }
 
@@ -764,36 +626,23 @@ impl InodeOp for Ext4Inode {
         let ino = self.ino;
 
         let raw = self.raw_metadata(path)?;
-        let mut mode = raw.mode;
-        if let Some(override_mode) = *self.mode_override.lock() {
-            mode = (mode & !0o7777) | (override_mode & 0o7777);
-        }
-
-        let mut uid = raw.uid;
-        let mut gid = raw.gid;
-        if let Some((override_uid, override_gid)) = *self.owner_override.lock() {
-            uid = override_uid;
-            gid = override_gid;
-        }
-
         let times = self.cached_times(raw.atime, raw.mtime, raw.ctime);
         let size = match ty {
             InodeType::Regular => (raw.size as usize).max(self.page_cache.len()),
             InodeType::SymLink => raw.size as usize,
             _ => 0,
         };
-        let nlink = self.nlink_override.lock().unwrap_or(raw.nlink);
 
         let stat = KStat {
             dev: 0,
             size,
             ty,
             ino,
-            nlink,
-            uid,
-            gid,
+            nlink: raw.nlink,
+            uid: raw.uid,
+            gid: raw.gid,
             rdev: 0,
-            mode,
+            mode: raw.mode,
             mode_valid: true,
             blksize: crate::config::BLOCK_SIZE as u32,
             blocks: KStat::blocks_for_size(size as u64),
@@ -806,7 +655,7 @@ impl InodeOp for Ext4Inode {
         Ok(stat)
     }
 
-    fn read_at(&self, path: &str, off: usize, buf: &mut [u8]) -> SysResult<usize> {
+    fn read_at(&self, _path: &str, off: usize, buf: &mut [u8]) -> SysResult<usize> {
         self.check_type(InodeType::Regular)?;
         crate::perf::inode_read_call(1);
         crate::perf::inode_read_requested_bytes(buf.len());
@@ -814,8 +663,8 @@ impl InodeOp for Ext4Inode {
         let started = crate::perf::now_ticks();
         let read_size = {
             let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Read);
-            let file = &mut Ext4File::new(path, self.ty.clone());
-            file.file_open(path, bindings::O_RDONLY)
+            let file = &mut Ext4File::new("/", self.ty.clone());
+            file.inode_open(self.ino as u32, bindings::O_RDONLY)
                 .map_err(Self::map_lwext4_err)?;
             file.file_seek(off as i64, bindings::SEEK_SET)
                 .map_err(Self::map_lwext4_err)?;
@@ -842,8 +691,8 @@ impl InodeOp for Ext4Inode {
 
         let write_size = {
             let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Write);
-            let file = &mut Ext4File::new(path, self.ty.clone());
-            file.file_open(path, bindings::O_RDWR)
+            let file = &mut Ext4File::new("/", self.ty.clone());
+            file.inode_open(self.ino as u32, bindings::O_RDWR)
                 .map_err(Self::map_lwext4_err)?;
             // lwext4's fseek rejects offsets beyond EOF and the Rust wrapper
             // historically clamped them to the current size.  Page-cache
@@ -880,8 +729,8 @@ impl InodeOp for Ext4Inode {
 
         {
             let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Write);
-            let file = &mut Ext4File::new(path, self.ty.clone());
-            file.file_open(path, bindings::O_RDWR)
+            let file = &mut Ext4File::new("/", self.ty.clone());
+            file.inode_open(self.ino as u32, bindings::O_RDWR)
                 .map_err(Self::map_lwext4_err)?;
             file.file_truncate(size as u64)
                 .map_err(Self::map_lwext4_err)?;
@@ -906,7 +755,6 @@ impl InodeOp for Ext4Inode {
         times.ctime = Self::now_timespec();
         self.commit_lower_setattr(path, Some(mode), None, None, None, Some(times.ctime))?;
         self.invalidate_raw_metadata();
-        self.set_cached_mode(mode);
         self.set_cached_times(times);
         Ok(())
     }
@@ -917,7 +765,6 @@ impl InodeOp for Ext4Inode {
         times.ctime = Self::now_timespec();
         self.commit_lower_setattr(path, None, Some((uid, gid)), None, None, Some(times.ctime))?;
         self.invalidate_raw_metadata();
-        self.set_cached_owner(uid, gid);
         self.set_cached_times(times);
         Ok(())
     }
@@ -931,10 +778,6 @@ impl InodeOp for Ext4Inode {
         times.ctime = Self::now_timespec();
         self.commit_lower_setattr(path, mode, Some((uid, gid)), None, None, Some(times.ctime))?;
         self.invalidate_raw_metadata();
-        self.set_cached_owner(uid, gid);
-        if let Some(mode) = mode {
-            self.set_cached_mode(mode);
-        }
         self.set_cached_times(times);
         Ok(())
     }
@@ -943,37 +786,135 @@ impl InodeOp for Ext4Inode {
         const XATTR_CREATE: usize = 0x1;
         const XATTR_REPLACE: usize = 0x2;
 
-        let mut xattrs = self.xattrs.lock();
-        let exists = xattrs.contains_key(&name);
+        let exists = match self.get_xattr(&name) {
+            Ok(_) => true,
+            Err(Errno::ENODATA) => false,
+            Err(error) => return Err(error),
+        };
         if flags & XATTR_CREATE != 0 && exists {
             return Err(Errno::EEXIST);
         }
         if flags & XATTR_REPLACE != 0 && !exists {
             return Err(Errno::ENODATA);
         }
-        xattrs.insert(name, value);
-        Ok(())
-    }
-
-    fn get_xattr(&self, name: &str) -> Result<Vec<u8>, Errno> {
-        self.xattrs.lock().get(name).cloned().ok_or(Errno::ENODATA)
-    }
-
-    fn list_xattr(&self) -> Result<Vec<String>, Errno> {
-        Ok(self.xattrs.lock().keys().cloned().collect())
-    }
-
-    fn remove_xattr(&self, name: &str) -> SysResult {
-        if self.xattrs.lock().remove(name).is_some() {
+        let name = CString::new(name).map_err(|_| Errno::EINVAL)?;
+        let mount = b"/\0";
+        let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Attributes);
+        let ret = unsafe {
+            bindings::ext4_setxattr_ino(
+                mount.as_ptr().cast(),
+                self.ino as u32,
+                name.as_ptr(),
+                name.as_bytes().len(),
+                value.as_ptr().cast(),
+                value.len(),
+            )
+        };
+        if ret == 0 {
             Ok(())
         } else {
-            Err(Errno::ENODATA)
+            Err(Self::map_lwext4_err(ret))
         }
     }
 
-    fn clear_xattrs(&self) {
-        self.xattrs.lock().clear();
+    fn get_xattr(&self, name: &str) -> Result<Vec<u8>, Errno> {
+        let name = CString::new(name).map_err(|_| Errno::EINVAL)?;
+        let mount = b"/\0";
+        let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Attributes);
+        let mut size = 0usize;
+        let mut ret = unsafe {
+            bindings::ext4_getxattr_ino(
+                mount.as_ptr().cast(),
+                self.ino as u32,
+                name.as_ptr(),
+                name.as_bytes().len(),
+                core::ptr::null_mut(),
+                0,
+                &mut size,
+            )
+        };
+        if ret != 0 {
+            return Err(Self::map_lwext4_err(ret));
+        }
+        let mut value = vec![0u8; size];
+        ret = unsafe {
+            bindings::ext4_getxattr_ino(
+                mount.as_ptr().cast(),
+                self.ino as u32,
+                name.as_ptr(),
+                name.as_bytes().len(),
+                value.as_mut_ptr().cast(),
+                value.len(),
+                &mut size,
+            )
+        };
+        if ret != 0 {
+            return Err(Self::map_lwext4_err(ret));
+        }
+        value.truncate(size);
+        Ok(value)
     }
+
+    fn list_xattr(&self) -> Result<Vec<String>, Errno> {
+        let mount = b"/\0";
+        let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Attributes);
+        let mut size = 0usize;
+        let mut ret = unsafe {
+            bindings::ext4_listxattr_ino(
+                mount.as_ptr().cast(),
+                self.ino as u32,
+                core::ptr::null_mut(),
+                0,
+                &mut size,
+            )
+        };
+        if ret != 0 {
+            return Err(Self::map_lwext4_err(ret));
+        }
+        let mut list = vec![0u8; size];
+        ret = unsafe {
+            bindings::ext4_listxattr_ino(
+                mount.as_ptr().cast(),
+                self.ino as u32,
+                list.as_mut_ptr().cast(),
+                list.len(),
+                &mut size,
+            )
+        };
+        if ret != 0 {
+            return Err(Self::map_lwext4_err(ret));
+        }
+        list.truncate(size);
+        list.split(|byte| *byte == 0)
+            .filter(|name| !name.is_empty())
+            .map(|name| {
+                core::str::from_utf8(name)
+                    .map(String::from)
+                    .map_err(|_| Errno::EINVAL)
+            })
+            .collect()
+    }
+
+    fn remove_xattr(&self, name: &str) -> SysResult {
+        let name = CString::new(name).map_err(|_| Errno::EINVAL)?;
+        let mount = b"/\0";
+        let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Attributes);
+        let ret = unsafe {
+            bindings::ext4_removexattr_ino(
+                mount.as_ptr().cast(),
+                self.ino as u32,
+                name.as_ptr(),
+                name.as_bytes().len(),
+            )
+        };
+        if ret == 0 {
+            Ok(())
+        } else {
+            Err(Self::map_lwext4_err(ret))
+        }
+    }
+
+    fn clear_xattrs(&self) {}
 
     /// 查找与 name 匹配的子索引节点，约定 name 为常规文件名
     fn lookup(&self, parent_path: &str, name: &str) -> SysResult<Arc<dyn InodeOp>> {
@@ -987,11 +928,7 @@ impl InodeOp for Ext4Inode {
         let (child_ino, child_ty) = Self::lookup_dirent(parent_path, name)?;
         crate::perf::ext4_lookup_call(1);
         crate::perf::ext4_lookup_ticks(crate::perf::elapsed_since(started));
-        let inode = Self::get_or_create(child_ino, child_ty);
-        if let Some(inode) = inode.as_any().downcast_ref::<Ext4Inode>() {
-            inode.register_alias(&Self::child_path(parent_path, name));
-        }
-        Ok(inode)
+        Ok(Self::get_or_create(child_ino, child_ty))
     }
 
     fn readdir(&self, path: &str) -> SysResult<Vec<LinuxDirent64>> {
@@ -999,13 +936,17 @@ impl InodeOp for Ext4Inode {
         let started = crate::perf::now_ticks();
 
         let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Readdir);
-        let c_path = CString::new(path).map_err(|_| Errno::EINVAL)?;
-        let c_path = c_path.into_raw();
         let mut dir: bindings::ext4_dir = unsafe { core::mem::zeroed() };
-        let ret = unsafe { bindings::ext4_dir_open(&mut dir, c_path) };
-        unsafe {
-            drop(CString::from_raw(c_path));
-        }
+        let mount = b"/\0";
+        let ret = unsafe {
+            bindings::ext4_inode_open(
+                &mut dir.f,
+                mount.as_ptr().cast(),
+                self.ino as u32,
+                bindings::O_RDONLY,
+            )
+        };
+        dir.next_off = 0;
         if ret != 0 {
             return Err(Self::map_lwext4_err(ret));
         }
@@ -1066,14 +1007,6 @@ impl InodeOp for Ext4Inode {
         self.check_type(InodeType::Directory)?;
         let started = crate::perf::now_ticks();
 
-        let is_ltp_emlink_subdir = ty == InodeType::Directory
-            && parent_path.ends_with("/emlink_dir")
-            && name.starts_with("testdir")
-            && name.trim_start_matches("testdir").parse::<usize>().is_ok();
-        if is_ltp_emlink_subdir && self.test_dir_link_limit_reached() {
-            return Err(Errno::EMLINK);
-        }
-
         let path = Self::child_path(parent_path, name);
         let ext4_ty = Ext4InodeTypes::from(ty);
         {
@@ -1119,11 +1052,7 @@ impl InodeOp for Ext4Inode {
         let (child_ino, child_ty) = Self::lookup_dirent(parent_path, name)?;
         let inode = Self::get_or_create(child_ino, child_ty);
         if let Some(inode) = inode.as_any().downcast_ref::<Ext4Inode>() {
-            inode.register_alias(&path);
             inode.init_inode_times();
-        }
-        if is_ltp_emlink_subdir {
-            self.bump_cached_dir_nlink();
         }
         crate::perf::ext4_create_call(1);
         crate::perf::ext4_create_ticks(crate::perf::elapsed_since(started));
@@ -1154,18 +1083,13 @@ impl InodeOp for Ext4Inode {
         //     return Err(Errno::EEXIST);
         // }
 
-        if self.cached_nlink() >= MAX_TEST_HARDLINKS {
-            return Err(Errno::EMLINK);
-        }
         Self::file_link(old_path, &bare_dentry.abs_path)?;
-        self.register_alias(&bare_dentry.abs_path);
         if let Some(parent) = bare_dentry.get_parent()
             && let Some(parent) = parent.get_inode().as_any().downcast_ref::<Ext4Inode>()
         {
             parent.namespace_changed();
         }
         self.invalidate_raw_metadata();
-        self.bump_cached_nlink();
         Ok(())
     }
 
@@ -1178,6 +1102,15 @@ impl InodeOp for Ext4Inode {
 
         let child_abs_path = &current_path;
         let child_inode = valid_dentry.try_get_inode().ok_or(Errno::ENOENT)?;
+        let child_ext4 = child_inode
+            .as_any()
+            .downcast_ref::<Ext4Inode>()
+            .ok_or(Errno::EXDEV)?;
+        let child_stat = child_inode.stat(child_abs_path)?;
+        // `i_nlink == 0` detaches the inode from the namespace. Lower storage
+        // is reclaimed only after every VFS Arc (File, cwd, Dentry and
+        // transient Path) has disappeared.
+        let deferred = child_inode.node_type() == InodeType::Directory || child_stat.nlink <= 1;
         if child_inode.node_type() == InodeType::Directory {
             let entries = child_inode.readdir(child_abs_path)?;
             let has_content = entries
@@ -1186,37 +1119,33 @@ impl InodeOp for Ext4Inode {
             if has_content {
                 return Err(Errno::ENOTEMPTY);
             }
-            let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Namespace);
-            let file = &mut Ext4File::new(child_abs_path, self.ty.clone());
-            file.dir_rm(child_abs_path).map_err(Self::map_lwext4_err)?;
-            if current_path.contains("/emlink_dir/testdir") {
-                self.drop_cached_dir_nlink();
-            }
+            Self::remove_path(child_abs_path, InodeType::Directory, deferred)?;
         } else {
-            // lwext4_rust 包中 `file_remove` 的语义是 unlink 而非删除文件
-            {
-                let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Namespace);
-                let file = &mut Ext4File::new(child_abs_path, child_inode.node_type().into());
-                file.file_remove(child_abs_path)
-                    .map_err(Self::map_lwext4_err)?;
-            }
-            if let Some(inode) = child_inode.as_any().downcast_ref::<Ext4Inode>() {
-                inode.drop_cached_nlink();
-            }
+            Self::remove_path(child_abs_path, child_inode.node_type(), deferred)?;
         };
-        if let Some(inode) = child_inode.as_any().downcast_ref::<Ext4Inode>() {
-            inode.unregister_cached_path(child_abs_path);
+        child_ext4.invalidate_raw_metadata();
+        if deferred {
+            child_ext4.mark_unlinked();
         }
         self.namespace_changed();
         Ok(())
     }
 
-    fn read_link(&self, path: &str) -> SysResult<String> {
+    fn read_link(&self, _path: &str) -> SysResult<String> {
         // readlinkat 必须作用在 symlink inode 自身，传到这里的 path 不应已经被 namei 跟随。
         if self.node_type() != InodeType::SymLink {
             return Err(Errno::EINVAL);
         }
-        Self::file_readlink(path)
+        const MAX_LINK_TARGET: usize = 4096;
+        let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Read);
+        let file = &mut Ext4File::new("/", self.ty.clone());
+        file.inode_open(self.ino as u32, bindings::O_RDONLY)
+            .map_err(Self::map_lwext4_err)?;
+        let mut buf = vec![0u8; MAX_LINK_TARGET];
+        let size = file.file_read(&mut buf).map_err(Self::map_lwext4_err)?;
+        file.file_close().map_err(Self::map_lwext4_err)?;
+        buf.truncate(size);
+        String::from_utf8(buf).map_err(|_| Errno::EINVAL)
     }
 }
 

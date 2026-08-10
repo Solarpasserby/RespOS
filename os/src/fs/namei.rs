@@ -834,23 +834,8 @@ pub fn filename_unlink(dirfd: isize, path: &str, remove_dir: bool) -> SysResult 
     let parent = target.get_parent().ok_or(Errno::EBUSY)?;
     check_sticky_rename_permission(&parent, &target)?;
     let name = dentry_name(&target)?;
-    let target_inode = target.get_inode();
     let target_path = target.current_abs_path();
-    let target_stat = target_inode.stat(&target_path)?;
-    let orphaned_open_file = if target_ty == InodeType::Regular && target_stat.nlink <= 1 {
-        target_inode
-            .as_any()
-            .downcast_ref::<Ext4Inode>()
-            .filter(|inode| inode.has_open_files())
-            .map(|inode| inode.orphan_regular_file(&target_path, &parent.get_inode()))
-            .transpose()?
-            .is_some()
-    } else {
-        false
-    };
-    if !orphaned_open_file {
-        parent.get_inode().unlink(&target)?;
-    }
+    parent.get_inode().unlink(&target)?;
     parent.remove_child(name.as_str());
     remove_dentry_cache_tree(&target_path);
     Ok(())
@@ -1024,17 +1009,8 @@ pub fn filename_rename(
     if old_ty == InodeType::Directory && new_abs.starts_with(&(old.abs_path() + "/")) {
         return Err(Errno::EINVAL);
     }
-    if old_ty == InodeType::Directory && nd.dentry.current_abs_path().ends_with("/emlink_dir") {
-        if let Some(parent) = nd.dentry.get_inode().as_any().downcast_ref::<Ext4Inode>() {
-            if parent.test_dir_link_limit_reached() {
-                return Err(Errno::EMLINK);
-            }
-        }
-    }
-
     // 防止 ext4_frename 在目标为非空目录时产生嵌套语义，损坏文件系统。
-    let mut replaced_regular: Option<(Arc<dyn super::vfs::InodeOp>, bool)> = None;
-    let mut replaced_directory: Option<(Arc<Dentry>, bool)> = None;
+    let mut replaced_target: Option<(Arc<dyn super::vfs::InodeOp>, String, InodeType, bool)> = None;
     if let Ok(existing) = lookup_dentry(&mut nd) {
         if no_replace {
             return Err(Errno::EEXIST);
@@ -1055,23 +1031,7 @@ pub fn filename_rename(
         }
         check_sticky_rename_permission(&nd.dentry, &existing)?;
 
-        if existing_ty != InodeType::Directory {
-            let existing_inode = existing.get_inode();
-            let existing_stat = existing_inode.stat(&existing_path)?;
-            if existing_ty == InodeType::Regular && existing_stat.nlink <= 1 {
-                // 先把被覆盖目标移到 orphan 名字。这样后续后端 rename 失败时
-                // 可以恢复目标，不会出现“失败却已经删除目标”的状态污染。
-                let ext4_inode = existing_inode
-                    .as_any()
-                    .downcast_ref::<Ext4Inode>()
-                    .ok_or(Errno::EXDEV)?;
-                let was_open = ext4_inode.has_open_files();
-                ext4_inode.orphan_regular_file(&existing_path, &nd.dentry.get_inode())?;
-                replaced_regular = Some((existing_inode, was_open));
-            } else {
-                nd.dentry.get_inode().unlink(&existing)?;
-            }
-        } else {
+        if existing_ty == InodeType::Directory {
             let entries = existing.get_inode().readdir(&existing_path)?;
             let has_content = entries
                 .iter()
@@ -1079,52 +1039,47 @@ pub fn filename_rename(
             if has_content {
                 return Err(Errno::ENOTEMPTY);
             }
-            let existing_inode = existing.get_inode();
-            let ext4_inode = existing_inode
-                .as_any()
-                .downcast_ref::<Ext4Inode>()
-                .ok_or(Errno::EXDEV)?;
-            let was_open = ext4_inode.has_open_files();
-            ext4_inode.orphan_directory(&existing_path, &nd.dentry.get_inode())?;
-            replaced_directory = Some((existing.clone(), was_open));
         }
+        let existing_inode = existing.get_inode();
+        existing_inode
+            .as_any()
+            .downcast_ref::<Ext4Inode>()
+            .ok_or(Errno::EXDEV)?;
+        let existing_stat = existing_inode.stat(&existing_path)?;
+        let deferred = existing_ty == InodeType::Directory || existing_stat.nlink <= 1;
+        let backup_path = alloc::format!(
+            "{}.respos_rename_backup_{}",
+            existing_path,
+            existing_stat.ino
+        );
+        Ext4Inode::file_rename(&existing_path, &backup_path)?;
+        replaced_target = Some((existing_inode, backup_path, existing_ty, deferred));
         nd.dentry.remove_child(name.as_str());
         remove_dentry_cache_tree(&existing_path);
     }
 
     if let Err(err) = Ext4Inode::file_rename(&old.abs_path(), &new_abs) {
-        if let Some((inode, _)) = replaced_regular.as_ref() {
-            if let Some(inode) = inode.as_any().downcast_ref::<Ext4Inode>() {
-                let _ = inode.restore_orphan(&new_abs);
-            }
-        }
-        if let Some((existing, _)) = replaced_directory.as_ref()
-            && let Some(inode) = existing.get_inode().as_any().downcast_ref::<Ext4Inode>()
-        {
-            let _ = inode.restore_orphan(&new_abs);
+        if let Some((_, backup_path, _, _)) = replaced_target.as_ref() {
+            let _ = Ext4Inode::file_rename(backup_path, &new_abs);
         }
         return Err(err);
     }
 
-    Ext4Inode::rename_cached_paths(&old.abs_path(), &new_abs);
     invalidate_directory_metadata(&old_parent);
     if !Arc::ptr_eq(&old_parent, &nd.dentry) {
         invalidate_directory_metadata(&nd.dentry);
     }
 
-    if let Some((inode, was_open)) = replaced_regular {
-        if !was_open {
-            if let Some(inode) = inode.as_any().downcast_ref::<Ext4Inode>() {
-                inode.cleanup_orphan();
-            }
-        }
-    }
-    if let Some((existing, was_open)) = replaced_directory {
+    if let Some((inode, backup_path, ty, deferred)) = replaced_target {
         // 主 rename 已提交，清理暂存目录失败不能再向用户报告 rename 失败，
         // 否则会造成“返回错误但命名空间已改变”的 ABI。残留备份可在后续维护清理。
-        if !was_open && let Some(inode) = existing.get_inode().as_any().downcast_ref::<Ext4Inode>()
+        if Ext4Inode::remove_path(&backup_path, ty, deferred).is_ok()
+            && let Some(inode) = inode.as_any().downcast_ref::<Ext4Inode>()
         {
-            inode.cleanup_orphan();
+            inode.invalidate_raw_metadata();
+            if deferred {
+                inode.mark_unlinked();
+            }
         }
     }
 

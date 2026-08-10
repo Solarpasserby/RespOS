@@ -5,8 +5,8 @@
 extern crate user_lib;
 
 use user_lib::{
-    O_CREATE, O_RDONLY, O_RDWR, O_TRUNC, SEEK_SET, Stat, close, exit, fork, fstat, link, lseek,
-    mkdir, open, read, rename, rmdir, stat, unlink, waitpid, write, yield_,
+    O_CREATE, O_RDONLY, O_RDWR, O_TRUNC, SEEK_SET, Stat, chdir, close, exit, fork, fstat, link,
+    lseek, mkdir, open, pipe, read, rename, rmdir, stat, unlink, waitpid, write, yield_,
 };
 
 const DIR_A: &str = "/respos-ns-a\0";
@@ -24,6 +24,9 @@ const RACE_A: &str = "/respos-ns-a/race-a\0";
 const RACE_B: &str = "/respos-ns-b/race-b\0";
 const DIR_REPLACE_SRC: &str = "/respos-ns-a/dir-replace-src\0";
 const DIR_REPLACE_DST: &str = "/respos-ns-a/dir-replace-dst\0";
+const CWD_HOLD: &str = "/respos-ns-cwd-hold\0";
+const CWD_REUSE: &str = "/respos-ns-cwd-reuse\0";
+const DOT: &str = ".\0";
 
 fn path_stat(path: &str) -> Stat {
     let mut value = Stat::default();
@@ -65,6 +68,8 @@ fn cleanup() {
     let _ = rmdir(DIR_REPLACE_DST);
     let _ = rmdir(DIR_A);
     let _ = rmdir(DIR_B);
+    let _ = rmdir(CWD_HOLD);
+    let _ = rmdir(CWD_REUSE);
 }
 
 #[unsafe(no_mangle)]
@@ -135,6 +140,48 @@ fn main() -> i32 {
     assert_eq!(fd_stat(replaced_dir).st_ino, replaced_dir_ino);
     assert_eq!(fd_stat(replaced_dir).st_nlink, 0);
     assert_eq!(close(replaced_dir), 0);
+
+    // A cwd is an inode reference even when no File object is open.  rmdir
+    // removes the namespace link, but the directory must remain usable via
+    // the child's cwd until that final Path/Dentry reference disappears.
+    assert_eq!(mkdir(CWD_HOLD, 0o755), 0);
+    let cwd_ino = path_stat(CWD_HOLD).st_ino;
+    let mut ready = [0i32; 2];
+    let mut resume = [0i32; 2];
+    assert_eq!(pipe(&mut ready), 0);
+    assert_eq!(pipe(&mut resume), 0);
+    let cwd_child = fork();
+    assert!(cwd_child >= 0);
+    if cwd_child == 0 {
+        assert_eq!(close(ready[0] as usize), 0);
+        assert_eq!(close(resume[1] as usize), 0);
+        assert_eq!(chdir(CWD_HOLD), 0);
+        assert_eq!(write(ready[1] as usize, b"r"), 1);
+        let mut signal = [0u8; 1];
+        assert_eq!(read(resume[0] as usize, &mut signal), 1);
+        let cwd_fd = open(DOT, O_RDONLY, 0);
+        assert!(cwd_fd >= 0);
+        let cwd_stat = fd_stat(cwd_fd as usize);
+        assert_eq!(cwd_stat.st_ino, cwd_ino);
+        assert_eq!(cwd_stat.st_nlink, 0);
+        assert_eq!(close(cwd_fd as usize), 0);
+        exit(0);
+    }
+    assert_eq!(close(ready[1] as usize), 0);
+    assert_eq!(close(resume[0] as usize), 0);
+    let mut signal = [0u8; 1];
+    assert_eq!(read(ready[0] as usize, &mut signal), 1);
+    assert_eq!(rmdir(CWD_HOLD), 0);
+    assert_eq!(mkdir(CWD_REUSE, 0o755), 0);
+    assert_ne!(path_stat(CWD_REUSE).st_ino, cwd_ino);
+    assert_eq!(write(resume[1] as usize, b"x"), 1);
+    let mut cwd_status = 0;
+    assert_eq!(waitpid(cwd_child as usize, &mut cwd_status), cwd_child);
+    assert_eq!(cwd_status, 0);
+    assert_eq!(close(ready[0] as usize), 0);
+    assert_eq!(close(resume[1] as usize), 0);
+    assert_eq!(rmdir(CWD_REUSE), 0);
+    println!("FS_NAMESPACE_CWD_UNLINK_PASS");
 
     let a_before = path_stat(DIR_A).st_nlink;
     let b_before = path_stat(DIR_B).st_nlink;

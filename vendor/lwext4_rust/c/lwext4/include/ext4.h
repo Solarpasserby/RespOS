@@ -395,6 +395,29 @@ uint64_t ext4_fsize(ext4_file *file);
 int ext4_raw_inode_fill(const char *path, uint32_t *ret_ino,
 			struct ext4_inode *inode);
 
+/** Initialize a file descriptor directly from a stable inode number. */
+int ext4_inode_open(ext4_file *file, const char *mount_point,
+		    uint32_t inode, uint32_t flags);
+
+/** Read raw inode metadata without resolving a pathname. */
+int ext4_raw_inode_fill_ino(const char *mount_point, uint32_t inode,
+			    struct ext4_inode *raw_inode);
+
+/** Atomically set selected metadata on an inode number. */
+int ext4_setattr_ino(const char *mount_point, uint32_t inode,
+		     uint32_t mask, uint32_t mode, uint32_t uid,
+		     uint32_t gid, uint32_t atime, uint32_t mtime,
+		     uint32_t ctime);
+
+/** Remove a file name while retaining an unlinked inode for open users. */
+int ext4_fremove_deferred(const char *path);
+
+/** Remove a directory name while retaining an unlinked inode for open users. */
+int ext4_dir_rm_deferred(const char *path);
+
+/** Truncate and free an inode whose link count and open count reached zero. */
+int ext4_inode_discard(const char *mount_point, uint32_t inode);
+
 /**@brief Check if inode exists.
  *
  * @param path    Parh to file/dir/link.
@@ -581,6 +604,17 @@ int ext4_listxattr(const char *path, char *list, size_t size, size_t *ret_size);
  *
  * @return  Standard error code.*/
 int ext4_removexattr(const char *path, const char *name, size_t name_len);
+
+int ext4_setxattr_ino(const char *mount_point, uint32_t inode,
+		      const char *name, size_t name_len,
+		      const void *data, size_t data_size);
+int ext4_getxattr_ino(const char *mount_point, uint32_t inode,
+		      const char *name, size_t name_len,
+		      void *buf, size_t buf_size, size_t *data_size);
+int ext4_listxattr_ino(const char *mount_point, uint32_t inode,
+		       char *list, size_t size, size_t *ret_size);
+int ext4_removexattr_ino(const char *mount_point, uint32_t inode,
+			 const char *name, size_t name_len);
 
 
 /*********************************DIRECTORY OPERATION***********************/

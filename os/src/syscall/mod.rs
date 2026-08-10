@@ -264,7 +264,8 @@ fn merge_offset_arg(low: usize, high: usize) -> isize {
 }
 
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
-    match syscall_id {
+    crate::fs::ext4::reap_deferred_inodes();
+    let result = match syscall_id {
         SYSCALL_SETXATTR => sys_setxattr(
             args[0] as *const u8,
             args[1] as *const u8,
@@ -744,5 +745,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         ),
         SYSCALL_MEMFD_SECRET => sys_memfd_secret(args[0]),
         _ => Err(Errno::ENOSYS),
-    }
+    };
+    crate::fs::ext4::reap_deferred_inodes();
+    result
 }

@@ -101,8 +101,9 @@ Phase 1 复核发现最初的 hardlink 与目录 `ENOENT` 来自用户库 `stat(
 ### 2026-08-10 阶段结果
 
 mode/owner/显式时间的提交协议已完成第一轮收敛：ext4 使用单 inode transaction，Rust 缓存只在底层
-成功后发布，目录 chmod 可跨启动保持，unlink 后打开 fd 的 fchmod/fchown/futimens 使用 orphan storage
-path。Linux/RV64 对照、双架构构建、五项 SMP probe 与完整 BuildStorm 均通过。
+成功后发布，目录 chmod 可跨启动保持。后续 inode-number 下沉已让 unlink 后打开 fd 的
+fchmod/fchown/futimens 直接作用于后端 inode，不再使用 orphan storage path。Linux/RV64 对照、
+双架构构建、五项 SMP probe 与当时完整 BuildStorm 均通过。
 
 本阶段同时校正了 Phase 0 用户库把 syscall 79 错当二参数 stat 的测试缺陷；此前 hardlink/目录
 `ENOENT` 结论作废。ext4 纳秒/负时间持久化和平台 `CLOCK_REALTIME` 初始化仍未完成，作为明确边界保留，
@@ -115,7 +116,7 @@ path。Linux/RV64 对照、双架构构建、五项 SMP probe 与完整 BuildSto
 - 已确认：ext4 时间持久化主要使用 32-bit 秒，纳秒与真实 `CLOCK_REALTIME` 模型不完整；
 - 待验证：`UTIME_NOW`、`UTIME_OMIT`、负时间和溢出边界；
 - 待验证：read EOF、零长度 read、readdir、`O_NOATIME`、relatime/strictatime 的完整行为；
-- 已验证：unlink 后打开 fd 的 futimens/fchmod/fchown 通过 orphan storage path 作用于同一 inode；
+- 已验证：unlink 后打开 fd 的 futimens/fchmod/fchown 通过 inode-number API 作用于同一 inode；
 - 已验证（单线程及 reopen）：同 inode 不同 hardlink path 的属性缓存一致；并发与缓存回收仍待 Phase 2。
 
 ### 目标模型
@@ -147,14 +148,13 @@ path。Linux/RV64 对照、双架构构建、五项 SMP probe 与完整 BuildSto
 
 ### 2026-08-10 阶段结果
 
-Phase 2 已完成第一轮收敛：ext4 全部使用真实后端 inode identity，同 inode hardlink/rename/open fd
-共享对象与 PageCache；存活 alias、目录后代 rename 和普通文件/空目录 orphan 生命周期由 inode 统一
-维护。目录 raw metadata 使用 per-inode generation，mutation 在底层成功后失效实际父目录。Linux 与
-RespOS namespace probe、双架构构建、五项 SMP probe 和完整 BuildStorm 均通过。
+Phase 2 已完成第二轮收敛：ext4 使用真实后端 inode identity，同 inode hardlink/rename/open fd 共享
+对象与 PageCache；数据与属性操作已下沉为 inode-number API，不再维护 alias/orphan path。目录 raw
+metadata 使用 per-inode generation，mutation 在底层成功后失效实际父目录。nlink=0 inode 按最后一个
+VFS Arc（包括 File、cwd、Path/Dentry）释放后入队，并在安全点回收，不再以 open-file 计数猜测。
 
-由于 lwext4 数据 API 仍以 pathname 为入口，alias 集是当前受控适配层，不宣称已经获得真正的
-inode-number handle；lookup 与 mutation 的完整 seqlock/RCU 可见性协议也保留为后续 VFS 并发工作，
-不在本阶段以拆除全局 lwext4 锁换取性能。
+lookup 与 mutation 的完整 seqlock/RCU 可见性协议、lwext4 orphan-list 崩溃恢复仍保留为后续工作；
+不在本阶段以拆除全局 lwext4 锁或提前 free 仍存活 inode 换取性能/即时回收。
 
 ### 目标
 

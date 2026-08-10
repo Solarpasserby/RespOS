@@ -24,6 +24,8 @@
 #define RACE_B DIR_B "/race-b"
 #define DIR_REPLACE_SRC DIR_A "/dir-replace-src"
 #define DIR_REPLACE_DST DIR_A "/dir-replace-dst"
+#define CWD_HOLD "/dev/shm/respos-ns-cwd-hold"
+#define CWD_REUSE "/dev/shm/respos-ns-cwd-reuse"
 
 static struct stat path_stat(const char *path) {
     struct stat value;
@@ -55,6 +57,8 @@ static void cleanup(void) {
     (void)rmdir(DIR_REPLACE_DST);
     (void)rmdir(DIR_A);
     (void)rmdir(DIR_B);
+    (void)rmdir(CWD_HOLD);
+    (void)rmdir(CWD_REUSE);
 }
 
 int main(void) {
@@ -116,6 +120,45 @@ int main(void) {
     assert(fd_stat(replaced_dir).st_ino == replaced_dir_ino);
     assert(fd_stat(replaced_dir).st_nlink == 0);
     assert(close(replaced_dir) == 0);
+
+    assert(mkdir(CWD_HOLD, 0755) == 0);
+    ino_t cwd_ino = path_stat(CWD_HOLD).st_ino;
+    int ready[2];
+    int resume[2];
+    assert(pipe(ready) == 0);
+    assert(pipe(resume) == 0);
+    pid_t cwd_child = fork();
+    assert(cwd_child >= 0);
+    if (cwd_child == 0) {
+        assert(close(ready[0]) == 0);
+        assert(close(resume[1]) == 0);
+        assert(chdir(CWD_HOLD) == 0);
+        assert(write(ready[1], "r", 1) == 1);
+        char signal;
+        assert(read(resume[0], &signal, 1) == 1);
+        int cwd_fd = open(".", O_RDONLY | O_DIRECTORY);
+        assert(cwd_fd >= 0);
+        struct stat cwd_stat = fd_stat(cwd_fd);
+        assert(cwd_stat.st_ino == cwd_ino);
+        assert(cwd_stat.st_nlink == 0);
+        assert(close(cwd_fd) == 0);
+        _exit(0);
+    }
+    assert(close(ready[1]) == 0);
+    assert(close(resume[0]) == 0);
+    char signal;
+    assert(read(ready[0], &signal, 1) == 1);
+    assert(rmdir(CWD_HOLD) == 0);
+    assert(mkdir(CWD_REUSE, 0755) == 0);
+    assert(path_stat(CWD_REUSE).st_ino != cwd_ino);
+    assert(write(resume[1], "x", 1) == 1);
+    int cwd_status = 0;
+    assert(waitpid(cwd_child, &cwd_status, 0) == cwd_child);
+    assert(WIFEXITED(cwd_status) && WEXITSTATUS(cwd_status) == 0);
+    assert(close(ready[0]) == 0);
+    assert(close(resume[1]) == 0);
+    assert(rmdir(CWD_REUSE) == 0);
+    puts("FS_NAMESPACE_CWD_UNLINK_PASS");
 
     nlink_t a_before = path_stat(DIR_A).st_nlink;
     nlink_t b_before = path_stat(DIR_B).st_nlink;

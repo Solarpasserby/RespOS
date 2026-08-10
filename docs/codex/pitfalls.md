@@ -520,16 +520,18 @@
 - 后续影响：若 LA-only pthread fault 重新出现，优先记录 fault VA、TP/TLS、PMD 边界和 mmap
   placement；在复现前不要把旧解释写成当前缺陷。
 
-## rename/unlink 仍受 path-based ext4 后端限制
+## open-file 计数不能代表 inode 的全部存活引用
 
-- 状态：已确认
-- 适用范围：多硬链接、rename 覆盖、unlink 后打开文件
-- 最后验证：2026-08-01
-- 证据：`os/src/fs/ext4/inode.rs`、`os/src/fs/namei.rs`、整合审查
-- 内容：open-file 计数已替代 `Arc::strong_count` 猜测，但后端仍通过 renamed/orphan path 兼容
-  path API；多别名的完整 inode-handle/事务语义尚未建立。
-- 后续影响：不要用更多路径特判宣称完整 POSIX 语义；复杂 rename 需要统一 inode identity/backup
-  设计和失败注入。
+- 状态：已确认并修复正常运行时提前回收
+- 适用范围：unlink/rmdir、rename 覆盖、cwd、目录 fd、Path/Dentry、inode number 复用
+- 最后验证：2026-08-10
+- 证据：`os/src/fs/ext4/inode.rs`、`os/src/fs/namei.rs`；Linux/RV64
+  `FS_NAMESPACE_CWD_UNLINK_PASS`
+- 内容：File 数为零不表示 inode 无引用。进程 cwd 和临时 Path/Dentry 都能在没有打开 File 的情况下
+  保持 inode 可观察；按最后 File close 回收会提前 free lower inode，并可能让仍存活的旧对象与复用的
+  inode number 形成 ABA。当前改为最后 Ext4Inode Arc Drop 入队、安全点回收。
+- 后续影响：遇到 VFS 生命周期问题时先列出所有引用所有者，不用局部计数代替系统模型。若 Drop 中不能
+  安全取得后端锁，应延迟到明确安全点；这种妥协必须同时记录回收时机、失败重试和崩溃恢复边界。
 
 ## 历史测试成绩会快速过期
 

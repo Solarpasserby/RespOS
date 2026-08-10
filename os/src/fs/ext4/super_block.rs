@@ -48,6 +48,7 @@ impl Ext4SuperBlock {
     }
 
     pub fn shutdown(&self) -> SysResult {
+        super::reap_deferred_inodes();
         self.flush_cache()?;
         let _op_guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Superblock);
         let mut inner = self.inner.lock();

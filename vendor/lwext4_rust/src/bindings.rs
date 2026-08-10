@@ -1848,6 +1848,23 @@ unsafe extern "C" {
         ret_ino: *mut u32,
         inode: *mut ext4_inode,
     ) -> ::core::ffi::c_int;
+    pub fn ext4_inode_open(
+        file: *mut ext4_file,
+        mount_point: *const ::core::ffi::c_char,
+        inode: u32,
+        flags: u32,
+    ) -> ::core::ffi::c_int;
+    pub fn ext4_raw_inode_fill_ino(
+        mount_point: *const ::core::ffi::c_char,
+        inode: u32,
+        raw_inode: *mut ext4_inode,
+    ) -> ::core::ffi::c_int;
+    pub fn ext4_fremove_deferred(path: *const ::core::ffi::c_char) -> ::core::ffi::c_int;
+    pub fn ext4_dir_rm_deferred(path: *const ::core::ffi::c_char) -> ::core::ffi::c_int;
+    pub fn ext4_inode_discard(
+        mount_point: *const ::core::ffi::c_char,
+        inode: u32,
+    ) -> ::core::ffi::c_int;
 }
 unsafe extern "C" {
     #[doc = "@brief Check if inode exists.\n\n @param path    Parh to file/dir/link.\n @param type    Inode type.\n                @ref EXT4_DIRENTRY_UNKNOWN\n                @ref EXT4_DE_REG_FILE\n                @ref EXT4_DE_DIR\n                @ref EXT4_DE_CHRDEV\n                @ref EXT4_DE_BLKDEV\n                @ref EXT4_DE_FIFO\n                @ref EXT4_DE_SOCK\n                @ref EXT4_DE_SYMLINK\n\n @return  Standard error code."]
@@ -1906,6 +1923,17 @@ unsafe extern "C" {
     #[doc = "Atomically set selected inode metadata with one inode transaction."]
     pub fn ext4_setattr(
         path: *const ::core::ffi::c_char,
+        mask: u32,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+        atime: u32,
+        mtime: u32,
+        ctime: u32,
+    ) -> ::core::ffi::c_int;
+    pub fn ext4_setattr_ino(
+        mount_point: *const ::core::ffi::c_char,
+        inode: u32,
         mask: u32,
         mode: u32,
         uid: u32,
@@ -1985,6 +2013,36 @@ unsafe extern "C" {
     #[doc = "@brief Remove extended attribute.\n\n @param path     Path to file/directory.\n @param name     Name of the entry to remove.\n @param name_len Length of @name in bytes.\n\n @return  Standard error code."]
     pub fn ext4_removexattr(
         path: *const ::core::ffi::c_char,
+        name: *const ::core::ffi::c_char,
+        name_len: usize,
+    ) -> ::core::ffi::c_int;
+    pub fn ext4_setxattr_ino(
+        mount_point: *const ::core::ffi::c_char,
+        inode: u32,
+        name: *const ::core::ffi::c_char,
+        name_len: usize,
+        data: *const ::core::ffi::c_void,
+        data_size: usize,
+    ) -> ::core::ffi::c_int;
+    pub fn ext4_getxattr_ino(
+        mount_point: *const ::core::ffi::c_char,
+        inode: u32,
+        name: *const ::core::ffi::c_char,
+        name_len: usize,
+        buf: *mut ::core::ffi::c_void,
+        buf_size: usize,
+        data_size: *mut usize,
+    ) -> ::core::ffi::c_int;
+    pub fn ext4_listxattr_ino(
+        mount_point: *const ::core::ffi::c_char,
+        inode: u32,
+        list: *mut ::core::ffi::c_char,
+        size: usize,
+        ret_size: *mut usize,
+    ) -> ::core::ffi::c_int;
+    pub fn ext4_removexattr_ino(
+        mount_point: *const ::core::ffi::c_char,
+        inode: u32,
         name: *const ::core::ffi::c_char,
         name_len: usize,
     ) -> ::core::ffi::c_int;

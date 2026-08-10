@@ -123,11 +123,7 @@ pub trait FileOp: Any + Send + Sync {
 
 impl File {
     fn storage_path(&self, path: &str) -> alloc::string::String {
-        self.inode
-            .as_any()
-            .downcast_ref::<Ext4Inode>()
-            .map(|inode| inode.storage_path(path))
-            .unwrap_or_else(|| alloc::string::String::from(path))
+        alloc::string::String::from(path)
     }
 
     /// Resolve a regular-file offset to the same physical frame used by its
@@ -156,9 +152,6 @@ impl File {
     }
 
     pub fn new(path: Arc<Path>, inode: Arc<dyn InodeOp>, flags: OpenFlags) -> Self {
-        if let Some(ext4_inode) = inode.as_any().downcast_ref::<Ext4Inode>() {
-            ext4_inode.open_file();
-        }
         let abs_path = path.abs_path();
         let ty = inode.node_type();
         let page_cache = inode.get_page_cache();
@@ -213,9 +206,6 @@ impl File {
         flags: OpenFlags,
         meta: TmpFileMeta,
     ) -> Self {
-        if let Some(ext4_inode) = inode.as_any().downcast_ref::<Ext4Inode>() {
-            ext4_inode.open_file();
-        }
         let page_cache = Some(PageCache::new(0));
         Self {
             inode,
@@ -664,11 +654,6 @@ impl Drop for File {
     fn drop(&mut self) {
         crate::perf::file_close(1);
         let _ = self.flush_data_on_close();
-        if let Some(inode) = self.inode.as_any().downcast_ref::<Ext4Inode>() {
-            if inode.close_file() {
-                inode.cleanup_orphan();
-            }
-        }
     }
 }
 

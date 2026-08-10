@@ -1,6 +1,12 @@
 use crate::SignalAction;
 use core::arch::asm;
 
+const SYSCALL_SETXATTR: usize = 5;
+const SYSCALL_FSETXATTR: usize = 7;
+const SYSCALL_GETXATTR: usize = 8;
+const SYSCALL_FGETXATTR: usize = 10;
+const SYSCALL_LISTXATTR: usize = 11;
+const SYSCALL_REMOVEXATTR: usize = 14;
 const SYSCALL_GETCWD: usize = 17;
 const SYSCALL_EPOLL_CREATE1: usize = 20;
 const SYSCALL_EPOLL_CTL: usize = 21;
@@ -451,6 +457,83 @@ pub fn sys_openat(dirfd: isize, path: &str, flags: usize, mode: usize) -> isize 
 
 pub fn sys_close(fd: usize) -> isize {
     syscall(SYSCALL_CLOSE, [fd, 0, 0, 0, 0, 0])
+}
+
+pub fn sys_setxattr(path: &str, name: &str, value: &[u8], flags: usize) -> isize {
+    syscall(
+        SYSCALL_SETXATTR,
+        [
+            path.as_ptr() as usize,
+            name.as_ptr() as usize,
+            value.as_ptr() as usize,
+            value.len(),
+            flags,
+            0,
+        ],
+    )
+}
+
+pub fn sys_fsetxattr(fd: usize, name: &str, value: &[u8], flags: usize) -> isize {
+    syscall(
+        SYSCALL_FSETXATTR,
+        [
+            fd,
+            name.as_ptr() as usize,
+            value.as_ptr() as usize,
+            value.len(),
+            flags,
+            0,
+        ],
+    )
+}
+
+pub fn sys_getxattr(path: &str, name: &str, value: &mut [u8]) -> isize {
+    syscall(
+        SYSCALL_GETXATTR,
+        [
+            path.as_ptr() as usize,
+            name.as_ptr() as usize,
+            value.as_mut_ptr() as usize,
+            value.len(),
+            0,
+            0,
+        ],
+    )
+}
+
+pub fn sys_fgetxattr(fd: usize, name: &str, value: &mut [u8]) -> isize {
+    syscall(
+        SYSCALL_FGETXATTR,
+        [
+            fd,
+            name.as_ptr() as usize,
+            value.as_mut_ptr() as usize,
+            value.len(),
+            0,
+            0,
+        ],
+    )
+}
+
+pub fn sys_listxattr(path: &str, list: &mut [u8]) -> isize {
+    syscall(
+        SYSCALL_LISTXATTR,
+        [
+            path.as_ptr() as usize,
+            list.as_mut_ptr() as usize,
+            list.len(),
+            0,
+            0,
+            0,
+        ],
+    )
+}
+
+pub fn sys_removexattr(path: &str, name: &str) -> isize {
+    syscall(
+        SYSCALL_REMOVEXATTR,
+        [path.as_ptr() as usize, name.as_ptr() as usize, 0, 0, 0, 0],
+    )
 }
 
 pub fn sys_pipe2(pipefd: &mut [i32; 2], flags: usize) -> isize {

@@ -265,6 +265,24 @@ pub fn open(path: &str, flags: usize, mode: usize) -> isize {
 pub fn close(fd: usize) -> isize {
     sys_close(fd)
 }
+pub fn setxattr(path: &str, name: &str, value: &[u8], flags: usize) -> isize {
+    sys_setxattr(path, name, value, flags)
+}
+pub fn fsetxattr(fd: usize, name: &str, value: &[u8], flags: usize) -> isize {
+    sys_fsetxattr(fd, name, value, flags)
+}
+pub fn getxattr(path: &str, name: &str, value: &mut [u8]) -> isize {
+    sys_getxattr(path, name, value)
+}
+pub fn fgetxattr(fd: usize, name: &str, value: &mut [u8]) -> isize {
+    sys_fgetxattr(fd, name, value)
+}
+pub fn listxattr(path: &str, list: &mut [u8]) -> isize {
+    sys_listxattr(path, list)
+}
+pub fn removexattr(path: &str, name: &str) -> isize {
+    sys_removexattr(path, name)
+}
 pub fn mmap(addr: usize, len: usize, prot: usize, flags: usize, fd: isize, offset: usize) -> isize {
     sys_mmap(addr, len, prot, flags, fd, offset)
 }

@@ -11,6 +11,39 @@
 - 当前已知优先缺口包括目录 chmod 未持久化、属性 override 先于底层成功发布、时间纳秒/realtime
   不完整；ext4 C 库线程安全未证明前继续保留唯一全局锁。
 
+### inode-number 下沉与最后 VFS 引用回收（未提交）
+
+- **状态收敛**：Ext4Inode 不再保存 pathname aliases、hidden orphan path、mode/owner/nlink override 或
+  内存 xattr；数据、属性、readdir、readlink 和 xattr 均通过真实后端 inode number 操作。metadata raw
+  snapshot、纳秒时间补充与 generation 合并到单一 metadata lock。
+- **生命周期修正**：首版 inode-number 改造仍用 `open_files` 决定 nlink=0 inode 的 truncate/free，遗漏
+  cwd 与 Path/Dentry 引用。当前删除该计数：最后 unlink/rename 覆盖只提交 nlink=0；最后一个
+  Ext4Inode Arc Drop 无阻塞入队，syscall 前后及 shutdown 安全点持统一 ext4 锁回收。回收失败保留队列
+  重试；正常运行时避免 inode-number ABA。
+- **Linux/POSIX 对照**：namespace probe 新增“子进程 cwd 被父进程 rmdir”场景。Linux `/dev/shm`
+  输出 `FS_NAMESPACE_CWD_UNLINK_PASS` 与 `FS_NAMESPACE_PROBE_PASS race_observations=1077`；RV64
+  1 GiB/8 核输出同一 cwd PASS 与 `race_observations=1200`，旧 cwd 通过 `.` 打开时保持原 inode 且
+  nlink=0，新目录在旧引用存活期间未复用 inode number。
+- **门禁**：2026-08-10 RV64/LA64 无 feature release 构建通过；RV64 同轮通过 namespace、metadata、
+  xattr、Unix socket、file、private-map、shared-MM、frame-reclaim。全新 qcow2 overlay 两次冷启动通过
+  metadata 目录 mode `0711` 与 xattr 持久化。8 GiB/8 核 snapshot BuildStorm 短门禁输出
+  `BUILDSTORM_TOOLCHAIN ok`、`BUILDSTORM_MINIBUILD ok` 并进入正式 build-std；随后主动停止，未冒充完整
+  timed build。格式检查和 `git diff --check` 通过。
+- **第二轮完整 BuildStorm 未完成（交接状态）**：2026-08-10 在提交 `6636cfe` 的当前未提交工作树上，
+  重新执行 `make build-rv RV_USER_FEATURES= RV_KERNEL_FEATURES=` 通过；随后直接在宿主运行 RV64
+  `-m 8G -smp 8 -snapshot`，guest 执行原始 `/glibc/buildstorm_testcode.sh`。本轮再次输出
+  `BUILDSTORM_TOOLCHAIN ok`、`BUILDSTORM_MINIBUILD ok`，untimed tg-xtask 为 13.40 秒，并进入正式
+  build-std；可见进度先后到达 `ax-posix-api`、标准库和 ArceOS 平台/驱动/MM 依赖。约 49 分钟后按
+  用户要求主动终止，未出现最终 `BUILDSTORM_COMPILE mode=multi ok=true`，因此第二轮不能视为完成或
+  通过。终止前宿主 QEMU 仍约占用 233% CPU，RSS 约 2.3 GiB，未见 panic、fault、OOM 或明确 ext4
+  错误；但 QEMU 实际继承 `CLS=IDL`，且宿主 swap 曾增长到约 3.4 GiB，墙钟和长静默均不能作为性能
+  数据。当前只能把 inode/ext4 活性问题列为 `待验证`，不能仅凭本轮长静默断言已定位 inode 死锁。
+  QEMU 使用 `-snapshot`，原始 pub 镜像未被本轮修改；进程已终止，无残留 QEMU。
+- **未关闭边界**：lwext4 vendor 当前没有完整 orphan-list mount recovery；异常断电恰好发生在 nlink=0
+  提交与安全点回收之间时，可能遗留泄漏 inode。当前不以提前 free 换取表面上的即时回收，也不宣称
+  已达到 Linux ext4 崩溃恢复。该工作树尚未完成最新完整 BuildStorm；此前长运行经 PC/trace 证明确实
+  持续编译而非 inode/ext4 死锁，历史完整 BuildStorm 本身约需 24 分钟。
+
 ### Phase 0 语义回归框架（已提交 `4dc52ef`，Phase 1 已校正基线）
 
 - **实现**：新增可独立运行的 `fs_metadata_probe normal|prepare|verify|cleanup`，记录 mode/uid/gid/

@@ -33,6 +33,17 @@ impl Ext4File {
         self.this_type.clone()
     }
 
+    /// Initialize this descriptor from a stable inode number instead of a path.
+    pub fn inode_open(&mut self, inode: u32, flags: u32) -> Result<usize, i32> {
+        let mount = CString::new("/").expect("root mount CString");
+        let r = unsafe { ext4_inode_open(&mut self.file_desc, mount.as_ptr(), inode, flags) };
+        if r != EOK as i32 {
+            error!("ext4_inode_open: inode={}, rc={}", inode, r);
+            return Err(r);
+        }
+        Ok(EOK as usize)
+    }
+
     /// File open function.
     ///
     /// |---------------------------------------------------------------|

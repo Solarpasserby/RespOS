@@ -200,9 +200,9 @@ FdTable slot (FdEntry: descriptor flags)
 - 最后验证：2026-08-10
 - 证据：`os/src/fs/{ext4/inode.rs,file.rs}`、`vendor/lwext4_rust/c/lwext4/src/ext4.c`；
   `fs_metadata_probe` Linux/RV64 对照与跨启动 qcow2 检查
-- 内容：`ext4_setattr` 在一个 inode ref/transaction 内更新选定字段；Rust mode/owner/times cache 仅在
-  lower commit 成功后发布。fd 操作从 `File` 取得 inode 与 storage path，已 unlink regular file 使用
-  orphan path，不依赖已从 namespace 移除的旧名字。同 inode hardlink 共享属性缓存。
+- 内容：`ext4_setattr_ino` 在一个 inode ref/transaction 内更新选定字段；Rust mode/owner/times cache
+  仅在 lower commit 成功后发布。fd 操作直接使用后端 inode number，不再依赖可见路径或隐藏 orphan
+  名字；同 inode hardlink 共享属性缓存。
 - 后续影响：新增 setattr 字段必须加入同一 prepare/commit/publish 协议；不得把 `ENOENT` 转成成功后只改
   Rust override。持久层仍只有 32-bit 秒精度，纳秒/epoch 扩展需另做 on-disk 设计与跨重启测试。
 
@@ -271,14 +271,18 @@ FdTable slot (FdEntry: descriptor flags)
   `os/src/fs/mount.rs`
 - 内容：`Path` 是 mount+dentry；dentry 表达目录项身份和父子关系；inode 表达文件对象；路径
   查找由 namei 处理 `dirfd`、`.`/`..`、symlink 与 mount crossing。
-- ext4 inode cache 以真实后端 inode number 为 identity，不再为新建文件生成 synthetic inode。同 inode
-  的所有 hardlink alias 登记在 inode；rename 迁移 alias（目录同时迁移已缓存后代前缀），unlink 只注销
-  被删除 alias。最后目录项及 rename 覆盖目标通过隐藏 orphan path 延长到最后 open File 关闭。
+- ext4 inode cache 以真实后端 inode number 为 identity，不再为新建文件生成 synthetic inode。数据、
+  属性、readdir 与 readlink 通过 inode number 进入 lwext4，不在 inode 中维护 pathname alias 或隐藏
+  orphan path。
+- `i_nlink == 0` 只表示 inode 已脱离 namespace，不表示可以立即释放。最后 unlink/rename 覆盖先让
+  lower inode 进入 nlink=0 状态；`File`、cwd、`Path`、`Dentry` 等共同持有 `Ext4Inode` Arc。最后一个
+  Arc 的 Drop 只把 inode number 放入延迟队列，syscall 前后安全点或 shutdown 再持统一 ext4 锁执行
+  truncate/free，避免在 Drop 或未知 VFS 锁下进入 lwext4。
 - 每个 ext4 目录 inode 持有独立 metadata generation；成功 namespace mutation 在 lower commit 后失效
   实际源/目标父目录，不再用全局 generation 使所有目录快照失效。
-- 后续影响：不能用 `Arc::strong_count` 推断 inode 是否仍被打开；使用明确 open-file 计数。alias 集是
-  lwext4 pathname API 的兼容边界，不等价于真正的 inode handle；新增 mutation 必须同步维护 alias、
-  orphan 生命周期、相关父目录 generation 与 dentry cache。
+- 后续影响：不能用 open-file 计数替代 inode 引用生命周期，因为 cwd 与临时 Path/Dentry 同样是有效
+  引用；也不能在 `Drop` 中直接取得 ext4 锁。当前 syscall 安全点把正常运行时的回收窗口限制到下一次
+  syscall，但 lwext4 尚无完整 ext4 orphan-list 崩溃恢复，异常断电后的 nlink=0 inode 清理仍待实现。
 
 ## 网络模型
 

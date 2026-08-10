@@ -11,10 +11,24 @@
 - 证据：`vendor/lwext4_rust/c/lwext4/{include/ext4.h,src/ext4.c}`、
   `os/src/fs/{ext4/inode.rs,file.rs}`、`user/src/bin/fs_metadata_probe.rs`
 - 内容：mode、owner 与选定时间字段由 `ext4_setattr` 在一次 pathname lookup、inode ref 和 transaction
-  中提交；chown 引起的 suid/sgid 清除与 owner 变更同事务完成。Rust 缓存只在返回成功后发布。fd 属性
-  修改使用 File 的 storage path；unlink 后仍打开的普通文件通过 orphan 名字访问底层 inode。
+  中提交；chown 引起的 suid/sgid 清除与 owner 变更同事务完成。Rust 缓存只在返回成功后发布。当前
+  fd 属性修改通过 inode-number API 访问底层 inode，unlink 后不再依赖 storage/orphan path。
 - 后续影响：不再接受“底层 ENOENT 但内存 override 成功”的兼容语义，也不得重新拆分 chown 的 owner/
-  mode 提交。底层时间精度扩展和真正 inode-number handle 仍是后续独立设计，不用更多路径特判替代。
+  mode 提交。底层时间精度扩展仍是后续独立设计，不用更多路径特判替代。
+
+## nlink=0 inode 按最后 VFS 引用延迟回收，不按 open File 数猜测
+
+- 状态：已采用，崩溃恢复仍待完善
+- 适用范围：unlink、rmdir、rename 覆盖、cwd、目录 fd、inode number 复用
+- 最后验证：2026-08-10
+- 证据：`os/src/fs/{ext4/inode.rs,file.rs,namei.rs}`、`user/src/bin/fs_namespace_probe.rs`、
+  `scripts/fs_namespace_probe_linux.c`
+- 内容：最后 namespace link 删除时，lower inode 先变为 nlink=0，但不立即 truncate/free。`Ext4Inode`
+  的最后一个 Arc Drop 只入队，syscall 前后和 shutdown 安全点在统一 ext4 锁下回收。该 Arc 生命周期
+  同时覆盖 File、cwd、Path 与 Dentry，删除了只能覆盖 File 的 `open_files` 计数。
+- 后续影响：生命周期正确性优先于“本 syscall 内立刻归还块”。Drop 路径不得直接调用 lwext4；回收失败
+  保留队列重试。当前 vendor 未实现完整 orphan-list mount recovery，异常断电窗口明确标记待完善，
+  不能宣称等价于 Linux ext4 的崩溃恢复。
 
 ## ext4 目录 metadata 用 per-inode generation 失效，dentry cache 保留 16K 工作集
 
