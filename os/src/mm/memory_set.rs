@@ -1977,11 +1977,25 @@ impl MemorySet {
         // 首个 RAM GiB 保留 4 KiB 映射，以继承上述内核段的细粒度权限。
         // 其余 RAM 用 Sv39 1 GiB 叶页，避免 8 GiB direct map 消耗数千页页表。
         let memory_end = physical_memory_end();
+        #[cfg(target_arch = "riscv64")]
         let first_gigabyte_end = 0xc000_0000usize.min(memory_end);
+        #[cfg(target_arch = "loongarch64")]
+        let first_gigabyte_end = crate::config::LOW_MEMORY_END;
         memory_set.push_empty_map_area(
             MapArea::new(
                 VirtAddr::from(ekernel as *const () as usize),
                 VirtAddr::from(KERNEL_BASE + first_gigabyte_end),
+                MapType::Direct,
+                MapPermission::READ | MapPermission::WRITE,
+            ),
+            None,
+            0,
+        );
+        #[cfg(target_arch = "loongarch64")]
+        memory_set.push_empty_map_area(
+            MapArea::new(
+                VirtAddr::from(KERNEL_BASE + crate::config::HIGH_MEMORY_START),
+                VirtAddr::from(KERNEL_BASE + memory_end),
                 MapType::Direct,
                 MapPermission::READ | MapPermission::WRITE,
             ),

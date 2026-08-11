@@ -6,13 +6,28 @@
 /// - 32 个通用寄存器 (`x[0..31]`)
 /// - `prmd`: 异常前的处理器模式（替代 RISC-V 的 sstatus）
 /// - `era`: 异常返回地址（替代 RISC-V 的 sepc）
+/// - 32 个 128-bit LSX/浮点寄存器、FCSR0 和 FCC0..7
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct TrapContext {
     pub x: [usize; 32],
     pub prmd: usize, // Previous Mode: PPLV(bits 0..=1) + PIE(bit 2)
     pub era: usize,  // Exception Return Address
+    // LSX extends the scalar floating-point registers in place, so saving the
+    // full 128 bits preserves both FP and vector state across every user trap.
+    pub vr: [[u64; 2]; 32],
+    pub fcsr: usize,
+    pub fcc: [u8; 8],
 }
+
+const _: () = {
+    assert!(core::mem::offset_of!(TrapContext, prmd) == 256);
+    assert!(core::mem::offset_of!(TrapContext, era) == 264);
+    assert!(core::mem::offset_of!(TrapContext, vr) == 272);
+    assert!(core::mem::offset_of!(TrapContext, fcsr) == 784);
+    assert!(core::mem::offset_of!(TrapContext, fcc) == 792);
+    assert!(core::mem::size_of::<TrapContext>() == 800);
+};
 
 impl TrapContext {
     pub fn get_a0(&self) -> usize {
@@ -84,6 +99,9 @@ impl TrapContext {
             x: regs,
             prmd,
             era: entry,
+            vr: [[0; 2]; 32],
+            fcsr: 0,
+            fcc: [0; 8],
         };
         cx.set_sp(sp);
         cx

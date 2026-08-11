@@ -27,9 +27,11 @@ global_asm!(include_str!("tlb_refill.S"));
 static LOW_DIRECT_MAP_ACTIVE: AtomicBool = AtomicBool::new(true);
 
 // QEMU 启动时先依赖低地址 DMW 直映运行；进入高地址共享内核模型前，
-// 需要一份覆盖早期内核镜像和 64 MiB 内核堆的临时页表作为过渡。
+// 需要一份覆盖早期内核镜像和高端 256 MiB 内核堆的临时页表作为过渡。
 const BOOT_MAP_SIZE: usize = 128 * 1024 * 1024;
 const BOOT_PTE_TABLES: usize = BOOT_MAP_SIZE / (512 * crate::config::PAGE_SIZE);
+const BOOT_HIGH_MAP_SIZE: usize = 512 * 1024 * 1024;
+const BOOT_HIGH_PTE_TABLES: usize = BOOT_HIGH_MAP_SIZE / (512 * crate::config::PAGE_SIZE);
 
 const PTE_VALID: usize = 1 << 0;
 const PTE_DIRTY: usize = 1 << 1;
@@ -44,6 +46,9 @@ struct BootPage([usize; 512]);
 static mut BOOT_PGD: BootPage = BootPage([0; 512]);
 static mut BOOT_PMD: BootPage = BootPage([0; 512]);
 static mut BOOT_PTES: [BootPage; BOOT_PTE_TABLES] = [const { BootPage([0; 512]) }; BOOT_PTE_TABLES];
+static mut BOOT_HIGH_PMD: BootPage = BootPage([0; 512]);
+static mut BOOT_HIGH_PTES: [BootPage; BOOT_HIGH_PTE_TABLES] =
+    [const { BootPage([0; 512]) }; BOOT_HIGH_PTE_TABLES];
 
 unsafe extern "C" {
     fn __rfill();
@@ -94,6 +99,13 @@ pub fn enable_kernel_extensions() {
 #[inline(always)]
 pub fn idle() -> ! {
     register::idle()
+}
+
+#[inline(always)]
+pub fn wait_for_interrupt() {
+    unsafe {
+        core::arch::asm!("idle 0", options(nomem, nostack));
+    }
 }
 
 #[inline]
@@ -165,6 +177,10 @@ pub fn enable_boot_paging() {
             kernel_virt_to_phys(core::ptr::addr_of!(BOOT_PMD.0) as *const _) as *mut [usize; 512];
         let ptes = kernel_virt_to_phys(core::ptr::addr_of!(BOOT_PTES) as *const _)
             as *mut [BootPage; BOOT_PTE_TABLES];
+        let high_pmd = kernel_virt_to_phys(core::ptr::addr_of!(BOOT_HIGH_PMD.0) as *const _)
+            as *mut [usize; 512];
+        let high_ptes = kernel_virt_to_phys(core::ptr::addr_of!(BOOT_HIGH_PTES) as *const _)
+            as *mut [BootPage; BOOT_HIGH_PTE_TABLES];
 
         let base_vpn = crate::config::KERNEL_BASE >> crate::config::PAGE_SIZE_BITS;
         let pgd_idx = (base_vpn >> 18) & 0x1ff;
@@ -184,6 +200,28 @@ pub fn enable_boot_paging() {
             );
             for idx in 0..512 {
                 let pa = (table * 512 + idx) * crate::config::PAGE_SIZE;
+                core::ptr::write_volatile((table_pa as *mut usize).add(idx), leaf_pte(pa));
+            }
+        }
+        let high_va = crate::config::KERNEL_BASE + crate::config::HIGH_MEMORY_START;
+        let high_vpn = high_va >> crate::config::PAGE_SIZE_BITS;
+        let high_pgd_idx = (high_vpn >> 18) & 0x1ff;
+        let high_pmd_idx = (high_vpn >> 9) & 0x1ff;
+        core::ptr::write_volatile(
+            (pgd as *mut usize).add(high_pgd_idx),
+            table_pte(kernel_virt_to_phys(
+                core::ptr::addr_of!(BOOT_HIGH_PMD) as *const _
+            )),
+        );
+        for table in 0..BOOT_HIGH_PTE_TABLES {
+            let table_pa = high_ptes as usize + table * core::mem::size_of::<BootPage>();
+            core::ptr::write_volatile(
+                (high_pmd as *mut usize).add(high_pmd_idx + table),
+                table_pte(table_pa),
+            );
+            for idx in 0..512 {
+                let pa = crate::config::HIGH_MEMORY_START
+                    + (table * 512 + idx) * crate::config::PAGE_SIZE;
                 core::ptr::write_volatile((table_pa as *mut usize).add(idx), leaf_pte(pa));
             }
         }

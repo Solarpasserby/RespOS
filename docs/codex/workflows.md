@@ -148,11 +148,13 @@ make la                   # 输出同时写入 la-output.txt
 
 ```bash
 make rv MEM=4G SMP=1 RV_OUTPUT=/tmp/respos-rv.log
-make la MEM=4G SMP=1 LA_OUTPUT=/tmp/respos-la.log
+make la LA_MEM=12G LA_SMP=12 LA_OUTPUT=/tmp/respos-la.log
 ```
 
 - 内容补充：两目标依赖 `build-disks`，分别挂载 `disk.img`/`disk-la.img` 为 x1。默认
-  `MEM=4G`、`SMP=1`，可在命令行覆盖。本地 `rv`/`la` 目标默认使用 QEMU
+  RV 使用 `MEM=4G`、`SMP=1`；LA 使用独立的 `LA_MEM=12G`、`LA_SMP=12`，均可在命令行
+  覆盖。LA 内核当前仍只启动一个 hart，`LA_SMP=12` 只是匹配本地/评测 QEMU 拓扑，不代表
+  guest 已具备 SMP 调度。本地 `rv`/`la` 目标默认使用 QEMU
   `-snapshot`，guest 在本轮仍可正常写盘，但不会因 Ctrl-C/超时把官方原始镜像留在
   journal/元数据不一致状态。RV64 使用网站给出的 virtio-mmio bus.0/1；LoongArch
   保留原 Makefile 已使用的 `-machine virt` 和 `virtio-blk-pci` 自动 PCI 总线分配。网站文本中的

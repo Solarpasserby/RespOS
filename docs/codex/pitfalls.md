@@ -2,18 +2,48 @@
 
 ## RV64 最大支持 RAM 必须同时覆盖 early FDT 和正式 direct map
 
-## LoongArch 静态 BSS 必须完整落在 early map 内
+## LoongArch refill 的“无效 TLB 项”不得带 V/D 有效位
+
+- 状态：已确认并修复
+- 适用范围：LA TLB refill、惰性 VMA、filesystem ELF exec
+- 最后验证：2026-08-11
+- 证据：LA pub `/glibc/busybox` 的 GOT 应为 `0x12018e064`，故障值
+  `0x4c0000c128f300c6` 实际来自 ELF 首页偏移 `0xee0`；预取可写 PT_LOAD 后 BusyBox 正常输出；
+  修复 refill 后在 `-m 12G -smp 12` 下进入 `cagent-glibc` group。
+- 内容：原 `construct_invalid` 对 `TLBREHI` 做位旋转并 OR `3`，生成了带 `V/D` 的表项。目录缺失
+  时硬件因此不会进入普通 page-fault handler，而会把未映射虚拟页别名到错误物理页。无效项应向
+  `TLBRELO0/1` 明确写零；`TLBREHI` 已由硬件保存 fault VPPN/PS，不要用普通 `TLBEHI` 替代。
+- 后续影响：验证 LA 惰性映射时不能只检查软件页表；必须确认缺页确实到达 Rust handler。预取所有
+  ELF 可写段只能掩盖 refill 缺陷，会增加启动 I/O 和常驻内存，不能作为正式修复。
+
+## 开启 LoongArch FPU/LSX 后必须保存任务扩展上下文
+
+- 状态：已确认并修复 user trap/task 隔离
+- 适用范围：LA `EUEN.FPE/SXE`、Rust/glibc 大型动态程序、timer/syscall/task switch
+- 最后验证：2026-08-11
+- 证据：修复前直接 `rustc --version`、`cargo` 与 BuildStorm 稳定 SIGSEGV；新增 eager
+  FP/LSX/FCSR/FCC 保存恢复后 CAgent 10/10、toolchain 和 minibuild 通过，并进入正式 `core` 编译。
+- 内容：只打开 EUEN 而不保存寄存器会让用户扩展状态跨异步 trap 和任务切换串扰；崩溃可能表现为
+  普通 load 的坏指针，而不是 illegal instruction 或浮点异常。关闭 timer 抢占不能完整规避 syscall/阻塞
+  调度，也不能代替架构上下文实现。
+- 后续影响：新增架构扩展时同时审计 enable、trap save/restore、fork/exec、signal frame 和 ptrace。当前
+  signal mcontext 尚缺 FP/LSX 扩展；eager 保存有固定开销，只有在正确性回归稳定后才考虑 lazy 化。
+
+## 内核堆存储不能作为巨型静态 BSS
 
 - 状态：已确认并修复无串口启动失败
-- 适用范围：LoongArch `KERNEL_HEAP_SIZE`、链接布局、`clear_bss()`、early page table
+- 适用范围：两架构 `KERNEL_HEAP_SIZE`、链接布局、`clear_bss()`、early direct map
 - 最后验证：2026-08-11
 - 证据：`kernel-la` program headers；QEMU 10.0.2 `-d in_asm,guest_errors`；
   `os/src/arch/loongarch64/{config/mm.rs,mod.rs}`
 - 内容：256 MiB 静态内核堆使 BSS 结束于约 `0x10aa7000`，而启动页表只覆盖前 128 MiB，
   `clear_bss()` 尚未建立最终页表就访问越界并最终执行地址 0，表现为完全没有串口输出。
-  LA 静态堆改为 64 MiB 后，x0+x1 已进入 preliminary testrunner 和首个测例。
-- 后续影响：增大 LA 静态堆时必须联合检查 ELF `ebss`、`BOOT_MAP_SIZE`、板级物理内存布局和
-  页表容量；QEMU 的 `-m` 增大不会自动扩大内核硬编码的 early map。
+  临时降为 64 MiB 后 LA 恢复启动；当前进一步把 buddy bitmap/heap storage 移到 `ekernel` 后的
+  启动期物理预留区，RV64/LA64 ELF 均不再携带巨型 BSS。
+- 后续影响：frame allocator 的下界必须是完整 heap 预留末端而不是 `ekernel`，否则会把仍在使用的
+  heap 页重复分配。预留区本身必须落在实际 RAM 和 early direct map 内；LoongArch QEMU 4 GiB
+  RAM 含 `0x10000000..0x80000000` PCI/MMIO 空洞，frame allocator 和正式 direct map 都必须按
+  low/high 两段处理，不能把 `MEMORY_END` 简单改成连续 4 GiB。
 
 ## RV64 `-m 16G` 的 FDT 在当前 early map 外
 
@@ -29,18 +59,19 @@
   early 高半区、FDT 位置、正式 direct map 和实际 FDT 分配上限，并保持小内存配置不会
   因扩大可达窗口而分配未安装 RAM。
 
-## RV64 当前 kernel ELF 无法放入 256 MiB QEMU RAM
+## RV64 巨型静态 heap 曾阻止 QEMU 装载 kernel ELF
 
-- 状态：已确认，当前最小启动回归使用 512 MiB
+- 状态：已确认并通过移出 BSS 修复
 - 适用范围：RV64 小内存启动、kernel heap、QEMU DTB 放置
 - 最后验证：2026-08-11
 - 证据：`os/src/arch/rv64/config/mm.rs` 的 256 MiB `KERNEL_HEAP_SIZE`；`ekernel` 物理末址
   约 `0x90bce000`；QEMU `-m 256M` 报 `No enough memory to place DTB after kernel/initrd`。
 - 内容：这个失败发生在 QEMU 进入 OpenSBI/内核之前，与 FDT 动态内存解析及 16 GiB
-  early leaf 扩展无关。`-m 512M -smp 1` 已进入 shell 并正确报告
-  `MemTotal: 522240 kB`。
-- 后续影响：小内存回归在重新设计 kernel heap 前使用至少 512 MiB；不能把 256 MiB
-  的 QEMU loader 错误当成 early page-table 回归。
+  early leaf 扩展无关。当前 heap 移出 BSS 后 release kernel-rv 约 8.0 MiB，512 MiB guest 已
+  运行到 libcbench；256 MiB guest 现在能进入内核，并明确报告 heap
+  `reserved_end=0x90c0b000` 超过 `memory_end=0x90000000`，因而不是有效运行配置。
+- 后续影响：区分“ELF 无法装载”和“启动后没有足够 RAM 预留目标 heap”。若要支持 256 MiB guest，
+  必须实现按实际 RAM 缩减或动态扩容 heap，不能只缩小 ELF。
 
 ## 自动 atime 更新不能复用会刷新 ctime 的显式 utimens 路径
 

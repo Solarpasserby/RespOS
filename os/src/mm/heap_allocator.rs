@@ -1,8 +1,11 @@
 // os/src/mm/heap_allocator.rs
 
 use crate::arch::interrupt::InterruptGuard;
-use crate::config::KERNEL_HEAP_SIZE;
+use crate::config::{
+    KERNEL_BASE, KERNEL_HEAP_PHYS_START, KERNEL_HEAP_SIZE, PAGE_SIZE, physical_memory_end,
+};
 use core::alloc::{GlobalAlloc, Layout};
+use core::mem::size_of;
 use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
 use respos_buddy_allocator::{Heap, bitmap_words};
@@ -104,20 +107,67 @@ unsafe impl<const ORDER: usize> GlobalAlloc for IrqSafeHeap<ORDER> {
 #[global_allocator]
 pub(crate) static HEAP_ALLOCATOR: IrqSafeHeap<32> = IrqSafeHeap::empty();
 
-// .bss 段上存放内核堆
-static mut HEAP_SPACE: [u8; KERNEL_HEAP_SIZE] = [0; KERNEL_HEAP_SIZE];
-static mut HEAP_BITMAP: [usize; bitmap_words(KERNEL_HEAP_SIZE, 32)] =
-    [0; bitmap_words(KERNEL_HEAP_SIZE, 32)];
+const HEAP_ORDER: usize = 32;
 
-/// 初始化全局堆分配器
-pub fn init_heap() {
-    unsafe {
-        HEAP_ALLOCATOR.lock().init(
-            (&raw mut HEAP_SPACE) as usize,
-            KERNEL_HEAP_SIZE,
-            &mut *(&raw mut HEAP_BITMAP),
-        );
+const fn align_up(value: usize, align: usize) -> usize {
+    (value + align - 1) & !(align - 1)
+}
+
+/// Reserve and initialize the global heap directly after the loaded kernel.
+///
+/// The heap and its buddy-membership bitmap intentionally live outside the
+/// ELF's BSS. The boot page tables already expose RAM through the high-half
+/// direct map, so this range is usable before the final frame allocator and
+/// kernel page table are constructed. The returned physical end must become
+/// the frame allocator's lower bound so heap pages can never be handed out as
+/// ordinary frames.
+pub fn init_heap() -> usize {
+    unsafe extern "C" {
+        unsafe fn ekernel();
     }
+
+    let kernel_end = ekernel as *const () as usize - KERNEL_BASE;
+    let bitmap_start = if KERNEL_HEAP_PHYS_START == 0 {
+        align_up(kernel_end, PAGE_SIZE)
+    } else {
+        assert!(
+            KERNEL_HEAP_PHYS_START >= kernel_end,
+            "kernel heap reservation overlaps loaded kernel"
+        );
+        KERNEL_HEAP_PHYS_START
+    };
+    let bitmap_len = bitmap_words(KERNEL_HEAP_SIZE, HEAP_ORDER)
+        .checked_mul(size_of::<usize>())
+        .expect("kernel heap bitmap size overflow");
+    let heap_start = align_up(
+        bitmap_start
+            .checked_add(bitmap_len)
+            .expect("kernel heap bitmap range overflow"),
+        PAGE_SIZE,
+    );
+    let reserved_end = align_up(
+        heap_start
+            .checked_add(KERNEL_HEAP_SIZE)
+            .expect("kernel heap range overflow"),
+        PAGE_SIZE,
+    );
+    assert!(
+        reserved_end <= physical_memory_end(),
+        "insufficient RAM for kernel heap: reserved_end={:#x}, memory_end={:#x}",
+        reserved_end,
+        physical_memory_end(),
+    );
+
+    unsafe {
+        let bitmap = core::slice::from_raw_parts_mut(
+            (KERNEL_BASE + bitmap_start) as *mut usize,
+            bitmap_words(KERNEL_HEAP_SIZE, HEAP_ORDER),
+        );
+        HEAP_ALLOCATOR
+            .lock()
+            .init(KERNEL_BASE + heap_start, KERNEL_HEAP_SIZE, bitmap);
+    }
+    reserved_end
 }
 
 #[cfg_attr(not(rust_analyzer), alloc_error_handler)]

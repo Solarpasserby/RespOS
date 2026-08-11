@@ -18,6 +18,10 @@ pub fn physical_memory_end() -> usize {
     PHYSICAL_MEMORY_END.load(Ordering::Acquire)
 }
 
+pub fn physical_memory_size() -> usize {
+    physical_memory_end().saturating_sub(MEMORY_START)
+}
+
 /// Read the RAM extent from the flattened device tree supplied by OpenSBI.
 /// The early page table maps the supported RAM window before this runs.
 pub fn init_physical_memory_end(fdt_pa: usize) {

@@ -53,8 +53,8 @@ pub fn try_heap_allocated() -> Option<usize> {
 pub fn init() {
     #[cfg(target_arch = "loongarch64")]
     crate::arch::enable_boot_paging();
-    init_heap();
-    init_frame_allocator();
+    let heap_reserved_end = init_heap();
+    init_frame_allocator(heap_reserved_end);
     #[cfg(debug_assertions)]
     memory_set::run_split_self_tests();
     KERNEL_SPACE.lock().activate();

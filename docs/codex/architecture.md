@@ -68,9 +68,37 @@
   frame allocator 严格以该实际末址为上限。
   首个 RAM GiB 保留 4 KiB 页以分离 kernel section 权限，后续整 GiB 用 Sv39 level-2 leaf。
 - 后续影响：不得把 early “最大可达窗口”当成真实 RAM 分配上限；增大支持内存时
-  必须同时审计 Sv39 物理地址范围、FDT 位置、direct-map leaf 和小内存启动。当前
-  256 MiB 静态内核堆使整个 kernel ELF 无法放入 256 MiB QEMU RAM；已回归的小内存点为
-  512 MiB，这是独立于 early leaf 覆盖的当前产物大小边界。
+  必须同时审计 Sv39 物理地址范围、FDT 位置、direct-map leaf 和小内存启动。
+
+### kernel heap 是启动期 RAM 预留区，不属于 ELF/BSS
+
+- 状态：已实现，RV64/LoongArch 启动烟测通过
+- 适用范围：early direct map、全局 buddy allocator、frame allocator 初始化边界
+- 最后验证：2026-08-11
+- 证据：`os/src/mm/{heap_allocator,frame_allocator}.rs`；RV64/LA64 release 构建；RV64
+  `-m 512M -smp 1 -snapshot` 运行到 libcbench，LoongArch 同配置进入 `basic-musl`
+- 内容：buddy bitmap 与 heap storage 不再声明为静态 BSS，而是从页对齐的 `ekernel` 之后连续
+  预留；两者通过已经生效的 high-half direct map 访问。`init_heap()` 返回物理预留末端，frame
+  allocator 必须排除该区间，不能再次分配这些页。RV64 heap 位于 `ekernel` 后；LoongArch
+  QEMU 12 GiB RAM 实际分为 `0..0x10000000` 与 `0x80000000..0x370000000`，256 MiB heap
+  位于高端段起始处，frame allocator 同时管理扣除内核/heap 后的两个不连续区间。容量仍在启动时
+  固定，运行期不扩容。
+- 后续影响：初始化顺序必须保持 heap reservation → heap init → frame allocator init → final
+  kernel page table。LoongArch early page table 必须覆盖高端 heap，正式 direct map 必须跳过
+  PCI/MMIO 空洞。调整 heap 容量时必须同时验证实际 RAM 上限与 early direct-map 可达范围；
+  若以后改为 frame-backed 可扩展 heap，需要先消除 frame allocator 初始化对 `Vec`/全局堆的依赖。
+
+### LoongArch 用户 trap eager 保存 FP/LSX 状态
+
+- 状态：已实现；BuildStorm 工具链与 minibuild 回归通过
+- 适用范围：LA `EUEN.FPE/SXE`、user trap、timer 抢占、task switch、fork/exec
+- 最后验证：2026-08-11
+- 证据：`os/src/arch/loongarch64/trap/{context.rs,trap.S}`；`/tmp/respos-la-lsx-context.log`
+- 内容：LA 用户 trap frame 为 800 字节，保存 GPR/PRMD/ERA、32 个 128-bit LSX/FP 寄存器、
+  FCSR0 和 FCC0..7；关键 Rust field offset 与总大小由 const assertion 固定。扩展状态保存在任务内核栈
+  的固定 trap frame 中，因此随任务调度隔离，并由 fork 复制、exec 清零。
+- 后续影响：当前 eager save/restore 优先保证正确性；lazy extension state 可作为性能优化。Linux LA
+  signal mcontext 的扩展状态接口尚未实现，不能把 task trap 隔离等同于完整 signal FP/LSX ABI。
 
 ### RV64 返回用户态前必须保持 kernel trap 状态
 

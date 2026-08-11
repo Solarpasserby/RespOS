@@ -353,15 +353,14 @@ pub mod mmu {
     #[inline(always)]
     pub unsafe fn configure_page_walk() {
         const DIR_WIDTH: usize = 9;
-        // Three-level page walk: PGD -> PMD -> PTE -> 4K page.
+        // LA64 three-level page walk: PGD -> PMD -> PTE -> 4K page.
         let pwcl = PAGE_SIZE_BITS
             | (DIR_WIDTH << 5)
             | ((PAGE_SIZE_BITS + DIR_WIDTH) << 10)
-            | (DIR_WIDTH << 15)
-            | ((PAGE_SIZE_BITS + DIR_WIDTH * 2) << 20)
-            | (DIR_WIDTH << 25);
+            | (DIR_WIDTH << 15);
+        let pwch = (PAGE_SIZE_BITS + DIR_WIDTH * 2) | (DIR_WIDTH << 6);
         write_csr!(CSR_PWCL, pwcl);
-        write_csr!(CSR_PWCH, 0);
+        write_csr!(CSR_PWCH, pwch);
     }
 
     #[inline(always)]

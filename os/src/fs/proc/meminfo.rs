@@ -73,7 +73,7 @@ fn generate_meminfo() -> String {
     let page_size = crate::config::PAGE_SIZE;
     let cached_pages = crate::fs::page_cache_page_count();
     let dirty_pages = crate::fs::page_cache_dirty_page_count();
-    let mem_total = crate::config::physical_memory_end() - crate::config::MEMORY_START;
+    let mem_total = crate::config::physical_memory_size();
     let mem_free = free_frames * page_size;
     let mem_cached = cached_pages * page_size;
     let mem_dirty = dirty_pages * page_size;

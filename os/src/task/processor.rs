@@ -210,7 +210,19 @@ pub fn run_tasks() -> ! {
                     crate::perf::idle_ticks(crate::perf::elapsed_since(idle_started));
                 }
                 #[cfg(target_arch = "loongarch64")]
-                core::hint::spin_loop();
+                {
+                    // All user tasks may be blocked on timer-backed waits (for
+                    // example nanosleep or an idle TCP listener). Enter idle
+                    // with local interrupts enabled so the timer can wake and
+                    // enqueue them, then restore the kernel's IE=0 invariant.
+                    unsafe {
+                        crate::arch::register::crmd::set_interrupt_enabled(true);
+                    }
+                    crate::arch::wait_for_interrupt();
+                    unsafe {
+                        crate::arch::register::crmd::set_interrupt_enabled(false);
+                    }
+                }
             }
 
             #[cfg(target_arch = "riscv64")]

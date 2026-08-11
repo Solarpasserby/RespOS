@@ -1,5 +1,13 @@
 # os/src/arch/loongarch64/trap/trap.S
 
+.altmacro
+.macro SAVE_VR n
+    vst         $vr\n, $sp, 272+\n*16
+.endm
+.macro LOAD_VR n
+    vld         $vr\n, $sp, 272+\n*16
+.endm
+
 # LoongArch 异常处理汇编
 #
 # 寄存器别名（ABI）:
@@ -26,6 +34,9 @@
 #     x0@sp+0, x1@sp+8, ..., x31@sp+248
 #     prmd@sp+256 (32*8)
 #     era@sp+264  (33*8)
+#     vr0..vr31@sp+272..783 (32*16)
+#     fcsr0@sp+784
+#     fcc0..fcc7@sp+792..799
 
     .section .text
     .globl __trap_from_user
@@ -40,8 +51,8 @@ __trap_from_user:
     # 现在 $sp 指向内核栈（由之前恢复流程保留在 KSAVE0 中的值）
     # 如果没有之前的值，说明是首次trap，KSAVE0需要预先初始化
 
-    # 步骤2: 在内核栈上分配 TrapContext 空间 (32*8 + 2*8 = 272 bytes)
-    addi.d      $sp, $sp, -272
+    # 步骤2: 在内核栈上分配 TrapContext 空间 (800 bytes, 16-byte aligned)
+    addi.d      $sp, $sp, -800
 
     # 步骤3: 保存通用寄存器
     # x0 恒为0不需要保存，但为了对齐我们保存0
@@ -89,6 +100,32 @@ __trap_from_user:
     csrrd       $t0, 0x6           # ERA
     st.d        $t0, $sp, 264      # offset 33*8
 
+    # 保存完整 LSX/浮点状态。LSX 的低 64 位与标量浮点寄存器重叠，
+    # 因而保存 128-bit vr0..vr31 即同时覆盖 FP 与 LSX。
+    .set n, 0
+    .rept 32
+        SAVE_VR %n
+        .set n, n+1
+    .endr
+    movfcsr2gr  $t0, $fcsr0
+    st.d        $t0, $sp, 784
+    movcf2gr    $t0, $fcc0
+    st.b        $t0, $sp, 792
+    movcf2gr    $t0, $fcc1
+    st.b        $t0, $sp, 793
+    movcf2gr    $t0, $fcc2
+    st.b        $t0, $sp, 794
+    movcf2gr    $t0, $fcc3
+    st.b        $t0, $sp, 795
+    movcf2gr    $t0, $fcc4
+    st.b        $t0, $sp, 796
+    movcf2gr    $t0, $fcc5
+    st.b        $t0, $sp, 797
+    movcf2gr    $t0, $fcc6
+    st.b        $t0, $sp, 798
+    movcf2gr    $t0, $fcc7
+    st.b        $t0, $sp, 799
+
     # 用户态可以自由使用 tp。进入 Rust 内核前恢复内核 tp，避免
     # trap_handler 在用户 tp 下运行。
     csrrd       $tp, 0x31
@@ -128,13 +165,38 @@ __restore:
     la.local    $t0, __trap_from_user
     csrwr       $t0, 0xc
 
+    # 在恢复通用寄存器前恢复用户扩展状态，以便自由使用 t0。
+    ld.d        $t0, $sp, 784
+    movgr2fcsr  $fcsr0, $t0
+    ld.bu       $t0, $sp, 792
+    movgr2cf    $fcc0, $t0
+    ld.bu       $t0, $sp, 793
+    movgr2cf    $fcc1, $t0
+    ld.bu       $t0, $sp, 794
+    movgr2cf    $fcc2, $t0
+    ld.bu       $t0, $sp, 795
+    movgr2cf    $fcc3, $t0
+    ld.bu       $t0, $sp, 796
+    movgr2cf    $fcc4, $t0
+    ld.bu       $t0, $sp, 797
+    movgr2cf    $fcc5, $t0
+    ld.bu       $t0, $sp, 798
+    movgr2cf    $fcc6, $t0
+    ld.bu       $t0, $sp, 799
+    movgr2cf    $fcc7, $t0
+    .set n, 0
+    .rept 32
+        LOAD_VR %n
+        .set n, n+1
+    .endr
+
     # 即将恢复用户寄存器，先把当前内核 tp 留到 KSAVE1，供下次 trap entry 使用。
     ori         $t0, $tp, 0
     csrwr       $t0, 0x31
 
     # 先保存下次 trap entry 要使用的内核栈顶。这个步骤会使用 $t0，
     # 必须发生在恢复用户 $t0 之前，否则异步中断返回会破坏用户寄存器。
-    addi.d      $t0, $sp, 272      # t0 = kernel stack top
+    addi.d      $t0, $sp, 800      # t0 = kernel stack top
     csrwr       $t0, 0x30          # KSAVE0 = kernel sp (下次 trap entry 时 csrwr 恢复)
 
     # 恢复通用寄存器

@@ -1,2 +1,2 @@
-# Change this to mode=final for the final-round submission.
-mode=preliminary
+# Final-round submission: run the fixed scripts from the official root image.
+mode=final

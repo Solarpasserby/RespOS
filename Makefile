@@ -6,9 +6,12 @@ RV_MODE ?= $(MODE)
 LA_MODE ?= $(MODE)
 MEM ?= 4G
 SMP ?= 1
+LA_MEM ?= 12G
+LA_SMP ?= 12
 RV_FS_IMG ?= img/sdcard-rv.img
 LA_FS_IMG ?= img/sdcard-la.img
 PUB_INTERACTIVE_MEM ?= 4G
+LA_PUB_INTERACTIVE_MEM ?= 12G
 PUB_INTERACTIVE_SMP ?= 1
 RV_PUB_FS_IMG ?= img/sdcard-rv-pub.img
 LA_PUB_FS_IMG ?= img/sdcard-la-pub.img
@@ -133,10 +136,10 @@ rv: build-rv build-disks
 la: build-la build-disks
 	$(QEMU_LA) -machine virt \
 		-kernel $(KERNEL_LA) \
-		-m $(MEM) \
+		-m $(LA_MEM) \
 		-nographic \
 		-snapshot \
-		-smp $(SMP) \
+		-smp $(LA_SMP) \
 		-drive file=$(LA_FS_IMG),if=none,format=raw,id=x0 \
 		-device virtio-blk-pci,drive=x0 \
 		-no-reboot \
@@ -159,8 +162,8 @@ run-rv-pub: check-pub-images rv
 
 run-la-pub: LA_FS_IMG=$(LA_PUB_FS_IMG)
 run-la-pub: LA_USER_FEATURES=
-run-la-pub: MEM=$(PUB_INTERACTIVE_MEM)
-run-la-pub: SMP=$(PUB_INTERACTIVE_SMP)
+run-la-pub: LA_MEM=$(LA_PUB_INTERACTIVE_MEM)
+run-la-pub: LA_SMP=$(PUB_INTERACTIVE_SMP)
 run-la-pub: LA_OUTPUT=$(LA_PUB_OUTPUT)
 run-la-pub: check-pub-images la
 

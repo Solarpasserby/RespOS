@@ -1,5 +1,79 @@
 # RespOS 当前状态
 
+## 2026-08-11 `make all` 产物 RV64 正式资源完整决赛回归（当前工作树）
+
+- **平台口径**：当前比赛公告参数为 RV64 `-m 16G -smp 8`、LoongArch
+  `-m 36G -smp 12`，整轮上限 6250 秒；LA 不是 16 GiB。本轮只验收 RV64。
+- **构建与启动**：仓库根目录直接执行 `make all` 成功生成 `kernel-rv`、`kernel-la`、
+  final-profile `disk.img`/`disk-la.img`。随后以 QEMU 10.0.2、`kernel-rv`、本地
+  `img/sdcard-rv-pub.img` 为 x0、生成的 `disk.img` 为 x1，使用 `-m 16G -smp 8 -snapshot`
+  及比赛 virtio-mmio/net/RTC 参数启动；8 个 hart 全部上线，launcher 读取 x1 profile 后进入
+  final mode。
+- **CAgent**：原始 `/glibc/cagent_testcode.sh` 输出 group start/end，factorial、fs-create、kernel、
+  fs-usage、cpu、fs-readwrite、date、network、fs-search、fs-directory 共 10 项全部 pass；脚本
+  exit code 0。单项约 352--674 ms。
+- **BuildStorm**：launcher 在 CAgent 完成后才串行启动原始 `/glibc/buildstorm_testcode.sh`；输出
+  `BUILDSTORM_TOOLCHAIN ok`、`BUILDSTORM_MINIBUILD ok`，正式阶段最终为
+  `BUILDSTORM_COMPILE mode=multi ok=true elapsed_s=0.00 cores=8 bytes=1681000 arch=riscv64`。
+  Cargo 报告 `21m 38s`，axbuild 报告 `1310.01s`；本地脚本的 `elapsed_s=0.00` 仍不可用于评分计时。
+  脚本 exit code 0，launcher 输出 `all final scripts finished; powering off`，QEMU 正常退出。
+- **结论与范围**：当前 heap/双盘工作树能够通过“平台执行 `make all` 后启动 RV64”这一完整
+  本地模拟。结果对应当前本地 pub 镜像，不替代评测方最终镜像哈希确认；LoongArch 当前内存布局按本地
+  12 GiB QEMU 分段硬编码，尚不满足正式 36 GiB 动态布局且只启动一个 hart，必须另行修改和回归。
+
+## 2026-08-11 LoongArch FP/LSX 用户上下文修复（当前工作树）
+
+- **根因**：LA 初始化时已开启 `EUEN.FPE/SXE`，官方 Rust 工具链也会执行 LSX 指令，但原
+  `TrapContext` 和 user trap 汇编只保存通用寄存器、PRMD 与 ERA。timer、syscall 或调度发生后，
+  用户 FP/LSX/FCSR/FCC 状态没有任务级所有权，BuildStorm 的 `rustc`/`cargo` 因坏指针 SIGSEGV。
+- **修复**：LA user trap frame 从 272 字节扩为 800 字节，eager 保存/恢复 32 个 128-bit
+  `vr`（同时覆盖标量 FP）、FCSR0 与 FCC0..7；exec 初始化为零，fork/clone 随完整
+  `TrapContext` 复制。Rust 结构对汇编使用的所有关键偏移带编译期断言。
+- **因果回归**：QEMU 10.0.2，`-m 12G -smp 12 -snapshot`，官方 LA pub x0 与 final-profile x1，
+  `LA_KERNEL_FEATURES=fault_trace`。CAgent 10/10 pass；BuildStorm 的 `rustc --version`、
+  `cargo --version`、`BUILDSTORM_TOOLCHAIN`、`BUILDSTORM_MINIBUILD` 均通过，不再出现此前稳定的
+  SIGSEGV，并进入正式 arceos 构建的 `compiler_builtins`/`core` 编译。QEMU 持续约 100% 单核 CPU；
+  运行 10 分 23 秒后按用户要求由宿主停止，因此没有 BuildStorm group end，不能宣称完整通过。
+  日志：`/tmp/respos-la-lsx-context.log`。
+- **边界与代价**：当前为 eager 策略，每次 user trap 固定搬运约 528 字节扩展状态，会增加 syscall/
+  timer 开销；后续可用 lazy-FPU/LSX 优化。当前 LoongArch 用户信号 mcontext 仍只公开/恢复 GPR，
+  signal handler 的完整 FP/LSX ABI 另行补齐；这不影响本次跨 trap/任务切换修复的因果结论。
+
+## 2026-08-11 kernel heap 移出静态 BSS（当前工作树）
+
+- **实现**：删除 RV64/LoongArch 的静态 `HEAP_SPACE` 和 `HEAP_BITMAP`。RV64 在页对齐的
+  `ekernel` 后预留 bitmap/heap；LoongArch 12 GiB QEMU RAM 按实测布局拆为 256 MiB low RAM 与
+  11.75 GiB high RAM，bitmap/256 MiB heap 放在 `0x80000000` 起始的 high RAM。frame allocator
+  支持多个不连续区间，并排除内核与 heap 预留区。现有 IRQ-safe buddy 热路径不变。
+- **ELF**：release `kernel-rv` 约 8.0 MiB、最后一个 BSS PT_LOAD `MemSize=532828`；
+  `kernel-la` 约 6.3 MiB，静态 heap 不再扩大 `ebss/ekernel` 或触发整段 `clear_bss()`。
+- **验证**：`make build-rv`、`make build-la`、kernel `cargo fmt --check` 和 `git diff --check`
+  通过。RV64 QEMU 10.0.2、`-m 512M -smp 1 -snapshot` 从 preliminary launcher 运行完
+  basic-musl/basic-glibc 并进入 libcbench；LoongArch 同内存/SMP 配置进入首个 `basic-musl`。
+  两轮由宿主主动停止，只证明启动、堆分配和早期用户态路径，不代表完整测例通过。
+- **256 MiB 边界**：同一 `kernel-rv` 在 `-m 256M` 下已由 QEMU 成功装载并进入内核，随后按设计
+  报告 `reserved_end=0x90c0b000, memory_end=0x90000000` 后停止；这证明旧 ELF/DTB 装载问题已经
+  消失，剩余限制是固定 256 MiB heap 加 bitmap 和内核本体无法同时容纳在 256 MiB RAM 中。
+- **LoongArch 决赛诊断**：正式 `-m 36G -smp 12` 在当前宿主由 QEMU 创建 RAM 时即报
+  `Cannot allocate memory`，未进入 guest。原 BusyBox `AddressError era=badv=0x4c0000c128f300c6`
+  已确认由 TLB refill 的 `construct_invalid` 分支错把目录缺失构造成有效映射导致：GOT 页没有进入
+  Rust page-fault handler，而是别名到 ELF 首页。改为向 `TLBRELO0/1` 明确写零后，文件页懒加载
+  恢复；清理全部临时探针后，QEMU 10.0.2 `-m 12G -smp 12`、官方 LA pub 根盘加
+  `disk-la.img` 已进入 `/glibc/cagent_testcode.sh` 并输出
+  `#### OS COMP TEST GROUP START cagent-glibc ####`。原卡死根因是所有用户任务 blocked 后，LA
+  调度器以 `IE=0` 执行 `spin_loop()`：timer 已在 `ESTAT.IS[11]` pending，却无法进入 trap 唤醒
+  nanosleep/网络 timeout。当前 idle 路径临时开启中断并执行 `idle 0`，kernel idle timer trap
+  处理 task timer，醒来后恢复内核 `IE=0` 约束。QEMU 10.0.2、`make la
+  LA_FS_IMG=img/sdcard-la-pub.img LA_MEM=12G LA_SMP=12` 在约 18 秒内退出；CAgent 10 项全部 pass。
+  随后的 BuildStorm 输出 group end，但 `rustc --version`、`cargo new` 和正式编译均 SIGSEGV
+  （rc=139），属于剩余动态程序兼容缺陷。日志：`/tmp/respos-la-full-after-idle-fix.log`。
+- **LoongArch 正式资源限制**：当前 task processor 在 LA 下明确使用 `MAX_CPUS=1`，没有 secondary
+  CPU 启动路径；`-smp 12` 不等于内核使用 12 核。当前 RAM high-end 按本地 12 GiB QEMU 布局
+  硬编码，尚不支持公告的 36 GiB 动态布局。因此 LA 决赛完整验收仍未通过。
+- **保留边界**：这不是动态扩容 heap；预留容量在启动时仍固定且不能归还 frame allocator。
+  LoongArch 12 GiB 上界和 RAM 分段当前按 QEMU 10.0.2 布局配置，尚未从固件/ACPI 动态发现；
+  使用不同 `-m` 容量前必须补充探测或匹配配置。
+
 ## 2026-08-11 官方根盘 + 可选辅助 ext4 迁移（当前工作树）
 
 - **实现**：RV64 virtio-mmio bus.0/1 和 LoongArch virtio PCI 均支持按 block-device index
@@ -22,12 +96,12 @@
   和 group end，launcher 观察到 exit code 0 后才启动 BuildStorm；BuildStorm 已输出 group start、
   rustc/cargo版本及 `BUILDSTORM_TOOLCHAIN ok`。该轮随后由宿主终止，不代表完整 BuildStorm 通过。
 - **构建验证**：`make build-rv` 和 `make build-la` release 均通过。
-- **LoongArch 运行验证与启动修复**：此前无串口输出发生在 `clear_bss()`：256 MiB 静态
+- **LoongArch 历史启动诊断**：此前无串口输出发生在 `clear_bss()`：256 MiB 静态
   `KERNEL_HEAP_SIZE` 使 BSS 结束于约 `0x10aa7000`，超过 128 MiB early map 和 256 MiB
   板级低内存窗口。QEMU `-d in_asm,guest_errors` 显示清零循环最终跳到地址 0。将 LA 专用静态堆
   恢复为 64 MiB 后，QEMU 10.0.2、`-m 4G -smp 1`、x0+x1 已输出
   `contest_launcher` preliminary 日志、`[testrunner] start` 并进入首个 `basic-musl` 测例。
-  本轮宿主在 60 秒后终止，证明启动和双盘链路，不代表完整 LA 测例集通过。
+  该历史修复先降为 64 MiB；当前 heap storage 已进一步移出 BSS，并恢复为 256 MiB。
 
 本文件是快速变化的状态页。更新测试结论时必须同时更新日期、提交和命令。
 
@@ -52,11 +126,11 @@
   Cargo 报告 `19m25s`，axbuild 报告 `1178.08s`；本地旧脚本仍输出无效的
   `elapsed_s=0.00`，因此本轮首先是 16 GiB 正确性验收，不代替新官方镜像/平台计时。
   结束时 QEMU RSS 约 2.8 GiB，宿主 swap 约 2 MiB，未见 panic、fault、OOM 或 ext4 错误。
-- **小内存边界**：`-m 512M -smp 1` 仍可进入 shell，并报告
-  `MemTotal: 522240 kB`。当前 256 MiB 静态 kernel heap 使 `ekernel` 物理末址约为
+- **历史小内存边界**：`-m 512M -smp 1` 可进入 shell，并报告
+  `MemTotal: 522240 kB`。当时 256 MiB 静态 kernel heap 使 `ekernel` 物理末址约为
   `0x90bce000`；`-m 256M` 在 QEMU 放置 DTB 前即报
-  `No enough memory to place DTB after kernel/initrd`。这是当前内核产物大小的独立旧边界，
-  不是 16 GiB early map 回归。
+  `No enough memory to place DTB after kernel/initrd`。当前工作树已把 heap 移出 ELF/BSS；
+  该记录只保留为旧故障证据，不再是当前 ELF 大小边界。
 
 ## 2026-08-11 Linux/POSIX Phase 3 写回与持久化语义完成（基于 `50fb93a` 的本轮工作树）
 

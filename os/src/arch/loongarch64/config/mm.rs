@@ -12,12 +12,12 @@ pub const USER_STACK_SIZE: usize = 8 * 1024 * 1024;
 pub const KERNEL_STACK_TOP: usize = 0xffff_ffff_ffff_f000;
 pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 8; // 32 KiB
 
-// 内核堆大小
-// The early LoongArch page table maps the first 128 MiB. Keep the complete
-// kernel image, including this statically allocated heap and its bitmap,
-// inside that window so clear_bss() is safe before the final page table exists.
-// User frames and page-cache frames are not allocated from this fixed heap.
-pub const KERNEL_HEAP_SIZE: usize = 64 * 1024 * 1024;
+// 内核堆不属于 ELF/BSS；它位于 QEMU high RAM 开头。early page table 单独映射
+// 该区域，正式页表则映射完整的 low/high RAM 并跳过 PCI/MMIO 空洞。User frames
+// and page-cache frames are not allocated from this reserved heap.
+pub const KERNEL_HEAP_SIZE: usize = 256 * 1024 * 1024;
+/// Put the large heap in QEMU's high RAM instead of overflowing 256 MiB low RAM.
+pub const KERNEL_HEAP_PHYS_START: usize = crate::config::HIGH_MEMORY_START;
 
 // 文件映射和匿名映射区域
 pub const MMAP_MIN_ADDR: usize = 0x0000_0020_0000_0000;

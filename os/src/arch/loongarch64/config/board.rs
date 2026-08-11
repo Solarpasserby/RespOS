@@ -12,12 +12,19 @@
 pub const HARDWARE_CLOCK_FREQ: usize = 100_000_000;
 pub const USER_CLOCK_FREQ: usize = 100_000_000;
 pub const ACCOUNTING_CLOCK_FREQ: usize = HARDWARE_CLOCK_FREQ;
-// QEMU loongarch64 virt with `-m 128M` maps RAM in low memory.
+// QEMU loongarch64 virt keeps 256 MiB of low RAM and places the remainder of
+// the local 12 GiB guest above the PCI/MMIO hole.
 pub const MEMORY_START: usize = 0;
-pub const MEMORY_END: usize = 0x1000_0000;
+pub const LOW_MEMORY_END: usize = 0x1000_0000;
+pub const HIGH_MEMORY_START: usize = 0x8000_0000;
+pub const MEMORY_END: usize = 0x3_7000_0000;
 
 pub const fn physical_memory_end() -> usize {
     MEMORY_END
+}
+
+pub const fn physical_memory_size() -> usize {
+    LOW_MEMORY_END + (MEMORY_END - HIGH_MEMORY_START)
 }
 
 pub const PCI_ECAM_BASE: usize = 0x2000_0000;

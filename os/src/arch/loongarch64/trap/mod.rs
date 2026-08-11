@@ -49,13 +49,29 @@ fn is_page_fault(exception: estat::Exception) -> bool {
 
 fn handle_user_page_fault(_cx: &TrapContext, exception: estat::Exception) {
     let badv = badv::read();
+    let cause = page_fault_cause(exception);
     let result = current_task()
         .expect("[kernel] current task is None.")
-        .op_memory_set_write(|memory_set| {
-            memory_set.handle_page_fault(page_fault_cause(exception), badv)
-        });
+        .op_memory_set_write(|memory_set| memory_set.handle_page_fault(cause, badv));
     if let Err(err) = result {
         let task = current_task().expect("[kernel] current task is None.");
+        #[cfg(feature = "fault_trace")]
+        println!(
+            "[user-fault] tid={} tgid={} cause={:?} era={:#x} badi={:#010x} badv={:#x} a0={:#x} a1={:#x} a2={:#x} a3={:#x} sp={:#x} ra={:#x} err={:?}",
+            task.tid(),
+            task.tgid(),
+            cause,
+            _cx.era,
+            read_badi(),
+            badv,
+            _cx.x[4],
+            _cx.x[5],
+            _cx.x[6],
+            _cx.x[7],
+            _cx.x[3],
+            _cx.x[1],
+            err
+        );
         let sig = if err == Errno::EIO {
             Sig::SIGBUS
         } else {
@@ -73,7 +89,6 @@ fn handle_user_syscall(cx: &mut TrapContext) {
     let syscall_id = cx.syscall_id();
     let syscall_args = cx.syscall_args();
     cx.era += 4;
-
     let ret = syscall(syscall_id, syscall_args);
     if syscall_id == SYSCALL_SIGRETURN && ret.is_ok() {
         return;
@@ -188,7 +203,9 @@ pub fn trap_from_kernel(cx: &mut TrapContext) {
             panic!("[kernel] Syscall from kernel!");
         }
         estat::Trap::Interrupt(estat::Interrupt::Timer) => {
-            println!("[kernel] Timer interrupt in kernel mode");
+            clear_timer_interrupt();
+            set_next_ti_trigger();
+            check_all_task_timers();
         }
         cause => {
             panic!(

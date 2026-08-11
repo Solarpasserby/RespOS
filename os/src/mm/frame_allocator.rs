@@ -1,7 +1,7 @@
 // os/src/mm/frame_allocator
 
 use super::address::{PhysAddr, PhysPageNum};
-use crate::config::{KERNEL_BASE, MEMORY_START, physical_memory_end};
+use crate::config::{MEMORY_START, physical_memory_end};
 use alloc::vec::Vec;
 use lazy_static::lazy_static;
 use spin::Mutex;
@@ -61,17 +61,23 @@ trait FrameAllocator {
 ///
 /// 使用栈式页帧管理
 pub struct StackFrameAllocator {
-    current: usize,
-    end: usize,
+    ranges: Vec<FrameRange>,
+    active_range: usize,
     recycled: Vec<usize>,
     recycled_bitmap: Vec<bool>,
+}
+
+struct FrameRange {
+    start: usize,
+    current: usize,
+    end: usize,
 }
 
 impl FrameAllocator for StackFrameAllocator {
     fn new() -> Self {
         Self {
-            current: 0,
-            end: 0,
+            ranges: Vec::new(),
+            active_range: 0,
             recycled: Vec::new(),
             recycled_bitmap: Vec::new(),
         }
@@ -82,17 +88,26 @@ impl FrameAllocator for StackFrameAllocator {
         if let Some(ppn) = self.recycled.pop() {
             self.recycled_bitmap[ppn] = false;
             Some(ppn.into())
-        } else if self.current == self.end {
-            None
         } else {
-            self.current += 1;
-            Some((self.current - 1).into())
+            while let Some(range) = self.ranges.get_mut(self.active_range) {
+                if range.current < range.end {
+                    let ppn = range.current;
+                    range.current += 1;
+                    return Some(ppn.into());
+                }
+                self.active_range += 1;
+            }
+            None
         }
     }
 
     fn dealloc(&mut self, ppn: PhysPageNum) {
         let ppn = ppn.0; // 使用了变量遮蔽，需要处理意外情况
-        if ppn >= self.current || self.recycled_bitmap.get(ppn).copied().unwrap_or(false) {
+        let was_allocated = self
+            .ranges
+            .iter()
+            .any(|range| ppn >= range.start && ppn < range.current);
+        if !was_allocated || self.recycled_bitmap.get(ppn).copied().unwrap_or(false) {
             panic!("Failed to release frame ppn={:#?}", ppn);
         }
         self.recycled_bitmap[ppn] = true;
@@ -101,30 +116,59 @@ impl FrameAllocator for StackFrameAllocator {
 }
 
 impl StackFrameAllocator {
-    fn init(&mut self, l: PhysPageNum, r: PhysPageNum) {
-        self.current = l.0;
-        self.end = r.0;
-        self.recycled_bitmap = alloc::vec![false; r.0];
+    fn init(&mut self, ranges: &[(PhysPageNum, PhysPageNum)]) {
+        self.ranges = ranges
+            .iter()
+            .filter(|(start, end)| start.0 < end.0)
+            .map(|(start, end)| FrameRange {
+                start: start.0,
+                current: start.0,
+                end: end.0,
+            })
+            .collect();
+        self.active_range = 0;
+        let max_ppn = self.ranges.iter().map(|range| range.end).max().unwrap_or(0);
+        self.recycled_bitmap = alloc::vec![false; max_ppn];
     }
 
     pub fn free_frames(&self) -> usize {
-        (self.end - self.current) + self.recycled.len()
+        self.ranges
+            .iter()
+            .map(|range| range.end - range.current)
+            .sum::<usize>()
+            + self.recycled.len()
     }
 }
 
 /// 初始化物理页帧分配器
 ///
 /// 分配的是 qemu 中真实的物理地址
-pub fn init_frame_allocator() {
-    unsafe extern "C" {
-        unsafe fn ekernel();
-    }
-    let kernel_end = ekernel as *const () as usize - KERNEL_BASE;
-    let alloc_start = kernel_end.max(MEMORY_START);
-    FRAME_ALLOCATOR.lock().init(
-        PhysAddr::from(alloc_start).ceil(),
+pub fn init_frame_allocator(reserved_end: usize) {
+    #[cfg(target_arch = "riscv64")]
+    let ranges = [(
+        PhysAddr::from(reserved_end.max(MEMORY_START)).ceil(),
         PhysAddr::from(physical_memory_end()).floor(),
-    );
+    )];
+
+    #[cfg(target_arch = "loongarch64")]
+    let ranges = {
+        unsafe extern "C" {
+            unsafe fn ekernel();
+        }
+        let kernel_end = ekernel as *const () as usize - crate::config::KERNEL_BASE;
+        [
+            (
+                PhysAddr::from(kernel_end.max(MEMORY_START)).ceil(),
+                PhysAddr::from(crate::config::LOW_MEMORY_END).floor(),
+            ),
+            (
+                PhysAddr::from(reserved_end.max(crate::config::HIGH_MEMORY_START)).ceil(),
+                PhysAddr::from(physical_memory_end()).floor(),
+            ),
+        ]
+    };
+
+    FRAME_ALLOCATOR.lock().init(&ranges);
 }
 
 pub fn frame_alloc() -> Option<FrameTracker> {
