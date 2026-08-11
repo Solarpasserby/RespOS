@@ -64,7 +64,41 @@
 - **保留边界**：当前仍无硬件 PTE dirty bit，resident writable MAP_SHARED page 采用保守范围写回；
   truncate 后访问已越过新 EOF 的映射尚未实现精确 Linux SIGBUS。这两项属于后续 MM 精化，不影响
   Phase 3 的 page identity、错误可见性和持久化退出门槛。
+## 2026-08-11 题一 CAgent 当前并发结果与性能定位（`ab893b0`）
 
+- **状态**：RV64、`SMP=1` 的受控 10 路 CAgent 负载全部通过，2026-08-03 记录的 20--60 秒
+  并发超时未在当前提交复现；这不是官方脚本经 judge 解析后的可申报成绩。当前运行使用仓库
+  `scripts/cagent_debug.sh`，设置 `SKIP_COMMAND_PROBE=1`，保留与官方脚本相同的 10 个 prompt、
+  timeout、`simple_llm_server`、`agent_lite` 和并发启动形态，只省略每个 agent 前额外执行一次固定
+  命令的诊断探针。官方脚本依赖工作目录为 `/glibc`，本地 `user_shell` 无法可靠预排 `cd`，因此
+  尚未完成原始 `/glibc/cagent_testcode.sh` + `judge_cagent-glibc.py` 的最终确认。
+- **配置与命令**：提交 `ab893b0`；构建命令为
+  `make build-rv RV_USER_FEATURES= RV_KERNEL_FEATURES='perf_counters debug_traces'`，执行成功。随后直接以
+  `kernel-rv`、pub 镜像、RV64 `-smp 1 -m 512M` 启动 QEMU，在 guest
+  中清零 `/proc/respos_perf` 后执行
+  `/bin/busybox env SKIP_COMMAND_PROBE=1 /glibc/cagent_debug.sh all`，立即读取计数并正常退出。
+  诊断 kernel 在 `256M` 下因 QEMU 无空间放置 DTB 而未启动，故本轮提高到 `512M`；详细 trace 会扰动
+  墙钟，结果只用于活性和瓶颈定位。日志为 `/tmp/cagent-all-trace.log`；单项对照为
+  `/tmp/cagent-kernel-trace.log`。
+- **10 项结果**：`cpu 667 ms`、`factorial 701 ms`、`fs-usage 619 ms`、`kernel 742 ms`、
+  `fs-create 655 ms`、`network 769 ms`、`date 894 ms`、`fs-search 860 ms`、
+  `fs-readwrite 853 ms`、`fs-directory 856 ms`，均为 `pass`。独立 `kernel` agent 全链路为
+  `132 ms`。因此当前没有证据支持继续把题一阻断归因于单项 timeout、`uname`、FS 固定命令或
+  TCP listener 无法承载 10 个并发连接。
+- **调度与等待证据**：10 路窗口内 `context_switches=504`、`blocking_switches=264`、
+  `scheduler_yields=20`、`timer_preemptions=127`。20 次 yield 全部属于 `tcp_connect`；FS、stdio、
+  pipe、futex、process、`signal_time` 和其他网络等待分桶均为 0。clone/exec/wait/exit trace 完整，
+  未观察到 waiter 丢唤醒、子进程无法回收、server 清理卡死或 timeout 风暴。一次宿主延迟 100 秒后
+  才读取计数的错误运行产生 7,182,645 次 `stdio` yield，已确认是测试窗口污染，不是 CAgent 负载。
+- **当前性能热点**：窗口内 `private_file_faults=11645`、`cow_faults=3766`、
+  `anonymous_faults=1666`，同时有 `page_cache_hits=11858`、`page_cache_misses=206`；这表明 glibc shell
+  和工具的重复 exec、动态 ELF/file-backed mmap 与私有/COW 装页是当前最显著的可优化资源路径。
+  但全部测例仍在 0.9 秒内完成，所以它是性能候选而非正确性阻断。后续若优化，应先做 1/2/4/10
+  并发的 exec/page-fault 计数与无 feature 墙钟 A/B，不能仅凭 fault 次数改共享/COW 语义。
+- **已排除的首要瓶颈**：ext4 `lock_wait_ticks=2644`，相对 `lock_hold_ticks=2731019` 很低；hold 主要
+  分布在 read、namespace、attributes、lookup 和 write 的正常工作中，没有长期锁等待。kernel heap
+  峰值约 5.9 MiB，也不是内存压力。当前不应优先修改 timeout、wait4、signal、pipe、TCP waiter、
+  ext4 锁模型或扩大 heap；除非官方原始脚本复跑给出与本轮不同的证据。
 ## 2026-08-10 Linux/POSIX 语义与模型重构路线（`7cdae1e` 后）
 
 - 已建立 [linux-posix-refactor-plan.md](./linux-posix-refactor-plan.md)，后续以保持 BuildStorm 不回退、
