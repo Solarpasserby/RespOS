@@ -19,9 +19,10 @@ use crate::syscall::{Errno, SysResult};
 use crate::timer::{TimeSpec, get_time_ms};
 
 lazy_static! {
-    static ref EXT4_INODE_CACHE: Mutex<HashMap<u64, Weak<dyn InodeOp>>> =
+    static ref EXT4_INODE_CACHE: Mutex<HashMap<(usize, u64), Weak<dyn InodeOp>>> =
         Mutex::new(HashMap::new());
-    static ref DEFERRED_INODE_DISCARDS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+    static ref DEFERRED_INODE_DISCARDS: Mutex<Vec<(usize, &'static [u8], u32)>> =
+        Mutex::new(Vec::new());
     /// lwext4 keeps mount, block-cache, and directory traversal state in
     /// shared C objects.  Every entry into lwext4, including superblock
     /// operations, must be serialized by this one lock on SMP.
@@ -124,6 +125,9 @@ impl Drop for ProfiledExt4Guard<'_> {
 }
 
 pub struct Ext4Inode {
+    fs_id: usize,
+    mount_point: &'static str,
+    mount_point_c: &'static [u8],
     pub ino: u64,
     ty: Ext4InodeTypes,
     metadata: Mutex<MetadataState>,
@@ -172,7 +176,9 @@ unsafe impl Sync for Ext4Inode {}
 impl Drop for Ext4Inode {
     fn drop(&mut self) {
         if self.unlinked.load(Ordering::Acquire) {
-            DEFERRED_INODE_DISCARDS.lock().push(self.ino as u32);
+            DEFERRED_INODE_DISCARDS
+                .lock()
+                .push((self.fs_id, self.mount_point_c, self.ino as u32));
             DEFERRED_INODE_DISCARD_PENDING.store(true, Ordering::Release);
         }
     }
@@ -192,18 +198,17 @@ pub fn reap_deferred_inodes() {
 
     {
         let mut cache = EXT4_INODE_CACHE.lock();
-        for ino in &pending {
-            cache.remove(&(*ino as u64));
+        for (fs_id, _, ino) in &pending {
+            cache.remove(&(*fs_id, *ino as u64));
         }
     }
 
     let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Namespace);
-    let mount = c"/";
     let mut retry = Vec::new();
-    for ino in pending {
-        let ret = unsafe { bindings::ext4_inode_discard(mount.as_ptr(), ino) };
+    for (fs_id, mount, ino) in pending {
+        let ret = unsafe { bindings::ext4_inode_discard(mount.as_ptr().cast(), ino) };
         if ret != 0 && ret != 22 {
-            retry.push(ino);
+            retry.push((fs_id, mount, ino));
         }
     }
     drop(_guard);
@@ -215,8 +220,17 @@ pub fn reap_deferred_inodes() {
 }
 
 impl Ext4Inode {
-    pub fn new(ino: u64, ty: Ext4InodeTypes) -> Self {
+    pub fn new(
+        fs_id: usize,
+        mount_point: &'static str,
+        mount_point_c: &'static [u8],
+        ino: u64,
+        ty: Ext4InodeTypes,
+    ) -> Self {
         Self {
+            fs_id,
+            mount_point,
+            mount_point_c,
             ino,
             ty,
             metadata: Mutex::new(MetadataState {
@@ -230,9 +244,16 @@ impl Ext4Inode {
         }
     }
 
-    pub fn get_or_create(ino: u64, ty: Ext4InodeTypes) -> Arc<dyn InodeOp> {
+    pub fn get_or_create(
+        fs_id: usize,
+        mount_point: &'static str,
+        mount_point_c: &'static [u8],
+        ino: u64,
+        ty: Ext4InodeTypes,
+    ) -> Arc<dyn InodeOp> {
         let mut cache = EXT4_INODE_CACHE.lock();
-        if let Some(inode) = cache.get(&ino).and_then(Weak::upgrade) {
+        let key = (fs_id, ino);
+        if let Some(inode) = cache.get(&key).and_then(Weak::upgrade) {
             return inode;
         }
 
@@ -241,8 +262,9 @@ impl Ext4Inode {
             evict_dead_inodes(&mut cache);
         }
 
-        let inode: Arc<dyn InodeOp> = Arc::new(Self::new(ino, ty));
-        cache.insert(ino, Arc::downgrade(&inode));
+        let inode: Arc<dyn InodeOp> =
+            Arc::new(Self::new(fs_id, mount_point, mount_point_c, ino, ty));
+        cache.insert(key, Arc::downgrade(&inode));
         inode
     }
 
@@ -459,7 +481,7 @@ impl Ext4Inode {
             | (u32::from(lower_mtime.is_some()) << 3)
             | (u32::from(lower_ctime.is_some()) << 4);
         let (uid, gid) = owner.unwrap_or_default();
-        let mount = b"/\0";
+        let mount = self.mount_point_c;
         let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Attributes);
         let ret = unsafe {
             bindings::ext4_setattr_ino(
@@ -599,7 +621,7 @@ impl Ext4Inode {
         let raw_inode = {
             let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Stat);
             let mut raw_inode: bindings::ext4_inode = unsafe { core::mem::zeroed() };
-            let mount = b"/\0";
+            let mount = self.mount_point_c;
             let ret = unsafe {
                 bindings::ext4_raw_inode_fill_ino(
                     mount.as_ptr().cast(),
@@ -700,7 +722,7 @@ impl InodeOp for Ext4Inode {
         let started = crate::perf::now_ticks();
         let read_size = {
             let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Read);
-            let file = &mut Ext4File::new("/", self.ty.clone());
+            let file = &mut Ext4File::new(self.mount_point, self.ty.clone());
             file.inode_open(self.ino as u32, bindings::O_RDONLY)
                 .map_err(Self::map_lwext4_err)?;
             file.file_seek(off as i64, bindings::SEEK_SET)
@@ -728,7 +750,7 @@ impl InodeOp for Ext4Inode {
 
         let write_size = {
             let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Write);
-            let file = &mut Ext4File::new("/", self.ty.clone());
+            let file = &mut Ext4File::new(self.mount_point, self.ty.clone());
             file.inode_open(self.ino as u32, bindings::O_RDWR)
                 .map_err(Self::map_lwext4_err)?;
             // lwext4's fseek rejects offsets beyond EOF and the Rust wrapper
@@ -765,7 +787,7 @@ impl InodeOp for Ext4Inode {
         self.page_cache.with_writeback_exclusion(|| {
             {
                 let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Write);
-                let file = &mut Ext4File::new("/", self.ty.clone());
+                let file = &mut Ext4File::new(self.mount_point, self.ty.clone());
                 file.inode_open(self.ino as u32, bindings::O_RDWR)
                     .map_err(Self::map_lwext4_err)?;
                 file.file_truncate(size as u64)
@@ -865,7 +887,7 @@ impl InodeOp for Ext4Inode {
             return Err(Errno::ENODATA);
         }
         let name = CString::new(name).map_err(|_| Errno::EINVAL)?;
-        let mount = b"/\0";
+        let mount = self.mount_point_c;
         let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Attributes);
         let ret = unsafe {
             bindings::ext4_setxattr_ino(
@@ -886,7 +908,7 @@ impl InodeOp for Ext4Inode {
 
     fn get_xattr(&self, name: &str) -> Result<Vec<u8>, Errno> {
         let name = CString::new(name).map_err(|_| Errno::EINVAL)?;
-        let mount = b"/\0";
+        let mount = self.mount_point_c;
         let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Attributes);
         let mut size = 0usize;
         let mut ret = unsafe {
@@ -923,7 +945,7 @@ impl InodeOp for Ext4Inode {
     }
 
     fn list_xattr(&self) -> Result<Vec<String>, Errno> {
-        let mount = b"/\0";
+        let mount = self.mount_point_c;
         let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Attributes);
         let mut size = 0usize;
         let mut ret = unsafe {
@@ -964,7 +986,7 @@ impl InodeOp for Ext4Inode {
 
     fn remove_xattr(&self, name: &str) -> SysResult {
         let name = CString::new(name).map_err(|_| Errno::EINVAL)?;
-        let mount = b"/\0";
+        let mount = self.mount_point_c;
         let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Attributes);
         let ret = unsafe {
             bindings::ext4_removexattr_ino(
@@ -995,7 +1017,13 @@ impl InodeOp for Ext4Inode {
         let (child_ino, child_ty) = Self::lookup_dirent(parent_path, name)?;
         crate::perf::ext4_lookup_call(1);
         crate::perf::ext4_lookup_ticks(crate::perf::elapsed_since(started));
-        Ok(Self::get_or_create(child_ino, child_ty))
+        Ok(Self::get_or_create(
+            self.fs_id,
+            self.mount_point,
+            self.mount_point_c,
+            child_ino,
+            child_ty,
+        ))
     }
 
     fn readdir(&self, path: &str) -> SysResult<Vec<LinuxDirent64>> {
@@ -1004,7 +1032,7 @@ impl InodeOp for Ext4Inode {
 
         let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Readdir);
         let mut dir: bindings::ext4_dir = unsafe { core::mem::zeroed() };
-        let mount = b"/\0";
+        let mount = self.mount_point_c;
         let ret = unsafe {
             bindings::ext4_inode_open(
                 &mut dir.f,
@@ -1117,7 +1145,13 @@ impl InodeOp for Ext4Inode {
         self.namespace_changed();
 
         let (child_ino, child_ty) = Self::lookup_dirent(parent_path, name)?;
-        let inode = Self::get_or_create(child_ino, child_ty);
+        let inode = Self::get_or_create(
+            self.fs_id,
+            self.mount_point,
+            self.mount_point_c,
+            child_ino,
+            child_ty,
+        );
         if let Some(inode) = inode.as_any().downcast_ref::<Ext4Inode>() {
             inode.init_inode_times();
         }
@@ -1205,7 +1239,7 @@ impl InodeOp for Ext4Inode {
         }
         const MAX_LINK_TARGET: usize = 4096;
         let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Read);
-        let file = &mut Ext4File::new("/", self.ty.clone());
+        let file = &mut Ext4File::new(self.mount_point, self.ty.clone());
         file.inode_open(self.ino as u32, bindings::O_RDONLY)
             .map_err(Self::map_lwext4_err)?;
         let mut buf = vec![0u8; MAX_LINK_TARGET];
@@ -1217,8 +1251,8 @@ impl InodeOp for Ext4Inode {
 }
 
 /// 清除缓存中已死亡的 Weak 条目
-fn evict_dead_inodes(cache: &mut HashMap<u64, Weak<dyn InodeOp>>) {
-    let dead: Vec<u64> = cache
+fn evict_dead_inodes(cache: &mut HashMap<(usize, u64), Weak<dyn InodeOp>>) {
+    let dead: Vec<(usize, u64)> = cache
         .iter()
         .filter(|(_, w)| w.upgrade().is_none())
         .map(|(k, _)| *k)

@@ -33,6 +33,10 @@ pub struct Ext4BlockWrapper<K: KernelDevOp> {
 
 impl<K: KernelDevOp> Ext4BlockWrapper<K> {
     pub fn new(block_dev: K::DevType) -> Result<Self, i32> {
+        Self::new_named(block_dev, "ext4_fs", "/")
+    }
+
+    pub fn new_named(block_dev: K::DevType, name: &str, mount_point: &str) -> Result<Self, i32> {
         // note this ownership
         let devt_user = Box::into_raw(Box::new(block_dev)) as *mut c_void;
         //let devt_user = devt.as_mut() as *mut _ as *mut c_void;
@@ -71,11 +75,14 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
             journal: null_mut(),
         };
 
-        let c_name = CString::new("ext4_fs").expect("CString::new ext4_fs failed");
+        let c_name = CString::new(name).map_err(|_| EINVAL as i32)?;
         let c_name = c_name.as_bytes_with_nul(); // + '\0'
-                                                 //let c_mountpoint = CString::new("/mp/").unwrap();
-        let c_mountpoint = CString::new("/").unwrap();
+        let c_mountpoint = CString::new(mount_point).map_err(|_| EINVAL as i32)?;
         let c_mountpoint = c_mountpoint.as_bytes_with_nul();
+
+        if c_name.len() > 16 || c_mountpoint.len() > 32 {
+            return Err(EINVAL as i32);
+        }
 
         let mut name: [u8; 16] = [0; 16];
         let mut mount_point: [u8; 32] = [0; 32];
@@ -97,11 +104,7 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
         // ext4_blockdev into static instance
         // lwext4_mount
         // let c_mountpoint = c_mountpoint as *const _ as *const c_char;
-        unsafe {
-            ext4bd
-                .lwext4_mount()
-                .expect("Failed to mount the ext4 file system, perhaps the disk is not an EXT4 file system.");
-        }
+        unsafe { ext4bd.lwext4_mount()?; }
         ext4bd.mounted = true;
 
         ext4bd.lwext4_dir_ls();
@@ -230,11 +233,14 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
         let r = ext4_mount(c_name, c_mountpoint, false);
         if r != EOK as i32 {
             error!("ext4_mount: rc = {:?}\n", r);
+            let _ = ext4_device_unregister(c_name);
             return Err(r);
         }
         let r = ext4_recover(c_mountpoint);
         if (r != EOK as i32) && (r != ENOTSUP as i32) {
             error!("ext4_recover: rc = {:?}\n", r);
+            let _ = ext4_umount(c_mountpoint);
+            let _ = ext4_device_unregister(c_name);
             return Err(r);
         }
 
@@ -248,6 +254,8 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
         let r = ext4_journal_start(c_mountpoint);
         if r != EOK as i32 {
             error!("ext4_journal_start: rc = {:?}\n", r);
+            let _ = ext4_umount(c_mountpoint);
+            let _ = ext4_device_unregister(c_name);
             return Err(r);
         }
         ext4_cache_write_back(c_mountpoint, true);

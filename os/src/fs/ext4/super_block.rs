@@ -5,7 +5,6 @@ use crate::drivers::Disk;
 use crate::fs::Statfs64;
 use crate::fs::vfs::{InodeOp, SuperBlockOp};
 use crate::syscall::{Errno, SysResult};
-use alloc::ffi::CString;
 use alloc::sync::Arc;
 use core::ffi::c_char;
 use lwext4_rust::{Ext4BlockWrapper, InodeTypes as Ext4InodeTypes, bindings};
@@ -17,18 +16,32 @@ unsafe impl Sync for Ext4SuperBlock {}
 pub struct Ext4SuperBlock {
     inner: Mutex<Option<Ext4BlockWrapper<Disk>>>,
     root: Arc<dyn InodeOp>,
+    mount_point: &'static [u8],
 }
 
 impl Ext4SuperBlock {
-    pub fn new(disk: Disk) -> Self {
-        info!("initializing ext4 device superblock");
-        let inner =
-            Ext4BlockWrapper::<Disk>::new(disk).expect("failed to initialize EXT4 filesystem");
-        let root = Ext4Inode::get_or_create(2, Ext4InodeTypes::EXT4_DE_DIR);
-        Self {
+    pub fn new(
+        disk: Disk,
+        fs_id: usize,
+        device_name: &'static str,
+        mount_path: &'static str,
+        mount_point: &'static [u8],
+    ) -> SysResult<Self> {
+        info!("initializing ext4 device {} at {}", device_name, mount_path);
+        let inner = Ext4BlockWrapper::<Disk>::new_named(disk, device_name, mount_path)
+            .map_err(|_| Errno::EINVAL)?;
+        let root = Ext4Inode::get_or_create(
+            fs_id,
+            mount_path,
+            mount_point,
+            2,
+            Ext4InodeTypes::EXT4_DE_DIR,
+        );
+        Ok(Self {
             inner: Mutex::new(Some(inner)),
             root,
-        }
+            mount_point,
+        })
     }
 
     fn flush_cache(&self) -> SysResult {
@@ -41,8 +54,7 @@ impl Ext4SuperBlock {
         if inner.is_none() {
             return Err(Errno::EIO);
         }
-        let path = CString::new("/").map_err(|_| Errno::EINVAL)?;
-        let rc = unsafe { bindings::ext4_cache_flush(path.as_ptr()) };
+        let rc = unsafe { bindings::ext4_cache_flush(self.mount_point.as_ptr().cast()) };
         drop(inner);
         if rc == 0 { Ok(()) } else { Err(Errno::EIO) }
     }
@@ -73,9 +85,8 @@ impl SuperBlockOp for Ext4SuperBlock {
     fn statfs(&self) -> SysResult<Statfs64> {
         let _op_guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Superblock);
         let mut stats: bindings::ext4_mount_stats = unsafe { core::mem::zeroed() };
-        let mount_point = CString::new("/").map_err(|_| Errno::EINVAL)?;
         let rc = unsafe {
-            bindings::ext4_mount_point_stats(mount_point.as_ptr() as *const c_char, &mut stats)
+            bindings::ext4_mount_point_stats(self.mount_point.as_ptr() as *const c_char, &mut stats)
         };
         if rc != 0 {
             return Err(Errno::EIO);

@@ -4,16 +4,18 @@ SHELL := /bin/bash
 MODE ?= release
 RV_MODE ?= $(MODE)
 LA_MODE ?= $(MODE)
-MEM ?= 256M
+MEM ?= 4G
 SMP ?= 1
 RV_FS_IMG ?= img/sdcard-rv.img
 LA_FS_IMG ?= img/sdcard-la.img
-PUB_INTERACTIVE_MEM ?= 256M
+PUB_INTERACTIVE_MEM ?= 4G
 PUB_INTERACTIVE_SMP ?= 1
 RV_PUB_FS_IMG ?= img/sdcard-rv-pub.img
 LA_PUB_FS_IMG ?= img/sdcard-la-pub.img
 RV_DISK_IMG ?= disk.img
 LA_DISK_IMG ?= disk-la.img
+AUX_FS_DIR ?= respos
+AUX_FS_SIZE ?= 16M
 QEMU_RV ?= qemu-system-riscv64
 QEMU_LA ?= qemu-system-loongarch64
 
@@ -67,22 +69,24 @@ KERNEL_LA := kernel-la
 RV_ELF := os/target/$(RV_TARGET)/$(RV_CARGO_TARGET_DIR)/os
 LA_ELF := os/target/$(LA_TARGET)/$(LA_CARGO_TARGET_DIR)/os
 
-RV_QEMU_DISK_ARGS :=
-ifneq ($(wildcard $(RV_DISK_IMG)),)
-RV_QEMU_DISK_ARGS += -drive file=$(RV_DISK_IMG),if=none,format=raw,id=x1 \
+RV_QEMU_DISK_ARGS := -drive file=$(RV_DISK_IMG),if=none,format=raw,id=x1 \
 	-device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1
-endif
 
-LA_QEMU_DISK_ARGS :=
-ifneq ($(wildcard $(LA_DISK_IMG)),)
-LA_QEMU_DISK_ARGS += -drive file=$(LA_DISK_IMG),if=none,format=raw,id=x1 \
+LA_QEMU_DISK_ARGS := -drive file=$(LA_DISK_IMG),if=none,format=raw,id=x1 \
 	-device virtio-blk-pci,drive=x1
-endif
 
-.PHONY: all build-rv build-la rv la run-rv-pub run-la-pub check-pub-images \
-	prepare-rv-cargo-config prepare-la-cargo-config clean check-submit
+.PHONY: all build-rv build-la build-disks force-build-disk rv la run-rv-pub run-la-pub \
+	check-pub-images prepare-rv-cargo-config prepare-la-cargo-config clean check-submit
 
-all: build-rv build-la
+all: build-rv build-la build-disks
+
+build-disks: $(RV_DISK_IMG) $(LA_DISK_IMG)
+
+force-build-disk:
+
+$(RV_DISK_IMG) $(LA_DISK_IMG): force-build-disk $(AUX_FS_DIR)/profile
+	truncate -s $(AUX_FS_SIZE) $@
+	mkfs.ext4 -q -F -d $(AUX_FS_DIR) $@
 
 prepare-rv-cargo-config:
 	mkdir -p os/.cargo user/.cargo
@@ -110,11 +114,12 @@ build-la: prepare-la-cargo-config
 	cp $(LA_ELF) $(KERNEL_LA)
 	@rust-readobj -h -l $(KERNEL_LA) | awk '/Entry:/ || /VirtualAddress:/ || /PhysicalAddress:/ { print }'
 
-rv: build-rv
+rv: build-rv build-disks
 	$(QEMU_RV) -machine virt \
 		-kernel $(KERNEL_RV) \
 		-m $(MEM) \
 		-nographic \
+		-snapshot \
 		-smp $(SMP) \
 		-bios default \
 		-drive file=$(RV_FS_IMG),if=none,format=raw,id=x0 \
@@ -125,11 +130,12 @@ rv: build-rv
 		-rtc base=utc \
 		$(RV_QEMU_DISK_ARGS) |& tee $(RV_OUTPUT)
 
-la: build-la
+la: build-la build-disks
 	$(QEMU_LA) -machine virt \
 		-kernel $(KERNEL_LA) \
 		-m $(MEM) \
 		-nographic \
+		-snapshot \
 		-smp $(SMP) \
 		-drive file=$(LA_FS_IMG),if=none,format=raw,id=x0 \
 		-device virtio-blk-pci,drive=x0 \
@@ -168,5 +174,5 @@ check-submit: all
 	@file $(KERNEL_LA)
 
 clean:
-	rm -f $(KERNEL_RV) $(KERNEL_LA)
+	rm -f $(KERNEL_RV) $(KERNEL_LA) $(RV_DISK_IMG) $(LA_DISK_IMG)
 	$(MAKE) -C os clean

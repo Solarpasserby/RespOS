@@ -2,6 +2,21 @@
 
 ## RV64 最大支持 RAM 必须同时覆盖 early FDT 和正式 direct map
 
+## LoongArch 静态 BSS 必须完整落在 early map 内
+
+- 状态：已确认并修复无串口启动失败
+- 适用范围：LoongArch `KERNEL_HEAP_SIZE`、链接布局、`clear_bss()`、early page table
+- 最后验证：2026-08-11
+- 证据：`kernel-la` program headers；QEMU 10.0.2 `-d in_asm,guest_errors`；
+  `os/src/arch/loongarch64/{config/mm.rs,mod.rs}`
+- 内容：256 MiB 静态内核堆使 BSS 结束于约 `0x10aa7000`，而启动页表只覆盖前 128 MiB，
+  `clear_bss()` 尚未建立最终页表就访问越界并最终执行地址 0，表现为完全没有串口输出。
+  LA 静态堆改为 64 MiB 后，x0+x1 已进入 preliminary testrunner 和首个测例。
+- 后续影响：增大 LA 静态堆时必须联合检查 ELF `ebss`、`BOOT_MAP_SIZE`、板级物理内存布局和
+  页表容量；QEMU 的 `-m` 增大不会自动扩大内核硬编码的 early map。
+
+## RV64 `-m 16G` 的 FDT 在当前 early map 外
+
 - 状态：已确认并修复到 16 GiB
 - 适用范围：RV64 QEMU 内存配置、early page table、FDT 解析、direct map
 - 最后验证：2026-08-11
@@ -581,3 +596,28 @@
 - 证据：README 历史“600 余 LTP”与当前 LTP 初始化失败并存
 - 内容：同一仓库的不同 commit、镜像、内存配置、libc 和 runner 清单会产生完全不同的结果。
 - 后续影响：任何成绩必须携带 commit、日期、架构、镜像、命令和 summary；旧记忆只用于寻找线索。
+
+## TCP 双端都阻塞时，仅定时重试不能代替网络事件唤醒
+
+- 状态：已确认并修复
+- 适用范围：smoltcp TCP，特别是 iperf3 的 TCP 控制通道
+- 最后验证：2026-08-11
+- 证据：RV64 临时干净镜像的 iperf musl BASIC/PARALLEL/REVERSE UDP/TCP
+- 内容：iperf3 的 UDP 测试也先通过 TCP 交换控制 JSON。旧 `block_on` 中客户端成功入队
+  147 字节 JSON 后，服务端仍阻塞在读取 4 字节长度；回退到 yield-poll 则六项均通过，
+  证明根因是协议进展没有唤醒对端，不是 UDP、`execve` 或 runner。
+- 后续影响：排查“UDP 卡住”时不要忽略应用协议的 TCP 控制面；更改 TCP 阻塞策略时
+  必须同时验证协议事件唤醒和空闲 listener 时的定时器前进。
+
+## 一个存活的 TCP daemon 不应破坏无关进程的 wait/信号同步
+
+- 状态：已稳定复现，内核根因待 Phase 5 重构定位
+- 适用范围：RV64 SMP=1，iperf3 daemon 存活时的 glibc iozone throughput
+- 最后验证：2026-08-11
+- 证据：`rv-output.txt`、`/tmp/respos-iperf-iozone*.log`、`current-status.md` 对应记录
+- 内容：iozone-only 可完成；`iperf-musl → iperf-glibc → iozone-glibc` 在 initial writers
+  后停滞；只杀 `iperf3` 即恢复。TCP 兜底 timeout 修改为 10/1000 ms 均无效，
+  说明不能仅按调度频率问题处理。
+- 后续影响：不能用 runner 清理、测例换序或缩短清单声称修复。优先审计
+  daemon reparent、process group/session、`kill()` 目标选择、SIGCHLD 发布、`wait()/wait4()`
+  消费和 TCP waiter/task-timeout 的退出清理。

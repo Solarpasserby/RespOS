@@ -1,5 +1,34 @@
 # RespOS 当前状态
 
+## 2026-08-11 官方根盘 + 可选辅助 ext4 迁移（当前工作树）
+
+- **实现**：RV64 virtio-mmio bus.0/1 和 LoongArch virtio PCI 均支持按 block-device index
+  创建。x0 继续作为 `/`；x1 合法 ext4 时以独立 lwext4 device/mountpoint、
+  `Ext4SuperBlock` 和 `(fs_id, ino)` cache identity 挂载到 `/respos`。无 x1 时不在官方
+  x0 上创建 `/respos`。关机时辅助与根 superblock 都会尝试完成 journal/cache/virtio flush；
+  一个设备失败不会阻止另一个设备的 shutdown 尝试。
+- **guest launcher**：新增内嵌 `contest_launcher`，读取 `/respos/profile` 的
+  `mode=preliminary|final`。profile 缺失/无效或 preliminary 时保持原内嵌 `testrunner`；final
+  时用官方根镜像 `/bin/bash` 在 `/glibc` 中依次运行固定的 `cagent_testcode.sh` 和
+  `buildstorm_testcode.sh`，每项 `waitpid` 完成后才启动下一项，最后主动关机。顶层
+  `make all` 同时从 `respos/` 完整重建 16 MiB ext4 `disk.img` 和 `disk-la.img`。
+- **RV64 运行验证**：QEMU 10.0.2、`kernel-rv`、`img/sdcard-rv.img`、`-m 1G
+  -smp 1 -snapshot`。仅 x0 可进入原 `testrunner`；64 MiB 临时 ext4 x1 内含
+  `profile -> /respos/final-runner` 和 RV64 `hello_world` ELF 时，串口输出
+  `[initproc] trying entry /respos/final-runner` 及 `Hello, world!`；64 MiB 全零非 ext4 x1
+  时无 panic 并进入原 `testrunner`。所有运行使用 snapshot，官方/初赛镜像未被该轮写入。
+- **阶段分派验证**：`mode=preliminary` 的生成镜像在 RV64 初赛 x0 上输出 dispatcher 日志后进入原
+  `testrunner`。临时切换为 `mode=final`、挂载 RV64 pub x0 后，CAgent 脚本完整输出 10 项 pass
+  和 group end，launcher 观察到 exit code 0 后才启动 BuildStorm；BuildStorm 已输出 group start、
+  rustc/cargo版本及 `BUILDSTORM_TOOLCHAIN ok`。该轮随后由宿主终止，不代表完整 BuildStorm 通过。
+- **构建验证**：`make build-rv` 和 `make build-la` release 均通过。
+- **LoongArch 运行验证与启动修复**：此前无串口输出发生在 `clear_bss()`：256 MiB 静态
+  `KERNEL_HEAP_SIZE` 使 BSS 结束于约 `0x10aa7000`，超过 128 MiB early map 和 256 MiB
+  板级低内存窗口。QEMU `-d in_asm,guest_errors` 显示清零循环最终跳到地址 0。将 LA 专用静态堆
+  恢复为 64 MiB 后，QEMU 10.0.2、`-m 4G -smp 1`、x0+x1 已输出
+  `contest_launcher` preliminary 日志、`[testrunner] start` 并进入首个 `basic-musl` 测例。
+  本轮宿主在 60 秒后终止，证明启动和双盘链路，不代表完整 LA 测例集通过。
+
 本文件是快速变化的状态页。更新测试结论时必须同时更新日期、提交和命令。
 
 ## 2026-08-11 RV64 16 GiB 启动与完整 BuildStorm（基于 `9bde322`）
@@ -1665,6 +1694,47 @@
 - 内容：真实 SMP；MAP_FIXED/mremap 极端 ENOMEM 回滚；truncate 与 resident mapped page；
   rename+多硬链接事务；epoll 跨进程最后关闭；pipe/poll/epoll 与 close/signal/timeout 联合竞争。
 - 后续影响：这些问题不能因当前 QEMU 完成整轮运行而视为关闭。
+
+## 2026-08-11 RV64 iperf 控制通道卡死定位与修复
+
+- 状态：根因已确认，内核修复已通过 RV64 实机运行与 RV64/LA 构建；`testrunner`
+  无改动。
+- 适用范围：当前工作树，RV64 SMP=1、4 GiB，由 `img/sdcard-rv.img.xz` 解压的
+  干净镜像；临时仅调整镜像内脚本顺序以提前运行 iperf。
+- 根因：`269a94a` 引入的 TCP 1 ms 阻塞避免了空闲 listener 忙轮询，但没有在
+  smoltcp 状态前进时唤醒对端。iperf3 UDP 先建立 TCP 控制通道；客户端写入 JSON
+  后服务端仍睡眠在接收长度上。临时回退到 yield-poll 后六项全部通过，因果链成立。
+- 修复：`poll_interfaces()` 唤醒全局 TCP waiter；`TcpSocket::block_on` 在阻塞前登记 waiter、
+  poll 并二次检查，防止丢失唤醒，同时保留 1 ms task-timeout 兜底。
+- 验证：两轮 RV64 中 iperf musl BASIC/PARALLEL/REVERSE UDP/TCP 六项均输出
+  `success`；`make build-rv`、`make build-la`、`cargo fmt --manifest-path os/Cargo.toml -- --check`
+  通过。人为将 iperf 放到 basic 之前的临时顺序中，其后 glibc `test_sleep` 未在
+  60/90 s 全局窗口内完成；这不是官方正常顺序，原因待验证，不得据此宣称
+  sleep 回归通过。
+
+## 2026-08-11 RV64 iozone “卡死”诊断
+
+- 状态：干净镜像上未复现内核死锁；已修复本地镜像污染工作流
+- 适用范围：RV64 SMP=1、4 GiB，release，`IOZONE_ONLY=1`，QEMU `-snapshot`
+- 证据：`/tmp/respos-iozone-only.log`；从 `img/sdcard-rv.img.xz` 恢复的干净 x0；
+  `e2fsck -fn img/sdcard-rv.img`
+- 结果：glibc 和 musl 均完成 automatic 及所有 throughput 子项，两组均输出
+  group end，guest 主动关机，总时间约 168 秒。先前 120 秒样本截止时 musl 仍在持续
+  产生 random-write 结果，属于慢而非无进展。
+- 镜像问题：原 `img/sdcard-rv.img` 的目录 checksum、inode/block bitmap、reference/free
+  count 存在错误，已保留为 `img/sdcard-rv.img.corrupt-20260811`，并从仓库 `.xz`
+  恢复原路径；恢复后 `e2fsck -fn` exit 0。
+- 修复：顶层 `make rv`/`make la` 默认增加 `-snapshot`；`IOZONE_ONLY=1 make rv`
+  提供可选专项诊断，默认 testrunner 清单不变。本轮没有为 iozone 修改内核
+  FS/MM 语义。
+- 后续定位：完整 runner 在 glibc iozone throughput 的 initial writers 后可稳定
+  停滞；干净镜像上的最小 `iperf-musl → iperf-glibc → iozone-glibc` 顺序复现
+  同一卡点。两个 iperf 脚本都使用 `iperf3 -s -D` 且不停止 daemon；在诊断
+  路径中只杀掉遗留 `iperf3` 后，iozone 立即越过 rewriters/readers。将 TCP timeout
+  兜底从 1 ms 改为 10 ms/1000 ms 均不能解除，已撤销这些无效实验。
+- 当前结论：触发器是“存活的 iperf TCP daemon + iozone 的 wait/kill/多进程同步”，
+  不是镜像基线或 iozone 单独写盘。内核中的 PID/PPID/process-group、signal 或 wait4
+  联合根因仍 `待验证`；不能把 runner 杀 daemon 当作 Linux 语义修复。
 
 ## 工作区注意事项
 

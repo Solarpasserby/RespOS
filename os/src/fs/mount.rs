@@ -6,7 +6,8 @@
 
 use super::Path;
 use super::dentry_cache::{
-    remove_dentry_cache, remove_dentry_cache_descendants, remove_dentry_cache_tree,
+    insert_dentry_cache, pin_vfs_dentry, remove_dentry_cache, remove_dentry_cache_descendants,
+    remove_dentry_cache_tree,
 };
 use super::namei::{
     AT_FDCWD, filename_lookup, filename_lookup_no_follow_final_mount,
@@ -657,12 +658,74 @@ pub fn init_root_fs() -> Arc<Path> {
 
     let root_vfs_mount = VfsMount::new(root_dentry.clone(), root_fs, 0);
     let root_mount = Mount::new_root(root_dentry.clone(), root_vfs_mount.clone());
-    add_mount(root_mount);
+    add_mount(root_mount.clone());
+
+    init_auxiliary_fs(&root_inode, &root_dentry, &root_mount);
 
     init_procfs(root_dentry.clone());
     init_devfs(root_dentry.clone());
 
     Path::new(root_vfs_mount, root_dentry)
+}
+
+fn init_auxiliary_fs(
+    root_inode: &Arc<dyn super::vfs::InodeOp>,
+    root_dentry: &Arc<Dentry>,
+    root_mount: &Arc<Mount>,
+) {
+    // Probe and mount the optional block device before touching the official
+    // root filesystem.  A missing/invalid x1 must not create /respos on x0.
+    let auxiliary = match crate::fs::ext4::auxiliary_super_block() {
+        Ok(fs) => fs,
+        Err(_error) => {
+            info!("[kernel] auxiliary filesystem unavailable: {:?}", _error);
+            return;
+        }
+    };
+
+    let mountpoint_inode = match root_inode.lookup("/", "respos") {
+        Ok(inode) if inode.node_type() == InodeType::Directory => inode,
+        Ok(_) => {
+            warn!("[kernel] auxiliary filesystem disabled: /respos is not a directory");
+            return;
+        }
+        Err(Errno::ENOENT) => match root_inode.create("/", "respos", InodeType::Directory) {
+            Ok(inode) => inode,
+            Err(_error) => {
+                warn!(
+                    "[kernel] auxiliary filesystem disabled: cannot create /respos: {:?}",
+                    _error
+                );
+                return;
+            }
+        },
+        Err(_error) => {
+            warn!(
+                "[kernel] auxiliary filesystem disabled: cannot inspect /respos: {:?}",
+                _error
+            );
+            return;
+        }
+    };
+    let mountpoint = Arc::new(Dentry::new(
+        "/respos".into(),
+        Some(root_dentry.clone()),
+        mountpoint_inode,
+    ));
+    root_dentry.insert_child("respos", mountpoint.clone());
+    insert_dentry_cache(mountpoint.clone());
+    pin_vfs_dentry(mountpoint.clone());
+
+    let auxiliary_fs: Arc<dyn SuperBlockOp> = auxiliary;
+    let auxiliary_root = Arc::new(Dentry::new(
+        "/respos".into(),
+        None,
+        auxiliary_fs.root_inode(),
+    ));
+    pin_vfs_dentry(auxiliary_root.clone());
+    let vfs_mount = VfsMount::new(auxiliary_root, auxiliary_fs, 0);
+    add_mount(Mount::new_child(mountpoint, vfs_mount, root_mount.clone()));
+    info!("[kernel] mounted auxiliary ext4 filesystem at /respos");
 }
 
 fn ensure_tmp_dir(root_inode: &Arc<dyn super::vfs::InodeOp>, root_dentry: &Arc<Dentry>) {

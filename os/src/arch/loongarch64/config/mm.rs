@@ -13,9 +13,11 @@ pub const KERNEL_STACK_TOP: usize = 0xffff_ffff_ffff_f000;
 pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 8; // 32 KiB
 
 // 内核堆大小
-// Keep enough metadata capacity for the official 12-vCPU compiler workload.
+// The early LoongArch page table maps the first 128 MiB. Keep the complete
+// kernel image, including this statically allocated heap and its bitmap,
+// inside that window so clear_bss() is safe before the final page table exists.
 // User frames and page-cache frames are not allocated from this fixed heap.
-pub const KERNEL_HEAP_SIZE: usize = 256 * 1024 * 1024;
+pub const KERNEL_HEAP_SIZE: usize = 64 * 1024 * 1024;
 
 // 文件映射和匿名映射区域
 pub const MMAP_MIN_ADDR: usize = 0x0000_0020_0000_0000;

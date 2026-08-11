@@ -23,7 +23,7 @@
 //! - `LOOPBACK_IFACE` / `LOOPBACK_DEV` — 回环接口及设备
 //! - `LISTEN_TABLE` — TCP 端口监听表
 
-use alloc::{string::String, vec};
+use alloc::{collections::BTreeSet, string::String, vec};
 use core::fmt::Write;
 use lazy_static::lazy_static;
 use smoltcp::{
@@ -69,6 +69,9 @@ lazy_static! {
     /// TCP 端口监听表，65536 个端口，每个端口维护一个 SYN 队列。
     pub static ref LISTEN_TABLE: SpinLock<ListenTable> =
         SpinLock::new(ListenTable::new());
+    /// Tasks sleeping in a TCP operation. Protocol polling wakes these tasks;
+    /// each task rechecks its own socket condition after it is scheduled.
+    static ref TCP_WAITERS: SpinLock<BTreeSet<usize>> = SpinLock::new(BTreeSet::new());
 }
 
 lazy_static! {
@@ -221,6 +224,22 @@ pub fn poll_interfaces() {
     // for userspace accept(2), so the listen backlog remains available to
     // concurrent clients.
     LISTEN_TABLE.lock().promote_ready_listeners();
+    wake_tcp_waiters();
+}
+
+pub(crate) fn register_tcp_waiter(tid: usize) {
+    TCP_WAITERS.lock().insert(tid);
+}
+
+pub(crate) fn unregister_tcp_waiter(tid: usize) {
+    TCP_WAITERS.lock().remove(&tid);
+}
+
+fn wake_tcp_waiters() {
+    let tids: alloc::vec::Vec<usize> = TCP_WAITERS.lock().iter().copied().collect();
+    for tid in tids {
+        crate::task::wakeup_task(tid);
+    }
 }
 
 pub(crate) struct TcpProcEntry {

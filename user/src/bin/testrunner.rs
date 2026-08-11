@@ -36,6 +36,7 @@ const IOZONE_SCRIPT: &str = "iozone_testcode.sh\0";
 const NETPERF_SCRIPT: &str = "netperf_testcode.sh\0";
 const IPERF_SCRIPT: &str = "iperf_testcode.sh\0";
 const CYCLICTEST_SCRIPT: &str = "cyclictest_testcode.sh\0";
+const IOZONE_ONLY: bool = option_env!("IOZONE_ONLY").is_some();
 const TASK_A_LTP_ONLY: bool = option_env!("TASK_A_LTP_ONLY").is_some();
 const TASK_A_WAIT4_PROBE: bool = option_env!("TASK_A_WAIT4_PROBE").is_some();
 const TASK_A_ATOMIC_PROBE: bool = option_env!("TASK_A_ATOMIC_PROBE").is_some();
@@ -1489,6 +1490,14 @@ fn run_task_a_clock_probe() {
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("[testrunner] start");
+    if IOZONE_ONLY {
+        println!("[testrunner] iozone-only diagnostic profile");
+        _run_iozone_glibc();
+        _run_iozone_musl();
+        println!("[testrunner] iozone-only profile finished, powering off");
+        poweroff();
+        return 0;
+    }
     if TASK_A_PERF_PROBE {
         run_task_a_perf_probe();
         println!("[testrunner] task-a performance probe finished, powering off");
@@ -1569,6 +1578,14 @@ fn main() -> i32 {
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("[testrunner] start");
+    if IOZONE_ONLY {
+        println!("[testrunner] iozone-only diagnostic profile");
+        _run_iozone_glibc();
+        _run_iozone_musl();
+        println!("[testrunner] iozone-only profile finished, powering off");
+        poweroff();
+        return 0;
+    }
     if TASK_A_PERF_PROBE {
         run_task_a_perf_probe();
         println!("[testrunner] task-a performance probe finished, powering off");

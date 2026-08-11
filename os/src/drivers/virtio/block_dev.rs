@@ -18,12 +18,10 @@ unsafe impl<H: Hal, T: Transport> Send for VirtIoBlkDev<H, T> {}
 unsafe impl<H: Hal, T: Transport> Sync for VirtIoBlkDev<H, T> {}
 
 impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
-    pub fn new(header: T) -> Self {
-        Self {
-            inner: Mutex::new(
-                VirtIOBlk::<H, T>::new(header).expect("[kernel] VirtIOBlk create failed"),
-            ),
-        }
+    pub fn new(header: T) -> DevResult<Self> {
+        Ok(Self {
+            inner: Mutex::new(VirtIOBlk::<H, T>::new(header).map_err(as_dev_err)?),
+        })
     }
 }
 

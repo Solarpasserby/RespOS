@@ -19,6 +19,30 @@
   → initproc / testrunner / 比赛镜像程序
 ```
 
+### 双 virtio ext4 根与辅助文件系统
+
+- 状态：RV64 与 LoongArch 均已实现并运行到 preliminary testrunner
+- 适用范围：QEMU block 设备、lwext4、VFS mount tree、initproc launcher
+- 最后验证：2026-08-11
+- 证据：`os/src/drivers/mod.rs`、`os/src/arch/loongarch64/pci.rs`、
+  `os/src/fs/{ext4,mount.rs}`、`user/src/bin/{initproc,contest_launcher}.rs`；RV64 x0-only、合法 x1 ext4 和非 ext4 x1
+  QEMU 启动；LoongArch x0+x1 启动到首个 `basic-musl` 测例
+- 内容：设备 index 0 是必需的官方根盘，lwext4 mountpoint 为 `/`；index 1 是可选
+  辅助盘，合法 ext4 时以独立 superblock/inode identity 挂载到 `/respos`。辅助盘不存在、
+  virtio 初始化失败或 ext4 挂载失败都只禁用辅助挂载，不得影响 x0 启动。
+  lwext4 的 C 层挂载表是全局的，路径必须按最长 mountpoint 前缀选择实例；Rust inode
+  cache key 必须包含 filesystem id，不能只用 inode number。所有 lwext4 实例仍共用唯一
+  `EXT4_OP_LOCK`。关机路径先尝试 shutdown 辅助 superblock，再 shutdown 根 superblock；即使
+  一个设备 flush 失败，也必须继续尝试另一个设备。
+- 启动入口：内嵌 `initproc` 启动内嵌 `contest_launcher`。launcher 从 `/respos/profile`
+  读取 `mode=preliminary|final`；缺失、无效或 preliminary 时 exec 原内嵌 `testrunner`，final
+  时在 `/glibc` 中使用 `/bin/bash` 严格串行运行当前官方决赛镜像固定的
+  `cagent_testcode.sh`、`buildstorm_testcode.sh`，全部结束后关机。dispatcher 失败时
+  `initproc` 仍依次回退到内嵌 `testrunner` 和 `user_shell`。测例策略不进入内核。
+- 后续影响：新增 inode-number lwext4 API 时必须传递所属 mountpoint；新增固有 VFS
+  mountpoint 时必须同时插入并 pin 全局 dentry cache，否则 namei 会新建不同的
+  dentry 并绕过 mount tree。
+
 ### 初始化顺序不可随意交换
 
 - 状态：已确认
@@ -326,6 +350,18 @@ FdTable slot (FdEntry: descriptor flags)
 - 后续影响：网络失败应先区分 ABI、协议状态和测试服务端启动时序，不能只凭一次
   `Connection refused` 判断内核网络语义损坏。修改 poll/accept/close 时必须同时维护 listener
   池、accept queue 和 socket handle 的唯一所有权，避免泄漏或重复 remove。
+
+### TCP 阻塞等待同时使用事件唤醒和短定时兜底
+
+- 状态：已确认
+- 适用范围：`TcpSocket::block_on`、smoltcp loopback 双端阻塞和空闲 listener
+- 最后验证：2026-08-11
+- 证据：`os/src/net/mod.rs`、`os/src/net/tcp.rs`；RV64 iperf musl 六个 UDP/TCP 模式
+- 内容：TCP 操作返回 `EAGAIN` 时先公布 waiter，再 poll 并二次检查条件，阻塞后由
+  `poll_interfaces()` 唤醒等待任务。同时保留 1 ms task-timeout 兜底，以维持现有 idle/listener
+  场景的定时器推进语义。
+- 后续影响：不能只改成固定 sleep 或只改成 yield；新等待路径必须保留“登记后复查”
+  的丢失唤醒防护，并同时回归 TCP 双端交互与空闲 listener 旁的 sleep/timeout。
 
 ## 双架构差异
 

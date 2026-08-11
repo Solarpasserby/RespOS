@@ -22,11 +22,34 @@ git clone --branch final-2026 --depth 1 \
 
 ## 环境与镜像
 
+### 可选 `/respos` 辅助镜像
+
+顶层 `Makefile` 的 `make all` 从 `respos/` 生成 16 MiB ext4 `disk.img` 和 `disk-la.img`；
+`RV_DISK_IMG`/`LA_DISK_IMG` 可覆盖名称，`os/Makefile` 使用 `DISK_IMG`。文件存在时，RV64 将其连接到 `virtio-mmio-bus.1`，LoongArch
+将其添加为第二个 `virtio-blk-pci`。文件不存在时不添加 x1。
+`build-disks` 每次都完整重建两个小镜像，因此 `respos/` 中辅助文件的新增、修改和删除都会反映到产物，
+不会因 Make 只观察 `profile` 而沿用陈旧内容。
+
+辅助镜像必须是 ext4，其根目录将在 guest 中显示为 `/respos`。最小 profile 例子：
+
+```text
+mode=preliminary
+```
+
+初赛提交保持 `mode=preliminary`；决赛提交改为 `mode=final`。profile 最多读取 512 bytes，
+忽略空行和以 `#` 开头的行；缺失或无法识别时安全回退到 preliminary。final launcher
+固定串行运行当前官方 pub 镜像的 `/glibc/cagent_testcode.sh` 和
+`/glibc/buildstorm_testcode.sh`，不扫描宿主机或在 Makefile 中推断测例。
+
+验证时应使用 `-snapshot`，并分别覆盖：不提供 x1、提供合法 ext4 x1、提供
+非 ext4 x1。还应分别用两种 mode 验证初赛进入原 `testrunner`，以及决赛脚本严格
+`fork → execve → waitpid` 串行并在全部完成后关机。
+
 ### 准备比赛镜像
 
 - 状态：已确认
 - 适用范围：首次运行或镜像恢复
-- 最后验证：2026-08-01
+- 最后验证：2026-08-11
 - 证据：`scripts/get_img.sh`、顶层 `Makefile`
 - 内容：
 
@@ -124,11 +147,29 @@ make la                   # 输出同时写入 la-output.txt
 常用覆盖参数：
 
 ```bash
-make rv MEM=128M SMP=1 RV_OUTPUT=/tmp/respos-rv.log
-make la MEM=128M SMP=1 LA_OUTPUT=/tmp/respos-la.log
+make rv MEM=4G SMP=1 RV_OUTPUT=/tmp/respos-rv.log
+make la MEM=4G SMP=1 LA_OUTPUT=/tmp/respos-la.log
 ```
 
+- 内容补充：两目标依赖 `build-disks`，分别挂载 `disk.img`/`disk-la.img` 为 x1。默认
+  `MEM=4G`、`SMP=1`，可在命令行覆盖。本地 `rv`/`la` 目标默认使用 QEMU
+  `-snapshot`，guest 在本轮仍可正常写盘，但不会因 Ctrl-C/超时把官方原始镜像留在
+  journal/元数据不一致状态。RV64 使用网站给出的 virtio-mmio bus.0/1；LoongArch
+  保留原 Makefile 已使用的 `-machine virt` 和 `virtio-blk-pci` 自动 PCI 总线分配。网站文本中的
+  `virtio-blk-pci,...,bus=virtio-mmio-bus.0` 在本机 QEMU 10.0.2 会直接报
+  `Bus 'virtio-mmio-bus.0' not found`，因此不能照抄。
 - 后续影响：建议顺序运行；端口转发和共享构建配置使并行运行收益有限且更难诊断。
+
+iozone 专项可用编译时诊断开关：
+
+```bash
+IOZONE_ONLY=1 make rv
+```
+
+该开关只使 `testrunner` 依次运行 glibc/musl iozone 并关机，默认构建不受影响。当前
+RV64 SMP=1、4 GiB 的干净镜像实测两组合计约 168 秒，不应用 60/120 秒外层超时
+判定为卡死。中断前先检查日志中的 `Run began`、子项标题和 `iozone test complete.`
+是否持续增长。
 
 ### pub 镜像交互式启动
 
@@ -139,14 +180,15 @@ make la MEM=128M SMP=1 LA_OUTPUT=/tmp/respos-la.log
 - 内容：
 
 ```bash
-make run-rv-pub       # RV pub 镜像，默认 256M、单核、串口 user_shell
-make run-la-pub       # LA pub 镜像，默认 256M、单核、串口 user_shell
+make run-rv-pub       # RV pub 镜像，默认 4G、单核
+make run-la-pub       # LA pub 镜像，默认 4G、单核
 ```
 
-这两个目标通过 virtio block 设备加载 ext4 镜像，不执行宿主机挂载。它们将用户程序的
-`eval` feature 清空，因此 `initproc` 启动 `user_shell`，不会自动运行初赛 `testrunner`。
-`make rv` 和 `make la` 仍保留 `FEATURES=eval` 及原初赛镜像，不能用来检查 pub 镜像。
-8 vCPU/8G 不是当前交互式入口的默认值；待 SMP 和决赛 launcher 明确后再单独增加决赛资源配置。
+这两个目标通过 virtio block 设备加载 ext4 镜像，不执行宿主机挂载。当前启动阶段由
+`/respos/profile` 的 `mode=preliminary|final` 决定，不再由 `eval` feature直接选择shell或runner。
+`make rv` 和 `make la` 默认仍使用原初赛镜像路径；检查pub镜像应使用这两个专用目标或显式覆盖
+`RV_FS_IMG`/`LA_FS_IMG`。
+8 vCPU/8G 不是当前交互式入口的默认值；可按评测资源通过 `MEM`/`SMP` 覆盖。
 
 交互式 RV64 SMP 专项构建后，可在 shell 直接运行内嵌 probe：
 

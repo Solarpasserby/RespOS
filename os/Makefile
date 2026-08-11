@@ -85,6 +85,10 @@ ifneq ($(wildcard $(FS_IMG)),)
 	QEMU_BLOCK_ARGS += -drive file=$(FS_IMG),if=none,format=raw,id=x0 \
 					   -device virtio-blk-pci,drive=x0
 endif
+ifneq ($(wildcard $(DISK_IMG)),)
+	QEMU_BLOCK_ARGS += -drive file=$(DISK_IMG),if=none,format=raw,id=x1 \
+					   -device virtio-blk-pci,drive=x1
+endif
 
 QEMU_ARGS = -machine $(QEMU_MACHINE) \
 			 -m $(MEM) \

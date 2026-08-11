@@ -17,6 +17,8 @@ os/.cargo/
 user/.cargo/
 kernel-rv
 kernel-la
+disk.img
+disk-la.img
 testrunner_output.log
 rv-output.txt
 la-output.txt

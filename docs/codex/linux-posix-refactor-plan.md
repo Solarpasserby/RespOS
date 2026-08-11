@@ -231,6 +231,39 @@ syscall 层只解析 ABI 参数；权限、path walk 和 mutation transaction �
 
 每个子系统单独建立状态机、不变量和专项 probe，不以 BuildStorm 单一工作负载代表通用正确性。
 
+### Phase 5 网络语义收口清单
+
+2026-08-11 的 RV64 iperf 诊断已确认：当前 TCP 通过“登记 waiter → poll →
+二次检查 → 阻塞”防止丢失唤醒，并由 `poll_interfaces()` 唤醒 waiter；但这只是
+基本可用性修复，尚不是 Linux 等价的 socket 等待模型。Phase 5 必须在不修改比赛
+runner 的前提下完成以下语义工作：
+
+1. 使 `SO_RCVTIMEO`/`SO_SNDTIMEO` 真正约束阻塞 `recv`/`send`，定义超时、部分传输与
+   `EAGAIN`/`EWOULDBLOCK` 的可观察结果；
+2. 实现非阻塞 `connect` 的完整状态与 pending error，使 `poll` 和 `SO_ERROR` 能区分
+   成功、refused、reset、timeout 和 unreachable；
+3. 按 Linux 对照 probe 补齐 `MSG_DONTWAIT`、`MSG_PEEK`、`MSG_WAITALL`、`MSG_NOSIGNAL`
+   的支持边界，不得继续静默忽略 flags；
+4. 明确 `shutdown`/close、peer EOF/reset、发送空间释放和 accept/connect 完成各自的唤醒
+   条件，包括 dup 后另一线程正在阻塞的情况；
+5. 审查 signal interruption、`SA_RESTART`、部分 I/O 优先返回字节数与 `EINTR` 的边界；
+6. 对 `poll`/epoll readiness、TCP half-close、EOF、`EPIPE`/`SIGPIPE` 和错误消费建立
+   Linux 对照矩阵。
+
+Phase 5 的退出门槛是：上述 probe 在 Linux 与 RespOS 上的 ABI 可观察结果一致；
+iperf BASIC/PARALLEL/REVERSE UDP/TCP、空闲 listener 旁的 sleep/timeout、信号中断和
+poll/epoll 回归全部通过。当前人为把 iperf 放到 basic 之前时的后续 `test_sleep`
+停滞仍是 `待验证`，是本阶段必须关闭的边界，不能由 1 ms 轮询或 runner 顺序
+掩盖。
+
+Phase 5 还必须保留 2026-08-11 确认的跨子系统回归：先运行 musl/glibc iperf
+脚本（两者均遗留 `iperf3 -s -D`），再运行 glibc iozone throughput。当前会在
+`Children see throughput for 4 initial writers` 后永久停滞；只终止遗留 daemon 则立即
+越过 rewriters/readers。重构时需在卡点记录 iozone 与 iperf 的 PID/PPID/TGID/PGRP/session、
+task state、children/zombie/wait selector、pending/masked signal、socket waiter 和 task-timeout；先用 Linux
+对照确定 `wait()`/`kill()` 契约，再修状态所有权。杀 daemon、调换 runner 顺序或调大 TCP
+poll timeout 都不算语义修复。
+
 ## Phase 6：细粒度并发与性能模型
 
 只有 Phase 1--5 的状态所有权清楚后才进入：
@@ -240,6 +273,12 @@ syscall 层只解析 ABI 参数；权限、path walk 和 mutation transaction �
 - 后台 writeback、异步 VirtIO、多队列；
 - per-CPU runqueue、allocator cache、ASID 与精确 TLB shootdown；
 - LA64 12 核的对等实现和缩放验证。
+
+网络方面，Phase 6 在 Phase 5 语义门槛通过后再将全局 TCP TID waiter 收窄为按
+socket 和 read/write/connect/accept 条件分类的等待队列，消除 `poll_interfaces()` 无条件
+唤醒所有 TCP 任务造成的惊群。在 VirtIO 中断、smoltcp 下一 deadline 和 scheduler idle
+的协作模型经专项验证后，再去掉当前 1 ms task-timeout 兜底；不能以降低 CPU
+开销为由提前删除正确性唤醒源。
 
 优化仍遵循“先计数、一次一个主变量、语义门禁先于计时”。Linux 的细粒度结构是参考目标，不在底层
 库不支持时强行模仿表面锁形态。
