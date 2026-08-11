@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="250" viewBox="0 0 920 250">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#475467"/>
+    </marker>
+    <style>
+      .ready { fill:#ecfdf3; stroke:#16a34a; stroke-width:1.6; rx:6; }
+      .block { fill:#fff7ed; stroke:#ea580c; stroke-width:1.6; rx:6; }
+      .proc { fill:#eff6ff; stroke:#2563eb; stroke-width:1.6; rx:6; }
+      .title { font-family:"DejaVu Sans Mono","Microsoft YaHei",sans-serif; font-size:18px; font-weight:700; fill:#101828; }
+      .text { font-family:"DejaVu Sans Mono","Microsoft YaHei",sans-serif; font-size:15px; fill:#344054; }
+      .note { font-family:"DejaVu Sans Mono","Microsoft YaHei",sans-serif; font-size:13px; fill:#667085; }
+      .line { stroke:#475467; stroke-width:1.8; fill:none; marker-end:url(#arrow); }
+      .dash { stroke:#667085; stroke-width:1.5; stroke-dasharray:6 5; fill:none; marker-end:url(#arrow); }
+    </style>
+  </defs>
+  <rect x="55" y="70" width="235" height="90" class="ready"/>
+  <text x="172" y="103" text-anchor="middle" class="title">ready_queue</text>
+  <text x="172" y="130" text-anchor="middle" class="text">T1 -> T2 -> T3</text>
+  <text x="172" y="151" text-anchor="middle" class="note">可被调度运行</text>
+
+  <rect x="360" y="70" width="200" height="90" class="proc"/>
+  <text x="460" y="103" text-anchor="middle" class="title">Processor</text>
+  <text x="460" y="130" text-anchor="middle" class="text">current task</text>
+  <text x="460" y="151" text-anchor="middle" class="note">__switch on kernel stack</text>
+
+  <rect x="630" y="70" width="235" height="90" class="block"/>
+  <text x="747" y="103" text-anchor="middle" class="title">blocked_queue</text>
+  <text x="747" y="130" text-anchor="middle" class="text">T4, T5</text>
+  <text x="747" y="151" text-anchor="middle" class="note">wait4 / futex / pipe / signal</text>
+
+  <path d="M290 100 H360" class="line"/>
+  <path d="M560 100 H630" class="dash"/>
+  <path d="M630 140 C520 210 385 210 290 140" class="line"/>
+  <text x="325" y="89" class="note">fetch_task</text>
+  <text x="573" y="89" class="note">block_task</text>
+  <text x="455" y="220" text-anchor="middle" class="note">wakeup_task 按 TID 将任务从阻塞队列移回就绪队列</text>
+</svg>

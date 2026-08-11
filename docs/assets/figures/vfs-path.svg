@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="500" viewBox="0 0 920 500">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L9,3 L0,6 Z" fill="#475467"/>
+    </marker>
+    <style>
+      .box { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.4; rx: 10; }
+      .sys { fill: #fff7ed; stroke: #c2410c; stroke-width: 1.7; rx: 10; }
+      .vfs { fill: #eff6ff; stroke: #2563eb; stroke-width: 1.8; rx: 10; }
+      .cache { fill: #ecfdf3; stroke: #16a34a; stroke-width: 1.6; rx: 10; }
+      .file { fill: #f8fafc; stroke: #64748b; stroke-width: 1.5; rx: 10; }
+      .label { font: 700 22px sans-serif; fill: #202124; }
+      .small { font: 500 17px monospace; fill: #344054; }
+      .hint { font: 500 16px sans-serif; fill: #667085; }
+      .arrow { stroke: #475467; stroke-width: 2.1; fill: none; marker-end: url(#arrow); }
+      .dash { stroke: #667085; stroke-width: 1.8; fill: none; stroke-dasharray: 7 5; marker-end: url(#arrow); }
+    </style>
+  </defs>
+
+  <rect x="56" y="42" width="210" height="70" class="sys"/>
+  <text x="161" y="71" text-anchor="middle" class="label">openat / stat</text>
+  <text x="161" y="97" text-anchor="middle" class="small">dirfd + user path</text>
+
+  <rect x="355" y="42" width="210" height="70" class="vfs"/>
+  <text x="460" y="71" text-anchor="middle" class="label">Nameidata</text>
+  <text x="460" y="97" text-anchor="middle" class="small">cwd/root + segments</text>
+
+  <rect x="654" y="42" width="210" height="70" class="cache"/>
+  <text x="759" y="71" text-anchor="middle" class="label">DentryCache</text>
+  <text x="759" y="97" text-anchor="middle" class="small">abs_path -> dentry</text>
+
+  <path d="M266 77 L355 77" class="arrow"/>
+  <path d="M565 77 L654 77" class="arrow"/>
+
+  <rect x="105" y="176" width="210" height="72" class="vfs"/>
+  <text x="210" y="206" text-anchor="middle" class="label">Mount Tree</text>
+  <text x="210" y="232" text-anchor="middle" class="small">Path = mnt + dentry</text>
+
+  <rect x="355" y="176" width="210" height="72" class="vfs"/>
+  <text x="460" y="206" text-anchor="middle" class="label">InodeOp</text>
+  <text x="460" y="232" text-anchor="middle" class="small">lookup / create / stat</text>
+
+  <rect x="605" y="176" width="210" height="72" class="file"/>
+  <text x="710" y="206" text-anchor="middle" class="label">File</text>
+  <text x="710" y="232" text-anchor="middle" class="small">offset + flags + path</text>
+
+  <path d="M460 112 C438 142 280 142 210 176" class="arrow"/>
+  <path d="M759 112 C742 142 520 145 460 176" class="arrow"/>
+  <path d="M565 212 L605 212" class="arrow"/>
+
+  <rect x="208" y="318" width="230" height="72" class="file"/>
+  <text x="323" y="348" text-anchor="middle" class="label">FdTable</text>
+  <text x="323" y="374" text-anchor="middle" class="small">fd -> FdEntry -> FileOp</text>
+
+  <rect x="502" y="318" width="230" height="72" class="cache"/>
+  <text x="617" y="348" text-anchor="middle" class="label">PageCache</text>
+  <text x="617" y="374" text-anchor="middle" class="small">regular file pages</text>
+
+  <path d="M710 248 C690 290 420 290 323 318" class="arrow"/>
+  <path d="M710 248 C720 292 665 302 617 318" class="dash"/>
+
+  <text x="460" y="453" text-anchor="middle" class="hint">路径解析负责“找到对象”，打开文件负责“保存一次打开状态”，fd 表负责“把整数句柄映射到 FileOp”。</text>
+</svg>

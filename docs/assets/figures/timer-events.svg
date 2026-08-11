@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="330" viewBox="0 0 920 330">
+  <defs>
+    <style>
+      .box { fill: #f8fafc; stroke: #64748b; stroke-width: 1.4; rx: 8; }
+      .hot { fill: #fff7ed; stroke: #ea580c; stroke-width: 1.5; rx: 8; }
+      .sig { fill: #fef2f2; stroke: #dc2626; stroke-width: 1.5; rx: 8; }
+      .fd { fill: #ecfdf5; stroke: #16a34a; stroke-width: 1.5; rx: 8; }
+      .text { font-family: Arial, Helvetica, sans-serif; font-size: 15px; fill: #1f2937; }
+      .small { font-family: Arial, Helvetica, sans-serif; font-size: 12px; fill: #475569; }
+      .arrow { stroke: #475569; stroke-width: 1.6; fill: none; marker-end: url(#arrow); }
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+      <path d="M0,0 L10,4 L0,8 Z" fill="#475569"/>
+    </marker>
+  </defs>
+
+  <rect x="30" y="45" width="160" height="70" class="hot"/>
+  <text x="110" y="75" text-anchor="middle" class="text">timer interrupt</text>
+  <text x="110" y="96" text-anchor="middle" class="small">set next trigger</text>
+
+  <rect x="250" y="45" width="190" height="70" class="box"/>
+  <text x="345" y="75" text-anchor="middle" class="text">check_all_task_timers</text>
+  <text x="345" y="96" text-anchor="middle" class="small">scan tasks and POSIX timers</text>
+
+  <rect x="500" y="25" width="170" height="64" class="sig"/>
+  <text x="585" y="55" text-anchor="middle" class="text">setitimer / POSIX</text>
+  <text x="585" y="75" text-anchor="middle" class="small">enqueue signal</text>
+
+  <rect x="500" y="115" width="170" height="64" class="fd"/>
+  <text x="585" y="145" text-anchor="middle" class="text">timerfd</text>
+  <text x="585" y="165" text-anchor="middle" class="small">computed on read / poll</text>
+
+  <rect x="730" y="25" width="160" height="64" class="sig"/>
+  <text x="810" y="55" text-anchor="middle" class="text">signal pending</text>
+  <text x="810" y="75" text-anchor="middle" class="small">handled before return</text>
+
+  <rect x="730" y="115" width="160" height="64" class="fd"/>
+  <text x="810" y="145" text-anchor="middle" class="text">fd readable</text>
+  <text x="810" y="165" text-anchor="middle" class="small">poll/select observes it</text>
+
+  <rect x="250" y="225" width="190" height="64" class="box"/>
+  <text x="345" y="255" text-anchor="middle" class="text">nanosleep / timeout</text>
+  <text x="345" y="275" text-anchor="middle" class="small">yield and re-check deadline</text>
+
+  <rect x="500" y="225" width="170" height="64" class="box"/>
+  <text x="585" y="255" text-anchor="middle" class="text">scheduler</text>
+  <text x="585" y="275" text-anchor="middle" class="small">run next ready task</text>
+
+  <path d="M190 80 H250" class="arrow"/>
+  <path d="M440 80 C465 80 470 57 500 57" class="arrow"/>
+  <path d="M440 80 C465 80 470 147 500 147" class="arrow"/>
+  <path d="M670 57 H730" class="arrow"/>
+  <path d="M670 147 H730" class="arrow"/>
+  <path d="M345 225 V125" class="arrow"/>
+  <path d="M440 257 H500" class="arrow"/>
+</svg>

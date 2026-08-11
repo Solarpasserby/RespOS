@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="300" viewBox="0 0 920 300">
+  <defs>
+    <style>
+      .box { fill: #f8fafc; stroke: #64748b; stroke-width: 1.4; rx: 8; }
+      .fs { fill: #ecfdf5; stroke: #16a34a; stroke-width: 1.4; rx: 8; }
+      .drv { fill: #eff6ff; stroke: #2563eb; stroke-width: 1.5; rx: 8; }
+      .plat { fill: #fff7ed; stroke: #ea580c; stroke-width: 1.5; rx: 8; }
+      .text { font-family: Arial, Helvetica, sans-serif; font-size: 15px; fill: #1f2937; }
+      .small { font-family: Arial, Helvetica, sans-serif; font-size: 12px; fill: #475569; }
+      .arrow { stroke: #475569; stroke-width: 1.7; fill: none; marker-end: url(#arrow); }
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+      <path d="M0,0 L10,4 L0,8 Z" fill="#475569"/>
+    </marker>
+  </defs>
+  <rect x="45" y="90" width="130" height="62" class="fs"/>
+  <text x="110" y="118" text-anchor="middle" class="text">Ext4</text>
+  <text x="110" y="138" text-anchor="middle" class="small">lwext4</text>
+
+  <rect x="235" y="90" width="130" height="62" class="fs"/>
+  <text x="300" y="118" text-anchor="middle" class="text">Disk</text>
+  <text x="300" y="138" text-anchor="middle" class="small">offset to block</text>
+
+  <rect x="425" y="90" width="145" height="62" class="drv"/>
+  <text x="497" y="118" text-anchor="middle" class="text">VirtIoBlkDev</text>
+  <text x="497" y="138" text-anchor="middle" class="small">BlockDevice</text>
+
+  <rect x="630" y="90" width="145" height="62" class="drv"/>
+  <text x="702" y="118" text-anchor="middle" class="text">virtio queue</text>
+  <text x="702" y="138" text-anchor="middle" class="small">read_blocks/write_blocks</text>
+
+  <rect x="425" y="205" width="145" height="62" class="plat"/>
+  <text x="497" y="233" text-anchor="middle" class="text">DMA pages</text>
+  <text x="497" y="253" text-anchor="middle" class="small">FrameTracker kept alive</text>
+
+  <rect x="630" y="205" width="145" height="62" class="plat"/>
+  <text x="702" y="233" text-anchor="middle" class="text">transport</text>
+  <text x="702" y="253" text-anchor="middle" class="small">MMIO or PCI</text>
+
+  <path d="M175 121 H235" class="arrow"/>
+  <path d="M365 121 H425" class="arrow"/>
+  <path d="M570 121 H630" class="arrow"/>
+  <path d="M497 152 V205" class="arrow"/>
+  <path d="M702 152 V205" class="arrow"/>
+</svg>

@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="260" viewBox="0 0 920 260">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#475467"/>
+    </marker>
+    <style>
+      .group { fill:#eff6ff; stroke:#2563eb; stroke-width:1.6; rx:8; }
+      .task { fill:#f8fafc; stroke:#667085; stroke-width:1.4; rx:6; }
+      .share { fill:#ecfdf3; stroke:#16a34a; stroke-width:1.5; rx:6; }
+      .title { font-family:"DejaVu Sans Mono","Microsoft YaHei",sans-serif; font-size:18px; font-weight:700; fill:#101828; }
+      .text { font-family:"DejaVu Sans Mono","Microsoft YaHei",sans-serif; font-size:15px; fill:#344054; }
+      .note { font-family:"DejaVu Sans Mono","Microsoft YaHei",sans-serif; font-size:13px; fill:#667085; }
+      .line { stroke:#475467; stroke-width:1.8; fill:none; marker-end:url(#arrow); }
+      .dash { stroke:#667085; stroke-width:1.5; stroke-dasharray:6 5; fill:none; marker-end:url(#arrow); }
+    </style>
+  </defs>
+  <rect x="45" y="40" width="830" height="180" class="group"/>
+  <text x="460" y="72" text-anchor="middle" class="title">ThreadGroup / Process</text>
+  <text x="460" y="96" text-anchor="middle" class="text">TGID = 100, PGID/SID and process-level resources</text>
+
+  <rect x="90" y="120" width="170" height="70" class="task"/>
+  <text x="175" y="148" text-anchor="middle" class="title">TCB</text>
+  <text x="175" y="172" text-anchor="middle" class="text">TID 100 main</text>
+
+  <rect x="315" y="120" width="170" height="70" class="task"/>
+  <text x="400" y="148" text-anchor="middle" class="title">TCB</text>
+  <text x="400" y="172" text-anchor="middle" class="text">TID 101 worker</text>
+
+  <rect x="540" y="120" width="170" height="70" class="task"/>
+  <text x="625" y="148" text-anchor="middle" class="title">TCB</text>
+  <text x="625" y="172" text-anchor="middle" class="text">TID 102 signal</text>
+
+  <rect x="735" y="120" width="105" height="70" class="share"/>
+  <text x="787" y="148" text-anchor="middle" class="title">shared</text>
+  <text x="787" y="172" text-anchor="middle" class="text">mm/fd/sig</text>
+
+  <path d="M260 155 H315" class="line"/>
+  <path d="M485 155 H540" class="line"/>
+  <path d="M710 155 H735" class="dash"/>
+  <text x="460" y="240" text-anchor="middle" class="note">线程是调度单位；线程组提供进程语义，决定 getpid/wait/signal 等接口的可见边界。</text>
+</svg>

@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="360" viewBox="0 0 920 360">
+  <defs>
+    <style>
+      .dir { fill: #eff6ff; stroke: #2563eb; stroke-width: 1.5; rx: 8; }
+      .char { fill: #ecfdf5; stroke: #16a34a; stroke-width: 1.4; rx: 8; }
+      .block { fill: #fff7ed; stroke: #ea580c; stroke-width: 1.4; rx: 8; }
+      .text { font-family: Arial, Helvetica, sans-serif; font-size: 15px; fill: #1f2937; }
+      .small { font-family: Arial, Helvetica, sans-serif; font-size: 12px; fill: #475569; }
+      .line { stroke: #94a3b8; stroke-width: 1.5; fill: none; }
+    </style>
+  </defs>
+  <rect x="390" y="24" width="140" height="54" class="dir"/>
+  <text x="460" y="55" text-anchor="middle" class="text">/dev</text>
+
+  <rect x="50" y="135" width="115" height="54" class="char"/>
+  <text x="107" y="157" text-anchor="middle" class="text">null</text>
+  <text x="107" y="176" text-anchor="middle" class="small">EOF / discard</text>
+
+  <rect x="190" y="135" width="115" height="54" class="char"/>
+  <text x="247" y="157" text-anchor="middle" class="text">zero</text>
+  <text x="247" y="176" text-anchor="middle" class="small">zero-fill</text>
+
+  <rect x="330" y="135" width="115" height="54" class="char"/>
+  <text x="387" y="157" text-anchor="middle" class="text">random</text>
+  <text x="387" y="176" text-anchor="middle" class="small">pseudo random</text>
+
+  <rect x="470" y="135" width="115" height="54" class="char"/>
+  <text x="527" y="157" text-anchor="middle" class="text">urandom</text>
+  <text x="527" y="176" text-anchor="middle" class="small">pseudo random</text>
+
+  <rect x="610" y="135" width="115" height="54" class="dir"/>
+  <text x="667" y="157" text-anchor="middle" class="text">shm</text>
+  <text x="667" y="176" text-anchor="middle" class="small">tmp-style dir</text>
+
+  <rect x="750" y="135" width="125" height="54" class="char"/>
+  <text x="812" y="157" text-anchor="middle" class="text">loop-control</text>
+  <text x="812" y="176" text-anchor="middle" class="small">ioctl control</text>
+
+  <rect x="255" y="260" width="115" height="54" class="block"/>
+  <text x="312" y="282" text-anchor="middle" class="text">loop0</text>
+  <text x="312" y="301" text-anchor="middle" class="small">file-backed blk</text>
+
+  <rect x="550" y="260" width="115" height="54" class="dir"/>
+  <text x="607" y="282" text-anchor="middle" class="text">misc</text>
+  <text x="607" y="301" text-anchor="middle" class="small">subdir</text>
+
+  <rect x="720" y="260" width="115" height="54" class="char"/>
+  <text x="777" y="282" text-anchor="middle" class="text">misc/rtc</text>
+  <text x="777" y="301" text-anchor="middle" class="small">rtc stub</text>
+
+  <path d="M460 78 V105 H107 V135" class="line"/>
+  <path d="M460 105 H247 V135" class="line"/>
+  <path d="M460 105 H387 V135" class="line"/>
+  <path d="M460 105 H527 V135" class="line"/>
+  <path d="M460 105 H667 V135" class="line"/>
+  <path d="M460 105 H812 V135" class="line"/>
+  <path d="M460 105 V232 H312 V260" class="line"/>
+  <path d="M460 232 H607 V260" class="line"/>
+  <path d="M607 232 H777 V260" class="line"/>
+</svg>

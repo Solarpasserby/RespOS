@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="520" viewBox="0 0 920 520">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L9,3 L0,6 Z" fill="#475467"/>
+    </marker>
+    <style>
+      .axis { stroke: #475467; stroke-width: 2.2; marker-end: url(#arrow); }
+      .region { stroke-width: 1.5; rx: 8; }
+      .user { fill: #eff6ff; stroke: #2563eb; }
+      .mmap { fill: #ecfdf3; stroke: #16a34a; }
+      .guard { fill: #f8fafc; stroke: #94a3b8; stroke-dasharray: 6 5; }
+      .trap { fill: #fff7ed; stroke: #c2410c; }
+      .kernel { fill: #fef2f2; stroke: #dc2626; }
+      .mmio { fill: #fffbeb; stroke: #d97706; }
+      .label { font: 700 23px sans-serif; fill: #202124; }
+      .small { font: 500 18px monospace; fill: #344054; }
+      .hint { font: 500 17px sans-serif; fill: #667085; }
+    </style>
+  </defs>
+
+  <line x1="112" y1="466" x2="112" y2="42" class="axis"/>
+  <text x="74" y="56" text-anchor="middle" class="hint">高地址</text>
+  <text x="74" y="468" text-anchor="middle" class="hint">低地址</text>
+
+  <rect x="165" y="42" width="600" height="62" class="region kernel"/>
+  <text x="465" y="69" text-anchor="middle" class="label">内核高地址线性映射</text>
+  <text x="465" y="93" text-anchor="middle" class="small">KERNEL_BASE = 0xffff_ffc0_0000_0000</text>
+
+  <rect x="165" y="116" width="600" height="58" class="region mmio"/>
+  <text x="465" y="143" text-anchor="middle" class="label">内核段与设备映射</text>
+  <text x="465" y="166" text-anchor="middle" class="small">text / rodata / data / bss / heap / VirtIO MMIO</text>
+
+  <rect x="165" y="204" width="600" height="48" class="region trap"/>
+  <text x="465" y="235" text-anchor="middle" class="small">TRAMPOLINE = 0x0000_003f_ffff_e000</text>
+
+  <rect x="165" y="270" width="600" height="52" class="region mmap"/>
+  <text x="465" y="299" text-anchor="middle" class="label">mmap 区间</text>
+  <text x="465" y="316" text-anchor="middle" class="small">0x20_0000_0000 .. 0x22_0000_0000</text>
+
+  <rect x="165" y="334" width="600" height="46" class="region user"/>
+  <text x="465" y="363" text-anchor="middle" class="small">heap / brk：ELF 与用户栈之后按需扩展</text>
+
+  <rect x="165" y="392" width="600" height="34" class="region guard"/>
+  <text x="465" y="415" text-anchor="middle" class="small">guard page：栈溢出保护</text>
+
+  <rect x="165" y="438" width="600" height="46" class="region user"/>
+  <text x="465" y="467" text-anchor="middle" class="small">ELF LOAD 段 / 动态链接器 / 用户栈</text>
+</svg>

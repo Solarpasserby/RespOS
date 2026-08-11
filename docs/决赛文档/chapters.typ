@@ -1,0 +1,13 @@
+// 此文件由 generate.sh 自动生成，请勿直接编辑。
+#include "chapters/01-概述.typ"
+#include "chapters/02-进程管理.typ"
+#include "chapters/03-中断与异常处理.typ"
+#include "chapters/04-内存管理.typ"
+#include "chapters/05-文件系统.typ"
+#include "chapters/06-进程间通信与信号.typ"
+#include "chapters/07-时钟模块.typ"
+#include "chapters/08-网络模块.typ"
+#include "chapters/09-硬件抽象层与架构适配.typ"
+#include "chapters/10-设备驱动.typ"
+#include "chapters/11-参考-AI-第三方.typ"
+#include "chapters/12-总结与展望.typ"
