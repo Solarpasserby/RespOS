@@ -2,7 +2,7 @@ use alloc::{string::String, sync::Arc, vec, vec::Vec};
 use core::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
 use crate::{
-    fs::{FdEntry, FileOp, OpenFlags, filename_create, vfs::InodeType},
+    fs::{FdEntry, FileOp, OpenFlags, filename_create, filename_lookup, vfs::InodeType},
     mm::{check_user_readable, check_user_writable, copy_from_user, copy_to_user},
     net::socket::{self, SOCK_CLOEXEC, SOCK_NONBLOCK, Socket, SocketDomain, SocketKind},
     task::current_task,
@@ -785,6 +785,9 @@ pub fn sys_connect(socketfd: usize, addr: usize, addrlen: usize) -> SysResult<us
     with_socket(socketfd, |sock| {
         if sock.domain == SocketDomain::AF_UNIX {
             let addr = read_sockaddr_un(addr, addrlen)?;
+            if let Some(path) = addr.pathname.as_ref() {
+                let _ = filename_lookup(AT_FDCWD, path.as_str(), 0)?;
+            }
             sock.connect_unix_path(addr.key.as_str())?;
             return Ok(0);
         }

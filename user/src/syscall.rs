@@ -36,6 +36,7 @@ const SYSCALL_GETDENTS64: usize = 61;
 const SYSCALL_LSEEK: usize = 62;
 const SYSCALL_READ: usize = 63;
 const SYSCALL_WRITE: usize = 64;
+const SYSCALL_PPOLL: usize = 73;
 const SYSCALL_PREAD64: usize = 67;
 const SYSCALL_PWRITE64: usize = 68;
 const SYSCALL_PREADV: usize = 69;
@@ -51,6 +52,7 @@ const SYSCALL_SYNC_FILE_RANGE: usize = 84;
 const SYSCALL_SYNCFS: usize = 267;
 const SYSCALL_TIMERFD_CREATE: usize = 85;
 const SYSCALL_EXIT: usize = 93;
+const SYSCALL_EXIT_GROUP: usize = 94;
 const SYSCALL_FUTEX: usize = 98;
 const SYSCALL_NANOSLEEP: usize = 101;
 const SYSCALL_TIMER_CREATE: usize = 107;
@@ -70,11 +72,14 @@ const SYSCALL_GETRUSAGE: usize = 165;
 const SYSCALL_KILL: usize = 129;
 const SYSCALL_SIGACTION: usize = 134;
 const SYSCALL_SIGPROCMASK: usize = 135;
+const SYSCALL_SIGPENDING: usize = 136;
+const SYSCALL_SIGQUEUEINFO: usize = 138;
 const SYSCALL_SIGRETURN: usize = 139;
 const SYSCALL_REBOOT: usize = 142;
 const SYSCALL_GETTIMEOFDAY: usize = 169;
 const SYSCALL_GETPID: usize = 172;
 const SYSCALL_GETPPID: usize = 173;
+const SYSCALL_GETTID: usize = 178;
 const SYSCALL_GETUID: usize = 174;
 const SYSCALL_GETGID: usize = 176;
 const SYSCALL_SETFSUID: usize = 151;
@@ -91,6 +96,7 @@ const SYSCALL_ACCEPT: usize = 202;
 const SYSCALL_CONNECT: usize = 203;
 const SYSCALL_SENDTO: usize = 206;
 const SYSCALL_RECVFROM: usize = 207;
+const SYSCALL_SHUTDOWN: usize = 210;
 const SYSCALL_BRK: usize = 214;
 const SYSCALL_MUNMAP: usize = 215;
 const SYSCALL_CLONE: usize = 220;
@@ -663,6 +669,10 @@ pub fn sys_exit(exit_code: i32) -> isize {
     syscall(SYSCALL_EXIT, [exit_code as usize, 0, 0, 0, 0, 0])
 }
 
+pub fn sys_exit_group(exit_code: i32) -> isize {
+    syscall(SYSCALL_EXIT_GROUP, [exit_code as usize, 0, 0, 0, 0, 0])
+}
+
 /// 主动交出 CPU 所有权
 pub fn sys_sched_yield() -> isize {
     syscall(SYSCALL_SCHED_YIELD, [0, 0, 0, 0, 0, 0])
@@ -865,7 +875,7 @@ pub fn sys_sigaction(
             signum as usize,
             action as usize,
             old_action as usize,
-            0,
+            core::mem::size_of::<u64>(),
             0,
             0,
         ],
@@ -882,8 +892,50 @@ pub fn sys_sigaction(
     */
 }
 
+pub fn sys_sigaction_raw(
+    signum: i32,
+    action: *const SignalAction,
+    old_action: *mut SignalAction,
+    sigsetsize: usize,
+) -> isize {
+    syscall(
+        SYSCALL_SIGACTION,
+        [
+            signum as usize,
+            action as usize,
+            old_action as usize,
+            sigsetsize,
+            0,
+            0,
+        ],
+    )
+}
+
 pub fn sys_sigprocmask(mask: u32) -> isize {
     syscall(SYSCALL_SIGPROCMASK, [mask as usize, 0, 0, 0, 0, 0])
+}
+
+pub fn sys_sigprocmask_raw(
+    how: usize,
+    set: *const u64,
+    oldset: *mut u64,
+    sigsetsize: usize,
+) -> isize {
+    syscall(
+        SYSCALL_SIGPROCMASK,
+        [how, set as usize, oldset as usize, sigsetsize, 0, 0],
+    )
+}
+
+pub fn sys_sigpending_raw(set: *mut u64, sigsetsize: usize) -> isize {
+    syscall(SYSCALL_SIGPENDING, [set as usize, sigsetsize, 0, 0, 0, 0])
+}
+
+pub fn sys_sigqueueinfo_raw(tgid: usize, signum: i32, info: *const u8) -> isize {
+    syscall(
+        SYSCALL_SIGQUEUEINFO,
+        [tgid, signum as usize, info as usize, 0, 0, 0],
+    )
 }
 
 pub fn sys_sigreturn() -> isize {
@@ -976,6 +1028,10 @@ pub fn sys_getppid() -> isize {
     syscall(SYSCALL_GETPPID, [0, 0, 0, 0, 0, 0])
 }
 
+pub fn sys_gettid() -> isize {
+    syscall(SYSCALL_GETTID, [0, 0, 0, 0, 0, 0])
+}
+
 pub fn sys_socket(domain: usize, socket_type: usize, protocol: usize) -> isize {
     syscall(SYSCALL_SOCKET, [domain, socket_type, protocol, 0, 0, 0])
 }
@@ -1013,6 +1069,30 @@ pub fn sys_accept(fd: usize, addr: usize, addrlen: usize) -> isize {
 
 pub fn sys_connect(fd: usize, addr: usize, addrlen: usize) -> isize {
     syscall(SYSCALL_CONNECT, [fd, addr, addrlen, 0, 0, 0])
+}
+
+pub fn sys_shutdown(fd: usize, how: usize) -> isize {
+    syscall(SYSCALL_SHUTDOWN, [fd, how, 0, 0, 0, 0])
+}
+
+pub fn sys_ppoll(
+    fds: *mut crate::PollFd,
+    nfds: usize,
+    timeout: *const TimeSpec,
+    sigmask: *const u64,
+    sigsetsize: usize,
+) -> isize {
+    syscall(
+        SYSCALL_PPOLL,
+        [
+            fds as usize,
+            nfds,
+            timeout as usize,
+            sigmask as usize,
+            sigsetsize,
+            0,
+        ],
+    )
 }
 
 pub fn sys_sendto(

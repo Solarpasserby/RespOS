@@ -14,7 +14,7 @@ use spin::Mutex;
 
 use crate::{
     fs::vfs::InodeType,
-    fs::{FileOp, KStat, OpenFlags},
+    fs::{FileOp, KStat, OpenFlags, POLL_HUP, POLL_READ, POLL_WRITE, PollEvents, PollWaiters},
     mutex::SpinLock,
     syscall::{Errno, SysResult},
     task::{
@@ -78,6 +78,10 @@ struct UnixSocket {
     peer_rx: SpinLock<Option<Arc<SpinLock<UnixBuffer>>>>,
     closed: Arc<AtomicBool>,
     peer_closed: SpinLock<Option<Arc<AtomicBool>>>,
+    read_shutdown: Arc<AtomicBool>,
+    write_shutdown: Arc<AtomicBool>,
+    peer_read_shutdown: SpinLock<Option<Arc<AtomicBool>>>,
+    peer_write_shutdown: SpinLock<Option<Arc<AtomicBool>>>,
     bound_key: Mutex<Option<String>>,
     listener: SpinLock<Option<Arc<UnixListener>>>,
     nonblock: AtomicBool,
@@ -85,12 +89,14 @@ struct UnixSocket {
 
 struct UnixListener {
     pending: SpinLock<UnixPending>,
+    poll_waiters: Arc<PollWaiters>,
 }
 
 struct UnixBuffer {
     data: VecDeque<u8>,
     read_waiters: VecDeque<usize>,
     write_waiters: VecDeque<usize>,
+    poll_waiters: Arc<PollWaiters>,
 }
 
 struct UnixPending {
@@ -104,6 +110,7 @@ impl UnixBuffer {
             data: VecDeque::new(),
             read_waiters: VecDeque::new(),
             write_waiters: VecDeque::new(),
+            poll_waiters: Arc::new(PollWaiters::new()),
         }
     }
 }
@@ -115,6 +122,7 @@ impl UnixListener {
                 sockets: VecDeque::new(),
                 accept_waiters: VecDeque::new(),
             }),
+            poll_waiters: Arc::new(PollWaiters::new()),
         }
     }
 }
@@ -126,6 +134,10 @@ impl UnixSocket {
             peer_rx: SpinLock::new(None),
             closed: Arc::new(AtomicBool::new(false)),
             peer_closed: SpinLock::new(None),
+            read_shutdown: Arc::new(AtomicBool::new(false)),
+            write_shutdown: Arc::new(AtomicBool::new(false)),
+            peer_read_shutdown: SpinLock::new(None),
+            peer_write_shutdown: SpinLock::new(None),
             bound_key: Mutex::new(None),
             listener: SpinLock::new(None),
             nonblock: AtomicBool::new(false),
@@ -139,6 +151,10 @@ impl UnixSocket {
         *right.peer_rx.lock() = Some(left.rx.clone());
         *left.peer_closed.lock() = Some(right.closed.clone());
         *right.peer_closed.lock() = Some(left.closed.clone());
+        *left.peer_read_shutdown.lock() = Some(right.read_shutdown.clone());
+        *right.peer_read_shutdown.lock() = Some(left.read_shutdown.clone());
+        *left.peer_write_shutdown.lock() = Some(right.write_shutdown.clone());
+        *right.peer_write_shutdown.lock() = Some(left.write_shutdown.clone());
         (left, right)
     }
 
@@ -194,6 +210,11 @@ impl UnixSocket {
             return Err(Errno::ENOTCONN);
         }
         let peer_closed = self.peer_closed.lock().clone().ok_or(Errno::ENOTCONN)?;
+        let peer_write_shutdown = self
+            .peer_write_shutdown
+            .lock()
+            .clone()
+            .ok_or(Errno::ENOTCONN)?;
         let task = current_task().ok_or(Errno::ESRCH)?;
         loop {
             let mut rx = self.rx.lock();
@@ -207,7 +228,9 @@ impl UnixSocket {
                     read_len += 1;
                 }
                 let wake_writer = rx.write_waiters.pop_front();
+                let poll_waiters = rx.poll_waiters.clone();
                 drop(rx);
+                poll_waiters.notify(POLL_WRITE);
                 if let Some(tid) = wake_writer {
                     wakeup_task(tid);
                 }
@@ -215,7 +238,10 @@ impl UnixSocket {
             }
             // A stream socket reports EOF once the last reference to the peer
             // endpoint is closed and all bytes already sent have been drained.
-            if peer_closed.load(Ordering::Acquire) {
+            if self.read_shutdown.load(Ordering::Acquire)
+                || peer_closed.load(Ordering::Acquire)
+                || peer_write_shutdown.load(Ordering::Acquire)
+            {
                 return Ok(0);
             }
             if self.is_nonblocking() {
@@ -252,9 +278,17 @@ impl UnixSocket {
         }
         let peer_rx = self.peer_rx.lock().clone().ok_or(Errno::ENOTCONN)?;
         let peer_closed = self.peer_closed.lock().clone().ok_or(Errno::ENOTCONN)?;
+        let peer_read_shutdown = self
+            .peer_read_shutdown
+            .lock()
+            .clone()
+            .ok_or(Errno::ENOTCONN)?;
         let task = current_task().ok_or(Errno::ESRCH)?;
         loop {
-            if peer_closed.load(Ordering::Acquire) {
+            if self.write_shutdown.load(Ordering::Acquire)
+                || peer_closed.load(Ordering::Acquire)
+                || peer_read_shutdown.load(Ordering::Acquire)
+            {
                 return Err(Errno::EPIPE);
             }
             let mut rx = peer_rx.lock();
@@ -263,7 +297,9 @@ impl UnixSocket {
                 let write_len = available.min(buf.len());
                 rx.data.extend(buf[..write_len].iter().copied());
                 let wake_reader = rx.read_waiters.pop_front();
+                let poll_waiters = rx.poll_waiters.clone();
                 drop(rx);
+                poll_waiters.notify(POLL_READ);
                 if let Some(tid) = wake_reader {
                     wakeup_task(tid);
                 }
@@ -301,24 +337,37 @@ impl UnixSocket {
     }
 
     fn read_ready(&self) -> bool {
-        !self.rx.lock().data.is_empty()
+        self.read_shutdown.load(Ordering::Acquire)
+            || !self.rx.lock().data.is_empty()
             || self
                 .peer_closed
+                .lock()
+                .as_ref()
+                .is_some_and(|closed| closed.load(Ordering::Acquire))
+            || self
+                .peer_write_shutdown
                 .lock()
                 .as_ref()
                 .is_some_and(|closed| closed.load(Ordering::Acquire))
     }
 
     fn write_ready(&self) -> bool {
-        self.peer_rx
-            .lock()
-            .as_ref()
-            .is_some_and(|rx| rx.lock().data.len() < UNIX_SOCKET_BUFFER_LIMIT)
-            && !self
+        self.write_shutdown.load(Ordering::Acquire)
+            || self
                 .peer_closed
                 .lock()
                 .as_ref()
                 .is_some_and(|closed| closed.load(Ordering::Acquire))
+            || self
+                .peer_read_shutdown
+                .lock()
+                .as_ref()
+                .is_some_and(|closed| closed.load(Ordering::Acquire))
+            || self
+                .peer_rx
+                .lock()
+                .as_ref()
+                .is_some_and(|rx| rx.lock().data.len() < UNIX_SOCKET_BUFFER_LIMIT)
     }
 
     fn listen(&self) -> SysResult {
@@ -342,18 +391,24 @@ impl UnixSocket {
             .iter()
             .find(|(item_key, _)| item_key == key)
             .map(|(_, listener)| listener.clone())
-            .ok_or(Errno::ENOENT)?;
+            .ok_or(Errno::ECONNREFUSED)?;
 
         let server = UnixSocket::new();
         *server.peer_rx.lock() = Some(self.rx.clone());
         *self.peer_rx.lock() = Some(server.rx.clone());
         *server.peer_closed.lock() = Some(self.closed.clone());
         *self.peer_closed.lock() = Some(server.closed.clone());
+        *server.peer_read_shutdown.lock() = Some(self.read_shutdown.clone());
+        *self.peer_read_shutdown.lock() = Some(server.read_shutdown.clone());
+        *server.peer_write_shutdown.lock() = Some(self.write_shutdown.clone());
+        *self.peer_write_shutdown.lock() = Some(server.write_shutdown.clone());
 
         let mut pending = listener.pending.lock();
         if pending.sockets.len() >= UNIX_LISTEN_QUEUE_LIMIT {
             *self.peer_rx.lock() = None;
             *self.peer_closed.lock() = None;
+            *self.peer_read_shutdown.lock() = None;
+            *self.peer_write_shutdown.lock() = None;
             return Err(Errno::EAGAIN);
         }
         pending.sockets.push_back(server);
@@ -362,6 +417,7 @@ impl UnixSocket {
         if let Some(tid) = wake_accept {
             wakeup_task(tid);
         }
+        listener.poll_waiters.notify(POLL_READ);
         Ok(())
     }
 
@@ -409,6 +465,75 @@ impl UnixSocket {
         self.bound_key.lock().clone()
     }
 
+    fn shutdown(&self, how: usize) -> SysResult {
+        if self.peer_rx.lock().is_none() {
+            return Err(Errno::ENOTCONN);
+        }
+        if how == 0 || how == 2 {
+            self.read_shutdown.store(true, Ordering::Release);
+            let mut rx = self.rx.lock();
+            rx.data.clear();
+            let mut wake = core::mem::take(&mut rx.write_waiters);
+            wake.append(&mut rx.read_waiters);
+            let poll_waiters = rx.poll_waiters.clone();
+            drop(rx);
+            poll_waiters.notify(POLL_READ | POLL_WRITE | POLL_HUP);
+            for tid in wake.drain(..) {
+                wakeup_task(tid);
+            }
+        }
+        if how == 1 || how == 2 {
+            self.write_shutdown.store(true, Ordering::Release);
+            if let Some(peer_rx) = self.peer_rx.lock().clone() {
+                let mut peer_rx = peer_rx.lock();
+                let mut wake = core::mem::take(&mut peer_rx.read_waiters);
+                wake.append(&mut peer_rx.write_waiters);
+                let poll_waiters = peer_rx.poll_waiters.clone();
+                drop(peer_rx);
+                poll_waiters.notify(POLL_READ | POLL_WRITE | POLL_HUP);
+                for tid in wake.drain(..) {
+                    wakeup_task(tid);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn poll_hup(&self) -> bool {
+        self.peer_closed
+            .lock()
+            .as_ref()
+            .is_some_and(|closed| closed.load(Ordering::Acquire))
+    }
+
+    fn register_poll_waiter(&self, tid: usize, events: PollEvents) {
+        self.rx
+            .lock()
+            .poll_waiters
+            .register(tid, events & (POLL_READ | POLL_HUP));
+        if let Some(peer_rx) = self.peer_rx.lock().clone() {
+            peer_rx
+                .lock()
+                .poll_waiters
+                .register(tid, events & POLL_WRITE);
+        }
+        if events & POLL_READ != 0
+            && let Some(listener) = self.listener.lock().clone()
+        {
+            listener.poll_waiters.register(tid, POLL_READ);
+        }
+    }
+
+    fn unregister_poll_waiter(&self, tid: usize) {
+        self.rx.lock().poll_waiters.unregister(tid);
+        if let Some(peer_rx) = self.peer_rx.lock().clone() {
+            peer_rx.lock().poll_waiters.unregister(tid);
+        }
+        if let Some(listener) = self.listener.lock().clone() {
+            listener.poll_waiters.unregister(tid);
+        }
+    }
+
     fn close(&self) {
         let Some(listener) = self.listener.lock().take() else {
             return;
@@ -422,11 +547,21 @@ impl UnixSocket {
 impl Drop for UnixSocket {
     fn drop(&mut self) {
         self.closed.store(true, Ordering::Release);
+        self.read_shutdown.store(true, Ordering::Release);
+        self.write_shutdown.store(true, Ordering::Release);
         let mut wake = VecDeque::new();
         if let Some(peer_rx) = self.peer_rx.lock().clone() {
-            wake.append(&mut peer_rx.lock().read_waiters);
+            let mut peer_rx = peer_rx.lock();
+            wake.append(&mut peer_rx.read_waiters);
+            let poll_waiters = peer_rx.poll_waiters.clone();
+            drop(peer_rx);
+            poll_waiters.notify(POLL_READ | POLL_WRITE | POLL_HUP);
         }
-        wake.append(&mut self.rx.lock().write_waiters);
+        let mut rx = self.rx.lock();
+        wake.append(&mut rx.write_waiters);
+        let poll_waiters = rx.poll_waiters.clone();
+        drop(rx);
+        poll_waiters.notify(POLL_READ | POLL_WRITE | POLL_HUP);
         for tid in wake {
             wakeup_task(tid);
         }
@@ -760,7 +895,7 @@ impl Socket {
             SocketInner::Udp(udp) => {
                 udp.shutdown();
             }
-            SocketInner::Unix(_) => {}
+            SocketInner::Unix(unix) => unix.shutdown(how)?,
         }
         Ok(())
     }
@@ -866,6 +1001,29 @@ impl FileOp for Socket {
     /// 非阻塞可写：poll 网络接口后检查 socket 是否可写。
     fn write_ready(&self) -> bool {
         self.tcp_poll(false)
+    }
+
+    fn poll_hup(&self) -> bool {
+        match &self.inner {
+            SocketInner::Unix(unix) => unix.poll_hup(),
+            SocketInner::Tcp(_) | SocketInner::Udp(_) => false,
+        }
+    }
+
+    fn register_poll_waiter(&self, tid: usize, events: PollEvents) -> bool {
+        match &self.inner {
+            SocketInner::Unix(unix) => {
+                unix.register_poll_waiter(tid, events);
+                true
+            }
+            SocketInner::Tcp(_) | SocketInner::Udp(_) => false,
+        }
+    }
+
+    fn unregister_poll_waiter(&self, tid: usize) {
+        if let SocketInner::Unix(unix) = &self.inner {
+            unix.unregister_poll_waiter(tid);
+        }
     }
 
     fn readable(&self) -> bool {

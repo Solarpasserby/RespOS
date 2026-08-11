@@ -947,7 +947,6 @@ impl TaskControlBlock {
 
         /* ===== 修改信号处理 ===== */
         self.op_sig_handler_mut(|handler| handler.reset_user_handlers_for_exec());
-        self.op_sig_pending_mut(|pending| pending.clear_pending());
         *self.sig_stack.lock() = SignalStack::default();
 
         // Linux vfork resumes the parent once the child has installed its new

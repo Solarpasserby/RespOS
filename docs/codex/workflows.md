@@ -259,6 +259,63 @@ descriptor/open-file 分层、`AT_EMPTY_PATH`、umask、fsuid/fsgid、supplement
 `O_NOATIME` 和只读 bind mount。权限 probe 会临时修改当前进程的 fsuid/fsgid/groups，但不会修改
 shell 进程；失败后直接重启 snapshot guest，避免残留测试目录影响二次判读。
 
+Phase 5 task leader/exec Linux 对照：
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror -O2 scripts/task_phase5_probe_linux.c \
+  -o /tmp/task_phase5_probe_linux
+/tmp/task_phase5_probe_linux
+```
+
+当前 no-feature guest 可运行 `task_phase5_probe`。修复前预期打印三个
+`TASK_PHASE5_EXPECTED_FAIL` 和 `TASK_PHASE5 CURRENT DIFFERENCES CONFIRMED`，并以非零状态退出；这些
+marker 只证明探针捕获了已确认差异，不是通过。完成 task 生命周期修复后，退出门槛是
+`TASK_PHASE5 ALL PASS`，并且不得出现 expected-fail marker。探针分别覆盖 leader 原始 `SYS_exit`
+后 worker 的 `exit_group`、worker 的原始 `SYS_exit`，以及非 leader `execve` 后
+`getpid() == gettid()` 的 identity 接管。
+
+Phase 5 mmap EOF/SIGBUS Linux 对照：
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror -O2 scripts/mmap_phase5_probe_linux.c \
+  -o /tmp/mmap_phase5_probe_linux
+/tmp/mmap_phase5_probe_linux
+```
+
+当前 no-feature guest 可运行 `mmap_phase5_probe`。修复前预期打印 shared/private 的
+`MMAP_PHASE5_EXPECTED_FAIL` 和 `MMAP_PHASE5 CURRENT DIFFERENCES CONFIRMED`，并以非零状态退出；它们
+覆盖初始 EOF 整页 SIGBUS、truncate 后 resident PTE 失效、未 COW EOF 部分页清零、已 COW private
+部分页保留匿名字节，以及 mmap 后动态扩容。完成 MM 修复后必须同时出现 `MMAP_PHASE5 shared PASS`、
+`MMAP_PHASE5 private PASS`、`MMAP_PHASE5 private_cow_truncate PASS` 与
+`MMAP_PHASE5 ALL PASS`，并复跑 `buildstorm_file_probe` 的 mmap 扩容/写回竞态。
+
+Phase 5 signal ABI 对照：
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror -O2 scripts/signal_phase5_probe_linux.c \
+  -o /tmp/signal_phase5_probe_linux
+/tmp/signal_phase5_probe_linux
+```
+
+无 feature guest 中运行 `signal_phase5_probe`，以 `SIGNAL_PHASE5 ALL PASS` 为通过标志。它覆盖
+query-only `rt_sigprocmask`、`rt_sigaction` size/EFAULT、`rt_sigqueueinfo(sig=0)` 和 pending signal
+跨 exec。修改 signal wait/timer 唤醒后还应复跑 `task_a_clock_probe` 与
+`/glibc/busybox timeout 1 /glibc/busybox sleep 10`；只通过 ABI 探针不能替代阻塞路径门禁。
+
+Phase 5 AF_UNIX、pipe 与 poll 对照：
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror -O2 scripts/socket_phase5_probe_linux.c \
+  -o /tmp/socket_phase5_probe_linux
+/tmp/socket_phase5_probe_linux
+```
+
+RV64 no-feature release、`-m 16G -smp 8 -snapshot` guest 中运行 `socket_phase5_probe`，以
+`SOCKET_PHASE5 ALL PASS` 为通过标志。它覆盖 pathname accept/connect、非阻塞 accept、EOF/EPIPE、
+AF_UNIX shutdown、阻塞 ppoll 数据唤醒、pipe 的无条件 HUP/ERR、epoll HUP 和 accept EINTR。修改
+Unix buffer/waiter 后还必须复跑 `unix_socket_block_probe` 的 128 KiB 满缓冲区传输；宿主 QEMU
+需要单独核对 `NI=-10/CLS=TS`。
+
 题一 CAgent 的 guest 入口是 `/glibc/cagent_testcode.sh`，不是内置 `testrunner`。它会启动
 `simple_llm_server`，并行运行 10 个 `agent_lite`，最终由上游
 [`judge_cagent-glibc.py`](https://github.com/oscomp/testsuits-for-oskernel/blob/final-2026/judge/judge_cagent-glibc.py)

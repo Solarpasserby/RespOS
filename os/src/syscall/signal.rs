@@ -229,7 +229,10 @@ pub fn sys_rt_sigpending(set: *mut SigSet, sigsetsize: usize) -> SysResult<usize
         return Err(Errno::EINVAL);
     }
     let task = current_task().expect("[kernel] current task is None.");
-    let pending = task.op_sig_pending(|pending| pending.pending);
+    // Linux exposes signals that are pending because they are blocked.  An
+    // unblocked signal is deliverable and must not be reported merely because
+    // it is still between enqueue and the next return-to-user signal check.
+    let pending = task.op_sig_pending(|pending| pending.pending & pending.mask);
     copy_to_user(set, &pending as *const SigSet, 1)?;
     Ok(0)
 }
@@ -282,20 +285,49 @@ pub fn sys_rt_sigqueueinfo(
     signum: i32,
     uinfo: *const LinuxSigInfo,
 ) -> SysResult<usize> {
+    if tgid == 0 || tgid > isize::MAX as usize {
+        return Err(Errno::EINVAL);
+    }
     let sig = Sig::from(signum);
     if signum != 0 && !sig.is_valid() {
         return Err(Errno::EINVAL);
     }
     let task = TASK_MANAGER.get(tgid).ok_or(Errno::ESRCH)?;
+    let current = current_task().expect("[kernel] current task is None.");
+    if current.euid() != 0
+        && current.euid() != task.uid()
+        && current.euid() != task.suid()
+        && current.uid() != task.uid()
+        && current.uid() != task.suid()
+    {
+        return Err(Errno::EPERM);
+    }
     let mut linux_info = LinuxSigInfo::default();
     copy_from_user(&mut linux_info as *mut LinuxSigInfo, uinfo, 1)?;
+    // As with kill(2), signal zero performs validation and permission checks
+    // without queuing a signal.  Passing Sig(0) into the pending-set code
+    // would otherwise underflow its one-based signal index.
+    if signum == 0 {
+        return Ok(0);
+    }
+    if tgid != current.tgid() && linux_info.si_code >= 0 {
+        return Err(Errno::EPERM);
+    }
     let mut siginfo = SigInfo::from(linux_info);
     siginfo.signo = signum;
     task.receive_siginfo(siginfo, !task.is_process_leader());
     Ok(0)
 }
 
-pub fn sys_sigaction(signum: i32, act: *const u8, oldact: *mut u8) -> SysResult<usize> {
+pub fn sys_sigaction(
+    signum: i32,
+    act: *const u8,
+    oldact: *mut u8,
+    sigsetsize: usize,
+) -> SysResult<usize> {
+    if sigsetsize != core::mem::size_of::<SigSet>() {
+        return Err(Errno::EINVAL);
+    }
     if signum <= 0 || signum > 64 {
         return Err(Errno::EINVAL);
     }
@@ -308,6 +340,20 @@ pub fn sys_sigaction(signum: i32, act: *const u8, oldact: *mut u8) -> SysResult<
     let oldact_ptr = oldact as *mut UserSigAction;
     let task = current_task().expect("[kernel] current task is None.");
 
+    // Prepare all input before writing oldact or changing the handler table.
+    // This keeps an invalid act/oldact pointer from publishing half of the
+    // operation and matches the syscall-wide failure-atomicity rule.
+    let prepared_action = if act.is_null() {
+        None
+    } else {
+        let mut new_user_action: UserSigAction = unsafe { core::mem::zeroed() };
+        copy_from_user(&mut new_user_action as *mut UserSigAction, act_ptr, 1)?;
+        let mut new_action = sigaction_from_user(new_user_action);
+        new_action.mask.remove_signal(Sig::SIGKILL);
+        new_action.mask.remove_signal(Sig::SIGSTOP);
+        Some(new_action)
+    };
+
     // 写回旧动作
     if !oldact.is_null() {
         let old_action = task.op_sig_handler(|handler| handler.get(sig));
@@ -315,13 +361,7 @@ pub fn sys_sigaction(signum: i32, act: *const u8, oldact: *mut u8) -> SysResult<
         copy_to_user(oldact_ptr, &old_user_action as *const UserSigAction, 1)?;
     }
 
-    // 读入新动作
-    if !act.is_null() {
-        let mut new_user_action: UserSigAction = unsafe { core::mem::zeroed() };
-        copy_from_user(&mut new_user_action as *mut UserSigAction, act_ptr, 1)?;
-        let mut new_action = sigaction_from_user(new_user_action);
-        new_action.mask.remove_signal(Sig::SIGKILL);
-        new_action.mask.remove_signal(Sig::SIGSTOP);
+    if let Some(new_action) = prepared_action {
         task.op_sig_handler_mut(|handler| handler.update(sig, new_action));
     }
 
@@ -338,9 +378,6 @@ pub fn sys_sigprocmask(
     const SIG_UNBLOCK: usize = 1;
     const SIG_SETMASK: usize = 2;
 
-    if how > SIG_SETMASK {
-        return Err(Errno::EINVAL);
-    }
     if sigsetsize != core::mem::size_of::<SigSet>() {
         return Err(Errno::EINVAL);
     }
@@ -358,6 +395,9 @@ pub fn sys_sigprocmask(
 
     // 读入新掩码并计算
     if set != 0 {
+        if how > SIG_SETMASK {
+            return Err(Errno::EINVAL);
+        }
         // set 为 NULL → 不修改，只查询当前掩码写入 oldset。
         let mut new_mask: SigSet = unsafe { core::mem::zeroed() };
         copy_from_user(&mut new_mask as *mut SigSet, set_ptr, 1)?;

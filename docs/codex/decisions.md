@@ -169,15 +169,18 @@
   `page_cache_pages`、free frames 和 heap peak。不得为减少锁次数而在 `EXT4_OP_LOCK` 之外并发调用
   lwext4；随机 I/O 回归时应重新评估固定 16 页预读是否过量。
 
-## AF_UNIX 阻塞 I/O 使用条件 waiter，不使用 yield polling
+## AF_UNIX 阻塞 I/O 与 poll 使用同一条件事件源，不使用 yield polling
 
-- 状态：已采用，pathname accept/connect 与 EINTR 专项待补
+- 状态：已采用，pathname/shutdown/EINTR/poll 专项已补
 - 适用范围：socketpair/pathname Unix socket read/write/accept、peer close、signal interruption
-- 最后验证：2026-08-10
-- 证据：`os/src/net/socket.rs`、`user/src/bin/unix_socket_block_probe.rs`；RV64 专项和 120 秒 Cargo 活性窗口
+- 最后验证：2026-08-11
+- 证据：`os/src/net/socket.rs`、`user/src/bin/{unix_socket_block_probe,socket_phase5_probe}.rs`、
+  `scripts/socket_phase5_probe_linux.c`；RV64 16 GiB/8 核专项
 - 内容：reader、writer、accept waiter 分别与接收 buffer 或 listener pending queue 共锁登记；登记后
   发布 blocked，并在切换前处理 producer-wins 和 signal-wins 竞态。写入唤醒 reader、读取唤醒 writer、
-  connect 唤醒 accept、endpoint drop 唤醒 EOF/EPIPE 对端。非阻塞路径继续直接返回 EAGAIN。
+  connect 唤醒 accept、shutdown/endpoint drop 唤醒 EOF/EPIPE 对端。非阻塞路径继续直接返回 EAGAIN。
+  同一 buffer/listener 的 `PollWaiters` 是 ppoll/epoll 的事件源；HUP/error 由 FileOp 独立发布，即使用户
+  未在 interest 中请求也必须返回。pipe 复用相同的 exceptional-event 规则。
 - 后续影响：不得改回固定 sleep/yield。新增 shutdown、dup-close 或 poll waiter 时必须一起验证 EOF、
   EPIPE、lost wake、EINTR 和 single-winner；唤醒 scheduler 必须在释放 socket data lock 后执行。
 
@@ -440,3 +443,15 @@
 - 后续影响：backlog 会占用 TCP 收发缓冲内存，不能无限接受用户值；close/unlisten 必须回收仍在
   listener 池和 accept queue 中的所有 handle。若以后替换为原生 SYN queue，应保持相同的
   userspace 可观察并发语义。
+
+## exec 保留调用线程的 signal mask 与 pending set
+
+- 状态：已采用
+- 适用范围：exec、signal mask/pending、sigaction/alt stack
+- 最后验证：2026-08-11
+- 证据：`os/src/task/task.rs::install_exec_image()`、`user/src/bin/signal_phase5_probe.rs`、
+  `scripts/signal_phase5_probe_linux.c`；RV64 16 GiB/8 核专项
+- 内容：exec 保留调用线程的 blocked mask 和 pending signals；用户安装的 handler 恢复默认，显式
+  `SIG_IGN` 保持，alternate signal stack 重置。不得以“新程序不认识旧信号”为由清空 pending set。
+- 后续影响：实现非 leader exec 时只保留调用线程自身 pending set，不能合并或继承被终止 sibling 的
+  thread-directed pending signals；后续引入独立 process-pending queue 时须分别处理两类所有权。

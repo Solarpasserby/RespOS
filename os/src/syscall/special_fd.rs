@@ -115,6 +115,8 @@ impl EpollFd {
     fn scan_ready(&self, maxevents: usize, out: &mut Vec<EpollReady>) -> usize {
         const EPOLLIN: u32 = 0x001;
         const EPOLLOUT: u32 = 0x004;
+        const EPOLLERR: u32 = 0x008;
+        const EPOLLHUP: u32 = 0x010;
         const EPOLLET: u32 = 1 << 31;
 
         let task = current_task().expect("[kernel] current task is None.");
@@ -150,6 +152,12 @@ impl EpollFd {
             {
                 ready |= EPOLLOUT;
             }
+            if interest.file.poll_error() {
+                ready |= EPOLLERR;
+            }
+            if interest.file.poll_hup() {
+                ready |= EPOLLHUP;
+            }
 
             let report = if interest.events & EPOLLET != 0 {
                 let newly_ready = ready & !interest.last_ready;
@@ -168,7 +176,7 @@ impl EpollFd {
 
             out.push(EpollReady {
                 key: *key,
-                events: report & interest.events,
+                events: report & (interest.events | EPOLLERR | EPOLLHUP),
                 data: interest.data,
                 observed_ready: ready,
                 generation: interest.generation,
@@ -208,7 +216,7 @@ impl EpollFd {
             if interest.disabled {
                 continue;
             }
-            let mut events = 0;
+            let mut events = crate::fs::POLL_HUP;
             if interest.events & EPOLLIN != 0 {
                 events |= POLL_READ;
             }
@@ -697,7 +705,8 @@ pub fn sys_epoll_ctl(epfd: usize, op: usize, fd: usize, event: *const u8) -> Sys
         // interest bit is accepted even though readiness is reported through
         // EPOLLIN rather than a separate RDHUP bit for now.
         const EPOLLRDHUP: u32 = 0x2000;
-        const EPOLL_SUPPORTED_EVENTS: u32 = 0x001 | 0x004 | EPOLLRDHUP | (1 << 31) | (1 << 30);
+        const EPOLL_SUPPORTED_EVENTS: u32 =
+            0x001 | 0x004 | 0x008 | 0x010 | EPOLLRDHUP | (1 << 31) | (1 << 30);
         let mut raw = [0u8; 12];
         copy_from_user(raw.as_mut_ptr(), event, raw.len())?;
         let events = u32::from_ne_bytes(raw[..4].try_into().unwrap());

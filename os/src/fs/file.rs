@@ -103,6 +103,13 @@ pub trait FileOp: Any + Send + Sync {
     fn write_ready(&self) -> bool {
         true
     }
+    /// poll/epoll exceptional readiness is reported even when not requested.
+    fn poll_hup(&self) -> bool {
+        false
+    }
+    fn poll_error(&self) -> bool {
+        false
+    }
     fn register_poll_waiter(&self, _tid: usize, _events: PollEvents) -> bool {
         false
     }

@@ -203,6 +203,12 @@ impl FileOp for NamedFifoEnd {
     fn write_ready(&self) -> bool {
         self.inner.write_ready()
     }
+    fn poll_hup(&self) -> bool {
+        self.inner.poll_hup()
+    }
+    fn poll_error(&self) -> bool {
+        self.inner.poll_error()
+    }
     fn register_poll_waiter(&self, tid: usize, events: PollEvents) -> bool {
         self.inner.register_poll_waiter(tid, events)
     }
@@ -457,6 +463,12 @@ impl FileOp for Pipe {
         let buffer = self.buffer.lock();
         let free = buffer.capacity.saturating_sub(buffer.available_bytes());
         free >= PAGE_SIZE.min(buffer.capacity)
+    }
+    fn poll_hup(&self) -> bool {
+        self.readable && self.buffer.lock().write_closed()
+    }
+    fn poll_error(&self) -> bool {
+        self.writable && self.buffer.lock().read_closed()
     }
     fn register_poll_waiter(&self, tid: usize, events: PollEvents) -> bool {
         self.poll_waiters.register(tid, events);

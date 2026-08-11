@@ -105,6 +105,108 @@
 
 本文件是快速变化的状态页。更新测试结论时必须同时更新日期、提交和命令。
 
+## 2026-08-11 Phase 5 前置 BuildStorm debug-traces 完整回归（基于 `76f7c61` 的本轮工作树）
+
+- **配置与命令**：以
+  `make build-rv RV_USER_FEATURES= RV_KERNEL_FEATURES=debug_traces` 构建 release kernel，QEMU 10.0.2
+  直接在宿主以 `-m 16G -smp 8 -snapshot` 和 pub 镜像运行，实测 QEMU 为 `NI=-10/CLS=TS`；guest
+  执行 `/glibc/buildstorm_testcode.sh`。完整串口日志为
+  `/tmp/respos-buildstorm-phase5-debug-traces.log`（688459 bytes）。这是正确性/活性诊断，不是正式性能成绩。
+- **结果**：依次观察到 `BUILDSTORM_TOOLCHAIN ok`、`BUILDSTORM_MINIBUILD ok` 与
+  `BUILDSTORM_COMPILE mode=multi ok=true elapsed_s=0.00 cores=8 bytes=1681000 arch=riscv64`；脚本经最终
+  `sync` 后退出 0。Cargo 报告 `20m 42s`，axbuild 报告 `1254.30s`；旧脚本的 `elapsed_s=0.00` 继续
+  不作为计时依据。
+- **trace 审查**：16 次带 sibling 列表的 exec 与 16 次 `exec remote-ack` 的 TID 多重集合完全一致；
+  pipe poll/HUP、child exit 与 wait resume 在完整运行中持续推进。并发串口输出会交织并打碎部分
+  group-exit 行，不能用其简单行数做严格配对，但全日志未出现 kernel panic、SIGSEGV、OOM、allocation
+  failure、assertion failure 或 illegal instruction。此前第二轮的并行 rustc SIGSEGV 本轮未复现。
+- **宿主边界**：采样中 QEMU RSS 约 1.5--2.9 GiB，宿主 available memory 约 9.0--9.4 GiB，swap 维持
+  约 3.5 MiB，没有历史失败轮次的宿主内存压力。脚本结束后已退出 QEMU；诊断完成后须恢复无 feature
+  kernel 再做正式门禁。
+
+## 2026-08-11 Linux/POSIX Phase 5 mmap EOF/SIGBUS 审计（基于 `76f7c61` 的本轮工作树）
+
+- **Linux 对照**：新增 `scripts/mmap_phase5_probe_linux.c`，分别覆盖 MAP_SHARED/MAP_PRIVATE：初始
+  EOF 所在部分页尾部补零、下一完整页触发 SIGBUS；truncate 后已驻留但未 COW 的部分页尾部清零、
+  完整越界页失效并触发 SIGBUS；映射后文件扩容且尚未 fault 的新页按当前 EOF 读取数据。补充对照还
+  确认 MAP_PRIVATE 已 COW 的 EOF 部分页保留其匿名尾部字节，但新 EOF 之后的完整 COW 页仍失效并
+  SIGBUS。宿主以 `cc -std=c11 -O2 -Wall -Wextra -Werror` 编译运行，全部 PASS。
+- **当前 RespOS 差异**：新增 `mmap_phase5_probe`。RV64 no-feature release、QEMU 10.0.2、
+  `-m 16G -smp 8 -snapshot`、宿主 `NI=-10/CLS=TS` 中，shared/private 的初始完整越界页和 truncate
+  后已驻留完整越界页都继续可读并正常退出，没有 SIGBUS；private truncate 后未 COW 的同一部分页仍
+  暴露旧字节，映射后扩容的新页也保持 mmap-time EOF 的零页；已 COW 的完整越界页同样未失效。探针
+  打印七项 `MMAP_PHASE5_EXPECTED_FAIL` 和
+  `MMAP_PHASE5 CURRENT DIFFERENCES CONFIRMED`，以非零退出，不能作为通过标记。
+- **根因边界**：MAP_SHARED 当前在 mmap 时为整个窗口预建 frame，越过 EOF 的完整页因此已有有效 PTE；
+  MAP_PRIVATE 的 `FileBacking.len` 固化 mmap-time EOF。truncate 会裁剪 PageCache/writeback，却没有按
+  inode identity 扫描 live MemorySet、撤销越界 PTE 与私有 resident frame；当前 page-fault 路径也没有
+  在映射页 offset 对照当前 inode size 后返回 SIGBUS fault 类型。
+- **待协商方案**：建议 fault 时动态读取当前 EOF；mmap 时在 backing 缓存 `(dev, ino)`，truncate 成功
+  并释放 File 锁后按 live task/MemorySet 去重扫描同 inode VMA，清除完整越界页并复用现有跨 hart TLB
+  shootdown。先接受 O(live tasks × VMAs) 的低频扫描，不新增常驻 inode→VMA 反向索引。EOF 部分页
+  还必须区分未 COW 文件页与已 COW 匿名页；当前 writable MAP_PRIVATE 首次 fault 即直接映射可写私有
+  frame、没有 COW/dirty 状态，不能无条件清尾。该点需在实施前与用户确认取舍。
+
+## 2026-08-11 Linux/POSIX Phase 5 AF_UNIX 与 poll 语义（基于 `76f7c61` 的本轮工作树）
+
+- **pathname 与关闭语义**：AF_UNIX pathname `bind/listen/connect/accept` 已用 Linux 对照闭合；空队列
+  非阻塞 accept 返回 `EAGAIN`，连接关闭后 read 返回 EOF、write 返回 `EPIPE`。connect 现在先验证
+  pathname namespace entry；节点不存在返回 `ENOENT`，残留 socket 节点没有 listener 返回
+  `ECONNREFUSED`。AF_UNIX `shutdown(SHUT_RD/WR/RDWR)` 不再是空操作，读写半边分别发布 EOF/EPIPE，
+  清理相应 buffer 并唤醒已阻塞的 reader/writer。
+- **poll/epoll**：Unix buffer、listener pending queue 复用 `PollWaiters` 做事件驱动登记，数据、空间、
+  connect、shutdown 与 endpoint close 在释放 data lock 后唤醒；AF_UNIX 的 ppoll 不再退化为 yield
+  polling。`FileOp` 显式发布 HUP/error 状态，ppoll/epoll 即使用户未请求也返回 `POLLHUP/POLLERR`；
+  pipe 的 writer-close/read-end HUP 与 reader-close/write-end error 同步纳入该路径。
+- **专项验证**：新增 `scripts/socket_phase5_probe_linux.c` 与 `socket_phase5_probe`。Linux 对照以
+  `-Wall -Wextra -Werror` 通过；RV64 QEMU 10.0.2、`-m 16G -smp 8 -snapshot`、宿主
+  `NI=-10/CLS=TS` 输出 `SOCKET_PHASE5 ALL PASS`，覆盖 pathname/nonblock、EOF/EPIPE、shutdown、
+  阻塞 ppoll 数据唤醒、pipe HUP/ERR、epoll HUP 和 accept EINTR。既有 128 KiB
+  `unix_socket_block_probe` 同轮继续通过；RV64/LA64 no-feature release 构建通过。
+- **保留边界**：pathname 在 listener 存活期间 unlink 后用同名节点 rebind 的 registry identity、
+  AF_UNIX getsockname/getpeername 完整地址回报和 named FIFO blocking-open/multi-open 仍需后续专项；
+  TCP/UDP poll 仍沿用协议栈轮询，本轮只收敛有现成条件队列的 AF_UNIX。
+
+## 2026-08-11 Linux/POSIX Phase 5 signal ABI 首轮（基于 `76f7c61` 的本轮工作树）
+
+- **查询与校验语义**：`rt_sigprocmask(set=NULL)` 现在忽略 `how`，仍按固定 8-byte kernel sigset
+  校验 `sigsetsize` 并可返回旧 mask；`rt_sigpending` 只报告被 mask 阻塞的 pending signals。
+  `rt_sigaction` 开始校验第四个 `sigsetsize` 参数，并先准备新 action、验证 old-action copyout，最后
+  提交 handler，避免非法输入指针先改写 old buffer 或 handler table。
+- **空信号与 exec**：`rt_sigqueueinfo(..., sig=0)` 只做 target、权限和 info 指针校验，不再把
+  `Sig(0)` 送入一基 signal bitmap；对其他进程补齐基本 uid/suid/euid 权限与非负 `si_code` 限制。
+  exec 继续保留调用线程的 signal mask，并不再错误清空 pending set；自定义 handler 重置、SIG_IGN
+  保留和 alt stack 重置维持原有规则。
+- **专项验证**：新增 `scripts/signal_phase5_probe_linux.c` 与 `signal_phase5_probe`，覆盖 query-only
+  sigprocmask、sigaction size/EFAULT 顺序、sigqueueinfo signal 0，以及 blocked SIGUSR1 跨 exec
+  保留。Linux 对照以 `-Wall -Wextra -Werror` 通过；RV64 QEMU 10.0.2、
+  `-m 16G -smp 8 -snapshot`、宿主 `NI=-10/CLS=TS` 输出 `SIGNAL_PHASE5 ALL PASS`。同一内核继续通过
+  `task_a_clock_probe` 和 BusyBox `timeout 1 sleep 10`；后者由 SIGTERM 结束 sleep。RV64/LA64
+  no-feature release 构建通过。
+- **保留边界**：`SA_RESTART` 尚无 syscall restart block；`SA_NOCLDWAIT`、精确 process-pending queue
+  和完整 job-control signal 仍待后续子轮，不以本专项通过宣称 signal 子系统已完成。
+
+## 2026-08-11 Linux/POSIX Phase 5 task 生命周期审计（基于 `76f7c61` 的本轮工作树）
+
+- **Linux 对照**：新增 `scripts/task_phase5_probe_linux.c`，宿主以
+  `cc -std=c11 -Wall -Wextra -Werror -O2` 编译运行通过。对照确认：线程组 leader 调用原始
+  `SYS_exit` 只结束自身，worker 后续无论调用 `exit_group(7)` 还是原始 `SYS_exit(7)`，父进程最终都
+  观察到进程退出状态 7；非 leader 调用 `execve` 会结束 sibling、接管 TGID 并成功安装新映像，
+  新映像中 `getpid() == gettid()`，而不是返回 `EINVAL`。
+- **当前 RespOS 差异**：新增 `task_phase5_probe` 与独立 exec target。RV64 no-feature release、QEMU
+  10.0.2、`-m 16G -smp 8 -snapshot`、宿主 `NI=-10/CLS=TS` 中，两种 leader `SYS_exit(42)` 用例都
+  错误地立即结束整个线程组：父进程观察到 status `10752`（`42 << 8`）且 worker 未继续运行；非
+  leader `execve` 返回 `-EINVAL`，失败路径的 `exit_group(111)` 使父进程观察到 status `28416`。
+  探针打印三个 `TASK_PHASE5_EXPECTED_FAIL` 和 `TASK_PHASE5 CURRENT DIFFERENCES CONFIRMED`，并以非零
+  状态退出；这些 marker 不能作为通过标记。
+- **根因边界**：`task_exit()` 显式把 process leader 的单线程退出转为 group exit；`execve_file()` /
+  `execve()` 显式拒绝非 leader。精确修复不能只删除两个条件：当前 `TASK_MANAGER`、父进程 children
+  表、`ThreadGroup` 和多处 signal/process 查询都以 `tid == tgid` 的 TCB 作为 leader identity，非
+  leader exec 需要安全的 de-thread/TID 接管；leader 单独退出还要保留进程可寻址性，并只在最后线程
+  退出时向父进程发布 waitable zombie。
+- **构建门禁**：加入探针后的 RV64/LA64 no-feature release 构建均通过。尚未修改 task 生命周期；
+  mmap EOF/SIGBUS 与 task leader/de-thread 都属于本阶段待协商的跨模块设计点。
+
 ## 2026-08-11 Linux/POSIX Phase 4 namei、权限与文件系统 ABI（基于 `4d7f86d` 的本轮工作树）
 
 - **final component 与 trailing slash**：namei 保留原始路径的 trailing-slash 目录约束；普通 lookup

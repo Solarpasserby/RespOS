@@ -532,9 +532,12 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
             sys_sigaltstack(args[0] as *const SignalStack, args[1] as *mut SignalStack)
         }
         SYSCALL_RT_SIGSUSPEND => sys_rt_sigsuspend(args[0] as *const SigSet, args[1]),
-        SYSCALL_SIGACTION => {
-            sys_sigaction(args[0] as i32, args[1] as *const u8, args[2] as *mut u8)
-        }
+        SYSCALL_SIGACTION => sys_sigaction(
+            args[0] as i32,
+            args[1] as *const u8,
+            args[2] as *mut u8,
+            args[3],
+        ),
         SYSCALL_SIGPROCMASK => sys_sigprocmask(args[0], args[1], args[2], args[3]),
         SYSCALL_RT_SIGPENDING => sys_rt_sigpending(args[0] as *mut SigSet, args[1]),
         SYSCALL_RT_SIGTIMEDWAIT => sys_rt_sigtimedwait(args[0], args[1], args[2], args[3]),

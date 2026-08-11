@@ -99,6 +99,7 @@ pub const AF_INET: usize = 2;
 pub const AF_UNIX: usize = 1;
 pub const SOCK_STREAM: usize = 1;
 pub const SOCK_DGRAM: usize = 2;
+pub const SOCK_NONBLOCK: usize = 0x800;
 pub const IPPROTO_TCP: usize = 6;
 pub const IPPROTO_UDP: usize = 17;
 
@@ -109,6 +110,41 @@ pub struct SockAddrIn {
     pub sin_port: u16,
     pub sin_addr: [u8; 4],
     pub sin_zero: [u8; 8],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SockAddrUn {
+    pub sun_family: u16,
+    pub sun_path: [u8; 108],
+}
+
+impl SockAddrUn {
+    pub fn from_path(path: &str) -> Option<(Self, usize)> {
+        let raw = path.as_bytes();
+        let bytes = if raw.last() == Some(&0) {
+            &raw[..raw.len() - 1]
+        } else {
+            raw
+        };
+        if bytes.is_empty() || bytes.len() >= 108 || bytes.contains(&0) {
+            return None;
+        }
+        let mut addr = Self {
+            sun_family: AF_UNIX as u16,
+            sun_path: [0; 108],
+        };
+        addr.sun_path[..bytes.len()].copy_from_slice(bytes);
+        Some((addr, core::mem::size_of::<u16>() + bytes.len() + 1))
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PollFd {
+    pub fd: i32,
+    pub events: i16,
+    pub revents: i16,
 }
 
 impl SockAddrIn {
@@ -381,6 +417,9 @@ pub fn memfd_create(name: &str, flags: usize) -> isize {
 pub fn exit(exit_code: i32) -> isize {
     sys_exit(exit_code)
 }
+pub fn exit_group(exit_code: i32) -> isize {
+    sys_exit_group(exit_code)
+}
 pub fn yield_() -> isize {
     sys_sched_yield()
 }
@@ -402,6 +441,9 @@ pub fn getpid() -> isize {
 }
 pub fn getppid() -> isize {
     sys_getppid()
+}
+pub fn gettid() -> isize {
+    sys_gettid()
 }
 pub fn fork() -> isize {
     sys_clone(17, 0, 0, 0, 0)
@@ -538,6 +580,10 @@ pub fn bind(fd: usize, addr: &SockAddrIn) -> isize {
     )
 }
 
+pub fn bind_unix(fd: usize, addr: &SockAddrUn, addrlen: usize) -> isize {
+    sys_bind(fd, addr as *const SockAddrUn as usize, addrlen)
+}
+
 pub fn listen(fd: usize, backlog: usize) -> isize {
     sys_listen(fd, backlog)
 }
@@ -550,12 +596,33 @@ pub fn accept(fd: usize, addr: &mut SockAddrIn, addrlen: &mut u32) -> isize {
     )
 }
 
+pub fn accept_unix(fd: usize) -> isize {
+    sys_accept(fd, 0, 0)
+}
+
 pub fn connect(fd: usize, addr: &SockAddrIn) -> isize {
     sys_connect(
         fd,
         addr as *const SockAddrIn as usize,
         core::mem::size_of::<SockAddrIn>(),
     )
+}
+
+pub fn connect_unix(fd: usize, addr: &SockAddrUn, addrlen: usize) -> isize {
+    sys_connect(fd, addr as *const SockAddrUn as usize, addrlen)
+}
+
+pub fn shutdown(fd: usize, how: usize) -> isize {
+    sys_shutdown(fd, how)
+}
+
+pub fn ppoll_raw(
+    fds: &mut [PollFd],
+    timeout: *const TimeSpec,
+    sigmask: *const u64,
+    sigsetsize: usize,
+) -> isize {
+    sys_ppoll(fds.as_mut_ptr(), fds.len(), timeout, sigmask, sigsetsize)
 }
 
 pub fn sendto(fd: usize, buf: &[u8], flags: usize, addr: Option<&SockAddrIn>) -> isize {
@@ -626,9 +693,26 @@ pub fn sigaction(
         old_action.map_or(core::ptr::null_mut(), |a| a),
     )
 }
+pub fn sigaction_raw(
+    signum: i32,
+    action: *const SignalAction,
+    old_action: *mut SignalAction,
+    sigsetsize: usize,
+) -> isize {
+    sys_sigaction_raw(signum, action, old_action, sigsetsize)
+}
 
 pub fn sigprocmask(mask: u32) -> isize {
     sys_sigprocmask(mask)
+}
+pub fn sigprocmask_raw(how: usize, set: *const u64, oldset: *mut u64, sigsetsize: usize) -> isize {
+    sys_sigprocmask_raw(how, set, oldset, sigsetsize)
+}
+pub fn sigpending_raw(set: *mut u64, sigsetsize: usize) -> isize {
+    sys_sigpending_raw(set, sigsetsize)
+}
+pub fn sigqueueinfo_raw(tgid: usize, signum: i32, info: *const u8) -> isize {
+    sys_sigqueueinfo_raw(tgid, signum, info)
 }
 
 pub fn sigreturn() -> isize {

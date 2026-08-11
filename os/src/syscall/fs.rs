@@ -3157,6 +3157,8 @@ struct Pselect6Sigmask {
 
 const POLLIN: i16 = 0x0001;
 const POLLOUT: i16 = 0x0004;
+const POLLERR: i16 = 0x0008;
+const POLLHUP: i16 = 0x0010;
 const POLLNVAL: i16 = 0x0020;
 const PPOLL_MAXFDS: usize = 4096;
 
@@ -3257,6 +3259,12 @@ fn ppoll_scan_ready(pollfds: &mut [PollFd]) -> usize {
         if pollfd.events & POLLOUT != 0 && file.writable() && file.write_ready() {
             pollfd.revents |= POLLOUT;
         }
+        if file.poll_error() {
+            pollfd.revents |= POLLERR;
+        }
+        if file.poll_hup() {
+            pollfd.revents |= POLLHUP;
+        }
         if pollfd.revents != 0 {
             ready += 1;
         }
@@ -3323,7 +3331,7 @@ fn ppoll_register(pollfds: &[PollFd], tid: usize) -> PollRegistration {
         let Ok(entry) = task.get_fd_entry(pollfd.fd as usize) else {
             continue;
         };
-        let mut events = 0;
+        let mut events = crate::fs::POLL_HUP;
         if pollfd.events & POLLIN != 0 {
             events |= POLL_READ;
         }
