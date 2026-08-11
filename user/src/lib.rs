@@ -76,16 +76,24 @@ pub const O_RDONLY: usize = 0;
 pub const O_WRONLY: usize = 1 << 0;
 pub const O_RDWR: usize = 1 << 1;
 pub const O_CREATE: usize = 1 << 6;
+pub const O_EXCL: usize = 1 << 7;
 pub const O_TRUNC: usize = 1 << 9;
 pub const O_APPEND: usize = 1 << 10;
 pub const O_NONBLOCK: usize = 1 << 11;
 pub const O_DIRECTORY: usize = 1 << 16;
+pub const O_NOFOLLOW: usize = 1 << 17;
+pub const O_NOATIME: usize = 1 << 18;
 pub const O_CLOEXEC: usize = 1 << 19;
+pub const O_PATH: usize = 0o10000000;
+pub const O_TMPFILE: usize = 0x410000;
 
 pub const SEEK_SET: usize = 0;
 pub const SEEK_CUR: usize = 1;
 pub const SEEK_END: usize = 2;
 pub const AT_FDCWD: isize = -100;
+pub const AT_SYMLINK_NOFOLLOW: usize = 0x100;
+pub const AT_EMPTY_PATH: usize = 0x1000;
+pub const AT_SYMLINK_FOLLOW: usize = 0x400;
 
 pub const AF_INET: usize = 2;
 pub const AF_UNIX: usize = 1;
@@ -232,6 +240,15 @@ pub fn rmdir(path: &str) -> isize {
 pub fn link(oldpath: &str, newpath: &str) -> isize {
     sys_linkat(AT_FDCWD, oldpath, AT_FDCWD, newpath, 0)
 }
+pub fn linkat(
+    olddirfd: isize,
+    oldpath: &str,
+    newdirfd: isize,
+    newpath: &str,
+    flags: usize,
+) -> isize {
+    sys_linkat(olddirfd, oldpath, newdirfd, newpath, flags)
+}
 pub fn symlink(target: &str, linkpath: &str) -> isize {
     sys_symlinkat(target, AT_FDCWD, linkpath)
 }
@@ -267,6 +284,30 @@ pub fn futimens(fd: usize, times: &[TimeSpec; 2]) -> isize {
 }
 pub fn open(path: &str, flags: usize, mode: usize) -> isize {
     sys_openat(AT_FDCWD, path, flags, mode)
+}
+pub fn openat(dirfd: isize, path: &str, flags: usize, mode: usize) -> isize {
+    sys_openat(dirfd, path, flags, mode)
+}
+pub fn fstatat(dirfd: isize, path: &str, stat: &mut Stat, flags: usize) -> isize {
+    sys_fstatat(dirfd, path, stat, flags)
+}
+pub fn faccessat2(dirfd: isize, path: &str, mode: usize, flags: usize) -> isize {
+    sys_faccessat2(dirfd, path, mode, flags)
+}
+pub fn setfsuid(uid: usize) -> isize {
+    sys_setfsuid(uid)
+}
+pub fn setfsgid(gid: usize) -> isize {
+    sys_setfsgid(gid)
+}
+pub fn getgroups(groups: &mut [u32]) -> isize {
+    sys_getgroups(groups)
+}
+pub fn setgroups(groups: &[u32]) -> isize {
+    sys_setgroups(groups)
+}
+pub fn umask(mask: usize) -> isize {
+    sys_umask(mask)
 }
 pub fn close(fd: usize) -> isize {
     sys_close(fd)

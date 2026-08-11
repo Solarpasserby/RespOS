@@ -329,6 +329,18 @@
   `File`。dup 共享后者，不共享前者。
 - 后续影响：任何 fd 复制、进程复制和 fcntl 实现都必须保持这一身份关系。
 
+## namei 以显式 lookup policy 表达最终分量语义
+
+- 状态：已采用
+- 适用范围：final symlink、trailing slash、empty path、link/rename/unlink/open
+- 最后验证：2026-08-11
+- 证据：`os/src/fs/namei.rs`、Phase 4 Linux/RV64 probes
+- 内容：路径切分结果之外保留 trailing-slash 目录约束；调用方显式选择是否跟随 final symlink、
+  final mount，以及 trailing slash 是否覆盖 no-follow。rename 的旧路径定位目录项自身，link 默认
+  链接 symlink inode，标准 lookup/lstat/readlink 则按各自 Linux policy 选择入口。
+- 后续影响：不接受所有 syscall 先统一 follow、再根据 inode type 猜测操作对象的实现。新增 policy
+  前先用 Linux probe 固定 errno；只增加布尔分支而没有对应调用者语义和测试，不进入 namei 公共层。
+
 ## 未实现状态型 ABI 必须诚实失败
 
 - 状态：已确认

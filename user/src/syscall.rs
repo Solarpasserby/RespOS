@@ -77,6 +77,12 @@ const SYSCALL_GETPID: usize = 172;
 const SYSCALL_GETPPID: usize = 173;
 const SYSCALL_GETUID: usize = 174;
 const SYSCALL_GETGID: usize = 176;
+const SYSCALL_SETFSUID: usize = 151;
+const SYSCALL_SETFSGID: usize = 152;
+const SYSCALL_GETGROUPS: usize = 158;
+const SYSCALL_SETGROUPS: usize = 159;
+const SYSCALL_UMASK: usize = 166;
+const SYSCALL_FACCESSAT2: usize = 439;
 const SYSCALL_SOCKET: usize = 198;
 const SYSCALL_SOCKETPAIR: usize = 199;
 const SYSCALL_BIND: usize = 200;
@@ -456,6 +462,53 @@ pub fn sys_openat(dirfd: isize, path: &str, flags: usize, mode: usize) -> isize 
         SYSCALL_OPENAT,
         [dirfd as usize, path.as_ptr() as usize, flags, mode, 0, 0],
     )
+}
+
+pub fn sys_fstatat(dirfd: isize, path: &str, stat: &mut Stat, flags: usize) -> isize {
+    syscall(
+        SYSCALL_FSTATAT,
+        [
+            dirfd as usize,
+            path.as_ptr() as usize,
+            stat as *mut _ as usize,
+            flags,
+            0,
+            0,
+        ],
+    )
+}
+
+pub fn sys_faccessat2(dirfd: isize, path: &str, mode: usize, flags: usize) -> isize {
+    syscall(
+        SYSCALL_FACCESSAT2,
+        [dirfd as usize, path.as_ptr() as usize, mode, flags, 0, 0],
+    )
+}
+
+pub fn sys_setfsuid(uid: usize) -> isize {
+    syscall(SYSCALL_SETFSUID, [uid, 0, 0, 0, 0, 0])
+}
+
+pub fn sys_setfsgid(gid: usize) -> isize {
+    syscall(SYSCALL_SETFSGID, [gid, 0, 0, 0, 0, 0])
+}
+
+pub fn sys_getgroups(groups: &mut [u32]) -> isize {
+    syscall(
+        SYSCALL_GETGROUPS,
+        [groups.len(), groups.as_mut_ptr() as usize, 0, 0, 0, 0],
+    )
+}
+
+pub fn sys_setgroups(groups: &[u32]) -> isize {
+    syscall(
+        SYSCALL_SETGROUPS,
+        [groups.len(), groups.as_ptr() as usize, 0, 0, 0, 0],
+    )
+}
+
+pub fn sys_umask(mask: usize) -> isize {
+    syscall(SYSCALL_UMASK, [mask, 0, 0, 0, 0, 0])
 }
 
 pub fn sys_close(fd: usize) -> isize {

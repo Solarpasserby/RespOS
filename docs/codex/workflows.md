@@ -245,6 +245,20 @@ RespOS 无 feature、至少 2 核的 snapshot guest 中运行 `fs_namespace_prob
 跨目录与覆盖 rename、打开后 unlink、打开目录被覆盖、目录 nlink/后代路径和 fork rename/open 竞态；
 以 `FS_NAMESPACE_PROBE_PASS race_observations=N` 为通过标志。
 
+Phase 4 namei/权限/fd Linux 对照：
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror -O2 scripts/fs_phase4_probe_linux.c \
+  -o /tmp/fs_phase4_probe_linux
+/tmp/fs_phase4_probe_linux
+```
+
+RV64 no-feature release、`-snapshot` guest 中运行 `fs_phase4_probe`，以
+`FS_PHASE4_PROBE_PASS` 为通过标志。它覆盖 final symlink、trailing slash errno、`O_PATH`、dup/fcntl
+descriptor/open-file 分层、`AT_EMPTY_PATH`、umask、fsuid/fsgid、supplementary groups、setgid/sticky、
+`O_NOATIME` 和只读 bind mount。权限 probe 会临时修改当前进程的 fsuid/fsgid/groups，但不会修改
+shell 进程；失败后直接重启 snapshot guest，避免残留测试目录影响二次判读。
+
 题一 CAgent 的 guest 入口是 `/glibc/cagent_testcode.sh`，不是内置 `testrunner`。它会启动
 `simple_llm_server`，并行运行 10 个 `agent_lite`，最终由上游
 [`judge_cagent-glibc.py`](https://github.com/oscomp/testsuits-for-oskernel/blob/final-2026/judge/judge_cagent-glibc.py)

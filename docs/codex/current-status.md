@@ -105,6 +105,31 @@
 
 本文件是快速变化的状态页。更新测试结论时必须同时更新日期、提交和命令。
 
+## 2026-08-11 Linux/POSIX Phase 4 namei、权限与文件系统 ABI（基于 `4d7f86d` 的本轮工作树）
+
+- **final component 与 trailing slash**：namei 保留原始路径的 trailing-slash 目录约束；普通 lookup
+  会按 Linux 规则在需要时跟随最终 symlink 并要求目录，rename 则定位旧目录项自身。`link()` 默认
+  硬链接 symlink inode，`linkat(AT_SYMLINK_FOLLOW)` 才跟随目标；rename/unlink 不再误操作 symlink
+  目标。open/create/link/unlink/rename 的 regular/symlink/directory 组合已由 Linux 对照 probe 固定
+  `ENOENT/EISDIR/ENOTDIR/ELOOP/EEXIST`。
+- **open-file 与权限**：`O_PATH` 忽略目标 read/write 权限及 `O_TRUNC/O_CREAT` 等无关状态位，
+  `O_PATH|O_NOFOLLOW` 可持有 symlink 自身；read/fchmod/F_SETFL/fsync/fdatasync/getdents 等不允许的 fd
+  操作返回 `EBADF`。dup 后 CLOEXEC 仍为 descriptor-local，O_APPEND/O_NONBLOCK 由共享 open-file
+  description 统一观察。fsuid/fsgid、supplementary groups、umask、setgid directory、sticky bit、
+  O_NOATIME 由专项 probe 覆盖；regular file 的 setgid 保留条件改为调用者属于继承 group。
+- **mutation 与只读挂载**：create 在 lower inode 的 mode/uid/gid 成功提交后才发布 dentry，失败会回滚
+  lower namespace entry；symlink owner 同样在发布前提交。只读 mount 对 open-for-write、buffered/
+  positioned write、truncate、chmod/chown/utimens 和 xattr mutation 返回 `EROFS`，读取不触发 atime
+  写入。`AT_EMPTY_PATH` 已覆盖 fstatat 与 O_TMPFILE link；当前 O_TMPFILE 仍以 materialize/copy 建立
+  可见 inode，因此 link 前后 inode-number identity 不是 Linux 精确匿名 inode，实现边界保留为后续扩展。
+- **验证**：宿主 Linux `scripts/fs_phase4_probe_linux.c` 以 `-Wall -Wextra -Werror` 编译运行通过；
+  RV64/LA64 no-feature release 构建通过。本轮 RV64 QEMU 10.0.2、`-m 16G -smp 8 -snapshot`、宿主
+  `NI=-10/CLS=TS` 依次通过 `fs_phase4_probe`、namespace、metadata、xattr、writeback normal 与
+  `buildstorm_file_probe`；最终审查补丁重编译后又复跑 Phase 4/xattr probe。主体改动的完整 BuildStorm
+  同配置输出 toolchain/minibuild PASS 和
+  `BUILDSTORM_COMPILE mode=multi ok=true cores=8 bytes=1681000 arch=riscv64`，Cargo `20m41s`、
+  axbuild 1256.83 秒、脚本退出 0；旧脚本的 `elapsed_s=0.00` 仍不作为计时依据。
+
 ## 2026-08-11 RV64 16 GiB 启动与完整 BuildStorm（基于 `9bde322`）
 
 - **early/direct map**：RV64 early Sv39 root page table 的 identity 和高半区 direct-map 窗口

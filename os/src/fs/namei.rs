@@ -42,6 +42,7 @@ pub struct Nameidata {
     pub dentry: Arc<Dentry>,
     path_segments: Vec<String>,
     depth: usize,
+    requires_directory: bool,
 }
 
 impl Nameidata {
@@ -74,6 +75,7 @@ impl Nameidata {
             dentry: base.dentry.clone(),
             path_segments,
             depth: 0,
+            requires_directory: file_name.ends_with('/'),
         }
     }
 }
@@ -168,19 +170,6 @@ fn follow_dotdot(nd: &mut Nameidata) {
         }
     }
     nd.dentry = nd.dentry.get_parent_or_self();
-}
-
-// 创建子目录项的过程不合适
-fn install_child_dentry(
-    parent: &Arc<Dentry>,
-    name: &str,
-    inode: Arc<dyn super::vfs::InodeOp>,
-) -> Arc<Dentry> {
-    let abs_path = child_abs_path(parent, name);
-    let child_dentry = Arc::new(Dentry::new(abs_path, Some(parent.clone()), inode));
-    parent.insert_child(name, child_dentry.clone());
-    insert_dentry_cache(child_dentry.clone());
-    child_dentry
 }
 
 fn child_abs_path(parent: &Arc<Dentry>, name: &str) -> alloc::string::String {
@@ -284,6 +273,12 @@ fn check_open_permission(dentry: &Arc<Dentry>, flags: OpenFlags) -> SysResult {
         return Err(Errno::EISDIR);
     }
 
+    // O_PATH only acquires a path reference.  Linux does not apply the
+    // target inode's read/write permission checks to this kind of open.
+    if flags.contains(OpenFlags::O_PATH) {
+        return Ok(());
+    }
+
     if flags.contains(OpenFlags::O_NOATIME) {
         let task = current_task().expect("[kernel] current task is None.");
         let stat = inode.stat(&dentry.current_abs_path())?;
@@ -332,11 +327,7 @@ fn check_mount_device_allowed(
     }
 }
 
-fn init_created_owner(
-    parent: &Arc<Dentry>,
-    inode: &Arc<dyn super::vfs::InodeOp>,
-    path: &str,
-) -> SysResult {
+fn created_owner(parent: &Arc<Dentry>) -> SysResult<(u32, u32)> {
     let task = current_task().expect("[kernel] current task is None.");
     let parent_stat = parent.get_inode().stat(&parent.current_abs_path())?;
     let gid = if parent_stat.mode & 0o2000 != 0 {
@@ -344,7 +335,7 @@ fn init_created_owner(
     } else {
         task.fsgid() as u32
     };
-    inode.set_owner(path, task.fsuid() as u32, gid)
+    Ok((task.fsuid() as u32, gid))
 }
 
 fn created_mode(parent: &Arc<Dentry>, requested_mode: usize, ty: InodeType) -> SysResult<u32> {
@@ -355,29 +346,112 @@ fn created_mode(parent: &Arc<Dentry>, requested_mode: usize, ty: InodeType) -> S
     if ty == InodeType::Directory && parent_stat.mode & 0o2000 != 0 {
         mode |= 0o2000;
     }
-    if ty == InodeType::Regular && parent_stat.mode & 0o2000 != 0 && task.euid() != 0 {
+    if ty == InodeType::Regular
+        && parent_stat.mode & 0o2000 != 0
+        && task.fsuid() != 0
+        && !task.in_group(parent_stat.gid as usize)
+    {
         mode &= !0o2000;
     }
     Ok(mode)
 }
 
-fn tmpfile_meta(parent: &Arc<Dentry>, mode: usize) -> SysResult<TmpFileMeta> {
-    let task = current_task().expect("[kernel] current task is None.");
-    let parent_stat = parent.get_inode().stat(&parent.current_abs_path())?;
-    let gid = if parent_stat.mode & 0o2000 != 0 {
-        parent_stat.gid
+fn normalized_open_flags(flags: OpenFlags) -> OpenFlags {
+    if flags.contains(OpenFlags::O_PATH) {
+        flags
+            & (OpenFlags::O_PATH
+                | OpenFlags::O_DIRECTORY
+                | OpenFlags::O_NOFOLLOW
+                | OpenFlags::O_CLOEXEC)
     } else {
-        task.fsgid() as u32
-    };
+        flags
+    }
+}
+
+fn require_directory(path: &Arc<Path>, required: bool) -> SysResult {
+    if required && path.dentry.get_inode().node_type() != InodeType::Directory {
+        Err(Errno::ENOTDIR)
+    } else {
+        Ok(())
+    }
+}
+
+fn reject_trailing_non_directory_creation(nd: &mut Nameidata) -> SysResult {
+    if !nd.requires_directory {
+        return Ok(());
+    }
+    match lookup_dentry(nd) {
+        Ok(_) => Err(Errno::EEXIST),
+        Err(Errno::ENOENT) => Err(Errno::ENOENT),
+        Err(err) => Err(err),
+    }
+}
+
+fn tmpfile_meta(parent: &Arc<Dentry>, mode: usize) -> SysResult<TmpFileMeta> {
+    let (uid, gid) = created_owner(parent)?;
     Ok(TmpFileMeta {
         mode: created_mode(parent, mode, InodeType::Regular)?,
-        uid: task.fsuid() as u32,
+        uid,
         gid,
     })
 }
 
+fn install_created_inode(
+    parent: &Arc<Dentry>,
+    name: &str,
+    inode: Arc<dyn super::vfs::InodeOp>,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+) -> SysResult<Arc<Dentry>> {
+    let child_path = child_abs_path(parent, name);
+    let child = Arc::new(Dentry::new(
+        child_path.clone(),
+        Some(parent.clone()),
+        inode.clone(),
+    ));
+    let configure_result = match inode.set_owner_and_mode(&child_path, uid, gid, Some(mode)) {
+        Err(Errno::EOPNOTSUPP) => inode
+            .set_mode(&child_path, mode)
+            .and_then(|_| inode.set_owner(&child_path, uid, gid)),
+        result => result,
+    };
+    if let Err(err) = configure_result {
+        // The lower create has already allocated a namespace entry.  Keep it
+        // unpublished until all metadata is committed, and roll it back on
+        // failure so callers never observe a successful-looking partial file.
+        let _ = parent.get_inode().unlink(&child);
+        return Err(err);
+    }
+    parent.insert_child(name, child.clone());
+    insert_dentry_cache(child.clone());
+    Ok(child)
+}
+
+fn install_created_symlink(
+    parent: &Arc<Dentry>,
+    name: &str,
+    inode: Arc<dyn super::vfs::InodeOp>,
+    uid: u32,
+    gid: u32,
+) -> SysResult<Arc<Dentry>> {
+    let child_path = child_abs_path(parent, name);
+    let child = Arc::new(Dentry::new(
+        child_path.clone(),
+        Some(parent.clone()),
+        inode.clone(),
+    ));
+    if let Err(err) = inode.set_owner(&child_path, uid, gid) {
+        let _ = parent.get_inode().unlink(&child);
+        return Err(err);
+    }
+    parent.insert_child(name, child.clone());
+    insert_dentry_cache(child.clone());
+    Ok(child)
+}
+
 pub fn open_last_lookups(nd: &mut Nameidata, flags: usize, mode: usize) -> SysResult<Arc<File>> {
-    let flags = OpenFlags::from(flags);
+    let flags = normalized_open_flags(OpenFlags::from(flags));
 
     // 目标为根目录或工作目录
     if nd.path_segments.is_empty() {
@@ -390,6 +464,10 @@ pub fn open_last_lookups(nd: &mut Nameidata, flags: usize, mode: usize) -> SysRe
             let meta = tmpfile_meta(&nd.dentry, mode)?;
             return Ok(Arc::new(File::new_tmpfile(path, inode, flags, meta)));
         }
+        if flags.contains(OpenFlags::O_CREATE) {
+            return Err(Errno::EISDIR);
+        }
+        check_open_permission(&nd.dentry, flags)?;
         return Ok(Arc::new(File::new(path, inode, flags)));
     }
 
@@ -421,15 +499,23 @@ pub fn open_last_lookups(nd: &mut Nameidata, flags: usize, mode: usize) -> SysRe
                 if flags.contains(OpenFlags::O_CREATE | OpenFlags::O_EXCL) {
                     return Err(Errno::EEXIST);
                 }
-                if flags.contains(OpenFlags::O_NOFOLLOW) && inode.node_type() == InodeType::SymLink
+                if flags.contains(OpenFlags::O_NOFOLLOW)
+                    && inode.node_type() == InodeType::SymLink
+                    && !flags.contains(OpenFlags::O_PATH)
                 {
                     return Err(Errno::ELOOP);
                 }
                 if flags.contains(OpenFlags::O_CREATE) && inode.node_type() == InodeType::SymLink {
                     let symlink_base = Path::new(nd.mnt.clone(), nd.dentry.clone());
                     let target = inode.read_link(&dentry.current_abs_path())?;
-                    match resolve_path_from(symlink_base.clone(), &target, true, true, 1) {
+                    let target = if nd.requires_directory && !target.ends_with('/') {
+                        format!("{}/", target)
+                    } else {
+                        target
+                    };
+                    match resolve_path_from(symlink_base.clone(), &target, true, true, true, 1) {
                         Ok(target_path) => {
+                            nd.mnt = target_path.mnt.clone();
                             dentry = target_path.dentry.clone();
                             inode = dentry.get_inode();
                         }
@@ -448,6 +534,9 @@ pub fn open_last_lookups(nd: &mut Nameidata, flags: usize, mode: usize) -> SysRe
                 {
                     return Err(Errno::EISDIR);
                 }
+                if nd.requires_directory && inode.node_type() != InodeType::Directory {
+                    return Err(Errno::ENOTDIR);
+                }
                 // 期望打开目录，但实际文件类型不是目录，返回错误
                 if flags.contains(OpenFlags::O_DIRECTORY)
                     && inode.node_type() != InodeType::Directory
@@ -455,6 +544,9 @@ pub fn open_last_lookups(nd: &mut Nameidata, flags: usize, mode: usize) -> SysRe
                     return Err(Errno::ENOTDIR);
                 }
                 check_mount_device_allowed(&nd.mnt, &inode)?;
+                if flags.intersects(OpenFlags::O_WRONLY | OpenFlags::O_RDWR | OpenFlags::O_TRUNC) {
+                    check_mount_writable(&nd.mnt)?;
+                }
                 check_open_permission(&dentry, flags)?;
                 // TODO: 此处默认 dentry 不是负目录项，在引入缓存后需修改
                 dentry
@@ -473,32 +565,33 @@ pub fn open_last_lookups(nd: &mut Nameidata, flags: usize, mode: usize) -> SysRe
                 if flags.contains(OpenFlags::O_DIRECTORY) {
                     return Err(Errno::ENOTDIR);
                 }
+                if nd.requires_directory {
+                    return Err(Errno::EISDIR);
+                }
                 check_mount_writable(&nd.mnt)?;
                 check_dir_write_and_search_permission(&nd.dentry)?;
                 let current_dir_inode = nd.dentry.get_inode();
+                let create_mode = created_mode(&nd.dentry, mode, InodeType::Regular)?;
+                let (uid, gid) = created_owner(&nd.dentry)?;
                 let inode = current_dir_inode.create(
                     &nd.dentry.current_abs_path(),
                     name.as_str(),
                     InodeType::Regular,
                 )?;
-                let child_path = child_abs_path(&nd.dentry, name.as_str());
-                let _ = inode.set_mode(
-                    child_path.as_str(),
-                    created_mode(&nd.dentry, mode, InodeType::Regular)?,
-                );
-                let _ = init_created_owner(&nd.dentry, &inode, child_path.as_str());
-                install_child_dentry(&nd.dentry, name.as_str(), inode.clone())
+                install_created_inode(&nd.dentry, name.as_str(), inode, create_mode, uid, gid)?
             }
             Err(err) => return Err(err),
         }
     };
 
     let inode = dentry.get_inode();
-    Ok(Arc::new(File::new(
-        Path::new(nd.mnt.clone(), dentry),
-        inode,
-        flags,
-    )))
+    let file = Arc::new(File::new(Path::new(nd.mnt.clone(), dentry), inode, flags));
+    if flags.contains(OpenFlags::O_TRUNC)
+        && flags.intersects(OpenFlags::O_WRONLY | OpenFlags::O_RDWR)
+    {
+        file.truncate(0)?;
+    }
+    Ok(file)
 }
 
 /// 根据路径打开文件
@@ -506,7 +599,7 @@ pub fn path_open(dirfd: isize, path: &str, flags: usize, mode: usize) -> SysResu
     if path.is_empty() {
         return Err(Errno::ENOENT);
     }
-    let open_flags = OpenFlags::from(flags);
+    let open_flags = normalized_open_flags(OpenFlags::from(flags));
     if !open_flags.contains(OpenFlags::O_CREATE) {
         let path = if open_flags.contains(OpenFlags::O_NOFOLLOW) {
             filename_lookup_no_follow_final_symlink(dirfd, path)?
@@ -514,7 +607,10 @@ pub fn path_open(dirfd: isize, path: &str, flags: usize, mode: usize) -> SysResu
             filename_lookup(dirfd, path, 0)?
         };
         let inode = path.dentry.get_inode();
-        if open_flags.contains(OpenFlags::O_NOFOLLOW) && inode.node_type() == InodeType::SymLink {
+        if open_flags.contains(OpenFlags::O_NOFOLLOW)
+            && inode.node_type() == InodeType::SymLink
+            && !open_flags.contains(OpenFlags::O_PATH)
+        {
             return Err(Errno::ELOOP);
         }
         if open_flags.contains(OpenFlags::O_TMPFILE) {
@@ -529,8 +625,17 @@ pub fn path_open(dirfd: isize, path: &str, flags: usize, mode: usize) -> SysResu
             return Err(Errno::ENOTDIR);
         }
         check_mount_device_allowed(&path.mnt, &inode)?;
+        if open_flags.intersects(OpenFlags::O_WRONLY | OpenFlags::O_RDWR | OpenFlags::O_TRUNC) {
+            check_mount_writable(&path.mnt)?;
+        }
         check_open_permission(&path.dentry, open_flags)?;
-        return Ok(Arc::new(File::new(path, inode, open_flags)));
+        let file = Arc::new(File::new(path, inode, open_flags));
+        if open_flags.contains(OpenFlags::O_TRUNC)
+            && open_flags.intersects(OpenFlags::O_WRONLY | OpenFlags::O_RDWR)
+        {
+            file.truncate(0)?;
+        }
+        return Ok(file);
     }
 
     // O_CREAT 路径沿用 parent-walk 流程；最终 symlink 的 O_NOFOLLOW 语义在 open_last_lookups 处理。
@@ -560,6 +665,10 @@ pub fn filename_create(dirfd: isize, path: &str, ty: InodeType, mode: usize) -> 
     let mut nd = Nameidata::new_at(dirfd, path)?;
     link_path_walk(&mut nd)?;
 
+    if ty != InodeType::Directory {
+        reject_trailing_non_directory_creation(&mut nd)?;
+    }
+
     // 目标为根目录或工作目录，返回错误
     if nd.path_segments.is_empty() {
         return Err(Errno::EEXIST);
@@ -578,12 +687,11 @@ pub fn filename_create(dirfd: isize, path: &str, ty: InodeType, mode: usize) -> 
         // 未找到目标文件，创建文件
         Err(Errno::ENOENT) => {
             let current_dir_inode = nd.dentry.get_inode();
+            let create_mode = created_mode(&nd.dentry, mode, ty)?;
+            let (uid, gid) = created_owner(&nd.dentry)?;
             let inode =
                 current_dir_inode.create(&nd.dentry.current_abs_path(), name.as_str(), ty)?;
-            let child_path = child_abs_path(&nd.dentry, name.as_str());
-            let _ = inode.set_mode(child_path.as_str(), created_mode(&nd.dentry, mode, ty)?);
-            let _ = init_created_owner(&nd.dentry, &inode, child_path.as_str());
-            install_child_dentry(&nd.dentry, name.as_str(), inode);
+            install_created_inode(&nd.dentry, name.as_str(), inode, create_mode, uid, gid)?;
             Ok(())
         }
         Err(err) => Err(err),
@@ -600,6 +708,8 @@ pub fn filename_symlink(dirfd: isize, target: &str, newpath: &str) -> SysResult 
     // 中间路径仍正常解析，最后一级必须不存在。
     let mut nd = Nameidata::new_at(dirfd, newpath)?;
     link_path_walk(&mut nd)?;
+
+    reject_trailing_non_directory_creation(&mut nd)?;
 
     // 不能把根目录或当前工作目录本身替换成一个新的符号链接目录项。
     if nd.path_segments.is_empty() {
@@ -618,10 +728,11 @@ pub fn filename_symlink(dirfd: isize, target: &str, newpath: &str) -> SysResult 
         Ok(_) => Err(Errno::EEXIST),
         Err(Errno::ENOENT) => {
             let parent_inode = nd.dentry.get_inode();
+            let (uid, gid) = created_owner(&nd.dentry)?;
             // 目标字符串原样写入 symlink inode；相对路径到真正解析时再以链接所在目录为基准解释。
             let inode =
                 parent_inode.symlink(target, &nd.dentry.current_abs_path(), name.as_str())?;
-            install_child_dentry(&nd.dentry, name.as_str(), inode);
+            install_created_symlink(&nd.dentry, name.as_str(), inode, uid, gid)?;
             Ok(())
         }
         Err(err) => Err(err),
@@ -631,17 +742,21 @@ pub fn filename_symlink(dirfd: isize, target: &str, newpath: &str) -> SysResult 
 /// 根据路径查询文件
 pub fn filename_lookup(dirfd: isize, path: &str, _mode: usize) -> SysResult<Arc<Path>> {
     // 默认 lookup 语义和 Linux 一致：跟随最后一级符号链接，也允许穿过最终挂载点。
-    resolve_path(dirfd, path, true, true)
+    resolve_path(dirfd, path, true, true, true)
 }
 
 pub fn filename_lookup_no_follow_final_mount(dirfd: isize, path: &str) -> SysResult<Arc<Path>> {
     // umount 等场景需要定位挂载点本身，因此最后一级不能穿过 mount。
-    resolve_path(dirfd, path, true, false)
+    resolve_path(dirfd, path, true, false, true)
 }
 
 pub fn filename_lookup_no_follow_final_symlink(dirfd: isize, path: &str) -> SysResult<Arc<Path>> {
     // readlinkat/lstat 需要拿到 symlink inode 自身；中间路径中的 symlink 仍要正常跟随。
-    resolve_path(dirfd, path, false, true)
+    resolve_path(dirfd, path, false, true, true)
+}
+
+fn filename_lookup_no_follow_final_component(dirfd: isize, path: &str) -> SysResult<Arc<Path>> {
+    resolve_path(dirfd, path, false, true, false)
 }
 
 fn resolve_path(
@@ -649,6 +764,7 @@ fn resolve_path(
     path: &str,
     follow_final_symlink: bool,
     follow_final_mount: bool,
+    follow_trailing_symlink: bool,
 ) -> SysResult<Arc<Path>> {
     if path.is_empty() {
         return Err(Errno::ENOENT);
@@ -656,7 +772,14 @@ fn resolve_path(
     validate_path_components(path)?;
     // dirfd 只决定相对路径的起点；绝对路径会在 Nameidata::new_from_path 中切回 root_path。
     let base = base_path_from_dirfd(dirfd, path)?;
-    match resolve_path_from(base, path, follow_final_symlink, follow_final_mount, 0) {
+    match resolve_path_from(
+        base,
+        path,
+        follow_final_symlink,
+        follow_final_mount,
+        follow_trailing_symlink,
+        0,
+    ) {
         Err(Errno::ENOENT) => {
             if let Some(alias) = glibc_default_lib_alias(path) {
                 resolve_path_from(
@@ -664,6 +787,7 @@ fn resolve_path(
                     &alias,
                     follow_final_symlink,
                     follow_final_mount,
+                    follow_trailing_symlink,
                     0,
                 )
             } else {
@@ -688,6 +812,7 @@ fn resolve_path_from(
     path: &str,
     follow_final_symlink: bool,
     follow_final_mount: bool,
+    follow_trailing_symlink: bool,
     symlink_follows: usize,
 ) -> SysResult<Arc<Path>> {
     // 限制 symlink 展开次数，防止 a -> b -> a 这种循环把内核拖进无限递归。
@@ -698,7 +823,9 @@ fn resolve_path_from(
     let mut nd = Nameidata::new_from_path(path, base);
     // 空 segment 表示路径就是起点本身，例如 "/" 或相对路径中的空字符串。
     if nd.path_segments.is_empty() {
-        return Ok(Path::new(nd.mnt.clone(), nd.dentry.clone()));
+        let resolved = Path::new(nd.mnt.clone(), nd.dentry.clone());
+        require_directory(&resolved, nd.requires_directory)?;
+        return Ok(resolved);
     }
 
     while nd.depth < nd.path_segments.len() {
@@ -737,13 +864,21 @@ fn resolve_path_from(
         let inode = child.get_inode();
 
         // 中间 symlink 一定要展开；最后一级是否展开由 follow_final_symlink 决定。
-        if inode.node_type() == InodeType::SymLink && (!is_last || follow_final_symlink) {
+        if inode.node_type() == InodeType::SymLink
+            && (!is_last
+                || follow_final_symlink
+                || (nd.requires_directory && follow_trailing_symlink))
+        {
             if child_path.mnt.has_flag(MS_NOSYMFOLLOW) {
                 return Err(Errno::ELOOP);
             }
             let target = inode.read_link(&child_path.abs_path())?;
             // target 替换当前 symlink，其余未解析 segment 继续拼到 target 后面。
-            let next_path = join_symlink_target(&target, &nd.path_segments[nd.depth + 1..]);
+            let next_path = join_symlink_target(
+                &target,
+                &nd.path_segments[nd.depth + 1..],
+                nd.requires_directory,
+            );
             if next_path.len() > PATH_MAX {
                 return Err(Errno::ENAMETOOLONG);
             }
@@ -760,12 +895,14 @@ fn resolve_path_from(
                 &next_path,
                 follow_final_symlink,
                 follow_final_mount,
+                follow_trailing_symlink,
                 symlink_follows + 1,
             );
         }
 
         if is_last {
             // 最后一级不是需要展开的 symlink，当前 child 就是解析结果。
+            require_directory(&child_path, nd.requires_directory)?;
             return Ok(child_path);
         }
 
@@ -776,7 +913,7 @@ fn resolve_path_from(
     Ok(Path::new(nd.mnt.clone(), nd.dentry.clone()))
 }
 
-fn join_symlink_target(target: &str, rest: &[String]) -> String {
+fn join_symlink_target(target: &str, rest: &[String], requires_directory: bool) -> String {
     let mut path = String::from(target);
     for segment in rest {
         // 保留 target 本身的绝对/相对形式，只负责把剩余 segment 接到后面。
@@ -786,6 +923,9 @@ fn join_symlink_target(target: &str, rest: &[String]) -> String {
             path.push('/');
             path.push_str(segment);
         }
+    }
+    if requires_directory && !path.ends_with('/') {
+        path.push('/');
     }
     path
 }
@@ -826,6 +966,9 @@ pub fn filename_unlink(dirfd: isize, path: &str, remove_dir: bool) -> SysResult 
 
     let target = lookup_dentry(&mut nd)?;
     let target_ty = target.get_inode().node_type();
+    if nd.requires_directory && target_ty != InodeType::Directory {
+        return Err(Errno::ENOTDIR);
+    }
     if target_ty == InodeType::Directory && !remove_dir {
         return Err(Errno::EISDIR);
     }
@@ -875,45 +1018,56 @@ pub fn filename_link_tmpfile(file: &File, newdirfd: isize, newpath: &str) -> Sys
                 InodeType::Regular,
             )?;
             let child_path = child_abs_path(&nd.dentry, name.as_str());
-            let data = file.read_all()?;
-            if let Some(page_cache) = inode.get_page_cache() {
-                let mut offset = 0usize;
-                while offset < data.len() {
-                    let written = page_cache.write_at(offset, &data[offset..], None)?;
-                    if written == 0 {
-                        return Err(Errno::EIO);
+            let child = Arc::new(Dentry::new(
+                child_path.clone(),
+                Some(nd.dentry.clone()),
+                inode.clone(),
+            ));
+            let materialize_result = (|| -> SysResult {
+                inode.set_owner_and_mode(&child_path, meta.uid, meta.gid, Some(meta.mode))?;
+                let data = file.read_all()?;
+                if let Some(page_cache) = inode.get_page_cache() {
+                    let mut offset = 0usize;
+                    while offset < data.len() {
+                        let written = page_cache.write_at(offset, &data[offset..], None)?;
+                        if written == 0 {
+                            return Err(Errno::EIO);
+                        }
+                        offset += written;
                     }
-                    offset += written;
-                }
-                if !data.is_empty() {
-                    let ms = get_time_ms();
-                    let now = TimeSpec {
-                        sec: (ms / 1000) as isize,
-                        nsec: ((ms % 1000) * 1_000_000) as isize,
-                    };
-                    let time_result = inode.note_data_write(child_path.as_str(), now);
-                    register_dirty_owner(
-                        page_cache,
-                        inode.clone(),
-                        nd.mnt.fs.clone(),
-                        child_path.as_str(),
-                    );
-                    time_result?;
-                }
-                let _ = inode.set_times(child_path.as_str(), None, None);
-            } else {
-                let mut offset = 0usize;
-                while offset < data.len() {
-                    let written = inode.write_at(child_path.as_str(), offset, &data[offset..])?;
-                    if written == 0 {
-                        return Err(Errno::EIO);
+                    if !data.is_empty() {
+                        let ms = get_time_ms();
+                        let now = TimeSpec {
+                            sec: (ms / 1000) as isize,
+                            nsec: ((ms % 1000) * 1_000_000) as isize,
+                        };
+                        inode.note_data_write(child_path.as_str(), now)?;
+                        register_dirty_owner(
+                            page_cache,
+                            inode.clone(),
+                            nd.mnt.fs.clone(),
+                            child_path.as_str(),
+                        );
                     }
-                    offset += written;
+                } else {
+                    let mut offset = 0usize;
+                    while offset < data.len() {
+                        let written =
+                            inode.write_at(child_path.as_str(), offset, &data[offset..])?;
+                        if written == 0 {
+                            return Err(Errno::EIO);
+                        }
+                        offset += written;
+                    }
                 }
+                Ok(())
+            })();
+            if let Err(err) = materialize_result {
+                let _ = parent_inode.unlink(&child);
+                return Err(err);
             }
-            let _ = inode.set_owner(child_path.as_str(), meta.uid, meta.gid);
-            let _ = inode.set_mode(child_path.as_str(), meta.mode);
-            install_child_dentry(&nd.dentry, name.as_str(), inode);
+            nd.dentry.insert_child(name.as_str(), child.clone());
+            insert_dentry_cache(child);
             Ok(())
         }
         Err(err) => Err(err),
@@ -921,16 +1075,28 @@ pub fn filename_link_tmpfile(file: &File, newdirfd: isize, newpath: &str) -> Sys
 }
 
 /// 根据两个路径创建硬链接。
-pub fn filename_link(olddirfd: isize, oldpath: &str, newdirfd: isize, newpath: &str) -> SysResult {
+pub fn filename_link(
+    olddirfd: isize,
+    oldpath: &str,
+    newdirfd: isize,
+    newpath: &str,
+    follow_old_symlink: bool,
+) -> SysResult {
     if oldpath.is_empty() || newpath.is_empty() {
         return Err(Errno::ENOENT);
     }
 
     let _mutation_guard = NAMEI_MUTATION_LOCK.lock();
-    let old_path = filename_lookup(olddirfd, oldpath, 0)?;
+    let old_path = if follow_old_symlink {
+        filename_lookup(olddirfd, oldpath, 0)?
+    } else {
+        filename_lookup_no_follow_final_symlink(olddirfd, oldpath)?
+    };
 
     let mut nd = Nameidata::new_at(newdirfd, newpath)?;
     link_path_walk(&mut nd)?;
+
+    reject_trailing_non_directory_creation(&mut nd)?;
 
     // 目标为根目录或工作目录
     if nd.path_segments.is_empty() {
@@ -990,7 +1156,10 @@ pub fn filename_rename(
     }
 
     let _mutation_guard = NAMEI_MUTATION_LOCK.lock();
-    let old = filename_lookup(olddirfd, oldpath, 0)?;
+    let old = filename_lookup_no_follow_final_component(olddirfd, oldpath)?;
+    if oldpath.ends_with('/') && old.dentry.get_inode().node_type() != InodeType::Directory {
+        return Err(Errno::ENOTDIR);
+    }
     let old_parent = old
         .dentry
         .get_parent()
@@ -1023,6 +1192,9 @@ pub fn filename_rename(
     }
 
     let old_ty = old.dentry.get_inode().node_type();
+    if nd.requires_directory && old_ty != InodeType::Directory {
+        return Err(Errno::ENOTDIR);
+    }
     if old_ty == InodeType::Directory && new_abs.starts_with(&(old.abs_path() + "/")) {
         return Err(Errno::EINVAL);
     }
@@ -1144,7 +1316,11 @@ pub fn link_path_walk(nd: &mut Nameidata) -> SysResult {
                         return Err(Errno::ELOOP);
                     }
                     let target = inode.read_link(&child_path.abs_path())?;
-                    let next_path = join_symlink_target(&target, &nd.path_segments[nd.depth + 1..]);
+                    let next_path = join_symlink_target(
+                        &target,
+                        &nd.path_segments[nd.depth + 1..],
+                        nd.requires_directory,
+                    );
                     if next_path.len() > PATH_MAX {
                         return Err(Errno::ENAMETOOLONG);
                     }

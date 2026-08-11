@@ -249,6 +249,34 @@ FdTable slot (FdEntry: descriptor flags)
   flags。dup 后 descriptor 可独立设置 CLOEXEC，但共享同一个 open-file offset/status。
 - 后续影响：实现新 fcntl 或 clone/exec 行为时，不得把 CLOEXEC 写进共享 `File` flags。
 
+### namei 保留 final-component 策略与 trailing-slash 约束
+
+- 状态：已实现并由 Linux/RV64 对照验证
+- 适用范围：open/create/link/unlink/rename/stat/readlink、symlink 与 mount crossing
+- 最后验证：2026-08-11
+- 证据：`os/src/fs/namei.rs`、`scripts/fs_phase4_probe_linux.c`、
+  `user/src/bin/fs_phase4_probe.rs`
+- 内容：`Nameidata` 在切分非空 path segment 的同时单独保留原路径是否以 `/` 结束；普通 lookup 的
+  trailing slash 会强制最终对象为目录，并在需要时穿过最终 symlink。rename 使用独立的 no-follow
+  final-component 策略，link 默认不跟随旧 symlink，只有 `AT_SYMLINK_FOLLOW` 改变该选择。跨 symlink
+  或 mount 后，结果 `Path` 的 mount 与 dentry 必须一起传播。
+- 后续影响：不能只用 `split('/').filter(nonempty)` 表示完整 Linux pathname；新增 `*at` syscall 时
+  必须先明确 final symlink、trailing slash、empty path 与 mount crossing 策略，再复用相应 namei
+  入口，不能在 syscall 层重新拼路径或事后猜 errno。
+
+### create 在属性提交成功后发布 dentry
+
+- 状态：已实现
+- 适用范围：open(O_CREAT)、mkdir/mknod/mkfifo、symlink
+- 最后验证：2026-08-11
+- 证据：`os/src/fs/namei.rs`、`user/src/bin/fs_phase4_probe.rs`
+- 内容：在全局 namespace mutation 临界区内先准备 mode/uid/gid，调用 lower create，再对未发布的
+  child dentry 提交属性；只有全部成功才插入 parent/dentry cache。属性失败会通过 parent inode
+  unlink 回滚 lower entry。这样 syscall 不会返回错误却留下默认 root owner/mode 的半成品。
+- 后续影响：任何新增 namespace create 操作都必须保持 prepare → lower create → metadata commit →
+  publish 顺序；若 lower backend 不能回滚，必须先建立它自己的 transaction，不能恢复忽略 setattr
+  错误的做法。
+
 ### ext4 inode 属性以底层 transaction 成功为发布点
 
 - 状态：已实现 mode/owner/秒级 times 组合提交

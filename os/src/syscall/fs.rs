@@ -100,6 +100,7 @@ const IO_CHUNK_SIZE: usize = PAGE_SIZE * 16;
 struct XattrTarget {
     inode: Option<Arc<dyn InodeOp>>,
     ty: InodeType,
+    readonly: bool,
 }
 
 fn xattr_target_from_path(path: &crate::fs::Path) -> SysResult<XattrTarget> {
@@ -108,6 +109,7 @@ fn xattr_target_from_path(path: &crate::fs::Path) -> SysResult<XattrTarget> {
     Ok(XattrTarget {
         inode: Some(inode),
         ty: stat.ty,
+        readonly: path.mnt.is_readonly(),
     })
 }
 
@@ -120,6 +122,7 @@ fn xattr_target_from_fd(fd: usize) -> SysResult<XattrTarget> {
     Ok(XattrTarget {
         inode: None,
         ty: InodeType::Socket,
+        readonly: false,
     })
 }
 
@@ -167,6 +170,9 @@ fn set_xattr(target: XattrTarget, name: String, value: Vec<u8>, flags: usize) ->
     }
     if user_namespace_restricted(&name, target.ty) {
         return Err(Errno::EPERM);
+    }
+    if target.readonly {
+        return Err(Errno::EROFS);
     }
     target
         .inode
@@ -220,6 +226,9 @@ fn list_xattr(target: XattrTarget, list: *mut u8, size: usize) -> SysResult<usiz
 }
 
 fn remove_xattr(target: XattrTarget, name: String) -> SysResult<usize> {
+    if target.readonly {
+        return Err(Errno::EROFS);
+    }
     target.inode.ok_or(Errno::ENODATA)?.remove_xattr(&name)?;
     Ok(0)
 }
@@ -1164,7 +1173,9 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: usize, mode: usize) -> S
         }
     }
     let file = path_open(dirfd, path.as_str(), flags, mode)?;
-    let file: alloc::sync::Arc<dyn FileOp> = if file.inode().node_type() == InodeType::Fifo {
+    let file: alloc::sync::Arc<dyn FileOp> = if file.inode().node_type() == InodeType::Fifo
+        && !file.get_flags().contains(OpenFlags::O_PATH)
+    {
         open_named_fifo(file.path().abs_path().as_str(), open_flags)?
     } else {
         file
@@ -1813,6 +1824,9 @@ fn set_fd_times(fd: isize, atime: Option<TimeSpec>, mtime: Option<TimeSpec>) -> 
     let task = current_task().expect("[kernel] current task is None.");
     let file = task.get_fd_entry(fd as usize)?.file;
     let file = file.as_any().downcast_ref::<File>().ok_or(Errno::EINVAL)?;
+    if file.path().mnt.is_readonly() {
+        return Err(Errno::EROFS);
+    }
     file.set_times(atime, mtime)
 }
 
@@ -1823,6 +1837,12 @@ fn set_fd_mode(fd: isize, mode: u32) -> SysResult {
     let task = current_task().expect("[kernel] current task is None.");
     let file = task.get_fd_entry(fd as usize)?.file;
     let file = file.as_any().downcast_ref::<File>().ok_or(Errno::EINVAL)?;
+    if file.get_flags().contains(OpenFlags::O_PATH) {
+        return Err(Errno::EBADF);
+    }
+    if file.path().mnt.is_readonly() {
+        return Err(Errno::EROFS);
+    }
     set_inode_mode(&file.inode(), &file.metadata_path(), mode)
 }
 
@@ -1833,7 +1853,7 @@ fn chmod_effective_mode(stat: &KStat, requested: u32) -> SysResult<u32> {
     }
 
     let mut mode = requested & 0o7777;
-    if mode & 0o2000 != 0 && task.fsuid() != 0 && task.fsgid() as u32 != stat.gid {
+    if mode & 0o2000 != 0 && task.fsuid() != 0 && !task.in_group(stat.gid as usize) {
         mode &= !0o2000;
     }
     Ok(mode)
@@ -1880,7 +1900,7 @@ fn check_chown_permission(stat: &KStat, owner: usize, group: usize) -> SysResult
     if task.fsuid() as u32 != stat.uid {
         return Err(Errno::EPERM);
     }
-    if !chown_id_is_unchanged(group) && group != task.fsgid() {
+    if !chown_id_is_unchanged(group) && !task.in_group(group) {
         return Err(Errno::EPERM);
     }
     Ok(())
@@ -1927,6 +1947,12 @@ pub fn sys_fchown(fd: usize, owner: usize, group: usize) -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
     let file = task.get_fd_entry(fd)?.file;
     let file = file.as_any().downcast_ref::<File>().ok_or(Errno::EINVAL)?;
+    if file.get_flags().contains(OpenFlags::O_PATH) {
+        return Err(Errno::EBADF);
+    }
+    if file.path().mnt.is_readonly() {
+        return Err(Errno::EROFS);
+    }
     do_chown_inode(&file.inode(), &file.metadata_path(), owner, group)?;
     Ok(0)
 }
@@ -1957,6 +1983,9 @@ fn do_fchmodat(dirfd: isize, path: *const u8, mode: usize, flags: usize) -> SysR
         if dirfd == AT_FDCWD {
             let task = current_task().expect("[kernel] current task is None.");
             let cwd = task.cwd();
+            if cwd.mnt.is_readonly() {
+                return Err(Errno::EROFS);
+            }
             set_inode_mode(&cwd.dentry.get_inode(), &cwd.abs_path(), mode)?;
         } else {
             set_fd_mode(dirfd, mode)?;
@@ -1967,6 +1996,9 @@ fn do_fchmodat(dirfd: isize, path: *const u8, mode: usize, flags: usize) -> SysR
         } else {
             filename_lookup(dirfd, path.as_str(), 0)?
         };
+        if resolved.mnt.is_readonly() {
+            return Err(Errno::EROFS);
+        }
         let abs_path = resolved.abs_path();
         set_inode_mode(&resolved.dentry.get_inode(), &abs_path, mode)?;
     }
@@ -2006,6 +2038,10 @@ pub fn sys_fchownat(
     } else {
         filename_lookup(dirfd, path.as_str(), 0)?
     };
+
+    if resolved.mnt.is_readonly() {
+        return Err(Errno::EROFS);
+    }
 
     let abs_path = resolved.abs_path();
     do_chown_inode(&resolved.dentry.get_inode(), &abs_path, owner, group)?;
@@ -2054,6 +2090,9 @@ pub fn sys_utimensat(
             }
             let task = current_task().expect("[kernel] current task is None.");
             let cwd = task.cwd();
+            if cwd.mnt.is_readonly() {
+                return Err(Errno::EROFS);
+            }
             cwd.dentry
                 .get_inode()
                 .set_times(&cwd.abs_path(), atime, mtime)?;
@@ -2065,6 +2104,9 @@ pub fn sys_utimensat(
         } else {
             filename_lookup(dirfd, path.as_str(), 0)?
         };
+        if resolved.mnt.is_readonly() {
+            return Err(Errno::EROFS);
+        }
         resolved
             .dentry
             .get_inode()
@@ -2090,6 +2132,9 @@ pub fn sys_ftruncate(fd: usize, length: isize) -> SysResult<usize> {
     check_truncate_fsize_limit(length as usize)?;
     let task = current_task().expect("[kernel] current task is None.");
     let file = task.get_fd_entry(fd)?.file;
+    if file.get_flags().contains(OpenFlags::O_PATH) {
+        return Err(Errno::EBADF);
+    }
     if !file.writable() {
         return Err(Errno::EINVAL);
     }
@@ -2170,7 +2215,7 @@ pub fn sys_fallocate(fd: usize, mode: usize, offset: isize, len: isize) -> SysRe
 /// 和 inode mode 的基础权限位执行 Linux access/faccessat 语义。
 ///
 /// TODO[ABI-COMPAT]: 尚未实现 capability、ACL 等权限放宽规则。
-/// TODO[ABI-COMPAT]: W_OK 对只读挂载、不可变文件等特殊状态的语义尚未实现。
+/// TODO[ABI-COMPAT]: W_OK 对不可变文件等特殊状态的语义尚未实现。
 pub fn sys_faccessat(dirfd: isize, path: *const u8, mode: usize, flags: usize) -> SysResult<usize> {
     const FACCESSAT_ALLOWED_FLAGS: usize = AT_EACCESS | AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH;
 
@@ -2179,7 +2224,7 @@ pub fn sys_faccessat(dirfd: isize, path: *const u8, mode: usize, flags: usize) -
     }
 
     let path = copy_cstr_from_user(path)?;
-    let kstat = if path.is_empty() {
+    let (kstat, readonly) = if path.is_empty() {
         // TODO[ABI-COMPAT]: AT_EMPTY_PATH 是 faccessat2 扩展；
         // 若未来同时暴露旧 faccessat，需要按 syscall 入口区分 flags 语义。
         if flags & AT_EMPTY_PATH == 0 {
@@ -2188,13 +2233,21 @@ pub fn sys_faccessat(dirfd: isize, path: *const u8, mode: usize, flags: usize) -
         if dirfd == AT_FDCWD {
             let task = current_task().expect("[kernel] current task is None.");
             let cwd = task.cwd();
-            cwd.dentry.get_inode().stat(&cwd.abs_path())?
+            (
+                cwd.dentry.get_inode().stat(&cwd.abs_path())?,
+                cwd.mnt.is_readonly(),
+            )
         } else {
             if dirfd < 0 {
                 return Err(Errno::EBADF);
             }
             let task = current_task().expect("[kernel] current task is None.");
-            task.get_fd_entry(dirfd as usize)?.file.get_stat()?
+            let file = task.get_fd_entry(dirfd as usize)?.file;
+            let readonly = file
+                .as_any()
+                .downcast_ref::<File>()
+                .is_some_and(|file| file.path().mnt.is_readonly());
+            (file.get_stat()?, readonly)
         }
     } else {
         // TODO[ABI-COMPAT]: AT_SYMLINK_NOFOLLOW 下 Linux 检查链接本身；
@@ -2204,11 +2257,17 @@ pub fn sys_faccessat(dirfd: isize, path: *const u8, mode: usize, flags: usize) -
         } else {
             filename_lookup(dirfd, path.as_str(), 0)?
         };
-        resolved.dentry.get_inode().stat(&resolved.abs_path())?
+        (
+            resolved.dentry.get_inode().stat(&resolved.abs_path())?,
+            resolved.mnt.is_readonly(),
+        )
     };
 
     if mode == F_OK {
         return Ok(0);
+    }
+    if mode & W_OK != 0 && readonly {
+        return Err(Errno::EROFS);
     }
 
     if !access_mode_allowed(&kstat, mode, flags & AT_EACCESS != 0) {
@@ -2595,6 +2654,9 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SysResult<usize> {
             Ok(flags.bits() as usize)
         }
         F_SETFL => {
+            if fd_entry.file.get_flags().contains(OpenFlags::O_PATH) {
+                return Err(Errno::EBADF);
+            }
             const O_ASYNC: usize = 0o20000;
             if arg & (OpenFlags::O_DIRECT.bits() as usize | O_ASYNC) != 0 {
                 return Err(Errno::EOPNOTSUPP);
@@ -2760,12 +2822,31 @@ pub fn sys_linkat(
     flags: usize,
 ) -> SysResult<usize> {
     const AT_SYMLINK_FOLLOW: usize = 0x400;
-    if flags & !AT_SYMLINK_FOLLOW != 0 {
+    if flags & !(AT_SYMLINK_FOLLOW | AT_EMPTY_PATH) != 0 {
         return Err(Errno::EINVAL);
     }
 
     let oldpath = copy_cstr_from_user(oldpath)?;
     let newpath = copy_cstr_from_user(newpath)?;
+    if oldpath.is_empty() {
+        if flags & AT_EMPTY_PATH == 0 {
+            return Err(Errno::ENOENT);
+        }
+        if olddirfd < 0 {
+            return Err(Errno::EBADF);
+        }
+        let task = current_task().expect("[kernel] current task is None.");
+        let file = task.get_fd_entry(olddirfd as usize)?.file;
+        let file = file.as_any().downcast_ref::<File>().ok_or(Errno::EINVAL)?;
+        if file.tmpfile_meta().is_none() {
+            // Linking an arbitrary fd through AT_EMPTY_PATH requires
+            // CAP_DAC_READ_SEARCH on Linux.  RespOS does not model that
+            // capability yet, so only the O_TMPFILE use case is admitted.
+            return Err(Errno::EPERM);
+        }
+        filename_link_tmpfile(file, newdirfd, newpath.as_str())?;
+        return Ok(0);
+    }
     if flags & AT_SYMLINK_FOLLOW != 0 {
         if let Some(fd) = oldpath
             .strip_prefix("/proc/self/fd/")
@@ -2781,7 +2862,13 @@ pub fn sys_linkat(
             }
         }
     }
-    filename_link(olddirfd, oldpath.as_str(), newdirfd, newpath.as_str())?;
+    filename_link(
+        olddirfd,
+        oldpath.as_str(),
+        newdirfd,
+        newpath.as_str(),
+        flags & AT_SYMLINK_FOLLOW != 0,
+    )?;
     Ok(0)
 }
 
@@ -2946,12 +3033,14 @@ pub fn sys_pipe2(pipefd: *mut [i32; 2], flags: usize) -> SysResult<usize> {
 
 /// 系统调用 sys-getdents64
 pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> SysResult<usize> {
+    let task = current_task().expect("[kernel] current task is None.");
+    let file = task.get_fd_entry(fd)?.get_file();
+    if file.get_flags().contains(OpenFlags::O_PATH) {
+        return Err(Errno::EBADF);
+    }
     if count == 0 {
         return Ok(0);
     }
-
-    let task = current_task().expect("[kernel] current task is None.");
-    let file = task.get_fd_entry(fd)?.get_file();
     let file = if let Some(file_cast) = file.as_any().downcast_ref::<File>() {
         file_cast
     } else {
@@ -3533,6 +3622,9 @@ pub fn sys_pselect6(
 pub fn sys_fsync(fd: usize) -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
     let file = task.get_fd_entry(fd)?.file;
+    if file.get_flags().contains(OpenFlags::O_PATH) {
+        return Err(Errno::EBADF);
+    }
     file.fsync()
 }
 
@@ -3555,6 +3647,9 @@ pub fn sys_syncfs(fd: usize) -> SysResult<usize> {
 pub fn sys_fdatasync(fd: usize) -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
     let file = task.get_fd_entry(fd)?.file;
+    if file.get_flags().contains(OpenFlags::O_PATH) {
+        return Err(Errno::EBADF);
+    }
     file.fdatasync()
 }
 

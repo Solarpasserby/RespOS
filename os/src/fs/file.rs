@@ -171,20 +171,6 @@ impl File {
         let ty = inode.node_type();
         let page_cache = inode.get_page_cache();
         let shared_page_identity = inode.stat(&abs_path).ok().map(|stat| (stat.dev, stat.ino));
-        if flags.contains(OpenFlags::O_TRUNC)
-            && flags.intersects(OpenFlags::O_WRONLY | OpenFlags::O_RDWR)
-        {
-            if inode.truncate(&abs_path, 0).is_ok() {
-                if page_cache.is_none()
-                    && let Some((dev, ino)) = shared_page_identity
-                {
-                    crate::mm::truncate_shared_file_pages(dev, ino, 0);
-                }
-                if let Some(ref pc) = page_cache {
-                    pc.resize(0);
-                }
-            }
-        }
         let offset = if flags.contains(OpenFlags::O_APPEND) && ty == InodeType::Regular {
             inode.stat(&abs_path).map(|stat| stat.size).unwrap_or(0)
         } else {
@@ -464,6 +450,9 @@ impl File {
 
     pub fn truncate(&self, size: usize) -> SysResult<usize> {
         let mut inner = self.inner.lock();
+        if inner.path.mnt.is_readonly() {
+            return Err(Errno::EROFS);
+        }
         let visible_path = inner.path.abs_path();
         let path = self.storage_path(&visible_path);
         let old_size = if let Some(ref pc) = inner.page_cache {
@@ -544,6 +533,9 @@ impl File {
                 inner.flags,
             )
         };
+        if !buf.is_empty() && file_path.mnt.is_readonly() {
+            return Err(Errno::EROFS);
+        }
         let old_size = if let Some(ref pc) = page_cache {
             pc.len()
         } else {
@@ -597,7 +589,8 @@ impl File {
         path: &Arc<Path>,
         ty: InodeType,
     ) -> SysResult<Option<TimeSpec>> {
-        if path.mnt.has_flag(MS_NOATIME)
+        if path.mnt.is_readonly()
+            || path.mnt.has_flag(MS_NOATIME)
             || (ty == InodeType::Directory && path.mnt.has_flag(MS_NODIRATIME))
         {
             return Ok(None);
@@ -699,6 +692,9 @@ impl FileOp for File {
 
     fn write<'a>(&'a self, buf: &'a [u8]) -> SysResult<usize> {
         let mut inner = self.inner.lock();
+        if !buf.is_empty() && inner.path.mnt.is_readonly() {
+            return Err(Errno::EROFS);
+        }
         let visible_path = inner.path.abs_path();
         let path = self.storage_path(&visible_path);
         if inner.flags.contains(OpenFlags::O_APPEND) {
@@ -779,6 +775,9 @@ impl FileOp for File {
     }
 
     fn can_seek(&self) -> SysResult {
+        if self.get_flags().contains(OpenFlags::O_PATH) {
+            return Err(Errno::EBADF);
+        }
         let ty = self.get_stat()?.ty;
         if ty == InodeType::Regular || ty == InodeType::Directory {
             Ok(())
@@ -843,12 +842,14 @@ impl FileOp for File {
     }
 
     fn readable(&self) -> bool {
-        !self.get_flags().contains(OpenFlags::O_WRONLY)
+        let flags = self.get_flags();
+        !flags.contains(OpenFlags::O_PATH) && !flags.contains(OpenFlags::O_WRONLY)
     }
 
     fn writable(&self) -> bool {
-        self.get_flags()
-            .intersects(OpenFlags::O_WRONLY | OpenFlags::O_RDWR)
+        let flags = self.get_flags();
+        !flags.contains(OpenFlags::O_PATH)
+            && flags.intersects(OpenFlags::O_WRONLY | OpenFlags::O_RDWR)
     }
 
     fn is_tty(&self) -> bool {
