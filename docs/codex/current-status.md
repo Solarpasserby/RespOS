@@ -2,16 +2,43 @@
 
 本文件是快速变化的状态页。更新测试结论时必须同时更新日期、提交和命令。
 
+## 2026-08-11 RV64 16 GiB 启动与完整 BuildStorm（基于 `9bde322`）
+
+- **early/direct map**：RV64 early Sv39 root page table 的 identity 和高半区 direct-map 窗口
+  各从 8 个扩为 16 个 1 GiB leaf，覆盖 QEMU virt RAM
+  `0x80000000..0x480000000`；FDT 解析后的物理末址上限同步扩为 `0x480000000`。
+  实际 frame allocator 上限仍由 FDT 决定，不会因 early 窗口扩大而分配未安装 RAM。
+- **16 GiB 启动证据**：QEMU 10.0.2/OpenSBI 1.5.1、`-m 16G -smp 8 -snapshot`
+  把 FDT 传入 `0x47fe00000`，当前内核能进入 8 核用户 shell；`/proc/meminfo` 报告
+  `MemTotal: 16775168 kB`，`nproc` 为 8。QEMU 直接在宿主启动，实测为
+  `NI=-10/CLS=TS`。
+- **专项门禁**：同一 16 GiB/8 核 release 客体通过 `fs_writeback_probe normal`、
+  `fs_metadata_probe normal`、`fs_namespace_probe`、`unix_socket_block_probe`、
+  `buildstorm_file_probe`、`buildstorm_private_map_probe`、`smp_shared_mm_probe` 和
+  `frame_reclaim_probe`，各进程均退出 0。RV64/LA64 无 feature release 构建通过。
+- **完整 BuildStorm**：当前本地 pub 镜像 SHA-256
+  `ccf4844bfa9a1f1284724a2d0a6b3d497017a71b1f66f78d7e38dd76419c1168`，客体执行
+  `/glibc/buildstorm_testcode.sh`，toolchain/minibuild 均 PASS，最终输出
+  `BUILDSTORM_COMPILE mode=multi ok=true cores=8 bytes=1681000 arch=riscv64`，脚本退出 0。
+  Cargo 报告 `19m25s`，axbuild 报告 `1178.08s`；本地旧脚本仍输出无效的
+  `elapsed_s=0.00`，因此本轮首先是 16 GiB 正确性验收，不代替新官方镜像/平台计时。
+  结束时 QEMU RSS 约 2.8 GiB，宿主 swap 约 2 MiB，未见 panic、fault、OOM 或 ext4 错误。
+- **小内存边界**：`-m 512M -smp 1` 仍可进入 shell，并报告
+  `MemTotal: 522240 kB`。当前 256 MiB 静态 kernel heap 使 `ekernel` 物理末址约为
+  `0x90bce000`；`-m 256M` 在 QEMU 放置 DTB 前即报
+  `No enough memory to place DTB after kernel/initrd`。这是当前内核产物大小的独立旧边界，
+  不是 16 GiB early map 回归。
+
 ## 2026-08-10 Linux/POSIX 语义与模型重构路线（`7cdae1e` 后）
 
 - 已建立 [linux-posix-refactor-plan.md](./linux-posix-refactor-plan.md)，后续以保持 BuildStorm 不回退、
   修复 Linux/POSIX 可观察差异和收敛内核状态所有权为共同目标。
 - 第一阶段先建立 `fs_metadata_probe`，固定目录 chmod 持久化、chmod/chown 失败原子性、hardlink alias
   和时间戳行为；取得 Linux 对照后再修改属性模型。
-- 当前已知优先缺口包括目录 chmod 未持久化、属性 override 先于底层成功发布、时间纳秒/realtime
+- 当时已知优先缺口包括目录 chmod 未持久化、属性 override 先于底层成功发布、时间纳秒/realtime
   不完整；ext4 C 库线程安全未证明前继续保留唯一全局锁。
 
-### Phase 3 首轮：PageCache 写回状态与 open-file error cursor（本次提交）
+### Phase 3 首轮：PageCache 写回状态与 open-file error cursor（已提交 `9bde322`）
 
 - **状态机**：PageCache page 在原有 dirty/write-version 之外记录当前 writeback batch id 与最近失败；
   锁外 I/O 完成后只有 batch id 仍匹配的完成者能结束该页 writeback，且只有内容 version 未变化时才能
@@ -35,12 +62,13 @@
   `BUILDSTORM_COMPILE mode=multi ok=true cores=8 bytes=1681000 arch=riscv64`，脚本退出 0；Cargo 为
   `31m11s`、axbuild 1896.55 秒。宿主同时运行基线 `debug_traces` BuildStorm，因此墙钟受诊断并行负载
   污染，只作当前改动的完整正确性回归，不作性能比较。
-- **交接 trace 复核与 16 GiB 边界**：先在 `ab893b0` 构建 `debug_traces`。宿主能以
-  `NI=-10/CLS=TS` 创建 16 GiB QEMU，但 OpenSBI 把 FDT 放在 `0x47fe00000`，超过当前 8 GiB
+- **交接 trace 复核与当时的 16 GiB 边界**：先在 `ab893b0` 构建 `debug_traces`。宿主能以
+  `NI=-10/CLS=TS` 创建 16 GiB QEMU，但 OpenSBI 把 FDT 放在 `0x47fe00000`，超过当时 8 GiB
   early/direct-map 上界 `0x280000000`，因此无内核输出；该地址空间扩展未混入本轮。改用 8 GiB/8 核后
   trace 通过 toolchain/minibuild 并持续进入正式编译，3 小时诊断截止时到达 `irq-framework`，QEMU 仍约
   524% CPU、RSS 3.0 GiB，宿主 swap 约 2 MiB，未见 panic、fault、OOM 或 ext4 错误。该 trace 没有最终
   `BUILDSTORM_COMPILE`，只证明先前长静默不是 inode/ext4 死锁；完整通过结论来自上一条无 feature 轮次。
+  16 GiB 阻断已于 2026-08-11 修复并完整回归，见本页首节。
 - **保留边界**：当前 `fdatasync` 仍比 Linux 最小保证更强，等价走完整 `fsync`；系统调用 `sync`/
   `syncfs`、unmount 前 inode-wide dirty flush、后台 writeback 与硬件 dirty-bit 精确 mmap 写回仍未实现。
   本轮不取消 close 数据提交，也不声称已完成 Phase 3。
@@ -161,7 +189,7 @@
   `BUILDSTORM_COMPILE mode=multi ok=true cores=8 bytes=1681000 arch=riscv64`，脚本退出 0。
   axbuild 报告 timed build `1348.08s`（Cargo 为 `22m16s`）；guest 时间戳 5 -> 1399 秒包含前置检查和
   未计时 tg-xtask。旧镜像脚本打印 `elapsed_s=0.00`，不作为计时依据。后续实测宿主能创建 16 GiB
-  QEMU，但当前 RV64 early map 无法访问其 FDT；因此这是完整正确性回归与本机 8 GiB 数据，不冒充
+  QEMU，但当时 RV64 early map 无法访问其 FDT；因此这是完整正确性回归与本机 8 GiB 数据，不冒充
   正式平台成绩。
 - **门禁**：无 feature RV64/LA64 release 构建通过；RV64 1 GiB/8 核无 feature snapshot 同轮通过
   Unix socket、file、private-map、shared-MM 与 frame-reclaim 五项 probe。`cargo fmt` 和

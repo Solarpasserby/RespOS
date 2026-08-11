@@ -32,20 +32,21 @@
 
 ### RV64 物理内存上限来自 OpenSBI FDT
 
-- 状态：已实现到 8 GiB；16 GiB 尚不可启动
+- 状态：已实现并验证 16 GiB
 - 适用范围：RV64 early page table、frame allocator、kernel direct map、procfs/sysinfo
-- 最后验证：2026-08-10
+- 最后验证：2026-08-11
 - 证据：`os/src/arch/rv64/entry/entry.asm`、`os/src/arch/rv64/config/board.rs`、
-  `os/src/mm/{frame_allocator,memory_set}.rs`；`/tmp/respos-buildstorm-dynamic-memory.log`、
-  `/tmp/respos-dynamic-memory-256m.log`
-- 内容：early root page table 只提供最大 8 GiB QEMU RAM 的可达窗口；boot hart 从 FDT
-  `/memory` `reg` 取实际末址并发布。frame allocator 严格以该实际末址为上限。
+  `os/src/mm/{frame_allocator,memory_set}.rs`；16 GiB/8 核启动、专项和完整 BuildStorm 结果见
+  [current-status.md](./current-status.md)。
+- 内容：early Sv39 root page table 在低地址和 `KERNEL_BASE` direct map 各安装 16 个
+  1 GiB leaf，覆盖 QEMU virt 的 `0x80000000..0x480000000` RAM 窗口，因而能读取 16 GiB
+  客体位于 `0x47fe00000` 的 FDT。boot hart 随后从 FDT `/memory` `reg` 取实际末址，
+  frame allocator 严格以该实际末址为上限。
   首个 RAM GiB 保留 4 KiB 页以分离 kernel section 权限，后续整 GiB 用 Sv39 level-2 leaf。
-  当前 `-m 16G` 时 OpenSBI 把 FDT 放在 `0x47fe00000`，超过 early/direct-map 上界
-  `0x280000000`，因此进入内核后在读取 FDT 前即无串口输出；这不是简单扩大 frame allocator 上限即可
-  解决的问题。
 - 后续影响：不得把 early “最大可达窗口”当成真实 RAM 分配上限；增大支持内存时
-  必须同时审计 Sv39 物理地址范围、FDT 位置、direct-map leaf 和最小内存启动。
+  必须同时审计 Sv39 物理地址范围、FDT 位置、direct-map leaf 和小内存启动。当前
+  256 MiB 静态内核堆使整个 kernel ELF 无法放入 256 MiB QEMU RAM；已回归的小内存点为
+  512 MiB，这是独立于 early leaf 覆盖的当前产物大小边界。
 
 ### RV64 返回用户态前必须保持 kernel trap 状态
 

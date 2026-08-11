@@ -556,12 +556,13 @@ Linux baseline 为 RV64 1616.09 秒、LA64 1985.21 秒；此前 4655.23 / 6223.0
 最终平台启动命令为准；本地取得更新后的镜像后仍须核对镜像 hash、脚本和实际启动命令。
 
 BuildStorm 使用 release kernel、无 `eval` user feature。诊断必须带 `-snapshot`。下列 16 GiB 命令是
-正式目标配置；截至 2026-08-10 当前 RV64 early map 无法访问位于 `0x47fe00000` 的 FDT，本机回归在
-修复前应改用 `-m 8G`，不能把 OpenSBI 后无内核输出记作 BuildStorm 失败：
+正式目标配置；2026-08-11 已在 QEMU 10.0.2/OpenSBI 1.5.1 验证 FDT
+`0x47fe00000` 可达、完整内存识别与 BuildStorm 最终 marker：
 
 ```bash
 make build-rv RV_USER_FEATURES=
-timeout 6250s qemu-system-riscv64 -machine virt -kernel kernel-rv -m 16G -nographic -smp 8 \
+timeout 6250s nice -n -10 qemu-system-riscv64 \
+  -machine virt -kernel kernel-rv -m 16G -nographic -smp 8 \
   -bios default \
   -drive file=img/sdcard-rv-pub.img,if=none,format=raw,id=x0 \
   -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \

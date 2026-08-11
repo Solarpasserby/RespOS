@@ -7,7 +7,8 @@ pub const USER_CLOCK_FREQ: usize = HARDWARE_CLOCK_FREQ;
 pub const ACCOUNTING_CLOCK_FREQ: usize = HARDWARE_CLOCK_FREQ;
 pub const MEMORY_START: usize = 0x8020_0000;
 pub const MEMORY_END: usize = 0x9000_0000;
-pub const MAX_PHYSICAL_MEMORY_END: usize = 0x2_8000_0000;
+/// End of the QEMU virt RAM window for the supported 16 GiB configuration.
+pub const MAX_PHYSICAL_MEMORY_END: usize = 0x4_8000_0000;
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 

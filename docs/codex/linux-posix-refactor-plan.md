@@ -16,12 +16,12 @@
 
 ### 当前基线
 
-- 代码基线：`ab893b0`（`fix: 下沉 ext4 inode 操作并按 VFS 引用延迟回收`）。
-- 最近已完成本地结果：`6636cfe`、旧 RV64 pub 镜像、8 GiB/8 核、无 feature release，BuildStorm
-  timed build `1459.33s`，最终 `ok=true`、产物 1,681,000 B；`ab893b0` 的最新复跑状态见
-  [current-status.md](./current-status.md)。
-- 资源限制：当前宿主可创建 16 GiB QEMU，但 RV64 early/direct map 只能访问 8 GiB，OpenSBI 传入的
-  16 GiB FDT 位于映射外而无法进入内核；本地 8 GiB 结果不等于评测平台成绩。
+- 代码基线：`9bde322`（`fix: 让 PageCache 写回错误对同步接口可见`）；后续
+  RV64 16 GiB 支持见 [current-status.md](./current-status.md) 首节。
+- 最近已完成本地结果：当前无 feature RV64 工作树、本地 pub 镜像、16 GiB/8 核、
+  `NI=-10/CLS=TS`，BuildStorm 最终 `ok=true`、产物 1,681,000 B，axbuild `1178.08s`。
+- 资源边界：RV64 early/direct map 已覆盖 16 GiB QEMU RAM 及顶部 FDT；该本地结果仍不等于
+  新官方镜像和评测宿主上的正式成绩。
 - 现有门禁：RV64/LA64 release 构建，RV64 Unix socket、file、private-map、shared-MM、frame-reclaim
   五项 probe，以及 `cargo fmt`、`git diff --check`。
 
@@ -275,8 +275,8 @@ frame_reclaim_probe
 - 固定旧 pub 镜像、8 GiB/8 核、窗口外预构建 tg-xtask，运行 120 秒无关变量受控的 Cargo 窗口；
 - 记录完成阶段、PageCache fill、ext4 lock classes、block I/O、heap、fault、scheduler idle；
 - Phase 1、Phase 3、Phase 6 收口时各跑一次无 feature 完整 BuildStorm；
-- 修复 RV64 early FDT/direct-map 的 16 GiB 可达性并获得官方新镜像后，按 16 GiB/8 核重新建立正式
-  RV64 基线；LA64 按公告资源独立验证。
+- RV64 16 GiB/8 核本地基线已建立；获得官方新镜像后按其 hash 和实际计时边界
+  重新验证，LA64 按公告资源独立验证。
 
 ## 暂停、回退与提交规则
 

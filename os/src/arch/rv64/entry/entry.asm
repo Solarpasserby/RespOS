@@ -31,19 +31,19 @@ boot_stack_top:
     .section .data
     .align 12
 boot_pagetable:
-    # 先映射 QEMU virt 最多 8 GiB RAM 的 1 GiB 叶页，使 boot hart 能读取
+    # 先映射 QEMU virt 最多 16 GiB RAM 的 1 GiB 叶页，使 boot hart 能读取
     # OpenSBI 放在 RAM 顶部的 FDT。实际可分配上限仍由 FDT 决定，所以
-    # -m 256M 不会访问未安装的物理内存。
+    # 小内存配置不会访问未安装的物理内存。
     .zero 8 * 2
     .set boot_ppn, 0x80000
-    .rept 8
+    .rept 16
     .quad (boot_ppn << 10) | 0xcf # VRWXAD
     .set boot_ppn, boot_ppn + 0x40000
     .endr
-    .zero 8 * 248
+    .zero 8 * 240
     .set boot_ppn, 0x80000
-    .rept 8
+    .rept 16
     .quad (boot_ppn << 10) | 0xcf # VRWXAD
     .set boot_ppn, boot_ppn + 0x40000
     .endr
-    .zero 8 * 246
+    .zero 8 * 238

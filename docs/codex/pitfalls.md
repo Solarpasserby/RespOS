@@ -1,18 +1,31 @@
 # RespOS 已确认易错点
 
-## RV64 `-m 16G` 的 FDT 在当前 early map 外
+## RV64 最大支持 RAM 必须同时覆盖 early FDT 和正式 direct map
 
-- 状态：已确认，尚未修复
+- 状态：已确认并修复到 16 GiB
 - 适用范围：RV64 QEMU 内存配置、early page table、FDT 解析、direct map
-- 最后验证：2026-08-10
-- 证据：QEMU 10.0.2/OpenSBI `-m 16G -smp 8` 输出 FDT `0x47fe00000`；
-  `os/src/arch/rv64/{entry/entry.asm,config/board.rs}` 的上界 `0x280000000`
-- 内容：16 GiB guest 的 OpenSBI 阶段正常，但 FDT 被放到 RAM 顶部附近，超过当前只覆盖 8 GiB RAM 的
-  early/direct-map 窗口；内核在能解析真实内存范围前就无法访问传入 FDT，因此表现为 OpenSBI 后无任何
-  kernel 串口输出。增加 QEMU `-m` 或只改 frame allocator 常量都不能修复。
-- 后续影响：扩到 16 GiB 必须把 early FDT 可达性、Sv39 direct-map leaf 数量/范围、物理地址上界和
-  256 MiB 最小配置一起设计与回归；在此之前正式本机回归继续使用 8 GiB，不能把 16 GiB 无输出误判为
-  inode、调度或 BuildStorm 死锁。
+- 最后验证：2026-08-11
+- 证据：QEMU 10.0.2/OpenSBI 1.5.1、`-m 16G -smp 8`、FDT `0x47fe00000`；
+  `os/src/arch/rv64/{entry/entry.asm,config/board.rs}`；完整 BuildStorm `ok=true`。
+- 内容：原 8 GiB early root 只映射 `0x80000000..0x280000000`，内核在解析真实内存范围前
+  就无法访问 16 GiB RAM 顶部的 FDT。修复后 identity/高半区各用 16 个 1 GiB leaf 覆盖
+  `0x80000000..0x480000000`，FDT 实际末址再限制 frame allocator 和正式 direct map。
+- 后续影响：不能只改 frame allocator 常量。任何新内存上限都必须同时覆盖 early identity、
+  early 高半区、FDT 位置、正式 direct map 和实际 FDT 分配上限，并保持小内存配置不会
+  因扩大可达窗口而分配未安装 RAM。
+
+## RV64 当前 kernel ELF 无法放入 256 MiB QEMU RAM
+
+- 状态：已确认，当前最小启动回归使用 512 MiB
+- 适用范围：RV64 小内存启动、kernel heap、QEMU DTB 放置
+- 最后验证：2026-08-11
+- 证据：`os/src/arch/rv64/config/mm.rs` 的 256 MiB `KERNEL_HEAP_SIZE`；`ekernel` 物理末址
+  约 `0x90bce000`；QEMU `-m 256M` 报 `No enough memory to place DTB after kernel/initrd`。
+- 内容：这个失败发生在 QEMU 进入 OpenSBI/内核之前，与 FDT 动态内存解析及 16 GiB
+  early leaf 扩展无关。`-m 512M -smp 1` 已进入 shell 并正确报告
+  `MemTotal: 522240 kB`。
+- 后续影响：小内存回归在重新设计 kernel heap 前使用至少 512 MiB；不能把 256 MiB
+  的 QEMU loader 错误当成 early page-table 回归。
 
 ## 自动 atime 更新不能复用会刷新 ctime 的显式 utimens 路径
 
