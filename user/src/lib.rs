@@ -202,6 +202,12 @@ pub fn epoll_pwait(
 pub fn mkdir(path: &str, mode: usize) -> isize {
     sys_mkdirat(AT_FDCWD, path, mode)
 }
+pub fn mount(source: &str, target: &str, fstype: &str, flags: usize, data: usize) -> isize {
+    sys_mount(source, target, fstype, flags, data)
+}
+pub fn umount2(target: &str, flags: usize) -> isize {
+    sys_umount2(target, flags)
+}
 pub fn unlink(path: &str) -> isize {
     sys_unlinkat(AT_FDCWD, path, 0)
 }
@@ -286,6 +292,9 @@ pub fn removexattr(path: &str, name: &str) -> isize {
 pub fn mmap(addr: usize, len: usize, prot: usize, flags: usize, fd: isize, offset: usize) -> isize {
     sys_mmap(addr, len, prot, flags, fd, offset)
 }
+pub fn msync(addr: usize, len: usize, flags: i32) -> isize {
+    sys_msync(addr, len, flags)
+}
 pub fn mprotect(addr: usize, len: usize, prot: usize) -> isize {
     sys_mprotect(addr, len, prot)
 }
@@ -309,6 +318,12 @@ pub fn fstat(fd: usize, stat: &mut Stat) -> isize {
 }
 pub fn fsync(fd: usize) -> isize {
     sys_fsync(fd)
+}
+pub fn sync() -> isize {
+    sys_sync()
+}
+pub fn syncfs(fd: usize) -> isize {
+    sys_syncfs(fd)
 }
 pub fn fdatasync(fd: usize) -> isize {
     sys_fdatasync(fd)

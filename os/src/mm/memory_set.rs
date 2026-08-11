@@ -210,7 +210,7 @@ pub(crate) struct FileWriteback {
 }
 
 pub(crate) fn writeback_file_pages(writebacks: Vec<FileWriteback>, sync: bool) -> SysResult {
-    let mut synced_files: Vec<Arc<dyn FileOp>> = Vec::new();
+    let mut sync_ranges: Vec<(Arc<dyn FileOp>, usize, usize)> = Vec::new();
 
     for writeback in writebacks {
         // A file can be truncated after the mapping was created. Never let
@@ -233,18 +233,24 @@ pub(crate) fn writeback_file_pages(writebacks: Vec<FileWriteback>, sync: bool) -
             return Err(Errno::EIO);
         }
 
-        if sync
-            && !synced_files
-                .iter()
-                .any(|file| Arc::ptr_eq(file, &writeback.file))
-        {
-            synced_files.push(writeback.file);
+        if sync {
+            let write_end = writeback.offset.saturating_add(write_len);
+            if let Some((_, start, end)) = sync_ranges.iter_mut().find(|(file, start, end)| {
+                Arc::ptr_eq(file, &writeback.file)
+                    && writeback.offset <= *end
+                    && write_end >= *start
+            }) {
+                *start = (*start).min(writeback.offset);
+                *end = (*end).max(write_end);
+            } else {
+                sync_ranges.push((writeback.file, writeback.offset, write_end));
+            }
         }
     }
 
     if sync {
-        for file in synced_files {
-            file.fsync()?;
+        for (file, start, end) in sync_ranges {
+            file.sync_file_range(start, end - start)?;
         }
     }
 

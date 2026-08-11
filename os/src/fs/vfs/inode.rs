@@ -24,6 +24,17 @@ pub trait InodeOp: Any + Send + Sync {
     fn get_page_cache(&self) -> Option<Arc<PageCache>> {
         None
     }
+    /// Publish the logical write time before delayed data writeback.  Regular
+    /// files may keep this metadata pending until fsync/syncfs/unmount.
+    fn note_data_write(&self, _path: &str, _time: TimeSpec) -> SysResult {
+        Ok(())
+    }
+    fn flush_data_metadata(&self, _path: &str) -> SysResult {
+        Ok(())
+    }
+    fn has_pending_data_metadata(&self) -> bool {
+        false
+    }
     fn set_times(
         &self,
         _path: &str,

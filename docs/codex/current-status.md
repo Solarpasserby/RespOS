@@ -29,6 +29,42 @@
   `No enough memory to place DTB after kernel/initrd`。这是当前内核产物大小的独立旧边界，
   不是 16 GiB early map 回归。
 
+## 2026-08-11 Linux/POSIX Phase 3 写回与持久化语义完成（基于 `50fb93a` 的本轮工作树）
+
+- **dirty owner 与 close**：新增 inode-wide dirty-owner registry，强持有 PageCache、inode、filesystem
+  和 lower I/O identity，直到脏数据与待提交 data mtime/ctime 都成功清理。`File::drop()` 不再写回；
+  128 owners 或单 cache/全局 256 dirty pages 达到阈值后，每个 syscall safe point 最多处理 8 个 owner。
+  后台失败保留 dirty/error 并停止无休止重试，新 mutation 会重新允许受控提交。truncate 清掉最后脏页
+  时显式回收 clean owner，避免低于阈值的强引用泄漏。
+- **同步边界**：新增 RV64/LA64 generic syscall `sync(81)` 与 `syncfs(267)` 及 user wrapper；fsync/
+  fdatasync、syncfs、全局 sync、unmount 子树和 shutdown 均先遍历对应 dirty owners，再执行 superblock
+  barrier。`sync` 按 Linux void 语义不返回异步错误；syncfs/unmount 和 open-file fsync/fdatasync 返回
+  错误。lwext4 只有统一 durability barrier，因此 fdatasync 保守地比最小保证更强。
+- **范围、时间与并发**：`sync_file_range` 只提交相交 PageCache pages，不再退化为全文件 fsync；
+  `MS_SYNC` 按映射对应文件范围等待写回，`MS_INVALIDATE` 因 buffered/MAP_SHARED 已共享同一 frame 而
+  无需第二份 cache invalidation。Ext4Inode 共享发布 data mtime/ctime，并在数据写回后按 generation
+  提交；lower truncate 与 PageCache writeback 由 per-inode writeback lock 串行，消除 truncate lower
+  完成后旧写回重新扩展 EOF 的窗口。
+- **专项与资源闭环**：无 feature RV64 1 GiB/8 核、`-snapshot` 通过
+  `fs_writeback_probe normal/phase3`、`fs_metadata_probe`、`buildstorm_file_probe`、
+  `buildstorm_private_map_probe`、`smp_shared_mm_probe` 和 `frame_reclaim_probe`。Phase 3 probe 覆盖
+  close owner、range/sync/syncfs/msync、132 个短文件及脏 tmpfs unmount；`buildstorm_file_probe`
+  新增 32 轮 fork 并发 mmap+pwrite+truncate。计数构建结束为
+  `page_cache_pages=0 page_cache_dirty_pages=0 page_cache_lru_entries=0 dirty_owners=0`，dirty peak 128。
+  `debug_traces` 的一次性 EIO cursor probe 继续通过。
+- **持久化**：从 `img/sdcard-rv.img` 创建临时 qcow2 overlay，不使用 snapshot；第一轮
+  `fs_writeback_probe persist-prepare` 经 syncfs 写入并退出，第二次启动同一 overlay 的
+  `persist-verify` 读到完整 22-byte payload 后清理，两个 marker 均 PASS。
+- **构建与完整压力**：RV64/LA64 debug 构建与最终 RV64 no-feature release 构建通过。QEMU 10.0.2、
+  `img/sdcard-rv-pub.img`（SHA-256 `ccf4844bfa9a1f1284724a2d0a6b3d497017a71b1f66f78d7e38dd76419c1168`）、
+  `-m 16G -smp 8 -snapshot`、宿主 `NI=-10/CLS=TS` 先通过最新版 Phase 3 probe，再运行原始
+  `/glibc/buildstorm_testcode.sh`；toolchain/minibuild/final marker 全部 PASS，最终
+  `BUILDSTORM_COMPILE mode=multi ok=true cores=8 bytes=1681000 arch=riscv64`。Cargo `20m05s`、
+  axbuild `1217.26s`，脚本退出 0；结束时 QEMU RSS 约 3.0 GiB，未见 panic、fault、OOM 或 ext4 错误。
+- **保留边界**：当前仍无硬件 PTE dirty bit，resident writable MAP_SHARED page 采用保守范围写回；
+  truncate 后访问已越过新 EOF 的映射尚未实现精确 Linux SIGBUS。这两项属于后续 MM 精化，不影响
+  Phase 3 的 page identity、错误可见性和持久化退出门槛。
+
 ## 2026-08-10 Linux/POSIX 语义与模型重构路线（`7cdae1e` 后）
 
 - 已建立 [linux-posix-refactor-plan.md](./linux-posix-refactor-plan.md)，后续以保持 BuildStorm 不回退、
@@ -39,6 +75,8 @@
   不完整；ext4 C 库线程安全未证明前继续保留唯一全局锁。
 
 ### Phase 3 首轮：PageCache 写回状态与 open-file error cursor（已提交 `9bde322`）
+
+本节保留首轮当时的历史边界；其中“未完成”项已由上方 2026-08-11 Phase 3 完成记录闭合。
 
 - **状态机**：PageCache page 在原有 dirty/write-version 之外记录当前 writeback batch id 与最近失败；
   锁外 I/O 完成后只有 batch id 仍匹配的完成者能结束该页 writeback，且只有内容 version 未变化时才能

@@ -8,8 +8,10 @@ use super::mount::{
 use super::vfs::{Dentry, InodeType};
 use super::{File, OpenFlags, TmpFileMeta};
 use crate::fs::ext4::Ext4Inode;
+use crate::fs::register_dirty_owner;
 use crate::syscall::{Errno, SysResult};
 use crate::task::current_task;
+use crate::timer::{TimeSpec, get_time_ms};
 use alloc::{
     format,
     string::{String, ToString},
@@ -882,6 +884,21 @@ pub fn filename_link_tmpfile(file: &File, newdirfd: isize, newpath: &str) -> Sys
                         return Err(Errno::EIO);
                     }
                     offset += written;
+                }
+                if !data.is_empty() {
+                    let ms = get_time_ms();
+                    let now = TimeSpec {
+                        sec: (ms / 1000) as isize,
+                        nsec: ((ms % 1000) * 1_000_000) as isize,
+                    };
+                    let time_result = inode.note_data_write(child_path.as_str(), now);
+                    register_dirty_owner(
+                        page_cache,
+                        inode.clone(),
+                        nd.mnt.fs.clone(),
+                        child_path.as_str(),
+                    );
+                    time_result?;
                 }
                 let _ = inode.set_times(child_path.as_str(), None, None);
             } else {

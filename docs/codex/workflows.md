@@ -462,6 +462,21 @@ FS_WRITEBACK_FAULT_PASS
 probe 通过 `/proc/respos_perf` 写入 `fail_writeback`，覆盖旧 observer 重试、独立 open 和 dup 共享 cursor。
 release 内核不接受该命令；正常语义门禁在无 feature 客体运行 `fs_writeback_probe normal`。
 
+Phase 3 完整语义门禁使用无 feature release 客体：
+
+```text
+/> fs_writeback_probe phase3
+FS_PHASE3_PROBE_PASS
+```
+
+该模式覆盖 close 后 dirty-owner 强生命周期、`sync_file_range`、`syncfs`、全局 `sync`、
+`MS_SYNC|MS_INVALIDATE`、132 个短文件触发的受控批量写回和 tmpfs 脏文件 unmount。带
+`perf_counters debug_traces` 运行后再读 `/proc/respos_perf`，结束态必须为
+`page_cache_dirty_pages=0`、`dirty_owners=0`，且 pages/LRU/registry 不随累计文件数增长。
+跨启动持久化不能使用 `-snapshot`；应从只读 raw 镜像创建临时 qcow2 overlay，第一轮运行
+`fs_writeback_probe persist-prepare` 并正常退出，第二轮挂同一 overlay 运行
+`fs_writeback_probe persist-verify`。不得直接修改仓库中的基准镜像。
+
 ### BuildStorm CPU/jobs 缩放矩阵
 
 正式 judge 只接受最终平台规定的 RV64 8 核、LA64 12 核配置；下列矩阵只用于选择优化方向，日志必须

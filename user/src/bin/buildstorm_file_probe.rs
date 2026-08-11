@@ -5,14 +5,15 @@
 extern crate user_lib;
 
 use user_lib::{
-    O_CREATE, O_RDONLY, O_RDWR, O_TRUNC, close, fstat, ftruncate, link, mmap, munmap, open, pread,
-    pwrite, unlink, write,
+    O_CREATE, O_RDONLY, O_RDWR, O_TRUNC, close, exit, fork, fstat, fsync, ftruncate, link, mmap,
+    msync, munmap, open, pread, pwrite, unlink, waitpid, write, yield_,
 };
 
 const OLD_PATH: &str = "/respos-buildstorm-file.tmp\0";
 const NEW_PATH: &str = "/respos-buildstorm-file.bin\0";
 const MAP_PATH: &str = "/respos-buildstorm-mmap.bin\0";
 const REUSE_PATH: &str = "/respos-buildstorm-reuse.bin\0";
+const RACE_PATH: &str = "/respos-buildstorm-race.bin\0";
 const PREFIX_END: usize = 0x2000;
 const SECTION_OFFSET: usize = 0x40c370;
 const SECTION_LEN: usize = 0x9c0;
@@ -60,6 +61,7 @@ fn main() -> i32 {
     let _ = unlink(NEW_PATH);
     let _ = unlink(MAP_PATH);
     let _ = unlink(REUSE_PATH);
+    let _ = unlink(RACE_PATH);
 
     let mut sections = [0u8; SECTION_LEN];
     for (index, byte) in sections.iter_mut().enumerate() {
@@ -166,6 +168,57 @@ fn main() -> i32 {
     assert!(mixed_data[24..].iter().all(|&byte| byte == 0xa7));
     assert_eq!(close(mixed_fd), 0);
     assert_eq!(unlink(REUSE_PATH), 0);
+
+    // Exercise truncate against pwrite and MAP_SHARED range writeback on
+    // another CPU/process.  The operations are intentionally unordered; the
+    // deterministic final rewrite below verifies that no stale writeback can
+    // escape after both sides have quiesced.
+    let race_fd = open(RACE_PATH, O_CREATE | O_TRUNC | O_RDWR, 0o600);
+    assert!(race_fd >= 0);
+    let race_fd = race_fd as usize;
+    assert_eq!(ftruncate(race_fd, 8192), 0);
+    let race_map = mmap(0, 8192, 0x3, 0x1, race_fd as isize, 0);
+    assert!(race_map > 0);
+    let child = fork();
+    assert!(child >= 0);
+    if child == 0 {
+        let child_data = [0xc3u8; 64];
+        for round in 0..32usize {
+            unsafe { ((race_map as usize + round * 17) as *mut u8).write_volatile(round as u8) };
+            assert_eq!(pwrite(race_fd, &child_data, 4096), 64);
+            assert_eq!(msync(race_map as usize, 4096, 4), 0);
+            let _ = yield_();
+        }
+        assert_eq!(munmap(race_map as usize, 8192), 0);
+        exit(0);
+    }
+    let parent_data = [0x5au8; 64];
+    for _ in 0..32usize {
+        assert_eq!(ftruncate(race_fd, 2048), 0);
+        assert_eq!(ftruncate(race_fd, 8192), 0);
+        assert_eq!(pwrite(race_fd, &parent_data, 0), 64);
+        let _ = yield_();
+    }
+    let mut child_status = 0;
+    assert_eq!(waitpid(child as usize, &mut child_status), child);
+    assert_eq!(child_status, 0);
+    assert_eq!(munmap(race_map as usize, 8192), 0);
+    assert_eq!(ftruncate(race_fd, 8192), 0);
+    let final_page = [0x6du8; 4096];
+    assert_eq!(pwrite(race_fd, &final_page, 0), 4096);
+    assert_eq!(pwrite(race_fd, &final_page, 4096), 4096);
+    assert_eq!(fsync(race_fd), 0);
+    assert_eq!(close(race_fd), 0);
+    let race_fd = open(RACE_PATH, O_RDONLY, 0);
+    assert!(race_fd >= 0);
+    let race_fd = race_fd as usize;
+    let mut final_verify = [0u8; 4096];
+    assert_eq!(pread(race_fd, &mut final_verify, 0), 4096);
+    assert!(final_verify.iter().all(|byte| *byte == 0x6d));
+    assert_eq!(pread(race_fd, &mut final_verify, 4096), 4096);
+    assert!(final_verify.iter().all(|byte| *byte == 0x6d));
+    assert_eq!(close(race_fd), 0);
+    assert_eq!(unlink(RACE_PATH), 0);
 
     // lld grows a brand-new sparse output to its final size and immediately
     // maps it.  Every untouched hole byte must already be zero in that first

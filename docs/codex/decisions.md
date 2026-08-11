@@ -224,17 +224,18 @@
 
 ## 普通 close 不执行全文件系统持久化屏障
 
-- 状态：已采用，完整 BuildStorm 计时待验证
+- 状态：已采用，Phase 3 已闭合 dirty owner 生命周期
 - 适用范围：普通文件 close、PageCache writeback、fsync/sync、ext4 shutdown
-- 最后验证：2026-08-09
+- 最后验证：2026-08-11
 - 证据：`os/src/fs/file.rs`、`os/src/fs/ext4/super_block.rs`；RV64 8 核
   `buildstorm_file_probe` 与 `/proc/respos_perf`
-- 内容：普通 `close(2)` 不等价于 `fsync(2)`，不得在每个 `File::drop()` 中调用
-  `ext4_cache_flush("/")` 或 block-device FLUSH。当前 inode cache 仍以 weak reference 为主，因此
-  close 会把该文件现有脏页提交给 lwext4，避免最后 inode/PageCache 消失时丢数据；全文件系统和
-  设备持久化只由显式 fsync/sync 及正常卸载触发。
-- 后续影响：若改为强引用 inode/page cache 和后台 writeback，可进一步取消 close 数据写回；在此之前
-  不能以性能为由直接丢弃脏页。崩溃一致性和正常 shutdown 的 virtio FLUSH 门禁保持不变。
+- 内容：普通 `close(2)` 不等价于 `fsync(2)`，`File::drop()` 只回收 open-file description，不执行
+  PageCache lower write 或 filesystem barrier。inode cache 可以继续使用 weak reference；外部 dirty-owner
+  表会强持有 inode、PageCache 和 filesystem，直到数据与待提交 mtime/ctime 都干净。显式 fsync/
+  fdatasync、sync/syncfs、正常卸载和 shutdown 定义持久化边界；阈值 writeback 只提交数据/元数据，
+  不把普通 close 升级成 durability guarantee。
+- 后续影响：任何能清 dirty 的路径都必须同时检查 owner 是否可释放；任何能新建 dirty 的路径必须在
+  返回用户态前登记强 owner。不能恢复依赖最后 File drop 防丢数据的局部补丁。
 
 ## PageCache 写回错误使用 inode 共享序列与 open-file cursor
 

@@ -226,19 +226,24 @@ FdTable slot (FdEntry: descriptor flags)
 
 ### PageCache 写回完成与错误按 batch/version 提交
 
-- 状态：Phase 3 首轮已实现，后台 writeback 与全局 sync 尚未建立
-- 适用范围：普通文件 buffered I/O、close、fsync/fdatasync、MAP_SHARED 间接写回
-- 最后验证：2026-08-10；RV64/LA64 release、RV64 debug fault probe
-- 证据：`os/src/fs/{page_cache.rs,file.rs,proc/perf_stats.rs}`、
+- 状态：Phase 3 已完成
+- 适用范围：普通文件 buffered I/O、close、fsync/fdatasync/sync/syncfs、unmount、MAP_SHARED 写回
+- 最后验证：2026-08-11；RV64/LA64 构建、RV64 1/16 GiB 专项、故障注入、跨启动持久化与完整 BuildStorm
+- 证据：`os/src/fs/{page_cache.rs,file.rs}`、`os/src/perf.rs`、
   `user/src/bin/fs_writeback_probe.rs`
 - 内容：页在 dirty 之外保存 write-version、当前 writeback batch id 和最近错误。锁外 lower I/O 返回后，
   只有仍持有该 batch id 的完成者能结束 writeback；仅当 write-version 未改变时清 dirty，并发 write 或
   truncate 会使旧快照失效。PageCache 另维护单调 error sequence；每个独立 open 的 `FileInner` 保存
   cursor，dup/fork 共享，因而一次失败可由所有错误发生前已打开的 description 各观察一次，而新 open
-  不继承历史错误。
+  不继承历史错误。独立 dirty-owner 表在最后一个 File 消失后继续强持有 inode/PageCache/filesystem；
+  safe-point writeback 每次最多处理 8 个 owner，单 cache 256 脏页或全局 128 owner 触发，失败 owner
+  保持 dirty/error 且不在每个 syscall 上忙重试。`sync`/`syncfs`/unmount/shutdown 在后端 barrier 前遍历
+  对应 owner；普通 close 不提交数据。data write 的共享 inode mtime/ctime 先在内存发布，数据成功后再
+  持久化时间；truncate 与 lower writeback 由 inode PageCache 的 writeback lock 串行。
 - 后续影响：任何新 writeback 入口都必须通过同一完成/错误发布协议，不能在 lower 返回前清 dirty，
-  也不能只把错误返回给发起写回的 syscall。引入后台线程后仍需保留 inode/PageCache 强生命周期，并
-  单独定义 `sync`/`syncfs`/unmount 的全局遍历边界。
+  也不能只把错误返回给发起写回的 syscall。dirty owner 只在数据和待提交时间都干净时移除；新增
+  truncate/hole/invalidate 路径必须同步维护该闭环。当前没有硬件 PTE dirty bit，MAP_SHARED resident
+  页仍保守写回，但所有路径共享同一个 PageCache frame。
 
 ### filesystem ELF 使用按需 private file backing
 

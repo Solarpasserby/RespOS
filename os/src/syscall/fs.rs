@@ -3,7 +3,7 @@
 use super::{Errno, SysResult};
 use crate::config::PAGE_SIZE;
 use crate::fs::dev::{LoopControlInode, LoopInode, VirtBlkInode};
-use crate::fs::mount::{do_mount, do_umount2};
+use crate::fs::mount::{do_mount, do_umount2, sync_all_filesystems, sync_filesystem};
 use crate::fs::vfs::{InodeOp, InodeType};
 use crate::fs::{
     AT_EMPTY_PATH, AT_FDCWD, AT_NO_AUTOMOUNT, AT_SYMLINK_NOFOLLOW, FdEntry, File, FileOp, KStat,
@@ -2367,10 +2367,12 @@ pub fn sys_sync_file_range(
     if flags == 0 {
         return Ok(0);
     }
-    // 当前没有范围级 writeback/wait 队列。整文件同步比请求范围更强，
-    // 但保证 WAIT_BEFORE/WAIT_AFTER 不会在未等待任何 I/O 时假成功。
-    let _ = (offset, nbytes);
-    file.fsync()
+    let offset = offset as usize;
+    let nbytes = nbytes as usize;
+    if nbytes != 0 {
+        offset.checked_add(nbytes).ok_or(Errno::EINVAL)?;
+    }
+    file.sync_file_range(offset, nbytes)
 }
 
 #[repr(C)]
@@ -3534,9 +3536,26 @@ pub fn sys_fsync(fd: usize) -> SysResult<usize> {
     file.fsync()
 }
 
+/// sync(2) has no error return in Linux.  Failed owners stay dirty and their
+/// errors remain visible to an open-file fsync/fdatasync cursor.
+pub fn sys_sync() -> SysResult<usize> {
+    let _ = sync_all_filesystems();
+    Ok(0)
+}
+
+pub fn sys_syncfs(fd: usize) -> SysResult<usize> {
+    let task = current_task().expect("[kernel] current task is None.");
+    let file = task.get_fd_entry(fd)?.file;
+    let filesystem = file.filesystem().ok_or(Errno::EINVAL)?;
+    sync_filesystem(&filesystem)?;
+    Ok(0)
+}
+
 /// 系统调用 sys-fdatasync — 当前等价于 fsync。
 pub fn sys_fdatasync(fd: usize) -> SysResult<usize> {
-    sys_fsync(fd)
+    let task = current_task().expect("[kernel] current task is None.");
+    let file = task.get_fd_entry(fd)?.file;
+    file.fdatasync()
 }
 
 /// 系统调用 sys-msync — 同步 mmap 映射区域与文件。
@@ -3544,9 +3563,10 @@ pub fn sys_fdatasync(fd: usize) -> SysResult<usize> {
 /// Resident writable shared file pages are snapshotted while holding the
 /// address-space read lock and written through FileOp after the lock is
 /// released. MS_ASYNC therefore leaves the data in the file page cache and
-/// returns without forcing the filesystem; MS_SYNC additionally calls fsync.
-/// MS_INVALIDATE is rejected because this kernel has no safe inode-wide
-/// invalidation protocol for the global shared file frame cache.
+/// returns without forcing the filesystem; MS_SYNC waits for writeback of the
+/// requested file ranges.  MS_INVALIDATE needs no second invalidation pass:
+/// buffered I/O and every MAP_SHARED mapping already use the same PageCache
+/// frame identity.
 pub fn sys_msync(addr: usize, len: usize, flags: i32) -> SysResult<usize> {
     const MS_ASYNC: i32 = 1;
     const MS_INVALIDATE: i32 = 2;
@@ -3562,10 +3582,6 @@ pub fn sys_msync(addr: usize, len: usize, flags: i32) -> SysResult<usize> {
     if flags & MS_ASYNC != 0 && flags & MS_SYNC != 0 {
         return Err(Errno::EINVAL);
     }
-    if flags & MS_INVALIDATE != 0 {
-        return Err(Errno::EOPNOTSUPP);
-    }
-
     if len == 0 {
         return Ok(0);
     }

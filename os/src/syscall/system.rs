@@ -202,6 +202,7 @@ pub fn sys_personality(persona: usize) -> SysResult<usize> {
 }
 
 pub fn sys_reboot() -> SysResult<usize> {
+    crate::fs::mount::sync_all_filesystems()?;
     ext4::shutdown()?;
     sbi::shutdown(false);
 }

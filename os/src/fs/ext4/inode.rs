@@ -136,6 +136,14 @@ struct MetadataState {
     raw: Option<RawInodeMetadata>,
     times: Option<InodeTimes>,
     generation: usize,
+    pending_data_times: Option<PendingDataTimes>,
+}
+
+#[derive(Clone, Copy)]
+struct PendingDataTimes {
+    generation: usize,
+    mtime: TimeSpec,
+    ctime: TimeSpec,
 }
 
 #[derive(Clone, Copy)]
@@ -215,6 +223,7 @@ impl Ext4Inode {
                 raw: None,
                 times: None,
                 generation: 1,
+                pending_data_times: None,
             }),
             unlinked: AtomicBool::new(false),
             page_cache: PageCache::new(0),
@@ -479,6 +488,9 @@ impl Ext4Inode {
         mtime: Option<TimeSpec>,
         update_ctime: bool,
     ) -> SysResult {
+        // Preserve an earlier delayed write's mtime before a later explicit
+        // setattr supersedes some or all timestamp fields.
+        self.flush_pending_data_times(path)?;
         let mut times = self.current_times(path)?;
 
         if let Some(atime) = atime {
@@ -527,6 +539,31 @@ impl Ext4Inode {
 
     fn set_cached_times(&self, times: InodeTimes) {
         self.metadata.lock().times = Some(times);
+    }
+
+    fn flush_pending_data_times(&self, path: &str) -> SysResult {
+        let pending = self.metadata.lock().pending_data_times;
+        let Some(pending) = pending else {
+            return Ok(());
+        };
+        crate::perf::ext4_set_times_call(1);
+        crate::perf::ext4_set_times_mtime_update(1);
+        self.commit_lower_setattr(
+            path,
+            None,
+            None,
+            None,
+            Some(pending.mtime),
+            Some(pending.ctime),
+        )?;
+        let mut metadata = self.metadata.lock();
+        if metadata
+            .pending_data_times
+            .is_some_and(|current| current.generation == pending.generation)
+        {
+            metadata.pending_data_times = None;
+        }
+        Ok(())
     }
 
     pub(crate) fn invalidate_raw_metadata(&self) {
@@ -685,7 +722,7 @@ impl InodeOp for Ext4Inode {
         Ok(read_size)
     }
 
-    fn write_at(&self, path: &str, off: usize, buf: &[u8]) -> SysResult<usize> {
+    fn write_at(&self, _path: &str, off: usize, buf: &[u8]) -> SysResult<usize> {
         self.check_type(InodeType::Regular)?;
         let started = crate::perf::now_ticks();
 
@@ -710,8 +747,6 @@ impl InodeOp for Ext4Inode {
         };
         self.invalidate_raw_metadata();
 
-        let now = Self::now_timespec();
-        let _ = self.set_times(path, None, Some(now));
         if write_size != 0 {
             let end = off.checked_add(write_size).ok_or(Errno::EINVAL)?;
             if end > self.page_cache.len() {
@@ -727,22 +762,51 @@ impl InodeOp for Ext4Inode {
     fn truncate(&self, path: &str, size: usize) -> SysResult<usize> {
         self.check_type(InodeType::Regular)?;
 
-        {
-            let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Write);
-            let file = &mut Ext4File::new("/", self.ty.clone());
-            file.inode_open(self.ino as u32, bindings::O_RDWR)
-                .map_err(Self::map_lwext4_err)?;
-            file.file_truncate(size as u64)
-                .map_err(Self::map_lwext4_err)?;
-            file.file_close().map_err(Self::map_lwext4_err)?;
-        }
-        self.invalidate_raw_metadata();
+        self.page_cache.with_writeback_exclusion(|| {
+            {
+                let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Write);
+                let file = &mut Ext4File::new("/", self.ty.clone());
+                file.inode_open(self.ino as u32, bindings::O_RDWR)
+                    .map_err(Self::map_lwext4_err)?;
+                file.file_truncate(size as u64)
+                    .map_err(Self::map_lwext4_err)?;
+                file.file_close().map_err(Self::map_lwext4_err)?;
+            }
+            self.invalidate_raw_metadata();
 
-        let now = Self::now_timespec();
-        let _ = self.set_times(path, None, Some(now));
-        self.page_cache.resize(size);
+            let now = Self::now_timespec();
+            self.set_times(path, None, Some(now))?;
+            self.page_cache.resize(size);
+            Ok(())
+        })?;
+        crate::fs::release_clean_owner(&self.page_cache);
 
         Ok(0)
+    }
+
+    fn note_data_write(&self, path: &str, time: TimeSpec) -> SysResult {
+        let mut times = self.current_times(path)?;
+        times.mtime = time;
+        times.ctime = time;
+        let mut metadata = self.metadata.lock();
+        let generation = metadata
+            .pending_data_times
+            .map_or(1, |pending| pending.generation.wrapping_add(1));
+        metadata.times = Some(times);
+        metadata.pending_data_times = Some(PendingDataTimes {
+            generation,
+            mtime: time,
+            ctime: time,
+        });
+        Ok(())
+    }
+
+    fn flush_data_metadata(&self, path: &str) -> SysResult {
+        self.flush_pending_data_times(path)
+    }
+
+    fn has_pending_data_metadata(&self) -> bool {
+        self.metadata.lock().pending_data_times.is_some()
     }
 
     fn set_times(&self, path: &str, atime: Option<TimeSpec>, mtime: Option<TimeSpec>) -> SysResult {
@@ -750,6 +814,7 @@ impl InodeOp for Ext4Inode {
     }
 
     fn set_mode(&self, path: &str, mode: u32) -> SysResult {
+        self.flush_pending_data_times(path)?;
         crate::perf::ext4_set_mode_call(1);
         let mut times = self.current_times(path)?;
         times.ctime = Self::now_timespec();
@@ -760,6 +825,7 @@ impl InodeOp for Ext4Inode {
     }
 
     fn set_owner(&self, path: &str, uid: u32, gid: u32) -> SysResult {
+        self.flush_pending_data_times(path)?;
         crate::perf::ext4_set_owner_call(1);
         let mut times = self.current_times(path)?;
         times.ctime = Self::now_timespec();
@@ -770,6 +836,7 @@ impl InodeOp for Ext4Inode {
     }
 
     fn set_owner_and_mode(&self, path: &str, uid: u32, gid: u32, mode: Option<u32>) -> SysResult {
+        self.flush_pending_data_times(path)?;
         crate::perf::ext4_set_owner_call(1);
         if mode.is_some() {
             crate::perf::ext4_set_mode_call(1);

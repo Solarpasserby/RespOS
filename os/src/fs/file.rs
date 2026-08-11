@@ -1,10 +1,13 @@
 // os/src/vfs/file.rs
 
-use super::vfs::{InodeOp, InodeType, LinuxDirent64};
+use super::vfs::{InodeOp, InodeType, LinuxDirent64, SuperBlockOp};
 use crate::config::{KERNEL_HEAP_SIZE, PAGE_SIZE};
 use crate::fs::ext4::Ext4Inode;
 use crate::fs::mount::{MS_NOATIME, MS_NODIRATIME, MS_STRICTATIME, check_mount_file_growth};
-use crate::fs::page_cache::{PageCache, WritebackErrorCursor};
+use crate::fs::page_cache::{
+    PageCache, WritebackErrorCursor, register_dirty_owner, sync_page_cache_owner,
+    sync_page_cache_range,
+};
 use crate::fs::{KStat, Path, PollEvents};
 use crate::mm::FrameTracker;
 use crate::syscall::{Errno, SysResult};
@@ -113,6 +116,15 @@ pub trait FileOp: Any + Send + Sync {
     /// 将文件缓冲数据刷入存储介质。当前文件系统在内存中，默认无操作。
     fn fsync(&self) -> SysResult<usize> {
         Ok(0)
+    }
+    fn fdatasync(&self) -> SysResult<usize> {
+        self.fsync()
+    }
+    fn sync_file_range(&self, _offset: usize, _len: usize) -> SysResult<usize> {
+        Err(Errno::ESPIPE)
+    }
+    fn filesystem(&self) -> Option<Arc<dyn SuperBlockOp>> {
+        None
     }
     /// 调整文件长度。普通文件和 memfd 支持该操作，其他特殊 fd 默认拒绝。
     fn truncate(&self, _size: usize) -> SysResult<usize> {
@@ -401,14 +413,12 @@ impl File {
     fn flush_page_cache_if_needed(
         &self,
         pc: &Arc<PageCache>,
-        path: &str,
+        _path: &str,
         force: bool,
     ) -> SysResult<bool> {
         if force || pc.needs_writeback() {
-            match pc.sync(&self.inode, path) {
-                Ok(_) | Err(Errno::ENOENT) => Ok(true),
-                Err(err) => Err(err),
-            }
+            sync_page_cache_owner(pc)?;
+            Ok(true)
         } else {
             Ok(false)
         }
@@ -419,54 +429,26 @@ impl File {
         inner.ctime_override = Some(now);
     }
 
-    fn sync_cached_write_time(
-        &self,
-        tmpfile: bool,
-        mtime: Option<TimeSpec>,
-        path: &str,
-    ) -> SysResult {
-        if !tmpfile {
-            if let Some(mtime) = mtime {
-                self.inode.set_times(path, None, Some(mtime))?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Write cached file data to lwext4 without issuing a device durability
-    /// barrier. `dirty_only` keeps close cheap; fsync forces the cache sync.
-    fn sync_cached_data(&self, dirty_only: bool) -> SysResult<bool> {
-        let (page_cache, write_back, path, tmpfile, mtime) = {
+    /// Write cached file data and pending data timestamps to lwext4 without
+    /// issuing the filesystem durability barrier performed by fsync below.
+    fn sync_cached_data(&self) -> SysResult<bool> {
+        let (page_cache, write_back, path) = {
             let inner = self.inner.lock();
             let visible_path = inner.path.abs_path();
             (
                 inner.page_cache.clone(),
                 inner.write_back,
                 self.storage_path(&visible_path),
-                inner.tmpfile_meta.is_some(),
-                inner.mtime_override,
             )
         };
         let Some(page_cache) = page_cache else {
             return Ok(false);
         };
-        if !write_back || (dirty_only && !page_cache.has_dirty_pages()) {
+        if !write_back {
             return Ok(false);
         }
         self.flush_page_cache_if_needed(&page_cache, &path, true)?;
-        self.sync_cached_write_time(tmpfile, mtime, &path)?;
         Ok(true)
-    }
-
-    /// Preserve dirty file data when the final open-file description goes
-    /// away, without turning ordinary close(2) into a filesystem-wide
-    /// durability barrier. Linux close does not imply fsync; explicit fsync,
-    /// sync and unmount retain the backend flush semantics.
-    fn flush_data_on_close(&self) -> SysResult {
-        if self.sync_cached_data(true)? {
-            crate::perf::close_data_writeback(1);
-        }
-        Ok(())
     }
 
     fn check_writeback_error(&self) -> SysResult {
@@ -505,11 +487,6 @@ impl File {
                 }
                 let now = Self::now_timespec();
                 Self::update_cached_write_times(&mut inner, now);
-                self.sync_cached_write_time(
-                    inner.tmpfile_meta.is_some(),
-                    inner.mtime_override,
-                    &path,
-                )?;
             }
         } else {
             self.inode.truncate(&path, size)?;
@@ -556,7 +533,7 @@ impl File {
     }
 
     pub fn write_at_offset(&self, offset: usize, buf: &[u8]) -> SysResult<usize> {
-        let (path, file_path, page_cache, write_back, flags, tmpfile) = {
+        let (path, file_path, page_cache, write_back, flags) = {
             let inner = self.inner.lock();
             let visible_path = inner.path.abs_path();
             (
@@ -565,7 +542,6 @@ impl File {
                 inner.page_cache.clone(),
                 inner.write_back,
                 inner.flags,
-                inner.tmpfile_meta.is_some(),
             )
         };
         let old_size = if let Some(ref pc) = page_cache {
@@ -587,13 +563,21 @@ impl File {
             if write_back && n != 0 {
                 let force = flags.intersects(OpenFlags::O_DSYNC | OpenFlags::O_SYNC);
                 let now = Self::now_timespec();
-                let mtime = {
+                {
                     let mut inner = self.inner.lock();
                     Self::update_cached_write_times(&mut inner, now);
-                    inner.mtime_override
-                };
-                if self.flush_page_cache_if_needed(&pc, &path, force)? {
-                    self.sync_cached_write_time(tmpfile, mtime, &path)?;
+                }
+                let time_result = self.inode.note_data_write(path.as_str(), now);
+                register_dirty_owner(
+                    pc.clone(),
+                    self.inode.clone(),
+                    file_path.mnt.fs.clone(),
+                    path.as_str(),
+                );
+                time_result?;
+                self.flush_page_cache_if_needed(&pc, &path, force)?;
+                if force {
+                    file_path.mnt.fs.sync()?;
                 }
             }
             Ok(n)
@@ -675,7 +659,6 @@ impl File {
 impl Drop for File {
     fn drop(&mut self) {
         crate::perf::file_close(1);
-        let _ = self.flush_data_on_close();
     }
 }
 
@@ -750,12 +733,17 @@ impl FileOp for File {
                     .intersects(OpenFlags::O_DSYNC | OpenFlags::O_SYNC);
                 let now = Self::now_timespec();
                 Self::update_cached_write_times(&mut inner, now);
-                if self.flush_page_cache_if_needed(&pc, &path, force)? {
-                    self.sync_cached_write_time(
-                        inner.tmpfile_meta.is_some(),
-                        inner.mtime_override,
-                        &path,
-                    )?;
+                let time_result = self.inode.note_data_write(path.as_str(), now);
+                register_dirty_owner(
+                    pc.clone(),
+                    self.inode.clone(),
+                    inner.path.mnt.fs.clone(),
+                    path.as_str(),
+                );
+                time_result?;
+                self.flush_page_cache_if_needed(&pc, &path, force)?;
+                if force {
+                    inner.path.mnt.fs.sync()?;
                 }
             }
             n
@@ -829,15 +817,15 @@ impl FileOp for File {
                 stat.uid = meta.uid;
                 stat.gid = meta.gid;
                 stat.nlink = 0;
-            }
-            if let Some(atime) = inner.atime_override {
-                stat.atime = atime;
-            }
-            if let Some(mtime) = inner.mtime_override {
-                stat.mtime = mtime;
-            }
-            if let Some(ctime) = inner.ctime_override {
-                stat.ctime = ctime;
+                if let Some(atime) = inner.atime_override {
+                    stat.atime = atime;
+                }
+                if let Some(mtime) = inner.mtime_override {
+                    stat.mtime = mtime;
+                }
+                if let Some(ctime) = inner.ctime_override {
+                    stat.ctime = ctime;
+                }
             }
             return Ok(stat);
         }
@@ -872,7 +860,7 @@ impl FileOp for File {
     fn fsync(&self) -> SysResult<usize> {
         crate::perf::explicit_fsync(1);
         let superblock = self.inner.lock().path.mnt.fs.clone();
-        let data_result = self.sync_cached_data(false);
+        let data_result = self.sync_cached_data();
         // Consume an error recorded by this attempt as well as an earlier
         // close/threshold writeback. This prevents a single failure from
         // being reported twice by the same open-file description.
@@ -881,6 +869,29 @@ impl FileOp for File {
         writeback_error?;
         superblock.sync()?;
         Ok(0)
+    }
+
+    fn fdatasync(&self) -> SysResult<usize> {
+        // lwext4 exposes one filesystem durability barrier.  Using it here is
+        // stronger than the minimum fdatasync contract but preserves the
+        // required data/size metadata ordering without a fake weaker path.
+        self.fsync()
+    }
+
+    fn sync_file_range(&self, offset: usize, len: usize) -> SysResult<usize> {
+        let page_cache = self.inner.lock().page_cache.clone().ok_or(Errno::EINVAL)?;
+        let end = if len == 0 {
+            usize::MAX
+        } else {
+            offset.checked_add(len).ok_or(Errno::EINVAL)?
+        };
+        sync_page_cache_range(&page_cache, offset, end)?;
+        self.check_writeback_error()?;
+        Ok(0)
+    }
+
+    fn filesystem(&self) -> Option<Arc<dyn SuperBlockOp>> {
+        Some(self.inner.lock().path.mnt.fs.clone())
     }
 
     fn truncate(&self, size: usize) -> SysResult<usize> {

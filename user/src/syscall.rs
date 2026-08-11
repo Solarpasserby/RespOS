@@ -44,9 +44,11 @@ const SYSCALL_READLINKAT: usize = 78;
 const SYSCALL_UTIMENSAT: usize = 88;
 const SYSCALL_FSTATAT: usize = 79;
 const SYSCALL_FSTAT: usize = 80;
+const SYSCALL_SYNC: usize = 81;
 const SYSCALL_FSYNC: usize = 82;
 const SYSCALL_FDATASYNC: usize = 83;
 const SYSCALL_SYNC_FILE_RANGE: usize = 84;
+const SYSCALL_SYNCFS: usize = 267;
 const SYSCALL_TIMERFD_CREATE: usize = 85;
 const SYSCALL_EXIT: usize = 93;
 const SYSCALL_FUTEX: usize = 98;
@@ -88,6 +90,7 @@ const SYSCALL_MUNMAP: usize = 215;
 const SYSCALL_CLONE: usize = 220;
 const SYSCALL_EXECVE: usize = 221;
 const SYSCALL_MMAP: usize = 222;
+const SYSCALL_MSYNC: usize = 227;
 const SYSCALL_MPROTECT: usize = 226;
 const SYSCALL_MEMFD_CREATE: usize = 279;
 const SYSCALL_RENAMEAT2: usize = 276;
@@ -573,6 +576,14 @@ pub fn sys_fsync(fd: usize) -> isize {
     syscall(SYSCALL_FSYNC, [fd, 0, 0, 0, 0, 0])
 }
 
+pub fn sys_sync() -> isize {
+    syscall(SYSCALL_SYNC, [0; 6])
+}
+
+pub fn sys_syncfs(fd: usize) -> isize {
+    syscall(SYSCALL_SYNCFS, [fd, 0, 0, 0, 0, 0])
+}
+
 pub fn sys_fdatasync(fd: usize) -> isize {
     syscall(SYSCALL_FDATASYNC, [fd, 0, 0, 0, 0, 0])
 }
@@ -996,6 +1007,10 @@ pub fn sys_mmap(
     offset: usize,
 ) -> isize {
     syscall(SYSCALL_MMAP, [addr, len, prot, flags, fd as usize, offset])
+}
+
+pub fn sys_msync(addr: usize, len: usize, flags: i32) -> isize {
+    syscall(SYSCALL_MSYNC, [addr, len, flags as usize, 0, 0, 0])
 }
 
 pub fn sys_mprotect(addr: usize, len: usize, prot: usize) -> isize {

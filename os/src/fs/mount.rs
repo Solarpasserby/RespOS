@@ -231,6 +231,34 @@ pub fn root_path() -> Arc<Path> {
     )
 }
 
+pub fn sync_filesystem(filesystem: &Arc<dyn SuperBlockOp>) -> SysResult {
+    crate::fs::sync_dirty_owners_for(filesystem)?;
+    filesystem.sync()
+}
+
+pub fn sync_all_filesystems() -> SysResult {
+    let mut first_error = crate::fs::sync_all_dirty_owners().err();
+    let filesystems: Vec<_> = {
+        let tree = MOUNT_TREE.lock();
+        let mut filesystems: Vec<Arc<dyn SuperBlockOp>> = Vec::new();
+        for mount in &tree.mount_table {
+            if !filesystems
+                .iter()
+                .any(|filesystem| Arc::ptr_eq(filesystem, &mount.vfs_mount.fs))
+            {
+                filesystems.push(mount.vfs_mount.fs.clone());
+            }
+        }
+        filesystems
+    };
+    for filesystem in filesystems {
+        if let Err(error) = filesystem.sync() {
+            first_error.get_or_insert(error);
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
 pub fn path_global_abs_path(path: &Path) -> alloc::string::String {
     let dentry_path = path.dentry.current_abs_path();
     let Some(mount) = get_mount_by_vfsmount(&path.mnt) else {
@@ -492,8 +520,28 @@ pub fn do_umount2(target: &str, flags: usize) -> SysResult<usize> {
         return Err(Errno::EAGAIN);
     }
 
+    // Flush every filesystem in a detached subtree before any namespace or
+    // backing-root cleanup can make its dirty inodes unreachable.
+    let mut filesystems: Vec<Arc<dyn SuperBlockOp>> = Vec::new();
+    collect_mount_filesystems(&mount, &mut filesystems);
+    for filesystem in filesystems {
+        sync_filesystem(&filesystem)?;
+    }
+
     remove_mount_tree(&mount);
     Ok(0)
+}
+
+fn collect_mount_filesystems(mount: &Arc<Mount>, filesystems: &mut Vec<Arc<dyn SuperBlockOp>>) {
+    if !filesystems
+        .iter()
+        .any(|filesystem| Arc::ptr_eq(filesystem, &mount.vfs_mount.fs))
+    {
+        filesystems.push(mount.vfs_mount.fs.clone());
+    }
+    for child in mount.children.lock().iter() {
+        collect_mount_filesystems(child, filesystems);
+    }
 }
 
 fn lookup_mount_target(target: &str) -> SysResult<Arc<Mount>> {

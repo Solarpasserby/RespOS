@@ -1,11 +1,12 @@
 // os/src/fs/page_cache.rs
 
-use super::vfs::InodeOp;
+use super::vfs::{InodeOp, SuperBlockOp};
 use crate::config::PAGE_CACHE_GLOBAL_MAX_PAGES;
 use crate::config::PAGE_SIZE;
 use crate::mm::{FrameTracker, frame_alloc};
 use crate::syscall::{Errno, SysResult};
 use alloc::collections::{BTreeMap, VecDeque};
+use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 #[cfg(feature = "debug_traces")]
@@ -18,9 +19,14 @@ lazy_static! {
     static ref PAGE_CACHE_REGISTRY: Mutex<BTreeMap<usize, Weak<PageCache>>> =
         Mutex::new(BTreeMap::new());
     static ref PAGE_CACHE_LRU: Mutex<VecDeque<LruEntry>> = Mutex::new(VecDeque::new());
+    /// Strong ownership for dirty regular-file state.  The inode cache itself
+    /// is weak, so this registry—not File::drop—keeps an inode and its cache
+    /// alive until both data and the corresponding timestamps are written.
+    static ref DIRTY_OWNERS: Mutex<BTreeMap<usize, DirtyOwner>> = Mutex::new(BTreeMap::new());
 }
 
 static NEXT_PAGE_CACHE_ID: AtomicUsize = AtomicUsize::new(1);
+static NEXT_DIRTY_OWNER_GENERATION: AtomicUsize = AtomicUsize::new(1);
 static NEXT_LRU_GENERATION: AtomicUsize = AtomicUsize::new(1);
 static NEXT_WRITEBACK_ID: AtomicUsize = AtomicUsize::new(1);
 static PAGE_CACHE_PAGE_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -31,6 +37,18 @@ static WRITEBACK_FAULT_ARMED: AtomicBool = AtomicBool::new(false);
 const WRITEBACK_BATCH_PAGES: usize = 32;
 const DIRTY_PAGES_PER_CACHE_HIGH_WATERMARK: usize = 256;
 const READ_AHEAD_PAGES: usize = 16;
+const DIRTY_OWNER_HIGH_WATERMARK: usize = 128;
+const BACKGROUND_WRITEBACK_OWNERS: usize = 8;
+
+#[derive(Clone)]
+struct DirtyOwner {
+    cache: Arc<PageCache>,
+    inode: Arc<dyn InodeOp>,
+    filesystem: Arc<dyn SuperBlockOp>,
+    path: String,
+    background_failed: bool,
+    generation: usize,
+}
 
 pub fn page_cache_page_count() -> usize {
     PAGE_CACHE_PAGE_COUNT.load(Ordering::Relaxed)
@@ -46,6 +64,145 @@ pub fn page_cache_registry_count() -> usize {
 
 pub fn page_cache_lru_entry_count() -> usize {
     PAGE_CACHE_LRU.lock().len()
+}
+
+pub fn dirty_owner_count() -> usize {
+    DIRTY_OWNERS.lock().len()
+}
+
+/// Publish the strong owner only after the page-cache mutation succeeded.
+/// Re-registering refreshes the path used for lower I/O after rename/link.
+pub fn register_dirty_owner(
+    cache: Arc<PageCache>,
+    inode: Arc<dyn InodeOp>,
+    filesystem: Arc<dyn SuperBlockOp>,
+    path: &str,
+) {
+    DIRTY_OWNERS.lock().insert(
+        cache.id,
+        DirtyOwner {
+            cache,
+            inode,
+            filesystem,
+            path: String::from(path),
+            background_failed: false,
+            generation: NEXT_DIRTY_OWNER_GENERATION.fetch_add(1, Ordering::Relaxed),
+        },
+    );
+}
+
+fn owner_needs_writeback(owner: &DirtyOwner) -> bool {
+    owner.cache.has_dirty_pages() || owner.inode.has_pending_data_metadata()
+}
+
+pub fn release_clean_owner(cache: &Arc<PageCache>) {
+    let mut owners = DIRTY_OWNERS.lock();
+    if owners
+        .get(&cache.id)
+        .is_some_and(|owner| !owner_needs_writeback(owner))
+    {
+        owners.remove(&cache.id);
+    }
+}
+
+fn sync_owner(owner: &DirtyOwner, range: Option<(usize, usize)>) -> SysResult {
+    let data_result = match range {
+        Some((start, end)) => owner
+            .cache
+            .sync_range(&owner.inode, owner.path.as_str(), start, end),
+        None => owner.cache.sync(&owner.inode, owner.path.as_str()),
+    };
+    data_result?;
+
+    // A range operation deliberately leaves inode-wide timestamps pending;
+    // fsync/syncfs/unmount persist them only after all older dirty data.
+    if range.is_none() {
+        if let Err(error) = owner.inode.flush_data_metadata(owner.path.as_str()) {
+            owner.cache.record_writeback_error(error);
+            return Err(error);
+        }
+    }
+
+    if !owner_needs_writeback(owner) {
+        let mut owners = DIRTY_OWNERS.lock();
+        if owners.get(&owner.cache.id).is_some_and(|current| {
+            Arc::ptr_eq(&current.cache, &owner.cache) && !owner_needs_writeback(current)
+        }) {
+            owners.remove(&owner.cache.id);
+        }
+    }
+    Ok(())
+}
+
+pub fn sync_page_cache_owner(cache: &Arc<PageCache>) -> SysResult {
+    let owner = DIRTY_OWNERS.lock().get(&cache.id).cloned();
+    if let Some(owner) = owner {
+        sync_owner(&owner, None)
+    } else {
+        Ok(())
+    }
+}
+
+pub fn sync_page_cache_range(cache: &Arc<PageCache>, start: usize, end: usize) -> SysResult {
+    let owner = DIRTY_OWNERS.lock().get(&cache.id).cloned();
+    if let Some(owner) = owner {
+        sync_owner(&owner, Some((start, end)))
+    } else {
+        Ok(())
+    }
+}
+
+pub fn sync_dirty_owners_for(filesystem: &Arc<dyn SuperBlockOp>) -> SysResult {
+    let owners: Vec<_> = DIRTY_OWNERS
+        .lock()
+        .values()
+        .filter(|owner| Arc::ptr_eq(&owner.filesystem, filesystem))
+        .cloned()
+        .collect();
+    let mut first_error = None;
+    for owner in owners {
+        if let Err(error) = sync_owner(&owner, None) {
+            first_error.get_or_insert(error);
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
+pub fn sync_all_dirty_owners() -> SysResult {
+    let owners: Vec<_> = DIRTY_OWNERS.lock().values().cloned().collect();
+    let mut first_error = None;
+    for owner in owners {
+        if let Err(error) = sync_owner(&owner, None) {
+            first_error.get_or_insert(error);
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
+/// Run a bounded amount of writeback at the syscall safe point.  Errors stay
+/// attached to the PageCache and are reported by a later fsync/fdatasync;
+/// they do not replace an unrelated syscall's result.
+pub fn writeback_dirty_owners_if_needed() {
+    if PAGE_CACHE_DIRTY_PAGE_COUNT.load(Ordering::Relaxed) < DIRTY_PAGES_PER_CACHE_HIGH_WATERMARK
+        && DIRTY_OWNERS.lock().len() < DIRTY_OWNER_HIGH_WATERMARK
+    {
+        return;
+    }
+    let owners: Vec<_> = DIRTY_OWNERS
+        .lock()
+        .values()
+        .filter(|owner| !owner.background_failed)
+        .take(BACKGROUND_WRITEBACK_OWNERS)
+        .cloned()
+        .collect();
+    for owner in owners {
+        if sync_owner(&owner, None).is_err()
+            && let Some(current) = DIRTY_OWNERS.lock().get_mut(&owner.cache.id)
+            && current.generation == owner.generation
+        {
+            current.background_failed = true;
+        }
+    }
 }
 
 #[cfg(feature = "debug_traces")]
@@ -128,6 +285,9 @@ pub struct PageCache {
     size_version: AtomicUsize,
     dirty_pages: AtomicUsize,
     writeback_error: Mutex<WritebackErrorState>,
+    /// Serializes lower-file writeback against lower truncate. Buffered
+    /// writers stay concurrent and are resolved by page/size generations.
+    writeback_lock: Mutex<()>,
 }
 
 impl PageCache {
@@ -143,6 +303,7 @@ impl PageCache {
                 sequence: 0,
                 error: None,
             }),
+            writeback_lock: Mutex::new(()),
         });
         PAGE_CACHE_REGISTRY
             .lock()
@@ -323,6 +484,14 @@ impl PageCache {
         }
         *size = new_size;
         self.size_version.fetch_add(1, Ordering::Release);
+    }
+
+    pub(crate) fn with_writeback_exclusion<T>(
+        &self,
+        operation: impl FnOnce() -> SysResult<T>,
+    ) -> SysResult<T> {
+        let _guard = self.writeback_lock.lock();
+        operation()
     }
 
     /// 查 BTreeMap 获取页（不触发 I/O）
@@ -584,20 +753,48 @@ impl PageCache {
 
     /// 将脏页写回。失败保留 dirty，并发布给所有已打开文件的错误游标。
     pub fn sync(&self, inode: &Arc<dyn InodeOp>, path: &str) -> SysResult {
-        let result = self.sync_inner(inode, path);
+        let result = self.sync_inner(inode, path, None);
         if let Err(error) = result {
             self.record_writeback_error(error);
         }
         result
     }
 
-    fn sync_inner(&self, inode: &Arc<dyn InodeOp>, path: &str) -> SysResult {
+    /// Write all dirty pages intersecting [start, end).  Page granularity is
+    /// intentional: storage writeback never splits the PageCache identity.
+    pub fn sync_range(
+        &self,
+        inode: &Arc<dyn InodeOp>,
+        path: &str,
+        start: usize,
+        end: usize,
+    ) -> SysResult {
+        let result = self.sync_inner(inode, path, Some((start, end)));
+        if let Err(error) = result {
+            self.record_writeback_error(error);
+        }
+        result
+    }
+
+    fn sync_inner(
+        &self,
+        inode: &Arc<dyn InodeOp>,
+        path: &str,
+        range: Option<(usize, usize)>,
+    ) -> SysResult {
+        let _writeback_guard = self.writeback_lock.lock();
         let file_size = *self.file_size.lock();
         let size_version = self.size_version.load(Ordering::Acquire);
         let pages: Vec<_> = self
             .pages
             .lock()
             .iter()
+            .filter(|(idx, _)| {
+                range.map_or(true, |(start, end)| {
+                    let page_start = **idx * PAGE_SIZE;
+                    page_start < end && page_start.saturating_add(PAGE_SIZE) > start
+                })
+            })
             .map(|(&idx, p)| (idx, p.clone()))
             .collect();
 

@@ -528,11 +528,12 @@ pub fn render() -> String {
     );
     let _ = writeln!(
         out,
-        "page_cache_pages={} page_cache_dirty_pages={} page_cache_lru_entries={} page_cache_registry={} shared_file_page_entries={} free_frames={}",
+        "page_cache_pages={} page_cache_dirty_pages={} page_cache_lru_entries={} page_cache_registry={} dirty_owners={} shared_file_page_entries={} free_frames={}",
         crate::fs::page_cache_page_count(),
         crate::fs::page_cache_dirty_page_count(),
         crate::fs::page_cache_lru_entry_count(),
         crate::fs::page_cache_registry_count(),
+        crate::fs::dirty_owner_count(),
         crate::mm::shared_file_page_entry_count(),
         crate::mm::free_frame_count()
     );

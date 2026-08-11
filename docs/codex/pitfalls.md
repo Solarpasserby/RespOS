@@ -560,6 +560,19 @@
 - 后续影响：遇到 VFS 生命周期问题时先列出所有引用所有者，不用局部计数代替系统模型。若 Drop 中不能
   安全取得后端锁，应延迟到明确安全点；这种妥协必须同时记录回收时机、失败重试和崩溃恢复边界。
 
+## weak inode cache 不能承担脏数据所有权
+
+- 状态：已确认并修复
+- 适用范围：普通文件 close、truncate、unlink、PageCache writeback、inode cache
+- 最后验证：2026-08-11
+- 证据：`os/src/fs/page_cache.rs`、`fs_writeback_probe phase3`、`/proc/respos_perf`
+- 内容：inode registry 只保存 Weak 时，最后一个 File drop 会连同仍脏的 PageCache 一起消失；把同步 I/O
+  塞回 Drop 虽能暂时防丢，却让 close 成为性能和锁序热点。当前由外部 dirty-owner 表强持有完整写回
+  对象，并在 syscall safe point 做有界批量提交。反向边界同样重要：truncate 可直接移除最后脏页并提交
+  时间，如果不主动释放已经 clean 的 owner，低于阈值的单文件会永久留下强引用。
+- 后续影响：新增写路径遵循“mutation/note 成功后、返回用户态前 register”；新增清理路径遵循
+  “data 和 pending metadata 同时为空才 release”。同步 I/O 期间不得持有 owner registry 锁。
+
 ## 历史测试成绩会快速过期
 
 - 状态：已确认

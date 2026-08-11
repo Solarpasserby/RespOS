@@ -179,7 +179,7 @@ lookup 与 mutation 的完整 seqlock/RCU 可见性协议、lwext4 orphan-list �
 这一阶段优化 Rust VFS 缓存一致性，不拆 lwext4 全局锁。只有 C 库共享状态、锁序和 reentrant API
 得到独立证明后，才另立设计讨论细粒度 ext4 并发。
 
-## Phase 3：PageCache、写回与持久化语义
+## Phase 3：PageCache、写回与持久化语义（已完成，2026-08-11）
 
 ### 目标模型
 
@@ -294,8 +294,8 @@ POSIX probe 成功也不能替代压力和资源闭环。
 
 ## 下一步
 
-Phase 3 首轮已为 PageCache 增加 batch/version writeback 状态、inode 共享 error sequence 和
-open-file cursor，并用 debug-only 一次性 EIO probe 固定 fsync/fdatasync 的错误可见性。下一轮先补
-`sync`/`syncfs` 与 unmount 的 inode-wide dirty 遍历和错误边界，再建立受控后台 writeback；在强引用
-生命周期闭合前不取消 close 数据提交。Phase 1 的时间精度与 realtime 边界继续保留，不得由
-PageCache 内存时间戳掩盖。
+Phase 3 已闭合 dirty-owner 强生命周期，补齐 `sync`/`syncfs`/unmount/shutdown 遍历、范围写回、
+共享 data timestamp 和受控 safe-point writeback，并取消最后 File drop 数据提交。退出门槛已由故障
+注入、两次启动持久化、mmap+pwrite+truncate、累计 owner 资源闭环和 16 GiB 完整 BuildStorm 覆盖。
+后续进入 Phase 4 namei/权限/文件系统 ABI；当前无硬件 dirty bit 的保守 mmap 写回和 mapped truncate
+后的精确 SIGBUS 仍作为 MM 扩展边界保留，不重新打开 Phase 3 所有权模型。
