@@ -41,6 +41,17 @@
   必须先验证软件 refill、成对 TLB 项的 G 位、ASID 生命周期、页表回收和跨核 shootdown；仅把 op=0
   改成 op=3 会改变语义，并已在 BuildStorm 探索中出现用户态内存破坏，不能直接合入。
 
+## 启用 ASID 后当前 active mask 不覆盖全部潜在旧 TLB
+
+- 状态：已确认并通过 residency mask 修复
+- 适用范围：LA ASID、task migration、PTE update、远端 shootdown
+- 最后验证：2026-08-12
+- 证据：`os/src/mm/memory_set.rs`；LA 12-hart 双 shared-MM、Phase3、1200 短进程与 perf 窗口
+- 内容：hart 切到 idle 后会清除 active bit，但普通 ASID 切换不会清除该 hart 的旧 TLB。只向当前
+  active mask 发送 PTE shootdown 会让任务以后迁回该 hart 时重新命中旧映射。必须记录自上次同步失效
+  后加载过该 ASID 的 residency，或在每次重新激活时按 generation 补做本地失效。
+- 后续影响：全局 retired-frame 批次还可能混有其他 MemorySet，不能用单个地址空间的 residency 释放。
+
 ## RV64 最大支持 RAM 必须同时覆盖 early FDT 和正式 direct map
 
 ## LoongArch refill 的“无效 TLB 项”不得带 V/D 有效位

@@ -494,6 +494,11 @@ pub struct MemorySet {
     // 切回 per-CPU idle/kernel satp 后清除。页表写入者持有 MemorySet 写锁，
     // 因此不会与设置/清除 active bit 的读锁临界区交错。
     active_hart_mask: AtomicUsize,
+    // LA 使用 ASID 且普通 task switch 不失效 TLB，因此已经离开该地址空间的
+    // hart 仍可能缓存它的旧 PTE。记录自上次同步失效以来的 residency；writer
+    // 完成 shootdown 后才可把它收缩回 active mask。
+    #[cfg(target_arch = "loongarch64")]
+    tlb_hart_mask: AtomicUsize,
     #[cfg(target_arch = "loongarch64")]
     asid: AtomicUsize,
 }
@@ -1800,8 +1805,8 @@ impl MemorySet {
     }
 
     /// Publish a page-table modification and synchronously invalidate every
-    /// hart currently running this address space before old frames may return
-    /// to the allocator.
+    /// hart that may cache this address space. Callers serialize this operation
+    /// with active/residency transitions through the MemorySet write lock.
     pub fn flush_tlb(&self) {
         // Freeze the batch before the local flush as well: a frame retired
         // concurrently after this point must wait for the next generation on
@@ -1822,14 +1827,28 @@ impl MemorySet {
         #[cfg(target_arch = "loongarch64")]
         {
             let current = crate::arch::smp::current_hart_id();
-            // Data-frame retirement is globally batched on LA. A full online
-            // mask makes every retired frame safe to release regardless of
-            // which MemorySet queued it before this flush.
-            let remote_mask = crate::arch::smp::online_hart_mask() & !(1 << current);
+            // Without frame retirement, only harts that loaded this ASID since
+            // its previous synchronous invalidation can retain stale entries.
+            // The global retirement batch may contain frames from unrelated
+            // MemorySets, so releasing a non-empty batch still requires every
+            // online hart to acknowledge a full invalidation.
+            let targets = if retired.is_empty() {
+                self.tlb_hart_mask.load(Ordering::Acquire)
+            } else {
+                crate::arch::smp::online_hart_mask()
+            };
+            let remote_mask = targets & !(1 << current);
             if remote_mask != 0 {
                 crate::perf::remote_rfence(1);
                 crate::arch::smp::remote_tlb_shootdown(remote_mask);
             }
+            // The write lock excludes scheduler mark/clear transitions. Every
+            // inactive resident has now acknowledged the new PTE generation;
+            // retain only harts that are still running this address space.
+            self.tlb_hart_mask.store(
+                self.active_hart_mask.load(Ordering::Acquire),
+                Ordering::Release,
+            );
             drop(retired);
         }
     }
@@ -1839,7 +1858,10 @@ impl MemorySet {
     pub fn mark_current_hart_active(&self) {
         {
             let hart = crate::arch::smp::current_hart_id();
-            self.active_hart_mask.fetch_or(1 << hart, Ordering::Release);
+            let bit = 1 << hart;
+            self.active_hart_mask.fetch_or(bit, Ordering::Release);
+            #[cfg(target_arch = "loongarch64")]
+            self.tlb_hart_mask.fetch_or(bit, Ordering::Release);
         }
     }
 
@@ -2059,6 +2081,8 @@ impl MemorySet {
             areas: Vec::new(),
             active_hart_mask: AtomicUsize::new(0),
             #[cfg(target_arch = "loongarch64")]
+            tlb_hart_mask: AtomicUsize::new(0),
+            #[cfg(target_arch = "loongarch64")]
             asid: AtomicUsize::new(0),
         }
     }
@@ -2071,6 +2095,8 @@ impl MemorySet {
             page_table: PageTable::from_kernel()?,
             areas: Vec::new(),
             active_hart_mask: AtomicUsize::new(0),
+            #[cfg(target_arch = "loongarch64")]
+            tlb_hart_mask: AtomicUsize::new(0),
             #[cfg(target_arch = "loongarch64")]
             asid: AtomicUsize::new(allocate_asid()?),
         })

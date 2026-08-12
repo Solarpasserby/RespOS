@@ -1,5 +1,23 @@
 # RespOS 当前状态
 
+## 2026-08-12 LA SMP 阶段 1E：按 TLB residency 缩小远端失效目标（当前工作树）
+
+- **实现**：LA `MemorySet` 新增独立 `tlb_hart_mask`。scheduler 激活地址空间时同时记录 active 与
+  residency；普通 PTE writer 向自上次同步失效后加载过该 ASID 的 residency 集合发请求，完成后在
+  MemorySet 写锁保护下把 residency 收缩回 active。RV64 的 active-mask/SBI RFENCE 路径未改变。
+- **回收安全性**：LA retired data frame 仍为全局批次，可能混有多个 MemorySet。只要本轮冻结到非空
+  批次，就继续对全部 online hart 完成全量失效后才释放；只有不释放旧 frame 的 PTE 更新才缩小目标。
+  不能直接使用当前 active mask，因为已切到 idle 的 hart 仍可能缓存同 ASID 的旧项。
+- **正确性门禁**：LA `-m 12G -smp 12` 双 `smp_shared_mm_probe` 各 100 轮和 Phase3 30 轮通过；
+  LA `-m 4G -smp 12` 以 BusyBox xargs 串行 exec 1200 个短进程并打印 `ASID_CHURN_STAGE_E_PASS`，pid
+  达到 1204。默认 LA/RV release 顺序构建通过；RV `-m 4G -smp 8` shared-MM 100 轮通过。
+- **性能计数**：相同 12-hart、30 秒 BuildStorm perf 窗口中，Stage C 基线 remote RFENCE 93800、
+  full invalidations 1127163；本阶段为 7424 和 169422，分别约下降 92.1% 与 85.0%。两轮 user trap
+  约 19.5 万/18.0 万、context switch 4155/4389，进度量级接近；该对比证明目标集合缩小，不等同于
+  BuildStorm wall-time 加速比。本轮窗口含 3304 次 COW fault，未出现 frame 回收故障。
+- **剩余边界**：本地和远端 handler 仍执行全量 `invtlb op=0`；按 ASID/VA 精确失效、Global kernel
+  映射与全局 retired batch 的按地址空间拆分仍需分别验证，不能由本阶段结果外推。
+
 ## 2026-08-12 LA SMP 阶段 1D：FP/LSX 首次使用门控（当前工作树）
 
 - **实现**：LA 用户 trap frame 从 800 字节扩为 816 字节，新增扩展状态激活标记和对齐槽。exec 初始

@@ -477,11 +477,13 @@ FdTable slot (FdEntry: descriptor flags)
   全局串行调度器；enqueue 后会向满足 affinity 的 idle hart 发送 IPI。LoongArch 的 boot hart
   在进入用户态前最多等待 1 秒收集 online mask，较小的 `-smp` 覆盖不会阻止启动。
 - 页表失效：RV64 通过 SBI RFENCE 对 active address-space mask 做同步远端 TLB shootdown；
-  LoongArch 通过 IOCSR IPI vector 1 和 per-target generation request/ack 槽完成同一语义。页表 root
-  切换只需本地 flush，实际 PTE 修改才发远端请求；旧 frame 必须在全部 ack 后回收。LA 当前把被
-  清除或替换的旧数据页加入全局退役批次，并对所有 online hart 完成全量失效后释放该批次；这是
-  按地址空间精确退役跟踪前的保守正确性边界。LA 内核态通常关中断，因此项目 SpinMutex 和
-  MemorySet RwLock 的竞争等待点会轮询 pending IPI。
-- 边界：用户 ASID 已启用，但 PTE writer 仍使用全量 `invtlb op=0`；request/ack 已通过 12-hart
-  单/双实例 `smp_shared_mm_probe`。引入精确失效或 Global kernel 映射仍须重新验证 generation、
-  active mask 和 frame 回收顺序；在此之前不能把退役批次的 online mask 缩成 active mask。
+  LoongArch 通过 IOCSR IPI vector 1 和 per-target generation request/ack 槽完成同一协议。页表 root
+  切换不发远端请求；LA `MemorySet` 另以 residency mask 记录自上次同步失效后加载过其 ASID 的 hart，
+  普通 PTE 更新只向该集合 shootdown，完成后把 residency 收缩回 active mask。不能直接只用当前 active
+  mask：已经切到 idle 的 hart 仍可能保留同 ASID 的旧项。
+- frame 回收：LA 清除或替换的旧数据页先进入全局退役批次。冻结到非空批次时仍对全部 online hart
+  完成全量失效后才能释放，因为批次可能混合多个 MemorySet；空批次的映射新增/权限更新才使用当前
+  MemorySet 的 residency。LA 内核态通常关中断，SpinMutex 和 MemorySet RwLock 的等待点会轮询 IPI。
+- 边界：本阶段仍执行全量本地 `invtlb op=0`，只缩小远端目标 hart 集合。按 ASID/VA 精确失效或
+  Global kernel 映射仍须重新验证 software refill、generation、G 位与 frame 回收顺序；不能把全局
+  retired-frame 批次的 online mask 缩成某一个 MemorySet 的 residency/active mask。

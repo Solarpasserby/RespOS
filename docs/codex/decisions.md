@@ -474,14 +474,16 @@
 - 状态：已采用
 - 适用范围：LA SMP、共享 MemorySet、PTE 修改与 frame 回收
 - 最后验证：2026-08-12
-- 证据：`os/src/arch/loongarch64/smp.rs`、`os/src/mm/memory_set.rs`；LA 12-hart 单/双实例
-  `smp_shared_mm_probe`
+- 证据：`os/src/arch/loongarch64/smp.rs`、`os/src/mm/memory_set.rs`；LA 12-hart 双
+  `smp_shared_mm_probe`、Phase3、1200 短进程 ASID 复用与 30 秒 BuildStorm `perf_counters` 窗口
 - 内容：IOCSR IPI vector 1 表示“检查本 hart 的 shootdown 槽”。请求者按 hart id 顺序独占每个
-  target slot，发布 generation 后发送 IPI 并同步等待 ack；目标执行本地全 TLB 失效后确认。地址空间
-  root 切换不发送远端请求，只有 PTE writer 使用该协议。LA 清除或替换 PTE 后先全局退役旧数据页，
-  当前对全部 online hart 完成 shootdown 后才释放；这是精确按地址空间回收前的保守选择。
-- 后续影响：LA 关中断内核的锁竞争等待必须能服务 pending IPI；handler 不得拿普通锁。ASID 已在
-  后续阶段验证；精确地址失效、Global 映射或异步 shootdown 仍须作为独立协议重新验证。
+  target slot，发布 generation 后发送 IPI 并同步等待 ack；目标执行本地全 TLB 失效后确认。启用 ASID
+  后，每个 MemorySet 以独立 residency mask 记录自上次同步失效后可能缓存其 TLB 的 hart；普通 PTE
+  更新向 residency shootdown，完成后收缩为 active mask。只用 active mask 不安全，因为 inactive hart
+  仍可保留同 ASID 的旧项。
+- 后续影响：全局 retired-frame 批次可能混入多个 MemorySet，只要批次非空，释放前仍必须 shootdown
+  全部 online hart；residency 只优化不释放旧 frame 的普通 PTE 更新。LA 关中断内核的锁等待必须服务
+  pending IPI，handler 不得拿普通锁。按 ASID/VA 精确失效、Global 映射或异步 shootdown 仍须单独验证。
 
 ## LoongArch 用户 MemorySet 持有可延迟复用的 10-bit ASID
 
