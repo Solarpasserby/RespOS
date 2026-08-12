@@ -18,6 +18,10 @@ pub struct TrapContext {
     pub vr: [[u64; 2]; 32],
     pub fcsr: usize,
     pub fcc: [u8; 8],
+    // Keep this as a machine word: trap.S reads it directly and the trailing
+    // padding keeps the complete user trap frame 16-byte aligned.
+    extension_state_active: usize,
+    _extension_state_padding: usize,
 }
 
 const _: () = {
@@ -26,7 +30,9 @@ const _: () = {
     assert!(core::mem::offset_of!(TrapContext, vr) == 272);
     assert!(core::mem::offset_of!(TrapContext, fcsr) == 784);
     assert!(core::mem::offset_of!(TrapContext, fcc) == 792);
-    assert!(core::mem::size_of::<TrapContext>() == 800);
+    assert!(core::mem::offset_of!(TrapContext, extension_state_active) == 800);
+    assert!(core::mem::offset_of!(TrapContext, _extension_state_padding) == 808);
+    assert!(core::mem::size_of::<TrapContext>() == 816);
 };
 
 impl TrapContext {
@@ -59,6 +65,12 @@ impl TrapContext {
     }
     pub fn set_sepc(&mut self, sepc: usize) {
         self.era = sepc;
+    }
+    pub fn extension_state_active(&self) -> bool {
+        self.extension_state_active != 0
+    }
+    pub fn activate_extension_state(&mut self) {
+        self.extension_state_active = 1;
     }
     /// 获取 syscall id（LoongArch: a7 = r11）
     pub fn syscall_id(&self) -> usize {
@@ -102,6 +114,8 @@ impl TrapContext {
             vr: [[0; 2]; 32],
             fcsr: 0,
             fcc: [0; 8],
+            extension_state_active: 0,
+            _extension_state_padding: 0,
         };
         cx.set_sp(sp);
         cx

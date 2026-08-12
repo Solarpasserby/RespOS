@@ -1,5 +1,23 @@
 # RespOS 当前状态
 
+## 2026-08-12 LA SMP 阶段 1D：FP/LSX 首次使用门控（当前工作树）
+
+- **实现**：LA 用户 trap frame 从 800 字节扩为 816 字节，新增扩展状态激活标记和对齐槽。exec 初始
+  关闭用户 EUEN.FPE/SXE；首次 FloatingPointUnavailable/SimdUnavailable 激活任务但不推进 ERA，
+  返回路径恢复零状态并重试。未激活任务的 trap 不执行向量/浮点保存，激活后仍使用原 eager 隔离。
+- **正确性边界**：这是 per-task first-use gating，不是跨 hart lazy-owner。trap entry 在读到 EUEN 未
+  启用时必须先跳过所有 FP/LSX 指令；进入 Rust 内核前重新开启扩展。fork 复制整个 trap frame，exec
+  重置激活标记。内核 trap 的 272 字节汇编帧未改变；signal mcontext 的 FP/LSX ABI 仍待补齐。
+- **LA 12-hart 门禁**：QEMU 10.0.2、`-m 12G -smp 12 -snapshot`、LA pub x0 与临时 diagnostic x1，
+  online mask `0xfff`。官方动态 BusyBox 执行成功；`smp_shared_mm_probe` 100 轮、`smp_phase3_probe`
+  30 轮通过；从 `/glibc` 启动原始 CAgent 脚本，10 项全部 pass、group end、退出码 0。
+- **计数结果**：同配置 `perf_counters` 窗口在 reset 后运行 BusyBox true/echo/cat，记录 user traps 535、
+  extension eager saves 62；旧实现每次 user trap 均保存，故该窗口减少 473 次（约 88.4%）扩展保存。
+  这是小型功能窗口的操作次数，不代表 BuildStorm wall-time 加速比。实际使用扩展的任务仍承担一次
+  unavailable trap 和后续 eager 保存成本。
+- **RV 边界**：变更仅位于 `arch/loongarch64`。RV64 release 顺序构建通过，并在 `-m 4G -smp 8`
+  diagnostic 启动后通过 `smp_shared_mm_probe` 100 轮。LA/RV 构建仍须顺序执行，避免共享 Cargo 配置污染。
+
 ## 2026-08-12 LA SMP 阶段 1C：ASID 与免逐切换全失效（当前工作树）
 
 - **实现**：ASID 0 保留给 kernel/idle，用户 MemorySet 使用 1--1023。软件 MMU token 携带 root 与
@@ -175,7 +193,7 @@
   本地模拟。结果对应当前本地 pub 镜像，不替代评测方最终镜像哈希确认；该轮记录的 LA 单 hart
   限制已由上方 2026-08-11 LA SMP 记录取代，12 GiB 分段硬编码与正式 36 GiB 动态布局问题仍保留。
 
-## 2026-08-11 LoongArch FP/LSX 用户上下文修复（当前工作树）
+## 2026-08-11 LoongArch FP/LSX 用户上下文修复（历史基线，已由阶段 1D 取代）
 
 - **根因**：LA 初始化时已开启 `EUEN.FPE/SXE`，官方 Rust 工具链也会执行 LSX 指令，但原
   `TrapContext` 和 user trap 汇编只保存通用寄存器、PRMD 与 ERA。timer、syscall 或调度发生后，
@@ -189,9 +207,9 @@
   SIGSEGV，并进入正式 arceos 构建的 `compiler_builtins`/`core` 编译。QEMU 持续约 100% 单核 CPU；
   运行 10 分 23 秒后按用户要求由宿主停止，因此没有 BuildStorm group end，不能宣称完整通过。
   日志：`/tmp/respos-la-lsx-context.log`。
-- **边界与代价**：当前为 eager 策略，每次 user trap 固定搬运约 528 字节扩展状态，会增加 syscall/
-  timer 开销；后续可用 lazy-FPU/LSX 优化。当前 LoongArch 用户信号 mcontext 仍只公开/恢复 GPR，
-  signal handler 的完整 FP/LSX ABI 另行补齐；这不影响本次跨 trap/任务切换修复的因果结论。
+- **当时的边界与代价**：该基线为全量 eager 策略，每次 user trap 固定搬运约 528 字节扩展状态；现已
+  由上方阶段 1D 的首次使用门控取代。LoongArch 用户信号 mcontext 仍只公开/恢复 GPR，signal handler
+  的完整 FP/LSX ABI 另行补齐；这不影响该历史记录的因果结论。
 
 ## 2026-08-11 kernel heap 移出静态 BSS（当前工作树）
 

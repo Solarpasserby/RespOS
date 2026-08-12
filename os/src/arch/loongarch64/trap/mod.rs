@@ -136,9 +136,11 @@ fn read_badi() -> usize {
 #[unsafe(no_mangle)]
 pub fn trap_handler(cx: &mut TrapContext) {
     crate::perf::user_trap(1);
-    // 当前 LA user trap 汇编会在进入此函数前 eager 保存全部 FP/LSX
-    // 状态，并在正常返回用户态前恢复；单独计数用于评估 lazy owner 的收益上限。
-    crate::perf::extension_state_eager_save(1);
+    // 未使用过 FP/LSX 的任务在汇编入口跳过扩展状态保存。任务首次
+    // 触发 FPD/SXD 后仍采用 eager save/restore，以保持跨核迁移语义简单可靠。
+    if cx.extension_state_active() {
+        crate::perf::extension_state_eager_save(1);
+    }
     match estat::cause(estat::read()) {
         estat::Trap::Interrupt(estat::Interrupt::Timer) => {
             crate::perf::user_timer_trap(1);
@@ -160,6 +162,12 @@ pub fn trap_handler(cx: &mut TrapContext) {
         estat::Trap::Exception(exception) if is_page_fault(exception) => {
             crate::perf::user_page_fault_trap(1);
             handle_user_page_fault(cx, exception);
+        }
+        estat::Trap::Exception(
+            estat::Exception::FloatingPointUnavailable | estat::Exception::SimdUnavailable,
+        ) => {
+            // __restore enables FP/LSX and retries the faulting instruction.
+            cx.activate_extension_state();
         }
         estat::Trap::Exception(estat::Exception::IllegalInstruction) => {
             let inst = read_badi();

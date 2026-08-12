@@ -498,3 +498,17 @@
   精确失效或缩小 frame-retirement target 正确；这些优化必须分别通过 shared-MM 与复用压力门禁。
   当前最多支持 1023 个同时存活的独立用户 MemorySet；若扩展上限，必须实现 active-ASID 保留的
   generation rollover，不能复用尚未退役的编号。
+
+## LoongArch 扩展状态采用 per-task first-use gating
+
+- 状态：已采用
+- 适用范围：LA FP/LSX trap、task switch、fork/exec、SMP 迁移
+- 最后验证：2026-08-12
+- 证据：`os/src/arch/loongarch64/trap/{context.rs,trap.S,mod.rs}`；12-hart BusyBox、CAgent、
+  shared-MM、Phase3 与 `perf_counters` 窗口
+- 内容：exec 后先关闭用户 EUEN.FPE/SXE，首次 FPD/SXD 只标记 trap frame 并重试原指令；未激活任务
+  跳过 FP/LSX/FCSR/FCC 保存恢复，激活任务继续使用既有 eager 隔离。内核执行 Rust 前始终重新启用
+  扩展。本阶段不引入 per-CPU owner，不允许在未证明跨 hart owner 迁移和内核扩展使用安全前进一步
+  改为 fully lazy save/restore。
+- 后续影响：fork 复制激活标记和扩展状态，exec 清零；signal mcontext 仍需独立补齐。测得 535 次
+  user trap 中扩展 eager save 为 62 次；该数值证明门控生效，不是正式 BuildStorm 加速比。

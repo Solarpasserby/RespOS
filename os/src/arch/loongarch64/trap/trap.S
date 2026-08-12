@@ -37,6 +37,8 @@
 #     vr0..vr31@sp+272..783 (32*16)
 #     fcsr0@sp+784
 #     fcc0..fcc7@sp+792..799
+#     extension_state_active@sp+800
+#     padding@sp+808
 
     .section .text
     .globl __trap_from_user
@@ -51,8 +53,8 @@ __trap_from_user:
     # 现在 $sp 指向内核栈（由之前恢复流程保留在 KSAVE0 中的值）
     # 如果没有之前的值，说明是首次trap，KSAVE0需要预先初始化
 
-    # 步骤2: 在内核栈上分配 TrapContext 空间 (800 bytes, 16-byte aligned)
-    addi.d      $sp, $sp, -800
+    # 步骤2: 在内核栈上分配 TrapContext 空间 (816 bytes, 16-byte aligned)
+    addi.d      $sp, $sp, -816
 
     # 步骤3: 保存通用寄存器
     # x0 恒为0不需要保存，但为了对齐我们保存0
@@ -100,8 +102,15 @@ __trap_from_user:
     csrrd       $t0, 0x6           # ERA
     st.d        $t0, $sp, 264      # offset 33*8
 
-    # 保存完整 LSX/浮点状态。LSX 的低 64 位与标量浮点寄存器重叠，
-    # 因而保存 128-bit vr0..vr31 即同时覆盖 FP 与 LSX。
+    # 只有已启用扩展的用户任务才有需要保存的 FP/LSX 状态。未启用时
+    # 不能执行任何向量/浮点指令，否则会在 trap entry 内再次异常。
+    csrrd       $t0, 0x2           # EUEN
+    andi        $t1, $t0, 0x3      # FPE | SXE
+    xori        $t1, $t1, 0x3
+    bnez        $t1, .Lskip_user_extension_save
+
+    # LSX 的低 64 位与标量浮点寄存器重叠，保存 128-bit vr0..vr31
+    # 即同时覆盖 FP 与 LSX。
     .set n, 0
     .rept 32
         SAVE_VR %n
@@ -125,6 +134,12 @@ __trap_from_user:
     st.b        $t0, $sp, 798
     movcf2gr    $t0, $fcc7
     st.b        $t0, $sp, 799
+
+.Lskip_user_extension_save:
+    # Rust 内核可能由编译器生成 FP/LSX 指令。内核执行期间始终启用扩展。
+    csrrd       $t0, 0x2
+    ori         $t0, $t0, 0x3
+    csrwr       $t0, 0x2
 
     # 用户态可以自由使用 tp。进入 Rust 内核前恢复内核 tp，避免
     # trap_handler 在用户 tp 下运行。
@@ -165,7 +180,14 @@ __restore:
     la.local    $t0, __trap_from_user
     csrwr       $t0, 0xc
 
-    # 在恢复通用寄存器前恢复用户扩展状态，以便自由使用 t0。
+    # 在恢复通用寄存器前按任务状态恢复用户扩展状态，以便自由使用 t0。
+    # 未激活的任务关闭 EUEN.FPE/SXE，让第一条扩展指令触发 FPD/SXD。
+    ld.d        $t0, $sp, 800
+    beqz        $t0, .Ldisable_user_extensions
+
+    csrrd       $t0, 0x2
+    ori         $t0, $t0, 0x3
+    csrwr       $t0, 0x2
     ld.d        $t0, $sp, 784
     movgr2fcsr  $fcsr0, $t0
     ld.bu       $t0, $sp, 792
@@ -189,6 +211,14 @@ __restore:
         LOAD_VR %n
         .set n, n+1
     .endr
+    b           .Luser_extensions_ready
+
+.Ldisable_user_extensions:
+    csrrd       $t0, 0x2
+    bstrins.d   $t0, $zero, 1, 0
+    csrwr       $t0, 0x2
+
+.Luser_extensions_ready:
 
     # 即将恢复用户寄存器，先把当前内核 tp 留到 KSAVE1，供下次 trap entry 使用。
     ori         $t0, $tp, 0
@@ -196,7 +226,7 @@ __restore:
 
     # 先保存下次 trap entry 要使用的内核栈顶。这个步骤会使用 $t0，
     # 必须发生在恢复用户 $t0 之前，否则异步中断返回会破坏用户寄存器。
-    addi.d      $t0, $sp, 800      # t0 = kernel stack top
+    addi.d      $t0, $sp, 816      # t0 = kernel stack top
     csrwr       $t0, 0x30          # KSAVE0 = kernel sp (下次 trap entry 时 csrwr 恢复)
 
     # 恢复通用寄存器

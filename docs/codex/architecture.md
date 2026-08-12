@@ -107,16 +107,18 @@
   PCI/MMIO 空洞。调整 heap 容量时必须同时验证实际 RAM 上限与 early direct-map 可达范围；
   若以后改为 frame-backed 可扩展 heap，需要先消除 frame allocator 初始化对 `Vec`/全局堆的依赖。
 
-### LoongArch 用户 trap eager 保存 FP/LSX 状态
+### LoongArch 用户 FP/LSX 状态按任务首次使用启用
 
-- 状态：已实现；BuildStorm 工具链与 minibuild 回归通过
+- 状态：已实现并通过 12-hart 扩展程序与 SMP 专项
 - 适用范围：LA `EUEN.FPE/SXE`、user trap、timer 抢占、task switch、fork/exec
-- 最后验证：2026-08-11
-- 证据：`os/src/arch/loongarch64/trap/{context.rs,trap.S}`；`/tmp/respos-la-lsx-context.log`
-- 内容：LA 用户 trap frame 为 800 字节，保存 GPR/PRMD/ERA、32 个 128-bit LSX/FP 寄存器、
-  FCSR0 和 FCC0..7；关键 Rust field offset 与总大小由 const assertion 固定。扩展状态保存在任务内核栈
-  的固定 trap frame 中，因此随任务调度隔离，并由 fork 复制、exec 清零。
-- 后续影响：当前 eager save/restore 优先保证正确性；lazy extension state 可作为性能优化。Linux LA
+- 最后验证：2026-08-12
+- 证据：`os/src/arch/loongarch64/trap/{context.rs,trap.S,mod.rs}`；12-hart BusyBox、CAgent、
+  `smp_shared_mm_probe` 与 `smp_phase3_probe`
+- 内容：LA 用户 trap frame 为 816 字节，保存 GPR/PRMD/ERA、32 个 128-bit LSX/FP 寄存器、FCSR0、
+  FCC0..7 和扩展状态激活标记。新 exec 初始关闭用户 FPE/SXE；首次 FPD/SXD 不推进 ERA，而是激活任务、
+  恢复初始零状态并重试。未激活任务的 trap 跳过扩展寄存器搬运；激活后仍按每次 trap eager 保存恢复，
+  因而无需维护跨 hart lazy owner。状态随 fork 复制、exec 清零。
+- 后续影响：每个实际使用扩展的任务多一次 unavailable trap；已激活任务仍承担 eager 成本。Linux LA
   signal mcontext 的扩展状态接口尚未实现，不能把 task trap 隔离等同于完整 signal FP/LSX ABI。
 
 ### LoongArch 用户地址空间使用 10-bit ASID，切换不再完整失效 TLB

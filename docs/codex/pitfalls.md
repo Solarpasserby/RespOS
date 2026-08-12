@@ -61,14 +61,16 @@
 
 - 状态：已确认并修复 user trap/task 隔离
 - 适用范围：LA `EUEN.FPE/SXE`、Rust/glibc 大型动态程序、timer/syscall/task switch
-- 最后验证：2026-08-11
+- 最后验证：2026-08-12
 - 证据：修复前直接 `rustc --version`、`cargo` 与 BuildStorm 稳定 SIGSEGV；新增 eager
-  FP/LSX/FCSR/FCC 保存恢复后 CAgent 10/10、toolchain 和 minibuild 通过，并进入正式 `core` 编译。
+  FP/LSX/FCSR/FCC 保存恢复后 CAgent 10/10、toolchain 和 minibuild 通过；首次使用门控后 12-hart
+  CAgent 10/10、shared-MM 100 轮和 Phase3 30 轮继续通过。
 - 内容：只打开 EUEN 而不保存寄存器会让用户扩展状态跨异步 trap 和任务切换串扰；崩溃可能表现为
   普通 load 的坏指针，而不是 illegal instruction 或浮点异常。关闭 timer 抢占不能完整规避 syscall/阻塞
-  调度，也不能代替架构上下文实现。
+  调度，也不能代替架构上下文实现。首次使用优化必须在 user trap entry 判断 EUEN 后再执行向量指令；
+  进入 Rust 内核前则要重新启用内核扩展，避免在保存路径内形成嵌套 unavailable trap。
 - 后续影响：新增架构扩展时同时审计 enable、trap save/restore、fork/exec、signal frame 和 ptrace。当前
-  signal mcontext 尚缺 FP/LSX 扩展；eager 保存有固定开销，只有在正确性回归稳定后才考虑 lazy 化。
+  signal mcontext 尚缺 FP/LSX 扩展；当前只是 per-task first-use gating，不是跨 hart lazy-owner。
 
 ## 内核堆存储不能作为巨型静态 BSS
 
