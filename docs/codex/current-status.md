@@ -1,5 +1,25 @@
 # RespOS 当前状态
 
+## 2026-08-12 LA SMP 阶段 1A：动态内存与 2 MiB direct map（当前工作树）
+
+- **实现**：LA boot hart 在关闭 DMW0 前通过 QEMU virt `fw_cfg` MMIO 的
+  `FW_CFG_RAM_SIZE` 读取实际 guest RAM，按 256 MiB low RAM + high RAM 计算物理末址；解析失败时
+  保留旧 12 GiB 上限，支持上限钳制为比赛 36 GiB。该路径完全位于 LoongArch 条件编译代码，RV64
+  仍使用 OpenSBI FDT。
+- **页表启动成本**：LA 正式 high-RAM direct map 从逐个 4 KiB PTE 改为 PMD 2 MiB huge leaf，
+  huge entry 使用 bit 6、HGlobal 使用 bit 12；软件 TLB refill 遇到 huge leaf 时不再执行仅适用于
+  table pointer 的 `-1`。这使 12 GiB/12 hart 无根盘启动在约 6 秒内到达预期 root-device panic，
+  避免按 36 GiB 建立约九百万个 4 KiB 映射。
+- **动态容量验证**：QEMU 10.0.2、LA pub/preliminary x0、diagnostic x1、`-snapshot -smp 12`；
+  `-m 4G` 进入 shell 后 `/proc/meminfo` 报 `MemTotal: 4194304 kB`、online mask `0xfff`；
+  `-m 12G` 同样以 online mask `0xfff` 进入 shell。4 GiB 结果证明不再固定使用 12 GiB 上限。
+- **短 BuildStorm**：LA pub x0、12 GiB/12 hart 的 30 秒 guest `timeout` 窗口通过 toolchain 与
+  minibuild，进入 `arceos-helloworld` timed build；timeout 只结束父 shell 后仍有子进程输出，属于
+  已知进程组/timeout 语义缺口，因此该窗口仅作活性回归，不作计时成绩。
+- **双架构门禁**：LA/RV64 no-feature release 均构建通过；RV64 `-m 4G -smp 8`、diagnostic x1
+  启动到内嵌 shell。完整 36 GiB 启动受本地主机内存限制仍待评测平台验证；下一阶段仍是 LA
+  远端 TLB shootdown/ack。
+
 ## 2026-08-12 LA SMP 阶段 0 性能观测基线（当前工作树）
 
 - **诊断边界**：`perf_counters` 新增 scheduler lock 获取/等待/ready peak、IPI 接收、完整 TLB

@@ -52,6 +52,7 @@ pub fn rust_main(hart_id: usize, opaque: usize) -> ! {
 #[unsafe(no_mangle)]
 pub fn rust_main() -> ! {
     clear_bss();
+    config::init_physical_memory_end();
 
     arch::enable_boot_paging();
     unsafe {

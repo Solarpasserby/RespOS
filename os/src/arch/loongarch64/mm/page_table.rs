@@ -40,6 +40,8 @@ const PTE_D: usize = 1 << 1;
 const PTE_PLV_USER: usize = 3 << 2;
 const PTE_MAT_CC: usize = 1 << 4;
 const PTE_G: usize = 1 << 6;
+const PMD_HUGE: usize = 1 << 6;
+const PMD_HGLOBAL: usize = 1 << 12;
 const PTE_P: usize = 1 << 7;
 const PTE_W: usize = 1 << 8;
 const PTE_COW: usize = 1 << 9;
@@ -94,6 +96,43 @@ pub struct PageTable {
 }
 
 impl PageTable {
+    /// Install one aligned 2 MiB kernel direct-map entry in the PMD.
+    ///
+    /// LoongArch marks a directory leaf with bit 6. Its global bit moves from
+    /// bit 6 to bit 12, which is available because a 2 MiB physical base is
+    /// aligned well beyond that bit.
+    pub fn map_huge_2m(&mut self, va: VirtAddr, pa: PhysAddr, flags: PTEFlags) -> SysResult {
+        const HUGE_SIZE: usize = 2 * 1024 * 1024;
+        let va_raw = usize::from(va);
+        let pa_raw = usize::from(pa);
+        if va_raw % HUGE_SIZE != 0 || pa_raw % HUGE_SIZE != 0 {
+            return Err(Errno::EINVAL);
+        }
+
+        let indexes = get_vpn_indexes(VirtPageNum::from(va_raw >> PAGE_SIZE_BITS));
+        let root = &mut self.root_ppn.get_pte_array()[indexes[0]];
+        if !root.is_valid() {
+            let frame = alloc_frame().ok_or(Errno::ENOMEM)?;
+            *root = PageTableEntry::new_table(frame.ppn());
+            self.frames.push(frame);
+        }
+        if root.is_huge() {
+            return Err(Errno::EEXIST);
+        }
+
+        let pmd = &mut root.ppn().get_pte_array()[indexes[1]];
+        if pmd.is_valid() {
+            return Err(Errno::EEXIST);
+        }
+        let mut bits = (pa_raw >> PAGE_SIZE_BITS) << 12;
+        bits |= flags_to_la64(flags | PTEFlags::VALID | PTEFlags::ACCESSED);
+        if bits & PTE_G != 0 {
+            bits = (bits & !PTE_G) | PMD_HGLOBAL;
+        }
+        pmd.bits = bits | PMD_HUGE;
+        Ok(())
+    }
+
     pub fn new() -> Self {
         let frame = alloc_frame().expect("Failed to allocate frame for page table");
         Self {
@@ -434,6 +473,10 @@ impl PageTableEntry {
 
     pub fn is_valid(&self) -> bool {
         self.bits & PTE_V != 0
+    }
+
+    fn is_huge(&self) -> bool {
+        self.bits & PMD_HUGE != 0
     }
 
     pub fn readable(&self) -> bool {

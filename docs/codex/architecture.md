@@ -71,6 +71,23 @@
 - 后续影响：不得把 early “最大可达窗口”当成真实 RAM 分配上限；增大支持内存时
   必须同时审计 Sv39 物理地址范围、FDT 位置、direct-map leaf 和小内存启动。
 
+### LoongArch 物理内存上限来自 QEMU fw_cfg
+
+- 状态：已实现并验证 4 GiB/12 GiB，36 GiB 平台实测待验证
+- 适用范围：LA early DMW、frame allocator、kernel direct map、procfs/sysinfo
+- 最后验证：2026-08-12
+- 证据：`os/src/arch/loongarch64/config/board.rs`、
+  `os/src/arch/loongarch64/{mm/page_table.rs,tlb_refill.S}`、`os/src/mm/memory_set.rs`；结果见
+  [current-status.md](./current-status.md)。
+- 内容：boot hart 在关闭 DMW0 前从 QEMU virt `0x1e020000` fw_cfg MMIO 读取
+  `FW_CFG_RAM_SIZE`，以 256 MiB low RAM 和 `0x80000000` high RAM 起点换算实际 high end。
+  正式页表保留 low RAM 的 4 KiB 权限映射，高 RAM 使用带 Global 的 PMD 2 MiB huge leaf；软件
+  refill 必须区分 table pointer 与 bit-6 huge leaf，后者不能执行 table-pointer 解码的 `-1`。
+  fw_cfg 无效时保留 12 GiB 兼容上限，发现值最高钳制到比赛 36 GiB。
+- 后续影响：36 GiB 支持不能退回逐页 direct map；调整 RAM 上限时必须同时审计 39-bit VA、物理
+  地址位宽、PMD 对齐和 frame allocator bitmap。fw_cfg 只在 DMW0 生效的 boot hart 早期读取，
+  secondary 不得重复访问或修改全局物理上限。
+
 ### kernel heap 是启动期 RAM 预留区，不属于 ELF/BSS
 
 - 状态：已实现，RV64/LoongArch 启动烟测通过
@@ -81,7 +98,7 @@
 - 内容：buddy bitmap 与 heap storage 不再声明为静态 BSS，而是从页对齐的 `ekernel` 之后连续
   预留；两者通过已经生效的 high-half direct map 访问。`init_heap()` 返回物理预留末端，frame
   allocator 必须排除该区间，不能再次分配这些页。RV64 heap 位于 `ekernel` 后；LoongArch
-  QEMU 12 GiB RAM 实际分为 `0..0x10000000` 与 `0x80000000..0x370000000`，256 MiB heap
+  QEMU RAM 分为 `0..0x10000000` 与从 `0x80000000` 开始的动态 high RAM，256 MiB heap
   位于高端段起始处，frame allocator 同时管理扣除内核/heap 后的两个不连续区间。容量仍在启动时
   固定，运行期不扩容。
 - 后续影响：初始化顺序必须保持 heap reservation → heap init → frame allocator init → final

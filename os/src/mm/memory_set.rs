@@ -1,6 +1,5 @@
 // os/src/mm/memory_set.rs
 
-#[cfg(target_arch = "riscv64")]
 use super::address::PhysAddr;
 use super::address::{PhysPageNum, StepByOne, VPNRange, VirtAddr, VirtPageNum};
 use super::frame_allocator::{FrameTracker, frame_alloc};
@@ -1986,16 +1985,30 @@ impl MemorySet {
             0,
         );
         #[cfg(target_arch = "loongarch64")]
-        memory_set.push_empty_map_area(
-            MapArea::new(
+        {
+            const HUGE_SIZE: usize = 2 * 1024 * 1024;
+            let flags =
+                PTEFlags::from(MapPermission::READ | MapPermission::WRITE | MapPermission::GLOBAL);
+            assert_eq!(
+                memory_end % HUGE_SIZE,
+                0,
+                "LoongArch RAM end must be 2 MiB aligned"
+            );
+            let mut pa = crate::config::HIGH_MEMORY_START;
+            while pa < memory_end {
+                memory_set
+                    .page_table
+                    .map_huge_2m(VirtAddr::from(KERNEL_BASE + pa), PhysAddr::from(pa), flags)
+                    .expect("failed to map LoongArch kernel RAM huge page");
+                pa += HUGE_SIZE;
+            }
+            memory_set.areas.push(MapArea::new(
                 VirtAddr::from(KERNEL_BASE + crate::config::HIGH_MEMORY_START),
                 VirtAddr::from(KERNEL_BASE + memory_end),
                 MapType::Direct,
                 MapPermission::READ | MapPermission::WRITE,
-            ),
-            None,
-            0,
-        );
+            ));
+        }
         #[cfg(target_arch = "riscv64")]
         if memory_end > first_gigabyte_end {
             const GIGABYTE: usize = 1 << 30;

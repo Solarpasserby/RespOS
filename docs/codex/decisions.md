@@ -291,6 +291,19 @@
   分页再跳转高半区，不采用与公共内核假设割裂的独立低地址模型。
 - 后续影响：LoongArch 修复应尽量收敛在 arch 层，不能未经全局审计改变公共地址空间模型。
 
+## LoongArch RAM 发现与 direct map 保持架构内聚
+
+- 状态：已采用，4/12 GiB 已验证，36 GiB 平台回归待验证
+- 适用范围：LA QEMU virt 启动、kernel direct map、frame allocator
+- 最后验证：2026-08-12
+- 内容：LA 从 QEMU fw_cfg 获取实际 RAM，失败时保留兼容上限；high RAM 使用 PMD 2 MiB huge
+  leaf。公共 MM 只消费 `physical_memory_end()`，不感知 fw_cfg、LA RAM 空洞或 huge PTE 编码。
+- 理由：比赛 LA 内存为 36 GiB，固定 12 GiB 会浪费资源；而用 4 KiB 页覆盖 36 GiB 会产生约
+  九百万次映射和大量页表页。将发现和编码收敛到 LA arch 层可避免改变 RV64 已验证的 FDT/Sv39
+  路径。
+- 后续影响：任何 LA RAM 布局变化要先验证 fw_cfg 合约和 PMD 对齐；不得为共享优化改动 RV64
+  页表实现而不做独立 A/B 与运行门禁。
+
 ## syscall 保持薄层，领域对象拥有状态机
 
 - 状态：已确认
