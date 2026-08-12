@@ -1,6 +1,5 @@
 #![no_std]
 #![no_main]
-#![cfg_attr(target_arch = "loongarch64", allow(dead_code, unused_imports))]
 
 #[macro_use]
 extern crate user_lib;
@@ -61,7 +60,32 @@ smp_shared_mm_clone_thread:
 "#
 );
 
-#[cfg(target_arch = "riscv64")]
+#[cfg(target_arch = "loongarch64")]
+core::arch::global_asm!(
+    r#"
+    .section .text
+    .global smp_shared_mm_clone_thread
+    .type smp_shared_mm_clone_thread, @function
+smp_shared_mm_clone_thread:
+    addi.d $a1, $a1, -16
+    st.d $a2, $a1, 0
+    st.d $a3, $a1, 8
+    ori $a2, $zero, 0
+    ori $a3, $zero, 0
+    ori $a4, $zero, 0
+    addi.w $a7, $zero, 220
+    syscall 0
+    bnez $a0, 1f
+    ld.d $t0, $sp, 0
+    ld.d $a0, $sp, 8
+    jirl $ra, $t0, 0
+    addi.w $a7, $zero, 93
+    syscall 0
+1:
+    jirl $zero, $ra, 0
+"#
+);
+
 unsafe extern "C" {
     fn smp_shared_mm_clone_thread(
         flags: usize,
@@ -104,7 +128,6 @@ extern "C" fn reader_thread(arg: usize) -> i32 {
 }
 
 #[unsafe(no_mangle)]
-#[cfg(target_arch = "riscv64")]
 fn main() -> i32 {
     let mut online = 0usize;
     assert!(sched_getaffinity(0, &mut online) > 0);
@@ -172,12 +195,5 @@ fn main() -> i32 {
     control.phase.store(PHASE_DONE, Ordering::Release);
     wait_for(control, PHASE_EXITED);
     println!("SMP_SHARED_MM_PROBE_PASS rounds={}", ROUNDS);
-    0
-}
-
-#[unsafe(no_mangle)]
-#[cfg(target_arch = "loongarch64")]
-fn main() -> i32 {
-    println!("smp_shared_mm_probe skipped: RV64 SMP only");
     0
 }

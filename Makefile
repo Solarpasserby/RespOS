@@ -13,6 +13,7 @@ LA_FS_IMG ?= img/sdcard-la.img
 PUB_INTERACTIVE_MEM ?= 4G
 LA_PUB_INTERACTIVE_MEM ?= 12G
 PUB_INTERACTIVE_SMP ?= 1
+LA_PUB_INTERACTIVE_SMP ?= 12
 RV_PUB_FS_IMG ?= img/sdcard-rv-pub.img
 LA_PUB_FS_IMG ?= img/sdcard-la-pub.img
 RV_DISK_IMG ?= disk.img
@@ -148,11 +149,8 @@ la: build-la build-disks
 		-rtc base=utc \
 		$(LA_QEMU_DISK_ARGS) |& tee $(LA_OUTPUT)
 
-# Pub-image interactive targets. The user `initproc` executes testrunner only
-# when the user crate is built with the `eval` feature. Clearing it makes
-# initproc start the embedded user_shell, which is the first step for examining
-# the pub images. Keep this path single-core until the kernel's SMP path is
-# implemented and the final-round guest launcher is known.
+# Pub-image targets. RV keeps its conservative interactive defaults; LA uses
+# the same 12 GiB / 12-hart topology as the normal local final-round run.
 run-rv-pub: RV_FS_IMG=$(RV_PUB_FS_IMG)
 run-rv-pub: RV_USER_FEATURES=
 run-rv-pub: MEM=$(PUB_INTERACTIVE_MEM)
@@ -163,7 +161,7 @@ run-rv-pub: check-pub-images rv
 run-la-pub: LA_FS_IMG=$(LA_PUB_FS_IMG)
 run-la-pub: LA_USER_FEATURES=
 run-la-pub: LA_MEM=$(LA_PUB_INTERACTIVE_MEM)
-run-la-pub: LA_SMP=$(PUB_INTERACTIVE_SMP)
+run-la-pub: LA_SMP=$(LA_PUB_INTERACTIVE_SMP)
 run-la-pub: LA_OUTPUT=$(LA_PUB_OUTPUT)
 run-la-pub: check-pub-images la
 

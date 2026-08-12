@@ -59,6 +59,27 @@ pub fn rust_main() -> ! {
     }
 }
 
+#[cfg(target_arch = "loongarch64")]
+#[unsafe(no_mangle)]
+pub fn rust_secondary_main() -> ! {
+    arch::enable_secondary_boot_paging();
+    unsafe {
+        arch::jump_to_high_half(rust_secondary_main_high as usize);
+    }
+}
+
+#[cfg(target_arch = "loongarch64")]
+fn rust_secondary_main_high() -> ! {
+    arch::enable_kernel_extensions();
+    mm::activate_kernel_space();
+    arch::disable_low_direct_map();
+    trap::init();
+    arch::smp::secondary_online();
+    trap::enable_timer_interrupt();
+    timer::set_next_ti_trigger();
+    task::run_tasks();
+}
+
 fn rust_main_high() -> ! {
     #[cfg(target_arch = "loongarch64")]
     arch::enable_kernel_extensions();
@@ -70,12 +91,20 @@ fn rust_main_high() -> ! {
     mm::init();
     net::init();
     task::add_initproc();
-    #[cfg(target_arch = "riscv64")]
+    #[cfg(any(target_arch = "riscv64", target_arch = "loongarch64"))]
     {
         task::init_per_cpu_idle_tasks();
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
         let boot_hart = arch::smp::boot_hart();
         arch::smp::publish_boot_ready(boot_hart);
         arch::smp::start_secondary_harts(boot_hart);
+    }
+    #[cfg(target_arch = "loongarch64")]
+    {
+        arch::smp::publish_boot_ready();
+        arch::smp::start_secondary_harts();
     }
     trap::enable_timer_interrupt();
     timer::set_next_ti_trigger();

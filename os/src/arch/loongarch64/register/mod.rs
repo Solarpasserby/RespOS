@@ -87,6 +87,7 @@ pub mod crmd {
 pub mod ecfg {
     const CSR_ECFG: usize = 0x4;
     const TIMER_INTERRUPT: usize = 1 << 11;
+    const IPI_INTERRUPT: usize = 1 << 12;
 
     #[inline(always)]
     pub fn read() -> usize {
@@ -102,6 +103,13 @@ pub mod ecfg {
     pub unsafe fn enable_timer_interrupt() {
         unsafe {
             write(read() | TIMER_INTERRUPT);
+        }
+    }
+
+    #[inline(always)]
+    pub unsafe fn enable_ipi_interrupt() {
+        unsafe {
+            write(read() | IPI_INTERRUPT);
         }
     }
 }
@@ -383,8 +391,9 @@ pub mod mmu {
     pub unsafe fn flush_tlb() {
         unsafe {
             core::arch::asm!("dbar 0", options(nostack));
+            // INVTLB op=0 clears every TLB entry. A following op=3 would
+            // only clear G=0 entries again and is therefore redundant.
             core::arch::asm!("invtlb 0x0, $r0, $r0", options(nostack));
-            core::arch::asm!("invtlb 0x3, $r0, $r0", options(nostack));
             core::arch::asm!("ibar 0", options(nostack));
         }
     }

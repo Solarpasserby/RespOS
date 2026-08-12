@@ -1,5 +1,34 @@
 # RespOS 已确认易错点
 
+## LoongArch `csrwr` 会改写源寄存器，不能连续复用同一页表 root 临时寄存器
+
+- 状态：已确认并修复
+- 适用范围：LA context switch、PGDL/PGDH、SMP、内核高半区
+- 最后验证：2026-08-11
+- 证据：QEMU/GDB 在 BuildStorm 卡死现场观察到 PGDL 与 PGDH 不同；
+  `os/src/arch/loongarch64/task/switch.S`
+- 内容：`csrwr rd, csr` 不只是写 CSR，还把 CSR 原值回写 `rd`。旧 `__switch` 先后用同一个
+  `$t0` 写 PGDL 和 PGDH，第二条实际把旧 PGDL 写进 PGDH，形成用户低半区使用新 root、内核
+  高半区使用旧 root 的 split-root。单核时全局 TLB 残留可能掩盖问题；SMP/频繁切换会最终在内核
+  trap 或 scheduler 中以页故障、持锁 hart 消失、其他 hart 自旋的形式暴露。
+- 后续影响：同一值写多个 CSR 前必须先复制到不同通用寄存器，或每次重新加载；审查所有
+  `csrwr` 序列时都要把源寄存器视为读写操作数。页表切换回归必须同时读取 PGDL/PGDH，不能只看
+  用户态是否暂时继续执行。
+
+## LoongArch `INVTLB op=3` 不是按 ASID 失效，不能接在 op=0 后重复执行
+
+- 状态：已确认并修复重复失效
+- 适用范围：LA task switch、`sfence()`、ASID/global TLB 设计
+- 最后验证：2026-08-12
+- 证据：[LoongArch Reference Manual Volume 1](https://loongson.github.io/LoongArch-Documentation/LoongArch-Vol1-EN.html#invtlb)、
+  `os/src/arch/loongarch64/{task/switch.S,register/mod.rs}`；公开 LA 决赛镜像 12 hart 限时回归
+- 内容：架构定义中 op=0 清除所有 TLB 项，op=3 清除所有 `G=0` 项，按指定 ASID 清除非 global
+  项的是 op=4。旧代码连续执行 op=0、op=3，第二条只重复清理已经为空的子集。当前保留 op=0，
+  因而删除 op=3 不改变“全量本地失效”语义。
+- 后续影响：不能依据错误 opcode 注释设计 ASID 优化。若要保留 global kernel 项或按 ASID 失效，
+  必须先验证软件 refill、成对 TLB 项的 G 位、ASID 生命周期、页表回收和跨核 shootdown；仅把 op=0
+  改成 op=3 会改变语义，并已在 BuildStorm 探索中出现用户态内存破坏，不能直接合入。
+
 ## RV64 最大支持 RAM 必须同时覆盖 early FDT 和正式 direct map
 
 ## LoongArch refill 的“无效 TLB 项”不得带 V/D 有效位

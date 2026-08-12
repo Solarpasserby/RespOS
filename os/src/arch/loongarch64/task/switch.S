@@ -72,13 +72,17 @@ __switch:
     ld.d        $r30, $a0, 80   # s7
     ld.d        $r31, $a0, 88   # s8
 
-    # 恢复 PGDL/PGDH 并刷新 TLB
+    # 恢复 PGDL/PGDH 并刷新 TLB。
     ld.d        $t0, $a0, 112
+    # csrwr 会把目标 CSR 的旧值写回源寄存器。必须先复制 root；若连续
+    # 两次复用 t0，第二次会把旧 PGDL 写进 PGDH，形成低/高半区 split root。
+    ori         $t1, $t0, 0
     csrwr       $t0, 0x19        # PGDL
-    csrwr       $t0, 0x1a        # PGDH
+    csrwr       $t1, 0x1a        # PGDH
     dbar        0
+    # op=0 已按架构手册完整失效所有 TLB 项。原先紧随其后的 op=3
+    # 只会再次失效 G=0 项，语义上完全被 op=0 覆盖。
     invtlb      0x0, $zero, $zero
-    invtlb      0x3, $zero, $zero
     ibar        0
 
     # 弹出 TaskContext，切换到新栈

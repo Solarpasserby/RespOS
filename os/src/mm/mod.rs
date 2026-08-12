@@ -20,6 +20,7 @@ use crate::task::current_task;
 pub use address::*;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use frame_allocator::init_frame_allocator;
 pub use frame_allocator::{FrameTracker, frame_alloc};
 use heap_allocator::init_heap;
@@ -28,6 +29,8 @@ pub(crate) use memory_set::{
     MmapBacking, mmap_file_backing, overlay_shared_file_pages, shared_file_page_entry_count,
     truncate_shared_file_pages, update_shared_file_pages, writeback_file_pages,
 };
+
+static KERNEL_MMU_TOKEN: AtomicUsize = AtomicUsize::new(0);
 
 pub fn free_frame_count() -> usize {
     frame_allocator::FRAME_ALLOCATOR.lock().free_frames()
@@ -57,7 +60,11 @@ pub fn init() {
     init_frame_allocator(heap_reserved_end);
     #[cfg(debug_assertions)]
     memory_set::run_split_self_tests();
-    KERNEL_SPACE.lock().activate();
+    {
+        let kernel_space = KERNEL_SPACE.lock();
+        KERNEL_MMU_TOKEN.store(kernel_space.page_table.token(), Ordering::Release);
+        kernel_space.activate();
+    }
     #[cfg(target_arch = "loongarch64")]
     crate::arch::disable_low_direct_map();
     // 注意此时已经启用了虚拟地址
@@ -66,6 +73,27 @@ pub fn init() {
 /// 在已经完成全局内存初始化的次 hart 上重新装载内核页表。
 pub fn activate_kernel_space() {
     KERNEL_SPACE.lock().activate();
+}
+
+/// Root token of the immutable kernel half, published before secondary harts
+/// start. Scheduler idle contexts use it without taking KERNEL_SPACE's lock.
+pub fn kernel_mmu_token() -> usize {
+    let token = KERNEL_MMU_TOKEN.load(Ordering::Acquire);
+    assert_ne!(token, 0, "kernel MMU token is not initialized");
+    token
+}
+
+/// Enforce the scheduler invariant that idle code never runs on a user root.
+/// A stale user root may be reclaimed after its last task exits, so merely
+/// relying on an old saved idle TaskContext is unsafe under SMP migration.
+#[cfg(target_arch = "loongarch64")]
+pub fn ensure_kernel_space_active() {
+    let token = kernel_mmu_token();
+    if crate::arch::read_mmu_token() != token || crate::arch::register::mmu::read_pgdh() != token {
+        crate::arch::write_mmu_token(token);
+        crate::arch::sfence();
+        crate::perf::local_sfence(1);
+    }
 }
 
 /// 将 C 风格的字符串转换为 Rust 型字符串

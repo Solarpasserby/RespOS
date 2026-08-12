@@ -139,8 +139,13 @@ pub fn trap_handler(cx: &mut TrapContext) {
         estat::Trap::Interrupt(estat::Interrupt::Timer) => {
             clear_timer_interrupt();
             set_next_ti_trigger();
-            check_all_task_timers();
+            if crate::arch::smp::is_timer_service_hart() {
+                check_all_task_timers();
+            }
             preempt_current_task();
+        }
+        estat::Trap::Interrupt(estat::Interrupt::Ipi) => {
+            crate::arch::smp::acknowledge_ipi();
         }
         estat::Trap::Exception(estat::Exception::Syscall) => {
             handle_user_syscall(cx);
@@ -205,7 +210,12 @@ pub fn trap_from_kernel(cx: &mut TrapContext) {
         estat::Trap::Interrupt(estat::Interrupt::Timer) => {
             clear_timer_interrupt();
             set_next_ti_trigger();
-            check_all_task_timers();
+            if crate::arch::smp::is_timer_service_hart() && crate::task::current_task().is_none() {
+                check_all_task_timers();
+            }
+        }
+        estat::Trap::Interrupt(estat::Interrupt::Ipi) => {
+            crate::arch::smp::acknowledge_ipi();
         }
         cause => {
             panic!(

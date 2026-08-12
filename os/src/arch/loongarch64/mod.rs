@@ -13,6 +13,7 @@ pub mod pci;
 // LoongArch CSR 缺少成熟 crate 覆盖，这里保留本地寄存器封装。
 pub mod register;
 pub mod sbi;
+pub mod smp;
 pub mod task;
 pub mod timer;
 pub mod trap;
@@ -229,6 +230,22 @@ pub fn enable_boot_paging() {
         let root = kernel_virt_to_phys(core::ptr::addr_of!(BOOT_PGD) as *const _);
         write_mmu_token(root);
 
+        register::crmd::enable_paging();
+        register::mmu::write_dmw1(0);
+    }
+}
+
+/// Secondary harts enter through QEMU's physical mailbox after the boot hart
+/// has finished building `BOOT_PGD`.  They must install the existing boot
+/// root locally, but must not rebuild the shared tables concurrently.
+pub fn enable_secondary_boot_paging() {
+    if paging_enabled() {
+        return;
+    }
+    unsafe {
+        configure_mmu();
+        let root = kernel_virt_to_phys(core::ptr::addr_of!(BOOT_PGD) as *const _);
+        write_mmu_token(root);
         register::crmd::enable_paging();
         register::mmu::write_dmw1(0);
     }

@@ -13,10 +13,7 @@ use crate::mutex::SpinNoIrqLock;
 use alloc::sync::Arc;
 use lazy_static::lazy_static;
 
-#[cfg(target_arch = "riscv64")]
 const MAX_CPUS: usize = crate::arch::smp::MAX_HARTS;
-#[cfg(target_arch = "loongarch64")]
-const MAX_CPUS: usize = 1;
 
 // 每个 CPU 都需要独立的 bootstrap/idle context。它们不进入 task manager，
 // 仅用于保存首次切入用户任务前的内核上下文。
@@ -47,38 +44,17 @@ pub struct Processor {
 
 #[inline]
 pub fn current_processor() -> &'static SpinNoIrqLock<Processor> {
-    #[cfg(target_arch = "riscv64")]
-    {
-        &PROCESSORS[crate::arch::smp::current_hart_id()]
-    }
-    #[cfg(target_arch = "loongarch64")]
-    {
-        &PROCESSORS[0]
-    }
+    &PROCESSORS[crate::arch::smp::current_hart_id()]
 }
 
 #[inline]
 fn current_cpu_id() -> usize {
-    #[cfg(target_arch = "riscv64")]
-    {
-        crate::arch::smp::current_hart_id()
-    }
-    #[cfg(target_arch = "loongarch64")]
-    {
-        0
-    }
+    crate::arch::smp::current_hart_id()
 }
 
 #[inline]
 fn current_idle_task() -> Arc<TaskControlBlock> {
-    #[cfg(target_arch = "riscv64")]
-    {
-        IDLE_TASKS[crate::arch::smp::current_hart_id()].clone()
-    }
-    #[cfg(target_arch = "loongarch64")]
-    {
-        IDLE_TASKS[0].clone()
-    }
+    IDLE_TASKS[crate::arch::smp::current_hart_id()].clone()
 }
 
 impl Processor {
@@ -151,6 +127,8 @@ pub fn handoff_current_to_idle(current: Arc<TaskControlBlock>) {
     let idle_task = current_idle_task();
     let idle_kstack = idle_task.kstack();
     assert_ne!(idle_kstack, 0, "idle context was not initialized");
+    #[cfg(target_arch = "loongarch64")]
+    idle_task.set_saved_mmu_token(crate::mm::kernel_mmu_token());
     {
         let mut processor = current_processor().lock();
         processor.handoff_current(&current);
@@ -161,6 +139,8 @@ pub fn handoff_current_to_idle(current: Arc<TaskControlBlock>) {
 }
 
 fn publish_saved_handoff() {
+    #[cfg(target_arch = "loongarch64")]
+    crate::mm::ensure_kernel_space_active();
     let handoff = current_processor().lock().take_handoff();
     if let Some(task) = handoff {
         // __switch has restored this CPU's idle context and kernel satp before
@@ -174,7 +154,6 @@ fn publish_saved_handoff() {
             super::scheduler::add_task_before_owner_release(task.clone());
         }
         task.release_cpu_owner(current_cpu_id());
-        #[cfg(target_arch = "riscv64")]
         crate::arch::smp::kick_one_idle_hart_in(task.cpu_affinity_mask());
     }
 }
@@ -184,6 +163,8 @@ fn publish_saved_handoff() {
 /// 该函数仅在每 CPU 的 idle context 中运行。
 pub fn run_tasks() -> ! {
     loop {
+        #[cfg(target_arch = "loongarch64")]
+        crate::mm::ensure_kernel_space_active();
         // This executes only after the outgoing task's __switch has saved its
         // context and stopped executing it on this CPU.
         publish_saved_handoff();
@@ -192,7 +173,6 @@ pub fn run_tasks() -> ! {
         cleanup_dead_tasks();
         let mut next_task = fetch_task();
         if next_task.is_none() {
-            #[cfg(target_arch = "riscv64")]
             crate::arch::smp::enter_idle();
 
             // 发布 idle 后再取一次任务。enqueue 若发生在首次 fetch 与
@@ -200,32 +180,22 @@ pub fn run_tasks() -> ! {
             next_task = fetch_task();
             if next_task.is_none() {
                 #[cfg(target_arch = "riscv64")]
-                {
-                    // 从用户 syscall 进入内核时硬件会清 SIE。idle 没有持锁或用户
-                    // copy 临界区，必须显式重新打开本地中断，否则 WFI 不会进入
-                    // supervisor timer trap，所有 timeout 都无法唤醒。
-                    crate::arch::trap::enable_timer_interrupt();
-                    let idle_started = crate::perf::now_ticks();
-                    crate::arch::wait_for_interrupt();
-                    crate::perf::idle_ticks(crate::perf::elapsed_since(idle_started));
-                }
+                crate::arch::trap::enable_timer_interrupt();
                 #[cfg(target_arch = "loongarch64")]
-                {
-                    // All user tasks may be blocked on timer-backed waits (for
-                    // example nanosleep or an idle TCP listener). Enter idle
-                    // with local interrupts enabled so the timer can wake and
-                    // enqueue them, then restore the kernel's IE=0 invariant.
-                    unsafe {
-                        crate::arch::register::crmd::set_interrupt_enabled(true);
-                    }
-                    crate::arch::wait_for_interrupt();
-                    unsafe {
-                        crate::arch::register::crmd::set_interrupt_enabled(false);
-                    }
+                unsafe {
+                    // LA kernel code normally runs with IE=0. Idle owns no
+                    // locks and may enable interrupts until timer/IPI wakeup.
+                    crate::arch::register::crmd::set_interrupt_enabled(true);
+                }
+                let idle_started = crate::perf::now_ticks();
+                crate::arch::wait_for_interrupt();
+                crate::perf::idle_ticks(crate::perf::elapsed_since(idle_started));
+                #[cfg(target_arch = "loongarch64")]
+                unsafe {
+                    crate::arch::register::crmd::set_interrupt_enabled(false);
                 }
             }
 
-            #[cfg(target_arch = "riscv64")]
             crate::arch::smp::leave_idle();
         }
 
@@ -237,8 +207,8 @@ pub fn run_tasks() -> ! {
                 let per_cpu = crate::arch::smp::current_per_cpu_ptr();
                 next_task.set_kernel_tp(per_cpu);
                 crate::arch::smp::set_current_kernel_sp(next_task.kernel_stack_top_edge());
-                next_task.mark_memory_set_current_hart_active();
             }
+            next_task.mark_memory_set_current_hart_active();
             let idle_task_ptr = Arc::as_ptr(&idle_task) as usize;
             idle_task.set_ready();
             next_task.assert_cpu_owner(current_cpu_id());
@@ -249,7 +219,6 @@ pub fn run_tasks() -> ! {
             drop(next_task);
             let running_started = crate::perf::now_ticks();
             crate::perf::context_switch(1);
-            #[cfg(target_arch = "riscv64")]
             crate::perf::local_sfence(1);
             unsafe {
                 __switch(next_task_kstack, idle_task_ptr);

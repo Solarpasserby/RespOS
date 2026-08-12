@@ -86,9 +86,15 @@ fn generate_cpuinfo() -> String {
     }
     #[cfg(target_arch = "loongarch64")]
     {
-        let _ = writeln!(result, "processor\t: 0");
-        let _ = writeln!(result, "cpu family\t: LoongArch");
-        let _ = writeln!(result, "model name\t: LoongArch QEMU");
+        let online = crate::arch::smp::online_hart_mask();
+        for hart in 0..crate::arch::smp::MAX_HARTS {
+            if online & (1 << hart) == 0 {
+                continue;
+            }
+            let _ = writeln!(result, "processor\t: {}", hart);
+            let _ = writeln!(result, "cpu family\t: LoongArch");
+            let _ = writeln!(result, "model name\t: LoongArch QEMU\n");
+        }
     }
     result.push('\n');
     result

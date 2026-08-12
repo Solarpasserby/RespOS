@@ -1,5 +1,55 @@
 # RespOS 当前状态
 
+## 2026-08-12 LoongArch 重复 TLB 失效去除与限时回归（当前工作树）
+
+- **实现**：LA `switch.S` 与 `register::mmu::flush_tlb()` 删除了紧随
+  `invtlb op=0` 的 `op=3`。LoongArch Volume 1 明确定义 op=0 清除全部 TLB 项、op=3 只清除
+  `G=0` 项，因此第二条严格冗余；本轮没有启用 ASID，也没有保留跨 root 的 global TLB 项。
+- **被否决的实验**：曾分别尝试把共享 kernel half 标为 global 并在 switch 只清非 global 项、以及
+  ready queue 没有 eligible competitor 时跳过 LA timer handoff。前一组合的两次冷启动在正式编译
+  阶段分别出现 SIGSEGV 与 `double free or corruption`；仅保留跳过 handoff 后仍出现
+  `free(): invalid pointer`。这些实验已全部回退。故障与这两个实验的独立因果仍为 `待验证`，不得
+  把它们重新作为无门禁优化合入。
+- **LA 限时回归**：QEMU 10.0.2，公开决赛 x0、final-profile x1，`-snapshot -m 12G -smp 12`。
+  最终单 `invtlb op=0` 版本 online mask 为 `0xfff`，CAgent 10/10，通过 BuildStorm toolchain、
+  minibuild 和 `tg-xtask` 预构建；正式编译越过此前实验的 allocator 崩溃点并推进到
+  `ax-posix-api`，240 秒外层 timeout 时仍在运行。最终精确源码日志：
+  `/tmp/respos-la-single-invtlb-final-smoke.log`。相邻版本（只多一个当前 task→idle 路径不会命中的
+  same-root 比较，随后因无收益删除）420 秒推进到 `rustc-std-workspace-core/alloc`，日志为
+  `/tmp/respos-la-single-invtlb-pub-smoke.log`。这些结果是正确性/活性限时门禁，不是完整
+  BuildStorm 通过，也尚未量化相对性能提升。
+- **构建门禁**：`make build-la LA_USER_FEATURES= LA_KERNEL_FEATURES=`、
+  `make build-rv RV_USER_FEATURES=eval RV_KERNEL_FEATURES=`、kernel `cargo fmt --check` 与
+  `git diff --check` 通过。
+
+## 2026-08-11 LoongArch 12 GiB / 12-hart 完整决赛功能回归（当前工作树）
+
+- **实现**：新增 QEMU-virt LoongArch IOCSR mailbox/IPI secondary 启动路径和 12 份 early/idle
+  context；scheduler、processor、affinity、timer 与 `/proc/cpuinfo` 接入实际 CPUID/online mask。
+  boot hart 在进入用户态前有界等待 secondary，并输出 online mask；本地 `make la` 和
+  `make run-la-pub` 均默认 `LA_MEM=12G`、`LA_SMP=12`。
+- **关键根因**：旧 LA `__switch` 连续用 `$t0` 写 PGDL/PGDH，但 `csrwr` 会把 CSR 旧值回写
+  源寄存器，造成低/高半区 split-root。单核残留 TLB 会暂时掩盖它，SMP BuildStorm 则表现为
+  内核高半区 fault、scheduler owner hart 消失和全局锁自旋。当前先复制 root 到 `$t1` 再分别写
+  PGDL/PGDH；idle context 还会恢复已发布的 kernel root，并同时核对两者。
+- **12-hart 证据**：QEMU 10.0.2，官方 `img/sdcard-la-pub.img` 为 x0、final-profile
+  `disk-la.img` 为 x1，`-snapshot -m 12G -smp 12`。guest online mask 达到 12 bit；QEMU 的 12
+  条 vCPU 线程均累计实际 CPU 时间，采样时最多 6 条受当前宿主并行度限制同时运行，QEMU 总体
+  CPU 随构建阶段升至约 300%--900%。BuildStorm 最终报告 `cores=12`。
+- **功能结果**：CAgent 10/10 pass、exit code 0；BuildStorm toolchain/minibuild 通过，正式编译
+  输出 `BUILDSTORM_COMPILE mode=multi ok=true ... cores=12 ... arch=loongarch64`，group 正常结束，
+  launcher 主动关机。完整日志：`/tmp/respos-la-smp12-clean.log`。
+- **性能结论**：功能通过不等于满足评分时限。本地 Cargo 报 `147m 20s`，axbuild 报
+  `8851.87s`，高于当前文档记录的平台整轮 6250 秒上限；后续仍需单独做 LA BuildStorm 性能优化。
+  Cargo 的 global-cache last-use `out of range integral type conversion attempted` 警告仍出现，但
+  未令本轮构建失败。
+- **剩余正确性边界**：LA 页表切换会本地全 TLB flush，但尚无带完成确认的远端 TLB shootdown；
+  本轮 BuildStorm 覆盖大量进程/pthread，只能证明该工作负载。`smp_shared_mm_probe` 已具备 LA
+  clone 汇编入口，但跨核并发 `munmap/mprotect/MAP_FIXED` 专项仍标记 `待验证`。
+- **构建门禁**：清理全部临时 lock/panic/trace 探针后，`make build-la ...` 与
+  `make build-rv ...` release 均通过；完整运行后的最终源码仅再移除并发 secondary 单独打印、
+  加强 PGDH root 核对，未重跑 147 分钟 BuildStorm。
+
 ## 2026-08-11 `make all` 产物 RV64 正式资源完整决赛回归（当前工作树）
 
 - **平台口径**：当前比赛公告参数为 RV64 `-m 16G -smp 8`、LoongArch
@@ -17,9 +67,9 @@
   `BUILDSTORM_COMPILE mode=multi ok=true elapsed_s=0.00 cores=8 bytes=1681000 arch=riscv64`。
   Cargo 报告 `21m 38s`，axbuild 报告 `1310.01s`；本地脚本的 `elapsed_s=0.00` 仍不可用于评分计时。
   脚本 exit code 0，launcher 输出 `all final scripts finished; powering off`，QEMU 正常退出。
-- **结论与范围**：当前 heap/双盘工作树能够通过“平台执行 `make all` 后启动 RV64”这一完整
-  本地模拟。结果对应当前本地 pub 镜像，不替代评测方最终镜像哈希确认；LoongArch 当前内存布局按本地
-  12 GiB QEMU 分段硬编码，尚不满足正式 36 GiB 动态布局且只启动一个 hart，必须另行修改和回归。
+- **结论与范围**：该轮 heap/双盘基线能够通过“平台执行 `make all` 后启动 RV64”这一完整
+  本地模拟。结果对应当前本地 pub 镜像，不替代评测方最终镜像哈希确认；该轮记录的 LA 单 hart
+  限制已由上方 2026-08-11 LA SMP 记录取代，12 GiB 分段硬编码与正式 36 GiB 动态布局问题仍保留。
 
 ## 2026-08-11 LoongArch FP/LSX 用户上下文修复（当前工作树）
 
@@ -67,9 +117,9 @@
   LA_FS_IMG=img/sdcard-la-pub.img LA_MEM=12G LA_SMP=12` 在约 18 秒内退出；CAgent 10 项全部 pass。
   随后的 BuildStorm 输出 group end，但 `rustc --version`、`cargo new` 和正式编译均 SIGSEGV
   （rc=139），属于剩余动态程序兼容缺陷。日志：`/tmp/respos-la-full-after-idle-fix.log`。
-- **LoongArch 正式资源限制**：当前 task processor 在 LA 下明确使用 `MAX_CPUS=1`，没有 secondary
-  CPU 启动路径；`-smp 12` 不等于内核使用 12 核。当前 RAM high-end 按本地 12 GiB QEMU 布局
-  硬编码，尚不支持公告的 36 GiB 动态布局。因此 LA 决赛完整验收仍未通过。
+- **LoongArch 当时的资源限制（历史，已部分取代）**：该轮基线 task processor 使用
+  `MAX_CPUS=1` 且没有 secondary 启动路径；现已由上方 LA 12-hart 实现取代。RAM high-end 仍按
+  本地 12 GiB QEMU 布局硬编码，尚不支持公告的 36 GiB 动态布局。
 - **保留边界**：这不是动态扩容 heap；预留容量在启动时仍固定且不能归还 frame allocator。
   LoongArch 12 GiB 上界和 RAM 分段当前按 QEMU 10.0.2 布局配置，尚未从固件/ACPI 动态发现；
   使用不同 `-m` 容量前必须补充探测或匹配配置。

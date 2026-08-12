@@ -9,6 +9,7 @@
     .section .text.entry
     .globl _start_phys
     .globl _start
+    .globl _start_secondary_phys
 
     .equ CSR_DMW0, 0x180
     .equ CSR_DMW1, 0x181
@@ -26,12 +27,38 @@ _start:
     addi.d   $t0, $zero, 0x11      # VSEG=0, PSEG=0, MAT=1(CC), PLV0=1
     csrwr    $t0, CSR_DMW0
 
-    la.local $sp, boot_stack_top
+    # CPU0 使用第一个 64 KiB early stack。使用 CPUNUM 而不是共享变量，
+    # 这样 secondary 从 mailbox 进入时也能无锁选择自己的栈。
+    csrrd    $t1, 0x20
+    andi     $t1, $t1, 0x3ff
+    addi.d   $t1, $t1, 1
+    slli.d   $t1, $t1, 16
+    la.local $sp, boot_stack_lower_bound
+    add.d    $sp, $sp, $t1
     bl       enter_main
+
+_start_secondary_phys:
+    # QEMU auxiliary boot ROM 关闭 IPI 后跳到本物理入口。每个 hart 都要
+    # 独立建立 DMW 与 early stack，不能复用 boot hart 的执行现场。
+    pcaddi   $t0, 0x0
+    srli.d   $t0, $t0, 0x30
+    slli.d   $t0, $t0, 0x30
+    addi.d   $t0, $t0, 0x11
+    csrwr    $t0, CSR_DMW1
+    addi.d   $t0, $zero, 0x11
+    csrwr    $t0, CSR_DMW0
+
+    csrrd    $t1, 0x20
+    andi     $t1, $t1, 0x3ff
+    addi.d   $t1, $t1, 1
+    slli.d   $t1, $t1, 16
+    la.local $sp, boot_stack_lower_bound
+    add.d    $sp, $sp, $t1
+    bl       enter_secondary
 
     .section .bss.stack
     .globl boot_stack_lower_bound
 boot_stack_lower_bound:
-    .space 4096 * 16
+    .space 4096 * 16 * 12
     .globl boot_stack_top
 boot_stack_top:

@@ -1943,6 +1943,17 @@ impl TaskControlBlock {
         }
     }
 
+    /// Override the root token in a saved context that is not currently
+    /// executing. LA idle contexts use this before they are restored so the
+    /// scheduler cannot inherit a reclaimed user page table.
+    #[cfg(target_arch = "loongarch64")]
+    pub fn set_saved_mmu_token(&self, token: usize) {
+        let task_cx = self.kernel_stack.get_top() as *mut TaskContext;
+        unsafe {
+            (*task_cx).set_mmu_token(token);
+        }
+    }
+
     pub fn get_trap_cx(&self) -> &'static mut TrapContext {
         let trap_cx_ptr = self.kernel_stack.get_top_edge() - core::mem::size_of::<TrapContext>();
         unsafe { &mut *(trap_cx_ptr as *mut TrapContext) }

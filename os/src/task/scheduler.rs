@@ -61,10 +61,8 @@ pub(crate) fn cleanup_dead_tasks() {
 /// 添加新任务到就绪队列。
 pub fn add_task(task: Arc<TaskControlBlock>) {
     assert!(task.is_ready());
-    #[cfg(target_arch = "riscv64")]
     let affinity = task.cpu_affinity_mask();
     SCHEDULER.lock().add(task);
-    #[cfg(target_arch = "riscv64")]
     crate::arch::smp::kick_one_idle_hart_in(affinity);
 }
 
@@ -84,16 +82,7 @@ pub(crate) fn add_task_before_owner_release(task: Arc<TaskControlBlock>) {
 /// context switch 仍在锁外完成，避免把 scheduler 锁带入 `__switch`。
 pub fn fetch_task() -> Option<Arc<TaskControlBlock>> {
     let mut scheduler = SCHEDULER.lock();
-    let cpu = {
-        #[cfg(target_arch = "riscv64")]
-        {
-            crate::arch::smp::current_hart_id()
-        }
-        #[cfg(target_arch = "loongarch64")]
-        {
-            0
-        }
-    };
+    let cpu = crate::arch::smp::current_hart_id();
     let task = scheduler.fetch_for_cpu(cpu);
     if let Some(task) = task {
         debug_assert!(task.is_ready(), "claimed task {} is not Ready", task.tid());
@@ -116,11 +105,9 @@ pub fn requeue_ready_task(task: Arc<TaskControlBlock>) {
     }
     let mut scheduler = SCHEDULER.lock();
     scheduler.remove(task.tid());
-    #[cfg(target_arch = "riscv64")]
     let affinity = task.cpu_affinity_mask();
     scheduler.add(task);
     drop(scheduler);
-    #[cfg(target_arch = "riscv64")]
     crate::arch::smp::kick_one_idle_hart_in(affinity);
 }
 
@@ -133,10 +120,8 @@ pub fn block_task(task: Arc<TaskControlBlock>) {
 pub fn wakeup_stopped_task(task: Arc<TaskControlBlock>) {
     if task.is_stopped() {
         task.set_ready();
-        #[cfg(target_arch = "riscv64")]
         let affinity = task.cpu_affinity_mask();
         SCHEDULER.lock().add(task);
-        #[cfg(target_arch = "riscv64")]
         crate::arch::smp::kick_one_idle_hart_in(affinity);
     }
 }
@@ -597,7 +582,7 @@ impl Scheduler {
 /// 唤醒指定 tid 的任务，将其从 blocked_queue 移入 ready_queue。
 pub fn wakeup_task(tid: usize) {
     let mut scheduler = SCHEDULER.lock();
-    let _affinity = if let Some(task) = scheduler.wake(tid) {
+    let affinity = if let Some(task) = scheduler.wake(tid) {
         task.set_ready();
         let affinity = task.cpu_affinity_mask();
         scheduler.add(task);
@@ -606,8 +591,7 @@ pub fn wakeup_task(tid: usize) {
         None
     };
     drop(scheduler);
-    #[cfg(target_arch = "riscv64")]
-    if let Some(affinity) = _affinity {
+    if let Some(affinity) = affinity {
         crate::arch::smp::kick_one_idle_hart_in(affinity);
     }
 }

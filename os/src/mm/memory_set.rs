@@ -22,7 +22,6 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use bitflags::bitflags;
-#[cfg(target_arch = "riscv64")]
 use core::sync::atomic::{AtomicUsize, Ordering};
 use lazy_static::lazy_static;
 use spin::Mutex;
@@ -397,13 +396,11 @@ pub struct MemorySet {
     // 当前加载该地址空间的 hart。scheduler 在恢复 task 前设置，在已经
     // 切回 per-CPU idle/kernel satp 后清除。页表写入者持有 MemorySet 写锁，
     // 因此不会与设置/清除 active bit 的读锁临界区交错。
-    #[cfg(target_arch = "riscv64")]
     active_hart_mask: AtomicUsize,
 }
 
 impl Drop for MemorySet {
     fn drop(&mut self) {
-        #[cfg(target_arch = "riscv64")]
         debug_assert_eq!(
             self.active_hart_mask.load(Ordering::Acquire),
             0,
@@ -1711,7 +1708,6 @@ impl MemorySet {
     /// 发布当前 hart 已经（或即将）加载这个地址空间。
     #[inline]
     pub fn mark_current_hart_active(&self) {
-        #[cfg(target_arch = "riscv64")]
         {
             let hart = crate::arch::smp::current_hart_id();
             self.active_hart_mask.fetch_or(1 << hart, Ordering::Release);
@@ -1721,7 +1717,6 @@ impl MemorySet {
     /// 当前 hart 已经切换到其他页表后撤销 active 状态。
     #[inline]
     pub fn clear_current_hart_active(&self) {
-        #[cfg(target_arch = "riscv64")]
         {
             let hart = crate::arch::smp::current_hart_id();
             let old = self
@@ -1748,6 +1743,7 @@ impl MemorySet {
     #[cfg(target_arch = "loongarch64")]
     pub fn activate(&self) {
         let token = self.page_table.token();
+        self.mark_current_hart_active();
         write_mmu_token(token);
         if !crate::arch::paging_enabled() {
             crate::arch::enable_mmu();
@@ -1905,7 +1901,6 @@ impl MemorySet {
             mmap_start: Self::initial_mmap_start(),
             page_table: PageTable::new(),
             areas: Vec::new(),
-            #[cfg(target_arch = "riscv64")]
             active_hart_mask: AtomicUsize::new(0),
         }
     }
@@ -1917,7 +1912,6 @@ impl MemorySet {
             mmap_start: Self::initial_mmap_start(),
             page_table: PageTable::from_kernel()?,
             areas: Vec::new(),
-            #[cfg(target_arch = "riscv64")]
             active_hart_mask: AtomicUsize::new(0),
         })
     }

@@ -337,14 +337,8 @@ pub fn sys_sched_yield() -> SysResult<usize> {
     Ok(0)
 }
 
-#[cfg(target_arch = "riscv64")]
 fn online_cpu_mask() -> usize {
     crate::arch::smp::online_hart_mask()
-}
-
-#[cfg(target_arch = "loongarch64")]
-fn online_cpu_mask() -> usize {
-    1
 }
 const SCHED_OTHER: usize = 0;
 const SCHED_FIFO: usize = 1;

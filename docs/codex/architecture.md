@@ -100,6 +100,21 @@
 - 后续影响：当前 eager save/restore 优先保证正确性；lazy extension state 可作为性能优化。Linux LA
   signal mcontext 的扩展状态接口尚未实现，不能把 task trap 隔离等同于完整 signal FP/LSX ABI。
 
+### LoongArch 页表切换仍使用 ASID 0 和完整本地 TLB 失效
+
+- 状态：已确认；已去除重复失效指令
+- 适用范围：LA `TaskContext`、PGDL/PGDH、软件 TLB refill、task switch
+- 最后验证：2026-08-12
+- 证据：`os/src/arch/loongarch64/{task/switch.S,register/mod.rs,tlb_refill.S}`；公开 LA 决赛镜像
+  12 GiB/12 hart 240 秒最终源码限时运行
+- 内容：所有地址空间当前仍使用 ASID 0。`__switch` 恢复目标 PGDL/PGDH 后，以
+  `invtlb op=0` 完整失效本 hart TLB；通用 `sfence()` 同样只执行一次 op=0。按架构手册，op=3
+  是“清除所有 G=0 项”而不是按 ASID 清除，所以不能把它当作 ASID
+  shootdown；旧的 op=0+op=3 序列中第二条没有附加效果。
+- 后续影响：该优化只省去重复指令，不消除 task→idle→task 带来的 root 切换和用户软件 refill。
+  真正引入 ASID/global kernel TLB 前必须同时设计 ASID 分配复用、TLB refill 的 G/ASID 写入、页表
+  回收以及多 hart shootdown/ack，不能只替换一个 `INVTLB` opcode。
+
 ### RV64 返回用户态前必须保持 kernel trap 状态
 
 - 状态：已实现并通过 8 核 BuildStorm 运行中 GDB 快照验证
@@ -430,11 +445,18 @@ FdTable slot (FdEntry: descriptor flags)
 | 早期分页 | 启动路径已进入公共高半区模型 | `rust_main` 显式启用 boot paging 后跳高半区 |
 | 内核栈/堆 | 约 60 KiB 栈、64 MiB 堆 | 32 KiB 栈、48 MiB 堆 |
 
-### 当前不是已验证 SMP 内核
+### SMP 启动与调度边界
 
-- 状态：待验证
-- 适用范围：多核调度、全局锁、TLB shootdown
-- 最后验证：2026-08-01
-- 证据：顶层 `Makefile` 默认 `SMP=1`；整合审查明确缺少真实 SMP 压力证据
-- 内容：构建和 QEMU 参数允许设置 `SMP`，但当前验收只覆盖单核，不能据此宣称多核正确。
-- 后续影响：任何 SMP 工作要单独设计 per-CPU 状态、跨核唤醒和 TLB 同步测试。
+- 状态：部分验证
+- 适用范围：多核启动、per-CPU idle/context、跨核调度唤醒、地址空间切换
+- 最后验证：2026-08-11
+- 证据：`arch/{rv64,loongarch64}/smp.rs`、`task/processor.rs`、LoongArch QEMU
+  `-m 12G -smp 12` 串口 online mask 与 BuildStorm 并行编译
+- 内容：RV64 通过 SBI HSM/IPI，LoongArch QEMU-virt 通过 IOCSR mailbox/IPI 启动 secondary。
+  每个 hart 使用独立 early/idle stack、processor/current-task 状态和本地 timer，ready queue 仍为
+  全局串行调度器；enqueue 后会向满足 affinity 的 idle hart 发送 IPI。LoongArch 的 boot hart
+  在进入用户态前最多等待 1 秒收集 online mask，较小的 `-smp` 覆盖不会阻止启动。
+- 边界：RV64 已通过 SBI RFENCE 对 active address-space mask 做同步远端 TLB shootdown；LoongArch
+  当前只有切换页表时的本地全 TLB 刷新，尚未实现带完成确认的远端 shootdown。因此 12-hart
+  BuildStorm 通过只能证明当前工作负载，多线程并发 `munmap/mprotect/MAP_FIXED` 的严格语义仍需
+  `smp_shared_mm_probe` 等专项验证，未验证前不能宣称通用 SMP 内存管理完成。

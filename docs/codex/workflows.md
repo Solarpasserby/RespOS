@@ -153,8 +153,8 @@ make la LA_MEM=12G LA_SMP=12 LA_OUTPUT=/tmp/respos-la.log
 
 - 内容补充：两目标依赖 `build-disks`，分别挂载 `disk.img`/`disk-la.img` 为 x1。默认
   RV 使用 `MEM=4G`、`SMP=1`；LA 使用独立的 `LA_MEM=12G`、`LA_SMP=12`，均可在命令行
-  覆盖。LA 内核当前仍只启动一个 hart，`LA_SMP=12` 只是匹配本地/评测 QEMU 拓扑，不代表
-  guest 已具备 SMP 调度。本地 `rv`/`la` 目标默认使用 QEMU
+  覆盖。LA 会通过 QEMU-virt IOCSR mailbox/IPI 启动最多 12 个 hart，并在进入用户态前输出
+  online mask；`0xfff` 表示 12 个 hart 均已上线。本地 `rv`/`la` 目标默认使用 QEMU
   `-snapshot`，guest 在本轮仍可正常写盘，但不会因 Ctrl-C/超时把官方原始镜像留在
   journal/元数据不一致状态。RV64 使用网站给出的 virtio-mmio bus.0/1；LoongArch
   保留原 Makefile 已使用的 `-machine virt` 和 `virtio-blk-pci` 自动 PCI 总线分配。网站文本中的
@@ -183,7 +183,7 @@ RV64 SMP=1、4 GiB 的干净镜像实测两组合计约 168 秒，不应用 60/1
 
 ```bash
 make run-rv-pub       # RV pub 镜像，默认 4G、单核
-make run-la-pub       # LA pub 镜像，默认 4G、单核
+make run-la-pub       # LA pub 镜像，默认 12G、12 hart
 ```
 
 这两个目标通过 virtio block 设备加载 ext4 镜像，不执行宿主机挂载。当前启动阶段由
@@ -606,8 +606,9 @@ export CARGO_BUILD_JOBS=1
 /glibc/buildstorm_testcode.sh
 ```
 
-再让 vCPU 与 jobs 同时变化：RV64 `1/1、2/2、4/4、8/8`，LA64 在 SMP 正确后使用
-`1/1、3/3、6/6、12/12`。正式命令之外的 `-smp` 只用于计算：
+再让 vCPU 与 jobs 同时变化：RV64 `1/1、2/2、4/4、8/8`，LA64 使用
+`1/1、3/3、6/6、12/12`。LA 每个数据点都要检查启动日志的 online mask；正式命令之外的
+`-smp` 只用于计算：
 
 ```text
 speedup(n) = timed_seconds(1) / timed_seconds(n)
