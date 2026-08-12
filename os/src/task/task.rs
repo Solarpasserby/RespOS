@@ -27,10 +27,42 @@ use alloc::vec::Vec;
 use bitflags::bitflags;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
 use lazy_static::lazy_static;
-use spin::RwLock;
+use spin::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 lazy_static! {
     static ref ACTIVE_ITIMER_TASKS: SpinLock<BTreeSet<usize>> = SpinLock::new(BTreeSet::new());
+}
+
+#[inline]
+fn memory_set_read(lock: &RwLock<MemorySet>) -> RwLockReadGuard<'_, MemorySet> {
+    #[cfg(target_arch = "riscv64")]
+    {
+        lock.read()
+    }
+    #[cfg(target_arch = "loongarch64")]
+    loop {
+        if let Some(guard) = lock.try_read() {
+            return guard;
+        }
+        crate::arch::smp::poll_pending_ipi();
+        core::hint::spin_loop();
+    }
+}
+
+#[inline]
+fn memory_set_write(lock: &RwLock<MemorySet>) -> RwLockWriteGuard<'_, MemorySet> {
+    #[cfg(target_arch = "riscv64")]
+    {
+        lock.write()
+    }
+    #[cfg(target_arch = "loongarch64")]
+    loop {
+        if let Some(guard) = lock.try_write() {
+            return guard;
+        }
+        crate::arch::smp::poll_pending_ipi();
+        core::hint::spin_loop();
+    }
 }
 
 /// 线程 tid 地址信息，用于 pthread 线程退出同步。
@@ -713,7 +745,7 @@ impl TaskControlBlock {
             parent_memory_set
         } else {
             Arc::new(RwLock::new(MemorySet::from_existed_user(
-                &mut parent_memory_set.write(),
+                &mut memory_set_write(&parent_memory_set),
             )?))
         };
 
@@ -915,8 +947,8 @@ impl TaskControlBlock {
         };
         // 刷新页表，由于应用程序通过异常进入，在异常返回时不会刷新页表
         // 为了程序返回后看到的地址空间为自身而非父任务的地址空间，需要主动刷新页表
-        new_memory_set.read().activate();
-        old_memory_set.read().clear_current_hart_active();
+        memory_set_read(&new_memory_set).activate();
+        memory_set_read(&old_memory_set).clear_current_hart_active();
         drop(old_memory_set);
 
         /* ===== 修改异常上下文 ===== */
@@ -1130,17 +1162,17 @@ impl TaskControlBlock {
     }
     /// 获取用户任务页表的页表基址寄存器值
     pub fn get_user_token(&self) -> usize {
-        self.memory_set_arc().read().token()
+        memory_set_read(&self.memory_set_arc()).token()
     }
 
     /// 在恢复本任务 context 前发布当前 hart 正在使用其地址空间。
     pub fn mark_memory_set_current_hart_active(&self) {
-        self.memory_set_arc().read().mark_current_hart_active();
+        memory_set_read(&self.memory_set_arc()).mark_current_hart_active();
     }
 
     /// 只可在本 hart 已经切回 idle/kernel 页表后调用。
     pub fn clear_memory_set_current_hart_active(&self) {
-        self.memory_set_arc().read().clear_current_hart_active();
+        memory_set_read(&self.memory_set_arc()).clear_current_hart_active();
     }
     // 任务状态判断
     pub fn is_running(&self) -> bool {
@@ -1475,11 +1507,11 @@ impl TaskControlBlock {
 
     pub fn op_memory_set_read<T>(&self, f: impl FnOnce(&MemorySet) -> T) -> T {
         let memory_set = self.memory_set_arc();
-        f(&memory_set.read())
+        f(&memory_set_read(&memory_set))
     }
     pub fn op_memory_set_write<T>(&self, f: impl FnOnce(&mut MemorySet) -> T) -> T {
         let memory_set = self.memory_set_arc();
-        f(&mut memory_set.write())
+        f(&mut memory_set_write(&memory_set))
     }
     pub fn op_parent<T>(&self, f: impl FnOnce(&Option<Weak<TaskControlBlock>>) -> T) -> T {
         f(&self.parent.lock())

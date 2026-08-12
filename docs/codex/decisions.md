@@ -468,3 +468,17 @@
   `SIG_IGN` 保持，alternate signal stack 重置。不得以“新程序不认识旧信号”为由清空 pending set。
 - 后续影响：实现非 leader exec 时只保留调用线程自身 pending set，不能合并或继承被终止 sibling 的
   thread-directed pending signals；后续引入独立 process-pending queue 时须分别处理两类所有权。
+
+## LoongArch shootdown 使用每目标 hart 的 generation 槽
+
+- 状态：已采用
+- 适用范围：LA SMP、共享 MemorySet、PTE 修改与 frame 回收
+- 最后验证：2026-08-12
+- 证据：`os/src/arch/loongarch64/smp.rs`、`os/src/mm/memory_set.rs`；LA 12-hart 单/双实例
+  `smp_shared_mm_probe`
+- 内容：IOCSR IPI vector 1 表示“检查本 hart 的 shootdown 槽”。请求者按 hart id 顺序独占每个
+  target slot，发布 generation 后发送 IPI 并同步等待 ack；目标执行本地全 TLB 失效后确认。地址空间
+  root 切换不发送远端请求，只有 PTE writer 使用该协议。LA 清除或替换 PTE 后先全局退役旧数据页，
+  当前对全部 online hart 完成 shootdown 后才释放；这是 ASID/精确按地址空间回收前的保守选择。
+- 后续影响：LA 关中断内核的锁竞争等待必须能服务 pending IPI；handler 不得拿普通锁。ASID、精确
+  地址失效、Global 映射或异步 shootdown 都必须作为后续独立协议重新验证。

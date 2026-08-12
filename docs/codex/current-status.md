@@ -1,5 +1,24 @@
 # RespOS 当前状态
 
+## 2026-08-12 LA SMP 阶段 1B：同步远端 TLB shootdown（当前工作树）
+
+- **实现**：LA IOCSR IPI vector 1 专用于 TLB shootdown。每个目标 hart 有独立 request/ack
+  generation 槽；并发发起者按 hart id 递增顺序认领目标槽，发布页表修改后发送 IPI，并等待所有
+  目标执行本地 `invtlb op=0` 后确认。槽在确认前不复用，因此 IPI vector 合并不会丢失请求。
+- **等待进展**：LA 内核通常保持 `CRMD.IE=0`。MemorySet RwLock 与项目普通 SpinMutex 的竞争等待
+  会轮询 pending IPI，使持有页表写锁并等待 shootdown 的 hart 不会与等待该锁的远端 hart 构成
+  环；RV64 路径保持原锁行为和 OpenSBI RFENCE。
+- **失效语义拆分与页帧寿命**：地址空间 `activate()` 只执行当前 hart 的 root-switch flush；只有实际
+  修改 PTE 的 `flush_tlb()` 才同步失效远端，避免启动互等和冗余 RV RFENCE。LA 在清除/替换 PTE 后
+  先把旧数据页放入全局退役批次，等所有在线 hart 确认全量失效后才归还分配器；因此当前 LA 使用
+  online mask，而不是尚未配合 ASID 生命周期验证的 active-hart mask。RV64 保持原回收与 RFENCE 路径。
+- **专项验证**：QEMU 10.0.2、LA `-m 4G -smp 12` online mask `0xfff`；
+  `smp_shared_mm_probe` 单实例 100 轮通过，两个实例并发各 100 轮通过；`smp_phase3_probe` 30 轮通过。
+  RV64 `-m 4G -smp 8` 的 `smp_shared_mm_probe` 100 轮通过；双架构 release 构建通过。
+- **BuildStorm 短测**：LA 12 GiB/12 hart diagnostic 单跑通过 toolchain/minibuild、完成 untimed
+  `tg-xtask`，并进入 timed arceos 编译。修复 SpinMutex 的 IPI polling 前负载停在 toolchain 启动；
+  修复后继续输出多项 crate 编译。该结果是活性短测，不是完整成绩。
+
 ## 2026-08-12 LA SMP 阶段 1A 收口：稳定次核高半区启动（当前工作树）
 
 - **实现**：`jump_to_high_half()` 不再在未声明 clobber 的 `$t0` 中装载 `KERNEL_BASE`，而是让

@@ -475,7 +475,12 @@ FdTable slot (FdEntry: descriptor flags)
   每个 hart 使用独立 early/idle stack、processor/current-task 状态和本地 timer，ready queue 仍为
   全局串行调度器；enqueue 后会向满足 affinity 的 idle hart 发送 IPI。LoongArch 的 boot hart
   在进入用户态前最多等待 1 秒收集 online mask，较小的 `-smp` 覆盖不会阻止启动。
-- 边界：RV64 已通过 SBI RFENCE 对 active address-space mask 做同步远端 TLB shootdown；LoongArch
-  当前只有切换页表时的本地全 TLB 刷新，尚未实现带完成确认的远端 shootdown。因此 12-hart
-  BuildStorm 通过只能证明当前工作负载，多线程并发 `munmap/mprotect/MAP_FIXED` 的严格语义仍需
-  `smp_shared_mm_probe` 等专项验证，未验证前不能宣称通用 SMP 内存管理完成。
+- 页表失效：RV64 通过 SBI RFENCE 对 active address-space mask 做同步远端 TLB shootdown；
+  LoongArch 通过 IOCSR IPI vector 1 和 per-target generation request/ack 槽完成同一语义。页表 root
+  切换只需本地 flush，实际 PTE 修改才发远端请求；旧 frame 必须在全部 ack 后回收。LA 当前把被
+  清除或替换的旧数据页加入全局退役批次，并对所有 online hart 完成全量失效后释放该批次；这是
+  ASID/按地址空间精确跟踪前的保守正确性边界。LA 内核态通常关中断，因此项目 SpinMutex 和
+  MemorySet RwLock 的竞争等待点会轮询 pending IPI。
+- 边界：LA 当前仍使用 ASID 0 和全量 `invtlb op=0`；request/ack 已通过 12-hart 单/双实例
+  `smp_shared_mm_probe`，但引入 ASID、精确失效或 Global kernel 映射时必须重新验证 generation
+  生命周期、active mask 和 frame 回收顺序；在此之前不能把 online mask 缩成 active mask。

@@ -6,7 +6,7 @@
 
 use core::{
     arch::asm,
-    sync::atomic::{AtomicU8, AtomicUsize, Ordering},
+    sync::atomic::{AtomicU8, AtomicUsize, Ordering, fence},
 };
 
 pub const MAX_HARTS: usize = 12;
@@ -22,11 +22,16 @@ const SEND_BLOCKING: usize = 1 << 31;
 const SEND_CPU_SHIFT: usize = 16;
 const MBUF_BOX_SHIFT: usize = 2;
 const MBUF_BUF_SHIFT: usize = 32;
+const IPI_SCHEDULER: usize = 0;
+const IPI_TLB_SHOOTDOWN: usize = 1;
 
 static BOOT_STATE: AtomicU8 = AtomicU8::new(BOOT_COLD);
 static ONLINE_HART_MASK: AtomicUsize = AtomicUsize::new(0);
 static IDLE_HART_MASK: AtomicUsize = AtomicUsize::new(0);
 static IPI_COUNT: [AtomicUsize; MAX_HARTS] = [const { AtomicUsize::new(0) }; MAX_HARTS];
+static TLB_SHOOTDOWN_GENERATION: AtomicUsize = AtomicUsize::new(1);
+static TLB_SHOOTDOWN_REQUEST: [AtomicUsize; MAX_HARTS] = [const { AtomicUsize::new(0) }; MAX_HARTS];
+static TLB_SHOOTDOWN_ACK: [AtomicUsize; MAX_HARTS] = [const { AtomicUsize::new(0) }; MAX_HARTS];
 
 unsafe extern "C" {
     fn _start_secondary_phys();
@@ -102,6 +107,14 @@ fn send_ipi(hart: usize, vector: usize) {
     iocsr_write32(value, IOCSR_IPI_SEND);
 }
 
+#[inline]
+fn publish_before_iocsr() {
+    fence(Ordering::SeqCst);
+    unsafe {
+        asm!("dbar 0", options(nostack));
+    }
+}
+
 fn send_mailbox_entry(hart: usize, entry: usize) {
     let common = SEND_BLOCKING | (hart << SEND_CPU_SHIFT);
     let high = common | (1 << MBUF_BOX_SHIFT) | (entry & 0xffff_ffff_0000_0000);
@@ -121,7 +134,7 @@ pub fn start_secondary_harts() {
     let entry = linked.saturating_sub(crate::config::KERNEL_BASE);
     for hart in 1..MAX_HARTS {
         send_mailbox_entry(hart, entry);
-        send_ipi(hart, 0);
+        send_ipi(hart, IPI_SCHEDULER);
     }
 
     // Give configured secondaries a bounded window to publish themselves so
@@ -167,8 +180,74 @@ pub fn kick_one_idle_hart_in(allowed_harts: usize) {
         return;
     }
     let hart = mask.trailing_zeros() as usize;
-    send_ipi(hart, 0);
+    send_ipi(hart, IPI_SCHEDULER);
     crate::perf::scheduler_ipi(1);
+}
+
+/// Service a pending IOCSR IPI while normal kernel execution keeps CRMD.IE=0.
+///
+/// MemorySet lock acquisition uses this hook so a hart waiting behind a page
+/// table writer can still acknowledge that writer's synchronous shootdown.
+#[inline]
+pub fn poll_pending_ipi() {
+    if iocsr_read32(IOCSR_IPI_STATUS) != 0 {
+        acknowledge_ipi();
+    }
+}
+
+/// Flush all local TLB entries on `targets` and wait for every remote hart.
+///
+/// Each target owns an independent request slot. Requesters acquire slots in
+/// ascending hart order, so concurrent shootdowns cannot form an acquisition
+/// cycle. One outstanding request per target also makes IOCSR vector
+/// coalescing harmless: the target acknowledges the published generation
+/// before its slot is reused.
+pub fn remote_tlb_shootdown(targets: usize) {
+    let current = current_hart_id();
+    let targets = targets & online_hart_mask() & !(1 << current);
+    if targets == 0 {
+        return;
+    }
+
+    let mut generation = TLB_SHOOTDOWN_GENERATION.fetch_add(1, Ordering::Relaxed);
+    if generation == 0 {
+        generation = TLB_SHOOTDOWN_GENERATION.fetch_add(1, Ordering::Relaxed);
+    }
+
+    let mut pending = targets;
+    while pending != 0 {
+        let hart = pending.trailing_zeros() as usize;
+        while TLB_SHOOTDOWN_REQUEST[hart]
+            .compare_exchange(0, generation, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            poll_pending_ipi();
+            core::hint::spin_loop();
+        }
+        // Do not let a wrapped generation match an acknowledgement left by a
+        // much older request. The slot is exclusively ours at this point.
+        TLB_SHOOTDOWN_ACK[hart].store(0, Ordering::Relaxed);
+        pending &= !(1 << hart);
+    }
+
+    publish_before_iocsr();
+    pending = targets;
+    while pending != 0 {
+        let hart = pending.trailing_zeros() as usize;
+        send_ipi(hart, IPI_TLB_SHOOTDOWN);
+        pending &= !(1 << hart);
+    }
+
+    pending = targets;
+    while pending != 0 {
+        let hart = pending.trailing_zeros() as usize;
+        while TLB_SHOOTDOWN_ACK[hart].load(Ordering::Acquire) != generation {
+            poll_pending_ipi();
+            core::hint::spin_loop();
+        }
+        TLB_SHOOTDOWN_REQUEST[hart].store(0, Ordering::Release);
+        pending &= !(1 << hart);
+    }
 }
 
 pub fn acknowledge_ipi() {
@@ -178,6 +257,13 @@ pub fn acknowledge_ipi() {
     }
     let hart = current_hart_id();
     if hart < MAX_HARTS {
+        if pending & (1 << IPI_TLB_SHOOTDOWN) != 0 {
+            let generation = TLB_SHOOTDOWN_REQUEST[hart].load(Ordering::Acquire);
+            if generation != 0 {
+                crate::arch::sfence();
+                TLB_SHOOTDOWN_ACK[hart].store(generation, Ordering::Release);
+            }
+        }
         IPI_COUNT[hart].fetch_add(1, Ordering::Relaxed);
     }
     crate::perf::ipi_received(1);

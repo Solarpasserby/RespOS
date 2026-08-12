@@ -49,6 +49,26 @@ lazy_static! {
         Mutex::new(BTreeMap::new());
 }
 
+#[cfg(target_arch = "loongarch64")]
+lazy_static! {
+    static ref RETIRED_DATA_FRAMES: Mutex<Vec<Arc<FrameTracker>>> = Mutex::new(Vec::new());
+}
+
+#[cfg(target_arch = "loongarch64")]
+fn retire_data_frame(frame: Arc<FrameTracker>) {
+    RETIRED_DATA_FRAMES.lock().push(frame);
+}
+
+#[cfg(not(target_arch = "loongarch64"))]
+fn retire_data_frame(frame: Arc<FrameTracker>) {
+    drop(frame);
+}
+
+#[cfg(target_arch = "loongarch64")]
+fn take_retired_data_frames() -> Vec<Arc<FrameTracker>> {
+    core::mem::take(&mut *RETIRED_DATA_FRAMES.lock())
+}
+
 const ET_DYN: u16 = 3;
 const PIE_LOAD_OFFSET: usize = 0x40_0000;
 
@@ -1686,12 +1706,27 @@ impl MemorySet {
         self.page_table.modify_pte(vpn, flags);
     }
 
-    /// 修改页表基址寄存器，切换页表
-    pub fn flush_tlb(&self) {
-        #[cfg(target_arch = "riscv64")]
+    /// Flush this hart after switching its page-table root.
+    ///
+    /// Root activation does not modify page-table contents, so it must not
+    /// wait for remote harts that are still legitimately using the same
+    /// address space. Page-table writers use `flush_tlb()` below.
+    fn flush_local_tlb(&self) {
         core::sync::atomic::fence(Ordering::SeqCst);
         sfence();
         crate::perf::local_sfence(1);
+    }
+
+    /// Publish a page-table modification and synchronously invalidate every
+    /// hart currently running this address space before old frames may return
+    /// to the allocator.
+    pub fn flush_tlb(&self) {
+        // Freeze the batch before the local flush as well: a frame retired
+        // concurrently after this point must wait for the next generation on
+        // every hart, including this one.
+        #[cfg(target_arch = "loongarch64")]
+        let retired = take_retired_data_frames();
+        self.flush_local_tlb();
         #[cfg(target_arch = "riscv64")]
         {
             let current = crate::arch::smp::current_hart_id();
@@ -1701,6 +1736,19 @@ impl MemorySet {
                 crate::arch::sbi::remote_sfence_vma(remote_mask, 0)
                     .expect("SBI RFENCE remote_sfence_vma failed");
             }
+        }
+        #[cfg(target_arch = "loongarch64")]
+        {
+            let current = crate::arch::smp::current_hart_id();
+            // Data-frame retirement is globally batched on LA. A full online
+            // mask makes every retired frame safe to release regardless of
+            // which MemorySet queued it before this flush.
+            let remote_mask = crate::arch::smp::online_hart_mask() & !(1 << current);
+            if remote_mask != 0 {
+                crate::perf::remote_rfence(1);
+                crate::arch::smp::remote_tlb_shootdown(remote_mask);
+            }
+            drop(retired);
         }
     }
 
@@ -1736,7 +1784,7 @@ impl MemorySet {
 
         self.mark_current_hart_active();
         write_mmu_token(token);
-        self.flush_tlb();
+        self.flush_local_tlb();
     }
 
     #[cfg(target_arch = "loongarch64")]
@@ -1747,7 +1795,7 @@ impl MemorySet {
         if !crate::arch::paging_enabled() {
             crate::arch::enable_mmu();
         }
-        self.flush_tlb();
+        self.flush_local_tlb();
     }
 
     /// 生成页表对应 `stap` 寄存器值
@@ -1879,9 +1927,15 @@ impl MemorySet {
 
     /// 回收内部地址空间
     pub fn recycle_data_pages(&mut self) {
+        #[cfg(target_arch = "loongarch64")]
+        let had_areas = !self.areas.is_empty();
         for area in self.areas.iter_mut() {
             area.notify_mmap_close();
             area.unmap(&mut self.page_table);
+        }
+        #[cfg(target_arch = "loongarch64")]
+        if had_areas {
+            self.flush_tlb();
         }
         self.areas.clear();
         // 退出路径可能仍短暂运行在当前用户页表上，页表页帧不能立刻
@@ -2977,6 +3031,8 @@ impl MapArea {
             let offset = vpn - old_start;
             if offset < new_pages {
                 data_frames.insert(VirtPageNum(new_start.0 + offset), frame);
+            } else {
+                retire_data_frame(frame);
             }
         }
         self.data_frames = data_frames;
@@ -3133,7 +3189,9 @@ impl MapArea {
         ppn.get_bytes_array()
             .copy_from_slice(old_frame.ppn().get_bytes_array());
         page_table.replace_pte(vpn, ppn, PTEFlags::from(self.map_perm))?;
-        self.data_frames.insert(vpn, Arc::new(frame));
+        if let Some(old_frame) = self.data_frames.insert(vpn, Arc::new(frame)) {
+            retire_data_frame(old_frame);
+        }
         Ok(())
     }
 
@@ -3152,22 +3210,28 @@ impl MapArea {
         // The old PTE/frame remain intact until allocation and copying have
         // succeeded. replace_pte cannot allocate, so ENOMEM never leaves a hole.
         page_table.replace_pte(vpn, ppn, PTEFlags::from(self.map_perm))?;
-        self.data_frames.insert(vpn, Arc::new(frame));
+        if let Some(old_frame) = self.data_frames.insert(vpn, Arc::new(frame)) {
+            retire_data_frame(old_frame);
+        }
         Ok(())
     }
 
     /// 消除虚拟页与物理页帧的映射关系，自动销毁失去连接的物理页帧
     pub fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
+        // Invalidate the PTE before retiring the last frame reference. LA
+        // keeps retired frames quarantined until a completed global shootdown.
+        page_table.try_unmap(vpn);
         match self.map_type {
             MapType::Framed => {
                 // Shared file writeback is prepared while the address-space
                 // lock is held and executed by the syscall/task-exit owner
                 // after releasing it. Never perform FileOp I/O here.
-                self.data_frames.remove(&vpn);
+                if let Some(frame) = self.data_frames.remove(&vpn) {
+                    retire_data_frame(frame);
+                }
             }
             _ => {}
         }
-        page_table.try_unmap(vpn);
     }
 }
 

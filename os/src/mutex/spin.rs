@@ -48,6 +48,8 @@ impl<T, S: MutexOperations> SpinMutex<T, S> {
     fn wait_unlock(&self) {
         let mut try_count = 0usize;
         while self.lock.load(Ordering::Relaxed) {
+            #[cfg(target_arch = "loongarch64")]
+            crate::arch::smp::poll_pending_ipi();
             core::hint::spin_loop();
             try_count += 1;
             if try_count >= 0x1000000000 {
