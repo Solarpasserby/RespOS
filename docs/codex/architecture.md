@@ -35,9 +35,10 @@
   `EXT4_OP_LOCK`。关机路径先尝试 shutdown 辅助 superblock，再 shutdown 根 superblock；即使
   一个设备 flush 失败，也必须继续尝试另一个设备。
 - 启动入口：内嵌 `initproc` 启动内嵌 `contest_launcher`。launcher 从 `/respos/profile`
-  读取 `mode=preliminary|final`；缺失、无效或 preliminary 时 exec 原内嵌 `testrunner`，final
+  读取 `mode=preliminary|final|diagnostic`；缺失、无效或 preliminary 时 exec 原内嵌 `testrunner`，final
   时在 `/glibc` 中使用 `/bin/bash` 严格串行运行当前官方决赛镜像固定的
-  `cagent_testcode.sh`、`buildstorm_testcode.sh`，全部结束后关机。dispatcher 失败时
+  `cagent_testcode.sh`、`buildstorm_testcode.sh`，全部结束后关机。diagnostic 只供显式本地 profile
+  使用，进入内嵌 `user_shell`，默认提交镜像不会选择它。dispatcher 失败时
   `initproc` 仍依次回退到内嵌 `testrunner` 和 `user_shell`。测例策略不进入内核。
 - 后续影响：新增 inode-number lwext4 API 时必须传递所属 mountpoint；新增固有 VFS
   mountpoint 时必须同时插入并 pin 全局 dentry cache，否则 namei 会新建不同的

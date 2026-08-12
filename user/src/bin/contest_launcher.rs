@@ -22,6 +22,7 @@ const FINAL_SCRIPTS: &[&str] = &[
 enum ContestMode {
     Preliminary,
     Final,
+    Diagnostic,
 }
 
 fn contest_mode() -> ContestMode {
@@ -51,6 +52,7 @@ fn contest_mode() -> ContestMode {
         match line {
             "mode=final" | "final" => return ContestMode::Final,
             "mode=preliminary" | "preliminary" => return ContestMode::Preliminary,
+            "mode=diagnostic" | "diagnostic" => return ContestMode::Diagnostic,
             _ => {}
         }
     }
@@ -64,6 +66,15 @@ fn run_preliminary() -> i32 {
     let argv = ["testrunner\0".as_ptr(), core::ptr::null()];
     let ret = exec("testrunner\0", &argv);
     println!("[contest_launcher] cannot exec testrunner: {}", ret);
+    let _ = exit(127);
+    127
+}
+
+fn run_diagnostic() -> i32 {
+    println!("[contest_launcher] diagnostic mode: starting embedded user shell");
+    let argv = ["user_shell\0".as_ptr(), core::ptr::null()];
+    let ret = exec("user_shell\0", &argv);
+    println!("[contest_launcher] cannot exec user_shell: {}", ret);
     let _ = exit(127);
     127
 }
@@ -134,5 +145,6 @@ fn main() -> i32 {
     match contest_mode() {
         ContestMode::Preliminary => run_preliminary(),
         ContestMode::Final => run_final(),
+        ContestMode::Diagnostic => run_diagnostic(),
     }
 }

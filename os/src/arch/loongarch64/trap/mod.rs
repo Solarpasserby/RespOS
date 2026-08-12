@@ -135,8 +135,13 @@ fn read_badi() -> usize {
 /// 异常处理入口
 #[unsafe(no_mangle)]
 pub fn trap_handler(cx: &mut TrapContext) {
+    crate::perf::user_trap(1);
+    // 当前 LA user trap 汇编会在进入此函数前 eager 保存全部 FP/LSX
+    // 状态，并在正常返回用户态前恢复；单独计数用于评估 lazy owner 的收益上限。
+    crate::perf::extension_state_eager_save(1);
     match estat::cause(estat::read()) {
         estat::Trap::Interrupt(estat::Interrupt::Timer) => {
+            crate::perf::user_timer_trap(1);
             clear_timer_interrupt();
             set_next_ti_trigger();
             if crate::arch::smp::is_timer_service_hart() {
@@ -145,12 +150,15 @@ pub fn trap_handler(cx: &mut TrapContext) {
             preempt_current_task();
         }
         estat::Trap::Interrupt(estat::Interrupt::Ipi) => {
+            crate::perf::user_ipi_trap(1);
             crate::arch::smp::acknowledge_ipi();
         }
         estat::Trap::Exception(estat::Exception::Syscall) => {
+            crate::perf::user_syscall_trap(1);
             handle_user_syscall(cx);
         }
         estat::Trap::Exception(exception) if is_page_fault(exception) => {
+            crate::perf::user_page_fault_trap(1);
             handle_user_page_fault(cx, exception);
         }
         estat::Trap::Exception(estat::Exception::IllegalInstruction) => {

@@ -1,5 +1,33 @@
 # RespOS 当前状态
 
+## 2026-08-12 LA SMP 阶段 0 性能观测基线（当前工作树）
+
+- **诊断边界**：`perf_counters` 新增 scheduler lock 获取/等待/ready peak、IPI 接收、完整 TLB
+  失效、LA user trap 分类和 eager FP/LSX 保存恢复对数；无 feature 时调用静态消除。正常关机时仅
+  对 perf kernel 输出一次完整快照。`contest_launcher` 新增显式 `mode=diagnostic` 进入内嵌
+  `user_shell`，默认 `respos/profile` 仍为 `mode=final`，`make all` 的提交行为不变。
+- **12-hart 专项**：QEMU 10.0.2、LA pub x0、无 x1、`-snapshot -m 12G -smp 12`，已有
+  `TASK_A_CLOCK_PROBE` 连续 20 轮全部通过并正常关机。该短程记录 643 次 user trap/扩展状态 eager save、
+  52 次 context switch、172 次完整 TLB 失效；scheduler lock 657 次获取，累计等待 760054 ticks
+  （100 MHz 下约 7.60 ms），ready peak 为 1。
+- **30 秒 BuildStorm 窗口**：使用 diagnostic shell 预排 reset、
+  `/glibc/busybox timeout 30 /bin/bash /glibc/buildstorm_testcode.sh`、读取 proc 和 quit。toolchain 与
+  minibuild 通过，窗口在旧 pub 镜像的 untimed `tg-xtask` 中由 timeout 结束，不能作为正式成绩。
+  快照为 user traps `194682`（syscall `84881`、page fault `106528`、timer `3268`），eager
+  extension eager saves `194682`；context switches `4141`，完整 TLB invalidations `155203`；scheduler
+  lock `83925` 次、累计等待 `1292393` ticks（约 12.9 ms）、ready peak 3。同期 ext4 全局锁 hold
+  `818411275` ticks（累计约 8.18 CPU 秒），heap alloc/dealloc lock wait 合计约 0.30 CPU 秒。
+- **当前判定**：该窗口不支持优先重构公共 scheduler；LA 完整本地 TLB 失效、eager FP/LSX 和 ext4
+  串行工作明显更值得继续测量。正确性顺序仍是先完成 LA 远端 shootdown，再考虑 ASID/精确失效；
+  不因性能数据跳过共享 MM 门禁。
+- **构建门禁**：RV64/LA64 无 feature release 与两架构 `perf_counters` release 均构建通过；LA
+  12-hart clock probe 正常关机。一次尝试直接运行缺失的 `/musl/task_a_perf` 返回 `ENOENT`，不计为
+  probe 结果；一次错误使用不存在的 `/bin/busybox` 被 shell 轮询污染，同样从基线排除。
+- **正式路径短回归**：最终源码的无 feature 内核分别以 RV64 `-m 4G -smp 8` 和 LA64
+  `-m 12G -smp 12`、final x1、`-snapshot` 限时 35 秒运行；两架构 CAgent 均 10/10、BuildStorm
+  toolchain/minibuild 均通过并进入后续构建，随后由宿主 timeout 停止。该结果只证明阶段 0 没有改变
+  默认 final 启动与短程活性，不是完整 BuildStorm 回归。
+
 ## 2026-08-12 LoongArch 重复 TLB 失效去除与限时回归（当前工作树）
 
 - **实现**：LA `switch.S` 与 `register::mmu::flush_tlb()` 删除了紧随

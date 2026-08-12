@@ -202,6 +202,8 @@ pub fn sys_personality(persona: usize) -> SysResult<usize> {
 }
 
 pub fn sys_reboot() -> SysResult<usize> {
+    #[cfg(feature = "perf_counters")]
+    println!("[perf shutdown]\n{}", crate::perf::render());
     crate::fs::mount::sync_all_filesystems()?;
     ext4::shutdown()?;
     sbi::shutdown(false);

@@ -75,6 +75,7 @@ pub fn write_mmu_token(token: usize) {
 
 #[inline]
 pub fn sfence() {
+    crate::perf::full_tlb_invalidation(1);
     unsafe {
         register::mmu::flush_tlb();
     }

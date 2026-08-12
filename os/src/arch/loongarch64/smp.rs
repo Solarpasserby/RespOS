@@ -180,4 +180,5 @@ pub fn acknowledge_ipi() {
     if hart < MAX_HARTS {
         IPI_COUNT[hart].fetch_add(1, Ordering::Relaxed);
     }
+    crate::perf::ipi_received(1);
 }

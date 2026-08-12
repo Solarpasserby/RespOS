@@ -108,7 +108,13 @@ counters!(
     context_switches,
     local_sfences,
     remote_rfences,
+    full_tlb_invalidations,
     scheduler_ipis,
+    ipis_received,
+    scheduler_lock_acquisitions,
+    scheduler_lock_wait_ticks,
+    scheduler_lock_max_wait_ticks,
+    scheduler_ready_peak,
     scheduler_yields,
     syscall_yields,
     quiescence_yields,
@@ -130,6 +136,12 @@ counters!(
     blocking_switches,
     task_running_ticks,
     idle_ticks,
+    user_traps,
+    user_syscall_traps,
+    user_page_fault_traps,
+    user_timer_traps,
+    user_ipi_traps,
+    extension_state_eager_saves,
     ext4_lock_acquisitions,
     ext4_lock_wait_ticks,
     ext4_lock_hold_ticks,
@@ -258,7 +270,11 @@ increment_functions!(
     (context_switch, context_switches),
     (local_sfence, local_sfences),
     (remote_rfence, remote_rfences),
+    (full_tlb_invalidation, full_tlb_invalidations),
     (scheduler_ipi, scheduler_ipis),
+    (ipi_received, ipis_received),
+    (scheduler_lock_acquisition, scheduler_lock_acquisitions),
+    (scheduler_lock_wait_ticks, scheduler_lock_wait_ticks),
     (scheduler_yield, scheduler_yields),
     (syscall_yield, syscall_yields),
     (quiescence_yield, quiescence_yields),
@@ -280,6 +296,12 @@ increment_functions!(
     (blocking_switch, blocking_switches),
     (task_running_ticks, task_running_ticks),
     (idle_ticks, idle_ticks),
+    (user_trap, user_traps),
+    (user_syscall_trap, user_syscall_traps),
+    (user_page_fault_trap, user_page_fault_traps),
+    (user_timer_trap, user_timer_traps),
+    (user_ipi_trap, user_ipi_traps),
+    (extension_state_eager_save, extension_state_eager_saves),
     (ext4_lock_acquisition, ext4_lock_acquisitions),
     (ext4_lock_wait_ticks, ext4_lock_wait_ticks),
     (ext4_lock_hold_ticks, ext4_lock_hold_ticks),
@@ -378,6 +400,22 @@ pub fn observe_ext4_lock_hold(value: usize) {
     ext4_lock_hold_ticks(value);
     #[cfg(feature = "perf_counters")]
     observe_max(&COUNTERS.ext4_lock_max_hold_ticks, value);
+}
+
+#[inline(always)]
+pub fn observe_scheduler_lock_wait(value: usize) {
+    scheduler_lock_acquisition(1);
+    scheduler_lock_wait_ticks(value);
+    #[cfg(feature = "perf_counters")]
+    observe_max(&COUNTERS.scheduler_lock_max_wait_ticks, value);
+}
+
+#[inline(always)]
+pub fn observe_scheduler_ready(value: usize) {
+    #[cfg(feature = "perf_counters")]
+    observe_max(&COUNTERS.scheduler_ready_peak, value);
+    #[cfg(not(feature = "perf_counters"))]
+    let _ = value;
 }
 
 #[inline(always)]
@@ -544,11 +582,13 @@ pub fn render() -> String {
     );
     let _ = writeln!(
         out,
-        "context_switches={} local_sfences={} remote_rfences={} scheduler_ipis={} scheduler_yields={} syscall_yields={} quiescence_yields={} timer_preemptions={} blocking_switches={} task_running_ticks={} idle_ticks={}",
+        "context_switches={} local_sfences={} remote_rfences={} full_tlb_invalidations={} scheduler_ipis={} ipis_received={} scheduler_yields={} syscall_yields={} quiescence_yields={} timer_preemptions={} blocking_switches={} task_running_ticks={} idle_ticks={}",
         s.context_switches,
         s.local_sfences,
         s.remote_rfences,
+        s.full_tlb_invalidations,
         s.scheduler_ipis,
+        s.ipis_received,
         s.scheduler_yields,
         s.syscall_yields,
         s.quiescence_yields,
@@ -556,6 +596,24 @@ pub fn render() -> String {
         s.blocking_switches,
         s.task_running_ticks,
         s.idle_ticks
+    );
+    let _ = writeln!(
+        out,
+        "scheduler_lock_acquisitions={} scheduler_lock_wait_ticks={} scheduler_lock_max_wait_ticks={} scheduler_ready_peak={}",
+        s.scheduler_lock_acquisitions,
+        s.scheduler_lock_wait_ticks,
+        s.scheduler_lock_max_wait_ticks,
+        s.scheduler_ready_peak
+    );
+    let _ = writeln!(
+        out,
+        "user_traps={} syscall={} page_fault={} timer={} ipi={} extension_state_eager_saves={}",
+        s.user_traps,
+        s.user_syscall_traps,
+        s.user_page_fault_traps,
+        s.user_timer_traps,
+        s.user_ipi_traps,
+        s.extension_state_eager_saves
     );
     let _ = writeln!(
         out,

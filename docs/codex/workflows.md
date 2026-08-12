@@ -36,7 +36,9 @@ git clone --branch final-2026 --depth 1 \
 mode=preliminary
 ```
 
-初赛提交保持 `mode=preliminary`；决赛提交改为 `mode=final`。profile 最多读取 512 bytes，
+初赛提交保持 `mode=preliminary`；决赛提交改为 `mode=final`。本地显式诊断可使用
+`respos-diagnostic/profile` 的 `mode=diagnostic` 进入内嵌 `user_shell`；该目录不参与默认
+`make all` 生成的提交镜像。profile 最多读取 512 bytes，
 忽略空行和以 `#` 开头的行；缺失或无法识别时安全回退到 preliminary。final launcher
 固定串行运行当前官方 pub 镜像的 `/glibc/cagent_testcode.sh` 和
 `/glibc/buildstorm_testcode.sh`，不扫描宿主机或在 Makefile 中推断测例。
@@ -462,6 +464,30 @@ LA64 对应使用 `LA_USER_FEATURES=` 和 `LA_KERNEL_FEATURES=perf_counters`。�
 `clock_hz` 换算；block 平均请求大小可由 bytes/requests 计算。读取 proc 文件本身会产生少量 task、
 heap 和文件关闭活动，因此分析大工作负载时忽略最后一次读取造成的常数扰动。未带 feature 的 kernel
 仍保留该 proc 路径，但只输出 `enabled=0`。
+
+LA64 的可复现短窗口可先生成不参与提交的 diagnostic 辅助盘：
+
+```bash
+make build-disks AUX_FS_DIR=respos-diagnostic \
+  RV_DISK_IMG=/tmp/respos-rv-diagnostic.img \
+  LA_DISK_IMG=/tmp/respos-la-diagnostic.img
+make la LA_FS_IMG=img/sdcard-la-pub.img \
+  LA_DISK_IMG=/tmp/respos-la-diagnostic.img \
+  LA_USER_FEATURES= LA_KERNEL_FEATURES=perf_counters
+```
+
+进入 shell 后将 reset、限时工作、读取计数和 quit 一次性预排，避免 shell stdin 空轮询污染：
+
+```text
+/> /glibc/busybox echo reset > /proc/respos_perf
+/> /glibc/busybox timeout 30 /bin/bash /glibc/buildstorm_testcode.sh
+/> /glibc/busybox cat /proc/respos_perf
+/> quit
+```
+
+旧 pub 脚本的前置 toolchain/minibuild/`tg-xtask` 也包含在这个 30 秒窗口内，因此该窗口用于热点和
+进展对比，不是正式 BuildStorm 计时。带 `perf_counters` 的正常关机还会输出 `[perf shutdown]` 快照；
+正式无 feature 内核没有这项输出或原子计数开销。
 
 修改 signal wait 或 timeout wakeup 后，先用短命令检查功能与调度计数；工作命令、proc read 和 quit
 必须一次性预排，避免 user_shell stdin 空轮询混入窗口：

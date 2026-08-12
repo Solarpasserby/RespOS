@@ -25,6 +25,14 @@ const SCHED_IDLE: usize = 5;
 const RT_QUEUE_COUNT: usize = 100;
 const NORMAL_QUEUE_COUNT: usize = 40;
 
+#[inline(always)]
+fn lock_scheduler() -> crate::mutex::MutexGuard<'static, Scheduler, crate::mutex::NoIrqLock> {
+    let started = crate::perf::now_ticks();
+    let guard = SCHEDULER.lock();
+    crate::perf::observe_scheduler_lock_wait(crate::perf::elapsed_since(started));
+    guard
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ReadyQueue {
     Rt(usize),
@@ -62,7 +70,7 @@ pub(crate) fn cleanup_dead_tasks() {
 pub fn add_task(task: Arc<TaskControlBlock>) {
     assert!(task.is_ready());
     let affinity = task.cpu_affinity_mask();
-    SCHEDULER.lock().add(task);
+    lock_scheduler().add(task);
     crate::arch::smp::kick_one_idle_hart_in(affinity);
 }
 
@@ -71,7 +79,7 @@ pub fn add_task(task: Arc<TaskControlBlock>) {
 /// required kick only after the handoff is complete.
 pub(crate) fn add_task_before_owner_release(task: Arc<TaskControlBlock>) {
     assert!(task.is_ready());
-    SCHEDULER.lock().add(task);
+    lock_scheduler().add(task);
 }
 
 /// 从就绪队列中取出队首任务，并在同一把 scheduler 锁内将其 claim 为
@@ -81,7 +89,7 @@ pub(crate) fn add_task_before_owner_release(task: Arc<TaskControlBlock>) {
 /// 可以观察到任务既不在 ready queue、又仍为 `Ready` 的窗口。该任务的实际
 /// context switch 仍在锁外完成，避免把 scheduler 锁带入 `__switch`。
 pub fn fetch_task() -> Option<Arc<TaskControlBlock>> {
-    let mut scheduler = SCHEDULER.lock();
+    let mut scheduler = lock_scheduler();
     let cpu = crate::arch::smp::current_hart_id();
     let task = scheduler.fetch_for_cpu(cpu);
     if let Some(task) = task {
@@ -103,7 +111,7 @@ pub fn requeue_ready_task(task: Arc<TaskControlBlock>) {
     if !task.is_ready() {
         return;
     }
-    let mut scheduler = SCHEDULER.lock();
+    let mut scheduler = lock_scheduler();
     scheduler.remove(task.tid());
     let affinity = task.cpu_affinity_mask();
     scheduler.add(task);
@@ -114,14 +122,14 @@ pub fn requeue_ready_task(task: Arc<TaskControlBlock>) {
 /// 阻塞任务。
 pub fn block_task(task: Arc<TaskControlBlock>) {
     assert!(task.is_blocked());
-    SCHEDULER.lock().block(task);
+    lock_scheduler().block(task);
 }
 
 pub fn wakeup_stopped_task(task: Arc<TaskControlBlock>) {
     if task.is_stopped() {
         task.set_ready();
         let affinity = task.cpu_affinity_mask();
-        SCHEDULER.lock().add(task);
+        lock_scheduler().add(task);
         crate::arch::smp::kick_one_idle_hart_in(affinity);
     }
 }
@@ -135,7 +143,7 @@ pub fn prepare_current_task_blocked() -> bool {
         return false;
     };
 
-    let mut scheduler = SCHEDULER.lock();
+    let mut scheduler = lock_scheduler();
     task.set_blocked();
     scheduler.block(task);
     true
@@ -143,12 +151,12 @@ pub fn prepare_current_task_blocked() -> bool {
 
 /// 从就绪队列中移除任务。
 pub fn remove_task(tid: usize) {
-    SCHEDULER.lock().remove(tid);
+    lock_scheduler().remove(tid);
 }
 
 /// 从就绪队列中移除线程组。
 pub fn remove_thread_group(tgid: usize) {
-    SCHEDULER.lock().remove_thread_group(tgid);
+    lock_scheduler().remove_thread_group(tgid);
 }
 
 /// 直接调度下一个任务。
@@ -327,6 +335,7 @@ impl Scheduler {
             }
             ReadyQueue::Idle => self.idle_queue.push_back(task),
         }
+        crate::perf::observe_scheduler_ready(self.task_index.len());
         self.debug_assert_invariants();
     }
 
@@ -581,7 +590,7 @@ impl Scheduler {
 
 /// 唤醒指定 tid 的任务，将其从 blocked_queue 移入 ready_queue。
 pub fn wakeup_task(tid: usize) {
-    let mut scheduler = SCHEDULER.lock();
+    let mut scheduler = lock_scheduler();
     let affinity = if let Some(task) = scheduler.wake(tid) {
         task.set_ready();
         let affinity = task.cpu_affinity_mask();
