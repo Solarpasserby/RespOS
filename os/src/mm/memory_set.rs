@@ -1987,8 +1987,7 @@ impl MemorySet {
         #[cfg(target_arch = "loongarch64")]
         {
             const HUGE_SIZE: usize = 2 * 1024 * 1024;
-            let flags =
-                PTEFlags::from(MapPermission::READ | MapPermission::WRITE | MapPermission::GLOBAL);
+            let flags = PTEFlags::from(MapPermission::READ | MapPermission::WRITE);
             assert_eq!(
                 memory_end % HUGE_SIZE,
                 0,

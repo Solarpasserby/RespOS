@@ -1,5 +1,22 @@
 # RespOS 当前状态
 
+## 2026-08-12 LA SMP 阶段 1A 收口：稳定次核高半区启动（当前工作树）
+
+- **实现**：`jump_to_high_half()` 不再在未声明 clobber 的 `$t0` 中装载 `KERNEL_BASE`，而是让
+  编译器分别分配 high-half target 与 base 输入寄存器，避免代码布局变化时 target 被覆盖。LA
+  high-RAM huge direct map 暂不设置 Global；当前所有地址空间仍使用 ASID 0 且切换时完整
+  `invtlb op=0`，Global/ASID 必须等同步远端 shootdown 完成后整体引入。
+- **启动矩阵**：QEMU 10.0.2、LA pub x0、临时 diagnostic x1、`-snapshot -m 4G`；
+  `-smp 1/3/6/12` 分别报告 online mask `0x1/0x7/0x3f/0xfff`，3-hart
+  `/proc/cpuinfo` 列出 processor 0--2。RV64 `-m 4G -smp 8` 同样进入 diagnostic shell，
+  `/proc/cpuinfo` 列出 0--7。
+- **短程决赛回归**：LA pub x0、正式 final x1、`-snapshot -m 12G -smp 12` 的 40 秒宿主限时运行中，
+  CAgent 10/10 pass，BuildStorm toolchain/minibuild 通过，untimed `tg-xtask` 完成并进入
+  `arceos-helloworld` timed build；这是活性短测，不是完整 BuildStorm 成绩。
+- **边界**：未完成的 LA 远端 TLB shootdown/MemorySet 锁轮询实验已从本阶段撤下，避免把尚未通过
+  多核启动门禁的协议混入稳定基线。下一阶段仍需独立实现 request/ack，并通过 shared-MM 专项后才能
+  宣称通用 LA SMP 页表修改安全。
+
 ## 2026-08-12 LA SMP 阶段 1A：动态内存与 2 MiB direct map（当前工作树）
 
 - **实现**：LA boot hart 在关闭 DMW0 前通过 QEMU virt `fw_cfg` MMIO 的
@@ -7,7 +24,7 @@
   保留旧 12 GiB 上限，支持上限钳制为比赛 36 GiB。该路径完全位于 LoongArch 条件编译代码，RV64
   仍使用 OpenSBI FDT。
 - **页表启动成本**：LA 正式 high-RAM direct map 从逐个 4 KiB PTE 改为 PMD 2 MiB huge leaf，
-  huge entry 使用 bit 6、HGlobal 使用 bit 12；软件 TLB refill 遇到 huge leaf 时不再执行仅适用于
+  huge entry 使用 bit 6；软件 TLB refill 遇到 huge leaf 时不再执行仅适用于
   table pointer 的 `-1`。这使 12 GiB/12 hart 无根盘启动在约 6 秒内到达预期 root-device panic，
   避免按 36 GiB 建立约九百万个 4 KiB 映射。
 - **动态容量验证**：QEMU 10.0.2、LA pub/preliminary x0、diagnostic x1、`-snapshot -smp 12`；

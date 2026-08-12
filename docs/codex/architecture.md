@@ -81,12 +81,13 @@
   [current-status.md](./current-status.md)。
 - 内容：boot hart 在关闭 DMW0 前从 QEMU virt `0x1e020000` fw_cfg MMIO 读取
   `FW_CFG_RAM_SIZE`，以 256 MiB low RAM 和 `0x80000000` high RAM 起点换算实际 high end。
-  正式页表保留 low RAM 的 4 KiB 权限映射，高 RAM 使用带 Global 的 PMD 2 MiB huge leaf；软件
+  正式页表保留 low RAM 的 4 KiB 权限映射，高 RAM 使用非 Global 的 PMD 2 MiB huge leaf；软件
   refill 必须区分 table pointer 与 bit-6 huge leaf，后者不能执行 table-pointer 解码的 `-1`。
   fw_cfg 无效时保留 12 GiB 兼容上限，发现值最高钳制到比赛 36 GiB。
 - 后续影响：36 GiB 支持不能退回逐页 direct map；调整 RAM 上限时必须同时审计 39-bit VA、物理
   地址位宽、PMD 对齐和 frame allocator bitmap。fw_cfg 只在 DMW0 生效的 boot hart 早期读取，
-  secondary 不得重复访问或修改全局物理上限。
+  secondary 不得重复访问或修改全局物理上限。当前 ASID 仍为 0，不能提前把 direct map 标成
+  Global；Global kernel 映射必须和 ASID 生命周期、软件 refill 及远端 shootdown 一起验证。
 
 ### kernel heap 是启动期 RAM 预留区，不属于 ELF/BSS
 

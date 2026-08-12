@@ -129,12 +129,11 @@ pub unsafe fn jump_to_high_half(entry: usize) -> ! {
     };
     unsafe {
         core::arch::asm!(
-            "li.d    $t0, {kernel_base}",
-            "bgeu    $sp, $t0, 1f",
-            "add.d   $sp, $sp, $t0",
+            "bgeu    $sp, {kernel_base}, 1f",
+            "add.d   $sp, $sp, {kernel_base}",
             "1:",
             "jr      {target}",
-            kernel_base = const crate::config::KERNEL_BASE,
+            kernel_base = in(reg) crate::config::KERNEL_BASE,
             target = in(reg) target,
             options(noreturn)
         );
