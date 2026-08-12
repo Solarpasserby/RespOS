@@ -2,13 +2,7 @@
 
 RespOS 是一个使用 Rust 编写的教学与竞赛型操作系统内核，主要面向全国大学生操作系统比赛。当前项目支持 RISC-V 64 与 LoongArch 64 两个架构，能够在比赛镜像中运行主要用户态测试程序，并围绕 Linux ABI 兼容、双架构移植和复杂测例支撑做了较完整的工程实现。
 
-- [初赛文档](docs/初赛文档/初赛文档.pdf)
-- [初赛 PPT](docs/初赛文档/RespOS初赛进展汇报.pptx)
-- [初赛视频展示](https://pan.baidu.com/s/1UeR0f-N6hwRB5mUd1EDO-w?pwd=0612)
-
-> 补充说明：受限于项目规划、时间投入和个人能力，最终提测成绩未能完全反映项目在本地环境中的实际完成度。我们在本地对 LTP 等测例做了持续验证，其中 LTP 可通过 600 余个测例，本地阶段性统计分数接近 5000 分。但不可否认：评测平台下的并发、时序和环境差异仍暴露出内核稳定性与细节语义上的不足，造成我们无法将内核潜在的能力进行展现。
-
-> 听我解释：由于最后提交时间较晚，且提交计划和平台环境可能共同影响了最终成绩，展示分数可能相对偏低（我等不到它出分了）；我们最后提交的版本选择的是此前实际拿到过分数、相对稳定的版本，该版本可取得约 2350 分。我们承认项目仍有不足，也会在后续继续修复和完善。恳请评判老师在评分时结合项目的代码规模、模块完整性、本地测试结果、最终稳定版本得分和实际工程工作量，给予一定的理解与综合考量。
+- [决赛文档](docs/决赛文档/决赛文档.pdf)
 
 ## 设计理念与完成情况
 
@@ -66,34 +60,6 @@ make rv           # 构建并运行 RISC-V 版本
 make la           # 构建并运行 LoongArch 版本
 ```
 
-也可以进入内核目录直接运行当前架构：
-
-```bash
-cd os
-make run          # 默认 ARCH=riscv64
-```
-
-运行日志默认写入：
-
-- RISC-V: `rv-output.txt`
-- LoongArch: `la-output.txt`
-
-## 调试
-
-RISC-V 调试：
-
-```bash
-cd os
-make gdbserver
-```
-
-LoongArch 调试：
-
-```bash
-cd os
-make gdbserver ARCH=loongarch64
-```
-
 ## 目录结构
 
 ```text
@@ -126,31 +92,6 @@ RespOS/
 ├── vendor/               # 第三方依赖源码
 └── .devcontainer/        # Dev Container 开发环境配置
 ```
-
-## 测例与评测
-
-RespOS 主要面向 OSComp 初赛评测流程：
-
-1. `make all` 生成 `kernel-rv` 与 `kernel-la`。
-2. QEMU 挂载比赛提供的 ext4 测试镜像。
-3. 内核启动后扫描并运行镜像中的测试脚本。
-4. `testrunner` 串行执行测例组，输出符合评测机格式的日志。
-5. 测例全部结束后主动关机。
-
-当前本地常用测例包括：
-
-- basic
-- BusyBox
-- libc-bench
-- libctest
-- lua
-- iperf
-- netperf
-- iozone
-- lmbench
-- LTP
-
-其中 LTP 使用清单化运行方式，便于在不同阶段启用高收益测例、跳过高风险或高耗时测例。
 
 ## 许可证
 
