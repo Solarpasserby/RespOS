@@ -479,6 +479,22 @@
 - 内容：IOCSR IPI vector 1 表示“检查本 hart 的 shootdown 槽”。请求者按 hart id 顺序独占每个
   target slot，发布 generation 后发送 IPI 并同步等待 ack；目标执行本地全 TLB 失效后确认。地址空间
   root 切换不发送远端请求，只有 PTE writer 使用该协议。LA 清除或替换 PTE 后先全局退役旧数据页，
-  当前对全部 online hart 完成 shootdown 后才释放；这是 ASID/精确按地址空间回收前的保守选择。
-- 后续影响：LA 关中断内核的锁竞争等待必须能服务 pending IPI；handler 不得拿普通锁。ASID、精确
-  地址失效、Global 映射或异步 shootdown 都必须作为后续独立协议重新验证。
+  当前对全部 online hart 完成 shootdown 后才释放；这是精确按地址空间回收前的保守选择。
+- 后续影响：LA 关中断内核的锁竞争等待必须能服务 pending IPI；handler 不得拿普通锁。ASID 已在
+  后续阶段验证；精确地址失效、Global 映射或异步 shootdown 仍须作为独立协议重新验证。
+
+## LoongArch 用户 MemorySet 持有可延迟复用的 10-bit ASID
+
+- 状态：已采用
+- 适用范围：LA task switch、MemorySet 生命周期、短进程/exec、TLB shootdown
+- 最后验证：2026-08-12
+- 证据：`os/src/{arch/loongarch64,mm/memory_set.rs,task/task.rs}`；12-hart 1200 短进程 rollover、
+  rollover 后双 shared-MM 与 Phase3、正式 final 短回归
+- 内容：ASID 0 保留给 kernel/idle，用户空间分配 1--1023；root 与 ASID 组合为软件 token，普通
+  `__switch` 只恢复 PGDL/PGDH/ASID，不完整失效 TLB。退出路径只有在确认无外部 CLONE_VM owner、
+  数据页完成全在线失效后才及时退役 ASID；最终 Drop 幂等补漏。编号耗尽时先冻结 retired 批次，
+  完成本地和全在线失效后才清除 used 位，禁止未经屏障立即复用。
+- 后续影响：CSR.ASID 的 ASIDBITS 高位不得混入 token。现有 ASID 不自动证明 Global PTE、按 ASID/VA
+  精确失效或缩小 frame-retirement target 正确；这些优化必须分别通过 shared-MM 与复用压力门禁。
+  当前最多支持 1023 个同时存活的独立用户 MemorySet；若扩展上限，必须实现 active-ASID 保留的
+  generation rollover，不能复用尚未退役的编号。

@@ -86,8 +86,8 @@
   fw_cfg 无效时保留 12 GiB 兼容上限，发现值最高钳制到比赛 36 GiB。
 - 后续影响：36 GiB 支持不能退回逐页 direct map；调整 RAM 上限时必须同时审计 39-bit VA、物理
   地址位宽、PMD 对齐和 frame allocator bitmap。fw_cfg 只在 DMW0 生效的 boot hart 早期读取，
-  secondary 不得重复访问或修改全局物理上限。当前 ASID 仍为 0，不能提前把 direct map 标成
-  Global；Global kernel 映射必须和 ASID 生命周期、软件 refill 及远端 shootdown 一起验证。
+  secondary 不得重复访问或修改全局物理上限。用户 ASID 已启用，但 direct map 仍非 Global；Global
+  kernel 映射必须和软件 refill 的成对 G 位、huge leaf 及远端 shootdown 一起独立验证。
 
 ### kernel heap 是启动期 RAM 预留区，不属于 ELF/BSS
 
@@ -119,20 +119,19 @@
 - 后续影响：当前 eager save/restore 优先保证正确性；lazy extension state 可作为性能优化。Linux LA
   signal mcontext 的扩展状态接口尚未实现，不能把 task trap 隔离等同于完整 signal FP/LSX ABI。
 
-### LoongArch 页表切换仍使用 ASID 0 和完整本地 TLB 失效
+### LoongArch 用户地址空间使用 10-bit ASID，切换不再完整失效 TLB
 
-- 状态：已确认；已去除重复失效指令
+- 状态：已实现并通过 ASID 复用与 SMP 专项
 - 适用范围：LA `TaskContext`、PGDL/PGDH、软件 TLB refill、task switch
 - 最后验证：2026-08-12
-- 证据：`os/src/arch/loongarch64/{task/switch.S,register/mod.rs,tlb_refill.S}`；公开 LA 决赛镜像
-  12 GiB/12 hart 240 秒最终源码限时运行
-- 内容：所有地址空间当前仍使用 ASID 0。`__switch` 恢复目标 PGDL/PGDH 后，以
-  `invtlb op=0` 完整失效本 hart TLB；通用 `sfence()` 同样只执行一次 op=0。按架构手册，op=3
-  是“清除所有 G=0 项”而不是按 ASID 清除，所以不能把它当作 ASID
-  shootdown；旧的 op=0+op=3 序列中第二条没有附加效果。
-- 后续影响：该优化只省去重复指令，不消除 task→idle→task 带来的 root 切换和用户软件 refill。
-  真正引入 ASID/global kernel TLB 前必须同时设计 ASID 分配复用、TLB refill 的 G/ASID 写入、页表
-  回收以及多 hart shootdown/ack，不能只替换一个 `INVTLB` opcode。
+- 证据：`os/src/arch/loongarch64/{task/switch.S,register/mod.rs,tlb_refill.S}`、
+  `os/src/mm/memory_set.rs`；12-hart 1200 短进程与 rollover 后 shared-MM/Phase3 专项
+- 内容：ASID 0 保留给 kernel/idle，用户 `MemorySet` 从 1--1023 分配。root 与低 10 位 ASID 组成
+  软件 MMU token；切换汇编保存 CSR.ASID 时必须屏蔽只读 ASIDBITS 高位，恢复 PGDL/PGDH/ASID 后
+  不执行逐切换 `invtlb`。无外部 CLONE_VM owner 的进程退出路径在数据页全在线失效后及时退役
+  ASID；Drop 是幂等 fallback。编号耗尽时冻结 retired 批次，完成全在线失效后才复用。
+- 后续影响：PTE writer 仍使用 Stage 1B 的完整 shootdown，direct map 仍非 Global。按 ASID/VA
+  精确失效和 Global kernel TLB 必须独立验证；不能把 `invtlb op=3` 误当按 ASID 失效。
 
 ### RV64 返回用户态前必须保持 kernel trap 状态
 
@@ -479,8 +478,8 @@ FdTable slot (FdEntry: descriptor flags)
   LoongArch 通过 IOCSR IPI vector 1 和 per-target generation request/ack 槽完成同一语义。页表 root
   切换只需本地 flush，实际 PTE 修改才发远端请求；旧 frame 必须在全部 ack 后回收。LA 当前把被
   清除或替换的旧数据页加入全局退役批次，并对所有 online hart 完成全量失效后释放该批次；这是
-  ASID/按地址空间精确跟踪前的保守正确性边界。LA 内核态通常关中断，因此项目 SpinMutex 和
+  按地址空间精确退役跟踪前的保守正确性边界。LA 内核态通常关中断，因此项目 SpinMutex 和
   MemorySet RwLock 的竞争等待点会轮询 pending IPI。
-- 边界：LA 当前仍使用 ASID 0 和全量 `invtlb op=0`；request/ack 已通过 12-hart 单/双实例
-  `smp_shared_mm_probe`，但引入 ASID、精确失效或 Global kernel 映射时必须重新验证 generation
-  生命周期、active mask 和 frame 回收顺序；在此之前不能把 online mask 缩成 active mask。
+- 边界：用户 ASID 已启用，但 PTE writer 仍使用全量 `invtlb op=0`；request/ack 已通过 12-hart
+  单/双实例 `smp_shared_mm_probe`。引入精确失效或 Global kernel 映射仍须重新验证 generation、
+  active mask 和 frame 回收顺序；在此之前不能把退役批次的 online mask 缩成 active mask。

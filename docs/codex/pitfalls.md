@@ -1,5 +1,17 @@
 # RespOS 已确认易错点
 
+## `build-rv` 与 `build-la` 不能并行共享可变 Cargo 配置
+
+- 状态：已确认；串行重建可恢复
+- 适用范围：顶层 Makefile、本地双架构验证、`make -j`
+- 最后验证：2026-08-12
+- 证据：并行执行两个目标后 RV 首条用户指令为 LA 编码并触发 IllegalInstruction；单独
+  `make build-rv` 后相同 RV 8-hart 命令正常进入 shell 且 shared-MM 100 轮通过
+- 内容：两个目标都会覆盖 `os/.cargo/config.toml` 与 `user/.cargo/config.toml`。并行构建会竞态选择
+  target/linker/rustflags，并可能把另一架构用户程序嵌入内核；不要并行运行这两个目标。
+- 后续影响：正式 `make all` 不加 `-j` 时按依赖顺序执行；若要支持并行，必须改为互不共享的
+  `--config`/`CARGO_HOME` 或 target-specific 配置，不能仅靠清理产物掩盖竞态。
+
 ## LoongArch `csrwr` 会改写源寄存器，不能连续复用同一页表 root 临时寄存器
 
 - 状态：已确认并修复

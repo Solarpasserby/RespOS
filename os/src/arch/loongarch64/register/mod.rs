@@ -341,6 +341,11 @@ pub mod mmu {
     }
 
     #[inline(always)]
+    pub fn read_asid() -> usize {
+        read_csr!(CSR_ASID) & 0x3ff
+    }
+
+    #[inline(always)]
     pub unsafe fn write_asid(bits: usize) {
         write_csr!(CSR_ASID, bits & 0x3ff);
     }

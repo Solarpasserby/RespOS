@@ -1,5 +1,25 @@
 # RespOS 当前状态
 
+## 2026-08-12 LA SMP 阶段 1C：ASID 与免逐切换全失效（当前工作树）
+
+- **实现**：ASID 0 保留给 kernel/idle，用户 MemorySet 使用 1--1023。软件 MMU token 携带 root 与
+  低 10 位 ASID；`__switch` 保存时屏蔽 CSR.ASID 的只读 ASIDBITS 字段，恢复 PGDL/PGDH/ASID 后
+  不再执行逐切换 `invtlb op=0`。ELF loader、activate、fork/clone 均传递完整 MemorySet token。
+- **生命周期**：退出路径确认地址空间没有外部 CLONE_VM owner、回收数据页并完成全在线 TLB 屏障后，
+  立即幂等退役 ASID，不依赖 zombie/deferred TCB 的最终 Drop。编号耗尽时冻结 retired 位图，完成
+  本地和全在线 TLB 失效后才批量复用；构造失败或 exec 旧空间仍由 Drop fallback 退役。
+- **复用门禁**：LA `-m 4G -smp 12` 下，以 BusyBox xargs 串行 exec 1200 个短进程，命令退出 0 并
+  打印 `ASID_CHURN_PASS`，进程号达到 1204。随后双 `smp_shared_mm_probe` 各 100 轮通过，
+  `smp_phase3_probe` 30 轮通过，证明 rollover 后共享 MM、fork/exec/wait 和网络/pipe 仍工作。
+- **BuildStorm/计数**：LA 12 GiB/12 hart 无 feature 短测通过 toolchain/minibuild 并完成 untimed
+  Cargo（正式 final 为 20.57 秒）并进入 timed arceos build。perf 30 秒窗口记录 context switches
+  4155、local sfences 93861、remote rfences 93800、full TLB invalidations 1127163；ASID 消除了逐切换
+  失效，但 PTE fault/update 的全在线 shootdown 仍占绝对多数，不能宣称总体大幅提速。
+- **容量边界**：当前只复用已退役编号；若同时存在超过 1023 个仍可运行的独立 MemorySet，会返回
+  `ENOMEM`。解除该限制需要带 active-ASID 保留的 generation rollover，不能直接覆盖在用编号。
+- **双架构边界**：ASID 分配、CSR 与切换汇编均为 LA 条件路径；RV64 保持 SATP/OpenSBI RFENCE。
+  双架构 release 构建通过；RV64 8-hart shared-MM 100 轮通过，LA final CAgent 10/10 后进入 BuildStorm。
+
 ## 2026-08-12 LA SMP 阶段 1B：同步远端 TLB shootdown（当前工作树）
 
 - **实现**：LA IOCSR IPI vector 1 专用于 TLB shootdown。每个目标 hart 有独立 request/ack

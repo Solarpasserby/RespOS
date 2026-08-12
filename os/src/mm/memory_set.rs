@@ -50,6 +50,84 @@ lazy_static! {
 }
 
 #[cfg(target_arch = "loongarch64")]
+struct AsidAllocator {
+    used: [usize; 16],
+    retired: [usize; 16],
+}
+
+#[cfg(target_arch = "loongarch64")]
+impl AsidAllocator {
+    const fn new() -> Self {
+        let mut used = [0; 16];
+        used[0] = 1;
+        Self {
+            used,
+            retired: [0; 16],
+        }
+    }
+
+    fn alloc(&mut self) -> Option<usize> {
+        for asid in 1..1024 {
+            let word = asid / usize::BITS as usize;
+            let bit = 1usize << (asid % usize::BITS as usize);
+            if self.used[word] & bit == 0 {
+                self.used[word] |= bit;
+                return Some(asid);
+            }
+        }
+        None
+    }
+
+    fn retire(&mut self, asid: usize) {
+        debug_assert!((1..1024).contains(&asid));
+        let word = asid / usize::BITS as usize;
+        let bit = 1usize << (asid % usize::BITS as usize);
+        debug_assert_ne!(self.used[word] & bit, 0);
+        self.retired[word] |= bit;
+    }
+    fn take_retired(&mut self) -> [usize; 16] {
+        core::mem::replace(&mut self.retired, [0; 16])
+    }
+    fn reclaim(&mut self, retired: [usize; 16]) {
+        for (used, retired) in self.used.iter_mut().zip(retired) {
+            *used &= !retired;
+        }
+        self.used[0] |= 1;
+    }
+}
+
+#[cfg(target_arch = "loongarch64")]
+lazy_static! {
+    static ref ASID_ALLOCATOR: Mutex<AsidAllocator> = Mutex::new(AsidAllocator::new());
+}
+
+#[cfg(target_arch = "loongarch64")]
+fn allocate_asid() -> SysResult<usize> {
+    let retired = {
+        let mut allocator = ASID_ALLOCATOR.lock();
+        if let Some(asid) = allocator.alloc() {
+            return Ok(asid);
+        }
+        allocator.take_retired()
+    };
+    if retired.iter().all(|word| *word == 0) {
+        return Err(Errno::ENOMEM);
+    }
+
+    sfence();
+    crate::perf::local_sfence(1);
+    let current = crate::arch::smp::current_hart_id();
+    let remote = crate::arch::smp::online_hart_mask() & !(1 << current);
+    if remote != 0 {
+        crate::perf::remote_rfence(1);
+        crate::arch::smp::remote_tlb_shootdown(remote);
+    }
+
+    let mut allocator = ASID_ALLOCATOR.lock();
+    allocator.reclaim(retired);
+    allocator.alloc().ok_or(Errno::ENOMEM)
+}
+#[cfg(target_arch = "loongarch64")]
 lazy_static! {
     static ref RETIRED_DATA_FRAMES: Mutex<Vec<Arc<FrameTracker>>> = Mutex::new(Vec::new());
 }
@@ -416,6 +494,8 @@ pub struct MemorySet {
     // 切回 per-CPU idle/kernel satp 后清除。页表写入者持有 MemorySet 写锁，
     // 因此不会与设置/清除 active bit 的读锁临界区交错。
     active_hart_mask: AtomicUsize,
+    #[cfg(target_arch = "loongarch64")]
+    asid: AtomicUsize,
 }
 
 impl Drop for MemorySet {
@@ -426,6 +506,8 @@ impl Drop for MemorySet {
             "dropping an active user address space"
         );
         self.recycle_data_pages();
+        #[cfg(target_arch = "loongarch64")]
+        self.retire_asid();
     }
 }
 
@@ -1789,7 +1871,7 @@ impl MemorySet {
 
     #[cfg(target_arch = "loongarch64")]
     pub fn activate(&self) {
-        let token = self.page_table.token();
+        let token = self.token();
         self.mark_current_hart_active();
         write_mmu_token(token);
         if !crate::arch::paging_enabled() {
@@ -1800,7 +1882,28 @@ impl MemorySet {
 
     /// 生成页表对应 `stap` 寄存器值
     pub fn token(&self) -> usize {
-        self.page_table.token()
+        #[cfg(target_arch = "loongarch64")]
+        {
+            return self.page_table.token() | self.asid.load(Ordering::Acquire);
+        }
+        #[cfg(target_arch = "riscv64")]
+        {
+            self.page_table.token()
+        }
+    }
+
+    /// Retire this address space's LA ASID after its last possible user has
+    /// completed the global TLB barrier, or when a never-activated construction
+    /// is dropped. The swap makes the explicit exit hook and eventual Drop
+    /// path idempotent.
+    pub(crate) fn retire_asid(&self) {
+        #[cfg(target_arch = "loongarch64")]
+        {
+            let asid = self.asid.swap(0, Ordering::AcqRel);
+            if asid != 0 {
+                ASID_ALLOCATOR.lock().retire(asid);
+            }
+        }
     }
     /// 转译虚拟页号为物理页号
     pub fn translate(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
@@ -1955,6 +2058,8 @@ impl MemorySet {
             page_table: PageTable::new(),
             areas: Vec::new(),
             active_hart_mask: AtomicUsize::new(0),
+            #[cfg(target_arch = "loongarch64")]
+            asid: AtomicUsize::new(0),
         }
     }
     /// 创建一个拥有内核空间根页表页信息的地址空间，主要用于用户进程
@@ -1966,6 +2071,8 @@ impl MemorySet {
             page_table: PageTable::from_kernel()?,
             areas: Vec::new(),
             active_hart_mask: AtomicUsize::new(0),
+            #[cfg(target_arch = "loongarch64")]
+            asid: AtomicUsize::new(allocate_asid()?),
         })
     }
 
@@ -2413,7 +2520,7 @@ impl MemorySet {
             .areas
             .sort_by_key(|area| area.vpn_range.get_start());
         memory_set.debug_check_invariants();
-        let token = memory_set.page_table.token();
+        let token = memory_set.token();
         Ok((
             memory_set, // 用户程序地址空间
             token,

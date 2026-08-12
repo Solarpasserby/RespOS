@@ -57,7 +57,7 @@ unsafe extern "C" {
 
 #[inline]
 pub fn read_mmu_token() -> usize {
-    register::mmu::read_pgdl()
+    register::mmu::read_pgdl() | register::mmu::read_asid()
 }
 
 #[inline]
@@ -66,9 +66,10 @@ pub fn write_mmu_token(token: usize) {
         // 当前模型下用户低半区和内核高半区共享同一个根页表页。
         // LoongArch 的硬件按虚拟地址所在半区在 PGDL/PGDH 中选择根页表，
         // 因此两个寄存器都要写入当前地址空间的 root。
-        register::mmu::write_pgdl(token);
-        register::mmu::write_pgdh(token);
-        register::mmu::write_asid(0);
+        let root = token & !0xfff;
+        register::mmu::write_pgdl(root);
+        register::mmu::write_pgdh(root);
+        register::mmu::write_asid(token);
         register::mmu::sync_page_table_root();
     }
 }

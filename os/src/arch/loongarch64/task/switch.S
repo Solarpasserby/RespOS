@@ -49,8 +49,11 @@ __switch:
     st.d        $zero, $sp, 96
     st.d        $zero, $sp, 104
 
-    # 保存当前用户页表 root。PGDL/PGDH 使用同一个 root。
+    # 保存当前 root 与低 10 位 ASID 组成的 MMU token。
     csrrd       $t0, 0x19        # PGDL
+    csrrd       $t1, 0x18        # ASID
+    andi        $t1, $t1, 0x3ff  # 去除 CSR.ASID 中只读的 ASIDBITS 字段
+    or          $t0, $t0, $t1
     st.d        $t0, $sp, 112
 
     # 更新当前任务的内核栈指针。
@@ -72,17 +75,18 @@ __switch:
     ld.d        $r30, $a0, 80   # s7
     ld.d        $r31, $a0, 88   # s8
 
-    # 恢复 PGDL/PGDH 并刷新 TLB。
+    # 恢复 PGDL/PGDH 与 ASID。普通上下文切换不再失效 TLB；PTE writer
+    # 和 ASID 回收路径负责同步屏障。
     ld.d        $t0, $a0, 112
-    # csrwr 会把目标 CSR 的旧值写回源寄存器。必须先复制 root；若连续
-    # 两次复用 t0，第二次会把旧 PGDL 写进 PGDH，形成低/高半区 split root。
-    ori         $t1, $t0, 0
-    csrwr       $t0, 0x19        # PGDL
-    csrwr       $t1, 0x1a        # PGDH
+    srli.d      $t1, $t0, 12
+    slli.d      $t1, $t1, 12     # root = token & !0xfff
+    andi        $t2, $t0, 0x3ff  # ASID
+    ori         $t3, $t1, 0
+    # csrwr 会把目标 CSR 的旧值写回源寄存器，所以每次使用独立副本。
+    csrwr       $t1, 0x19        # PGDL
+    csrwr       $t3, 0x1a        # PGDH
+    csrwr       $t2, 0x18        # ASID
     dbar        0
-    # op=0 已按架构手册完整失效所有 TLB 项。原先紧随其后的 op=3
-    # 只会再次失效 G=0 项，语义上完全被 op=0 覆盖。
-    invtlb      0x0, $zero, $zero
     ibar        0
 
     # 弹出 TaskContext，切换到新栈

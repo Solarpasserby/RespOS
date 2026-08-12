@@ -2334,6 +2334,7 @@ fn exit_process_group(task: Arc<TaskControlBlock>, cause: ExitCause) {
         }
         task.op_memory_set_write(|mem| {
             mem.recycle_data_pages();
+            mem.retire_asid();
         });
     }
     if fd_table_owned_by_group {

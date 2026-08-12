@@ -219,9 +219,8 @@ pub fn run_tasks() -> ! {
             drop(next_task);
             let running_started = crate::perf::now_ticks();
             crate::perf::context_switch(1);
+            #[cfg(target_arch = "riscv64")]
             crate::perf::local_sfence(1);
-            #[cfg(target_arch = "loongarch64")]
-            crate::perf::full_tlb_invalidation(1);
             unsafe {
                 __switch(next_task_kstack, idle_task_ptr);
             }
