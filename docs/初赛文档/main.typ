@@ -6,12 +6,12 @@
 // ============================================================
 
 // 字体配置：Dev Container 用文鼎字体，WSL 回退到 Windows 字体
-#let font-hei  = ("Microsoft YaHei", "微软雅黑", "SimHei", "黑体", "Noto Sans CJK SC", "Source Han Sans SC", "AR PL UMing", "AR PL UMing CN")
-#let font-song = ("SimSun", "宋体", "Noto Serif CJK SC", "Source Han Serif SC", "AR PL SungtiL GB")
-#let font-kai  = ("KaiTi", "楷体", "AR PL KaitiM GB")
-#let font-body = font-song + ("Times New Roman",)
-#let font-mono = ("DejaVu Sans Mono", "Cascadia Code", "Consolas", "Courier New")
-#let font-title = ("DejaVu Sans", "Arial", "Helvetica")
+#let font-hei  = ("AR PL KaitiM GB", "AR PL UMing")
+#let font-song = ("AR PL SungtiL GB", "AR PL UMing")
+#let font-kai  = ("AR PL KaitiM GB",)
+#let font-body = font-song
+#let font-mono = ("DejaVu Sans Mono",)
+#let font-title = ("DejaVu Sans", "AR PL SungtiL GB")
 
 #let brand-red = rgb("#8B1A2B")
 #let ink = rgb("#202124")
@@ -148,7 +148,7 @@
         inset: (x: 16pt, y: 9pt),
         radius: 2pt,
       )[
-        #image("figures/sdu-logo.svg", width: 21em)
+        #image("../assets/figures/sdu-logo.svg", width: 21em)
       ]
     ]
     #v(0.65em)
@@ -362,7 +362,7 @@ RespOS 采用宏内核结构，各核心模块运行在同一内核地址空间�
   supplement: [图],
   caption: [RespOS 整体架构示意],
 )[
-  #image("figures/architecture.svg", width: 100%)
+  #image("../assets/figures/architecture.svg", width: 100%)
 ]
 
 这种结构的优点是开发路径直接，便于在测例驱动下快速补齐能力；代价是模块之间存在真实的语义耦合。因此项目需要通过清晰的接口约定和回归测试约束资源生命周期，避免文件描述符、地址空间、信号状态和父子关系在复杂系统调用路径中出现不一致。
@@ -426,7 +426,7 @@ RespOS 采用宏内核结构，各核心模块运行在同一内核地址空间�
   supplement: [图],
   caption: [进程管理模块在内核中的位置],
 )[
-  #image("figures/process-module.svg", width: 100%)
+  #image("../assets/figures/process-module.svg", width: 100%)
 ]
 
 进程管理模块的主要源文件位于 `os/src/task/`。其中 `task.rs` 定义任务控制块和进程/线程资源，`scheduler.rs` 维护就绪队列与阻塞队列，`processor.rs` 记录当前 CPU 正在运行的任务，`manager.rs` 提供 TID 到任务对象的全局弱引用索引，`context.rs` 和 `kstack.rs` 则分别负责任务上下文和内核栈布局。
@@ -441,7 +441,7 @@ RespOS 当前采用 FIFO 调度策略。就绪任务被放入 `ready_queue`，�
   supplement: [图],
   caption: [任务切换流程],
 )[
-  #image("figures/task-switch.svg", width: 100%)
+  #image("../assets/figures/task-switch.svg", width: 100%)
 ]
 
 调度器目前不引入复杂优先级、时间片权重或多核心负载均衡，主要目标是保证初赛阶段系统调用和用户态程序运行链路稳定。对于 busybox、libc 初始化和 LTP 测例而言，调度策略本身不是瓶颈，关键在于阻塞、唤醒、退出和父子回收路径必须语义清楚，不能丢失任务状态或错误释放资源。
@@ -454,7 +454,7 @@ RespOS 当前采用 FIFO 调度策略。就绪任务被放入 `ready_queue`，�
   supplement: [图],
   caption: [调度队列结构],
 )[
-  #image("figures/scheduler-queues.svg", width: 92%)
+  #image("../assets/figures/scheduler-queues.svg", width: 92%)
 ]
 
 `processor.rs` 中的 `PROCESSOR` 保存当前 CPU 正在运行的任务。系统启动后，`run_tasks` 从就绪队列取出第一个任务，将其记录为当前任务，再切换到该任务内核栈。此后常规调度不再回到独立的执行器对象，而是由当前任务在让出、阻塞或退出路径中直接选择下一个任务并调用 `__switch`。
@@ -534,7 +534,7 @@ RespOS 采用接近 Linux 的“线程是调度单位，进程是线程组”的
   supplement: [图],
   caption: [进程与线程关系],
 )[
-  #image("figures/process-thread.svg", width: 92%)
+  #image("../assets/figures/process-thread.svg", width: 92%)
 ]
 
 `clone` 标志决定新任务是线程还是进程。当设置 `CLONE_THREAD` 时，新任务加入调用者的线程组，并共享地址空间、部分文件系统上下文和信号处理函数表；未设置该标志时，新任务成为独立进程，拥有新的 TGID，并作为子进程加入父任务的 `children` 表。这个区分直接影响 `wait4` 回收语义：普通子进程由父进程等待回收，同线程组内的新线程不进入父进程的 children 表。
@@ -549,7 +549,7 @@ RespOS 采用接近 Linux 的“线程是调度单位，进程是线程组”的
   supplement: [图],
   caption: [任务状态转换],
 )[
-  #image("figures/task-state.svg", width: 100%)
+  #image("../assets/figures/task-state.svg", width: 100%)
 ]
 
 其中 `Exited` 不是立即释放所有资源的终点。普通子进程退出后仍需要保留退出码和必要的任务元数据，直到父进程通过 `wait4` 完成观察和回收；线程退出还需要配合 futex、`clear_child_tid` 和线程组状态完成用户态同步。
@@ -608,7 +608,7 @@ RespOS 的 trap 处理分为入口保存、Rust 分发、后置检查和返回�
   supplement: [图],
   caption: [用户态 trap 处理流程],
 )[
-  #image("figures/trap-flow.svg", width: 100%)
+  #image("../assets/figures/trap-flow.svg", width: 100%)
 ]
 
 图中各分支的处理结果并不相同：有的修改上下文后继续返回，有的先尝试修复，失败后转为信号或退出，有的直接进入调度。具体边界在用户态 trap 表中列出。
@@ -691,7 +691,7 @@ RespOS 采用“用户低地址、内核高地址”的布局。用户进程的�
   supplement: [图],
   caption: [RespOS 地址空间布局],
 )[
-  #image("figures/memory-layout.svg", width: 100%)
+  #image("../assets/figures/memory-layout.svg", width: 100%)
 ]
 
 用户地址空间由 ELF LOAD 段、动态链接器映射、用户栈、堆区、mmap 区间和 sigreturn 跳板页组成。加载 ELF 时，内核根据程序头权限建立 `READ`、`WRITE`、`EXECUTE`、`USER` 标志；最高 LOAD 段之后先留出一页 guard page，再放置用户栈，栈顶位于栈区域高地址端，向低地址增长时会先撞到 guard page。`heap_bottom` 和初始 `brk` 放在用户栈之后，堆通过 `brk` 向高地址扩展；mmap 区间从 `MMAP_MIN_ADDR` 独立开始，和早期堆/栈之间保留较大空洞，避免普通堆增长立即碰到 mmap 区。
@@ -785,7 +785,7 @@ RespOS 采用“用户低地址、内核高地址”的布局。用户进程的�
   supplement: [图],
   caption: [缺页异常处理流程],
 )[
-  #image("figures/page-fault.svg", width: 100%)
+  #image("../assets/figures/page-fault.svg", width: 100%)
 ]
 
 === 写时复制机制
@@ -845,7 +845,7 @@ VFS 的核心目标是把“路径解析”“文件对象语义”和“打开�
   supplement: [图],
   caption: [VFS 路径解析与打开文件流程],
 )[
-  #image("figures/vfs-path.svg", width: 100%)
+  #image("../assets/figures/vfs-path.svg", width: 100%)
 ]
 
 === SuperBlock
@@ -906,7 +906,7 @@ devfs 的意义不只是提供几个路径名，而是把设备对象纳入统�
   supplement: [图],
   caption: [文件系统后端与页缓存关系],
 )[
-  #image("figures/fs-backends.svg", width: 100%)
+  #image("../assets/figures/fs-backends.svg", width: 100%)
 ]
 
 全局页缓存通过 `PAGE_CACHE_LRU` 和 `PAGE_CACHE_PAGE_COUNT` 控制规模。只有未 dirty、generation 未变化且没有额外强引用的页才能被回收；dirty 页需要先写回，仍被文件或其他路径持有的页也不能直接丢弃。这个策略避免了简单粗暴释放缓存导致的数据丢失，同时让常规文件重复读写可以绕开底层磁盘 I/O。
@@ -938,7 +938,7 @@ RespOS 的 IPC 支持围绕 Linux 用户程序最常依赖的控制流通知、�
   supplement: [图],
   caption: [信号递送与返回流程],
 )[
-  #image("figures/signal-flow.svg", width: 100%)
+  #image("../assets/figures/signal-flow.svg", width: 100%)
 ]
 
 == 信号传输
@@ -1016,7 +1016,7 @@ struct PipeRingBuffer {
   supplement: [图],
   caption: [IPC 对象与任务关系],
 )[
-  #image("figures/ipc-objects.svg", width: 100%)
+  #image("../assets/figures/ipc-objects.svg", width: 100%)
 ]
 
 === 读端与写端通信
@@ -1070,7 +1070,7 @@ futex 等待队列按用户地址哈希到 256 个桶。私有 futex 的 key 包
   supplement: [图],
   caption: [定时事件处理路径],
 )[
-  #image("figures/timer-events.svg", width: 100%)
+  #image("../assets/figures/timer-events.svg", width: 100%)
 ]
 
 == 时钟源与时间尺度
@@ -1211,7 +1211,7 @@ POSIX timer 由全局 `POSIX_TIMERS` 表管理，timer id 递增分配，表项�
   supplement: [图],
   caption: [网络栈调用路径],
 )[
-  #image("figures/net-stack.svg", width: 100%)
+  #image("../assets/figures/net-stack.svg", width: 100%)
 ]
 
 == Socket 套接字
@@ -1224,7 +1224,7 @@ POSIX timer 由全局 `POSIX_TIMERS` 表管理，timer id 递增分配，表项�
   supplement: [图],
   caption: [socket 从创建到收发的生命周期],
 )[
-  #image("figures/socket-lifecycle.svg", width: 100%)
+  #image("../assets/figures/socket-lifecycle.svg", width: 100%)
 ]
 
 `Socket` 的分派逻辑直接体现在构造函数中：协议选择失败时尽早返回 Linux 风格错误码，成功后统一接入 fd 表。
@@ -1271,7 +1271,7 @@ RespOS 当前网络设备是 `LoopbackDev`，实现 `smoltcp::phy::Device` trait
   supplement: [图],
   caption: [LoopbackDev 收发闭环],
 )[
-  #image("figures/loopback-flow.svg", width: 100%)
+  #image("../assets/figures/loopback-flow.svg", width: 100%)
 ]
 
 网络栈初始化时会先触发两个全局管理对象：`SOCKET_SET_INNER` 保存所有 smoltcp socket，`LISTEN_TABLE` 保存 TCP 监听端口。随后初始化回环设备和回环接口，即 `LOOPBACK_DEV` 与 `LOOPBACK_IFACE`。之后 TCP/UDP 的阻塞等待、poll 状态查询和 connect/listen 推进都会反复调用 `poll_interfaces`，由它带着当前时间戳执行 `Interface::poll()`。换言之，网络协议栈不是依靠独立网络中断推进，而是在系统调用和等待循环中主动轮询。
@@ -1341,7 +1341,7 @@ let result = loop {
   supplement: [图],
   caption: [TCP listen / accept 序列],
 )[
-  #image("figures/tcp-accept-sequence.svg", width: 100%)
+  #image("../assets/figures/tcp-accept-sequence.svg", width: 100%)
 ]
 
 #figure(
@@ -1387,7 +1387,7 @@ socket option 的目标是兼容常见用户程序，而不是完整复刻 Linux
   supplement: [图],
   caption: [设备模块分层],
 )[
-  #image("figures/device-stack.svg", width: 100%)
+  #image("../assets/figures/device-stack.svg", width: 100%)
 ]
 
 == 设备抽象与块设备
@@ -1419,7 +1419,7 @@ RespOS 的根文件系统后端依赖 VirtIO block。RISC-V 64 路径使用 QEMU
   supplement: [图],
   caption: [VirtIO block 到 Ext4 的数据路径],
 )[
-  #image("figures/virtio-block-flow.svg", width: 100%)
+  #image("../assets/figures/virtio-block-flow.svg", width: 100%)
 ]
 
 VirtIO 驱动的核心代码很薄，主要把 `virtio-drivers` 的 `VirtIOBlk` 包装成 RespOS 的设备接口，并把底层错误转换为 `DevError`。真正和内存管理相关的部分在 `VirtIoHalImpl`：DMA 分配通过页帧分配器取得连续页帧，用 `DMA_ALLOCATIONS` 保存 `FrameTracker`，直到 virtio 驱动调用 `dma_dealloc`；`share` 把内核虚拟地址转换为物理地址，供设备访问。
@@ -1450,7 +1450,7 @@ devfs 把设备对象纳入第五章介绍的 VFS 路径模型。初始化时，
   supplement: [图],
   caption: [/dev 目录结构],
 )[
-  #image("figures/devfs-tree.svg", width: 100%)
+  #image("../assets/figures/devfs-tree.svg", width: 100%)
 ]
 
 devfs 根目录的 `lookup` 根据文件名返回不同 inode：`null`、`zero`、`random`、`urandom`、`shm`、`misc`、`loop-control` 和 `loop0`。这些 inode 直接实现 `InodeOp`，因此设备行为由读写函数决定。例如 `/dev/null` 读返回 0、写返回写入长度；`/dev/zero` 读时填充 0；`/dev/random` 和 `/dev/urandom` 用时间、偏移和常量混合生成伪随机字节；`/dev/misc/rtc` 当前是兼容性 stub，读返回 0、写入成功消费字节。
@@ -1538,7 +1538,7 @@ RespOS 同时支持 RISC-V 64 和 LoongArch 64。为了避免上层内核在系�
   supplement: [图],
   caption: [硬件抽象层组织],
 )[
-  #image("figures/hal-layer.svg", width: 100%)
+  #image("../assets/figures/hal-layer.svg", width: 100%)
 ]
 
 ```rust
@@ -1615,7 +1615,7 @@ LoongArch QEMU virt 的启动约束不同。内核 ELF 链接在高半区，但 
   supplement: [图],
   caption: [双架构启动流程],
 )[
-  #image("figures/boot-flow.svg", width: 100%)
+  #image("../assets/figures/boot-flow.svg", width: 100%)
 ]
 
 ```rust
@@ -1645,7 +1645,7 @@ RespOS 在两个架构上都采用 39-bit 虚拟地址、4 KiB 页和三级页�
   supplement: [图],
   caption: [MemorySet 与架构页表后端],
 )[
-  #image("figures/mmu-page-table.svg", width: 100%)
+  #image("../assets/figures/mmu-page-table.svg", width: 100%)
 ]
 
 === 物理内存

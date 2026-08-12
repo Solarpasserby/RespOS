@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="470" viewBox="0 0 920 470">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L9,3 L0,6 Z" fill="#475467"/>
+    </marker>
+    <style>
+      .lane { fill: #f8fafc; stroke: #d0d5dd; stroke-width: 1.2; rx: 12; }
+      .user { fill: #fff7ed; stroke: #c2410c; stroke-width: 1.7; rx: 10; }
+      .entry { fill: #eff6ff; stroke: #2563eb; stroke-width: 1.8; rx: 10; }
+      .kernel { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.4; rx: 10; }
+      .fault { fill: #fef2f2; stroke: #dc2626; stroke-width: 1.5; rx: 10; }
+      .timer { fill: #ecfdf3; stroke: #16a34a; stroke-width: 1.5; rx: 10; }
+      .label { font: 700 23px sans-serif; fill: #202124; }
+      .small { font: 500 18px monospace; fill: #344054; }
+      .hint { font: 500 17px sans-serif; fill: #667085; }
+      .arrow { stroke: #475467; stroke-width: 2.1; fill: none; marker-end: url(#arrow); }
+      .dash { stroke: #667085; stroke-width: 1.8; fill: none; stroke-dasharray: 7 5; marker-end: url(#arrow); }
+    </style>
+  </defs>
+
+  <rect x="34" y="32" width="852" height="92" class="lane"/>
+  <text x="64" y="62" class="label">用户态</text>
+  <rect x="245" y="52" width="430" height="52" class="user"/>
+  <text x="460" y="82" text-anchor="middle" class="small">ecall/syscall · page fault · timer interrupt</text>
+
+  <path d="M460 104 L460 152" class="arrow"/>
+  <text x="482" y="132" class="hint">硬件切换到内核入口</text>
+
+  <rect x="34" y="152" width="852" height="182" class="lane"/>
+  <text x="64" y="182" class="label">入口汇编</text>
+  <rect x="95" y="218" width="210" height="72" class="entry"/>
+  <text x="200" y="248" text-anchor="middle" class="label">保存上下文</text>
+  <text x="200" y="274" text-anchor="middle" class="small">TrapContext on kstack</text>
+
+  <rect x="355" y="218" width="210" height="72" class="entry"/>
+  <text x="460" y="248" text-anchor="middle" class="label">切换入口</text>
+  <text x="460" y="274" text-anchor="middle" class="small">user trap -> kernel trap</text>
+
+  <rect x="615" y="218" width="210" height="72" class="entry"/>
+  <text x="720" y="248" text-anchor="middle" class="label">调用 Rust</text>
+  <text x="720" y="274" text-anchor="middle" class="small">trap_handler(cx)</text>
+
+  <path d="M305 254 L355 254" class="arrow"/>
+  <path d="M565 254 L615 254" class="arrow"/>
+
+  <path d="M720 290 L720 354" class="arrow"/>
+
+  <rect x="34" y="354" width="852" height="82" class="lane"/>
+  <text x="64" y="384" class="label">内核处理</text>
+  <rect x="180" y="374" width="150" height="42" class="kernel"/>
+  <text x="255" y="401" text-anchor="middle" class="small">syscall dispatch</text>
+  <rect x="385" y="374" width="150" height="42" class="fault"/>
+  <text x="460" y="401" text-anchor="middle" class="small">page fault / signal</text>
+  <rect x="590" y="374" width="150" height="42" class="timer"/>
+  <text x="665" y="401" text-anchor="middle" class="small">timer / yield</text>
+
+  <path d="M615 395 L535 395" class="dash"/>
+  <path d="M590 395 L535 395" class="dash"/>
+  <path d="M385 395 L330 395" class="dash"/>
+  <path d="M720 374 C690 344 600 330 460 334 C325 338 250 349 255 374" class="dash"/>
+
+  <path d="M255 374 C250 330 210 320 200 290" class="dash"/>
+  <text x="286" y="344" class="hint">处理后恢复或调度</text>
+</svg>

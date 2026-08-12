@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="450" viewBox="30 70 920 450">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L9,3 L0,6 Z" fill="#475467"/>
+    </marker>
+    <style>
+      .title { font: 700 26px sans-serif; fill: #202124; }
+      .box-title { font: 700 22px sans-serif; fill: #202124; }
+      .small { font: 500 18px monospace; fill: #344054; }
+      .note { font: 500 17px sans-serif; fill: #667085; }
+      .user { fill: #fff7ed; stroke: #c2410c; stroke-width: 1.6; rx: 10; }
+      .kernel { fill: #f8fafc; stroke: #9ca3af; stroke-width: 1.4; rx: 10; }
+      .sched { fill: #eff6ff; stroke: #2563eb; stroke-width: 1.6; rx: 10; }
+      .green { fill: #f0fdf4; stroke: #15803d; stroke-width: 1.6; rx: 10; }
+      .arrow { stroke: #475467; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+      .return { stroke: #15803d; stroke-width: 2; fill: none; marker-end: url(#arrow); stroke-dasharray: 7 5; }
+    </style>
+  </defs>
+
+  <rect x="60" y="80" width="210" height="76" class="user"/>
+  <text x="165" y="110" text-anchor="middle" class="box-title">当前用户任务</text>
+  <text x="165" y="136" text-anchor="middle" class="small">Running in user mode</text>
+
+  <line x1="270" y1="118" x2="360" y2="118" class="arrow"/>
+  <text x="315" y="102" text-anchor="middle" class="note">trap/syscall/timer</text>
+
+  <rect x="360" y="80" width="240" height="76" class="kernel"/>
+  <text x="480" y="110" text-anchor="middle" class="box-title">进入内核 Trap</text>
+  <text x="480" y="136" text-anchor="middle" class="small">保存 TrapContext</text>
+
+  <line x1="600" y1="118" x2="710" y2="118" class="arrow"/>
+
+  <rect x="710" y="80" width="210" height="76" class="kernel"/>
+  <text x="815" y="110" text-anchor="middle" class="box-title">更新任务状态</text>
+  <text x="815" y="136" text-anchor="middle" class="small">Ready/Blocked/Exited</text>
+
+  <line x1="815" y1="156" x2="815" y2="222" class="arrow"/>
+
+  <rect x="680" y="222" width="270" height="82" class="sched"/>
+  <text x="815" y="252" text-anchor="middle" class="box-title">调度器选择任务</text>
+  <text x="815" y="278" text-anchor="middle" class="small">fetch_task from ready_queue</text>
+
+  <line x1="680" y1="263" x2="565" y2="263" class="arrow"/>
+
+  <rect x="330" y="222" width="235" height="82" class="sched"/>
+  <text x="447" y="252" text-anchor="middle" class="box-title">切换内核上下文</text>
+  <text x="447" y="278" text-anchor="middle" class="small">__switch(kstack, current)</text>
+
+  <line x1="330" y1="263" x2="215" y2="263" class="arrow"/>
+
+  <rect x="40" y="222" width="175" height="82" class="kernel"/>
+  <text x="128" y="252" text-anchor="middle" class="box-title">恢复任务上下文</text>
+  <text x="128" y="278" text-anchor="middle" class="small">TaskContext</text>
+
+  <line x1="128" y1="304" x2="128" y2="380" class="arrow"/>
+
+  <rect x="40" y="380" width="230" height="76" class="green"/>
+  <text x="155" y="410" text-anchor="middle" class="box-title">返回用户态</text>
+  <text x="155" y="436" text-anchor="middle" class="small">__restore / sepc / sp</text>
+
+  <path d="M270 418 C455 506, 715 506, 815 304" class="return"/>
+  <text x="520" y="492" text-anchor="middle" class="note">下一次 trap 重新进入调度闭环</text>
+
+  <rect x="350" y="360" width="560" height="92" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.2" rx="10"/>
+  <text x="630" y="388" text-anchor="middle" class="box-title">关键数据流</text>
+  <text x="630" y="416" text-anchor="middle" class="small">TrapContext: 用户寄存器 / PC / SP</text>
+  <text x="630" y="440" text-anchor="middle" class="small">TaskContext: 内核返回地址 / 保存寄存器 / 页表 token</text>
+</svg>

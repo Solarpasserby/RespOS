@@ -71,6 +71,22 @@ ls -lh img/sdcard-rv.img img/sdcard-la.img \
 
 ## 构建
 
+### 决赛设计文档
+
+- 状态：已实现
+- 适用范围：`docs/决赛文档/markdown/*.md` 的 PDF 发布
+- 证据：`docs/决赛文档/build.sh`、`generate.sh`、`main.typ`；Pandoc Typst writer
+- 内容：Markdown 是逐章编辑源；`generate.sh` 使用 Pandoc 3.x 将每个 Markdown 转为
+  `docs/决赛文档/chapters/*.typ`，并生成 include 清单；`main.typ` 负责封面、目录、
+  页面样式和章节整合，`build.sh` 最后调用 Typst 生成 PDF。
+
+```bash
+bash docs/决赛文档/build.sh
+```
+
+- 后续影响：不要直接编辑 `chapters/` 下的生成文件；如果新增 Markdown 章节，按两位数字前缀
+  命名，脚本会按文件名顺序整合。
+
 ### 顶层双架构入口
 
 - 状态：已确认

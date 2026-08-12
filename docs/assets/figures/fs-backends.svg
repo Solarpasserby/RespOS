@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="470" viewBox="0 0 920 470">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L9,3 L0,6 Z" fill="#475467"/>
+    </marker>
+    <style>
+      .top { fill: #fff7ed; stroke: #c2410c; stroke-width: 1.7; rx: 10; }
+      .vfs { fill: #eff6ff; stroke: #2563eb; stroke-width: 1.8; rx: 10; }
+      .cache { fill: #ecfdf3; stroke: #16a34a; stroke-width: 1.7; rx: 10; }
+      .disk { fill: #fef2f2; stroke: #dc2626; stroke-width: 1.5; rx: 10; }
+      .virt { fill: #f8fafc; stroke: #64748b; stroke-width: 1.5; rx: 10; }
+      .label { font: 700 22px sans-serif; fill: #202124; }
+      .small { font: 500 17px monospace; fill: #344054; }
+      .hint { font: 500 16px sans-serif; fill: #667085; }
+      .arrow { stroke: #475467; stroke-width: 2.1; fill: none; marker-end: url(#arrow); }
+      .dash { stroke: #667085; stroke-width: 1.8; fill: none; stroke-dasharray: 7 5; marker-end: url(#arrow); }
+    </style>
+  </defs>
+
+  <rect x="260" y="32" width="400" height="62" class="top"/>
+  <text x="460" y="60" text-anchor="middle" class="label">syscall/fs</text>
+  <text x="460" y="84" text-anchor="middle" class="small">open/read/write/stat/mount</text>
+
+  <rect x="140" y="132" width="640" height="72" class="vfs"/>
+  <text x="460" y="162" text-anchor="middle" class="label">VFS 抽象层</text>
+  <text x="460" y="188" text-anchor="middle" class="small">SuperBlockOp / InodeOp / Dentry / FileOp / Mount</text>
+
+  <path d="M460 94 L460 132" class="arrow"/>
+
+  <rect x="70" y="260" width="220" height="70" class="disk"/>
+  <text x="180" y="290" text-anchor="middle" class="label">Ext4</text>
+  <text x="180" y="316" text-anchor="middle" class="small">lwext4 + Disk</text>
+
+  <rect x="350" y="250" width="220" height="92" class="cache"/>
+  <text x="460" y="280" text-anchor="middle" class="label">PageCache</text>
+  <text x="460" y="306" text-anchor="middle" class="small">dirty pages / LRU</text>
+  <text x="460" y="329" text-anchor="middle" class="small">inode shared cache</text>
+
+  <rect x="630" y="260" width="220" height="70" class="virt"/>
+  <text x="740" y="290" text-anchor="middle" class="label">procfs / devfs</text>
+  <text x="740" y="316" text-anchor="middle" class="small">dynamic virtual inode</text>
+
+  <path d="M280 204 C230 226 200 235 180 260" class="arrow"/>
+  <path d="M460 204 L460 250" class="arrow"/>
+  <path d="M640 204 C690 226 720 235 740 260" class="arrow"/>
+
+  <path d="M350 296 L290 296" class="dash"/>
+  <text x="320" y="282" text-anchor="middle" class="hint">load/sync</text>
+
+  <rect x="210" y="390" width="500" height="50" class="virt"/>
+  <text x="460" y="421" text-anchor="middle" class="small">Ext4 负责持久化；procfs/devfs 动态生成内容；常规文件读写优先经过页缓存。</text>
+</svg>

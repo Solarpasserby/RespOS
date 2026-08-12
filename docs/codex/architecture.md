@@ -253,15 +253,22 @@
 - 后续影响：新增中断内工作前要列出其触及的所有锁；若需在长 syscall 期间精确处理
   timeout，应建立 lock-free pending + 安全点延迟工作，不能直接恢复 kernel trap 里的高层扫描。
 
-### futex 锁内不触发用户缺页
+### futex 锁内用户访问边界
 
-- 状态：已确认
+- 状态：部分实现；普通 wait 待收敛
 - 适用范围：futex wait/wake/requeue
-- 最后验证：2026-08-01
-- 证据：`os/src/task/futex/wait.rs`、`os/src/mm/mod.rs`、Git `3aa1fb5`
-- 内容：可能 fault 的用户页检查在 futex queue 临界区之外完成；比较重排锁内使用固定 4 字节
-  no-fault PTE 读取。wait completion 区分 Pending/Woken/TimedOut/Interrupted。
-- 后续影响：不能在全局 futex queue lock 下调用一般 `copy_from_user` 或分配 frame。
+- 最后验证：2026-08-10
+- 证据：`os/src/task/futex/wait.rs::{futex_wait_common,futex_wait_timed_common,futex_requeue_common}`、
+  `os/src/mm/mod.rs::read_user_u32_nofault`、Git `3aa1fb5`
+- 内容：`FUTEX_CMP_REQUEUE` 已在队列锁外预先确认用户页可读，锁内只做固定 4 字节 no-fault
+  PTE 读取，使比较与 waiter 迁移处于同一临界区。普通和定时 `FUTEX_WAIT` 当前仍在持有
+  `FUTEX_QUEUES` 时调用通用 `copy_from_user` 复核用户值，lazy/COW 页可能进入补页路径。
+  wait completion 已区分 Pending/Woken/TimedOut/Interrupted，并保持单赢家。共享 futex key 对
+  shared file 和已有共享 frame 使用 backing 身份，但 System V shm 当前使用每次 `shmat` 独立分配的
+  attach id；两个进程分别 attach 同一段时，key 不能保证相同。
+- 后续影响：普通 wait 应复用“锁外预触页、锁内 no-fault 复核”的模式；在完成前不能宣称
+  futex queue lock 内已全面禁止通用用户拷贝或潜在 frame 分配。System V shm 的 futex key 应改用
+  segment/frame 的稳定共享身份，并增加独立 `shmat` 的跨进程 futex probe。
 
 ## FS、VFS 与 fd 模型
 

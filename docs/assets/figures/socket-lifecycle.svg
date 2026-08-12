@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="310" viewBox="0 0 920 310">
+  <defs>
+    <style>
+      .state { fill: #f8fafc; stroke: #64748b; stroke-width: 1.4; rx: 9; }
+      .active { fill: #eff6ff; stroke: #2563eb; stroke-width: 1.5; rx: 9; }
+      .io { fill: #ecfdf5; stroke: #16a34a; stroke-width: 1.5; rx: 9; }
+      .end { fill: #fef2f2; stroke: #dc2626; stroke-width: 1.5; rx: 9; }
+      .text { font-family: Arial, Helvetica, sans-serif; font-size: 15px; fill: #1f2937; }
+      .small { font-family: Arial, Helvetica, sans-serif; font-size: 12px; fill: #475569; }
+      .arrow { stroke: #475569; stroke-width: 1.6; fill: none; marker-end: url(#arrow); }
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+      <path d="M0,0 L10,4 L0,8 Z" fill="#475569"/>
+    </marker>
+  </defs>
+
+  <rect x="32" y="115" width="120" height="62" class="state"/>
+  <text x="92" y="143" text-anchor="middle" class="text">socket()</text>
+  <text x="92" y="163" text-anchor="middle" class="small">fd + Socket</text>
+
+  <rect x="215" y="42" width="132" height="62" class="active"/>
+  <text x="281" y="70" text-anchor="middle" class="text">bind()</text>
+  <text x="281" y="90" text-anchor="middle" class="small">local endpoint</text>
+
+  <rect x="410" y="42" width="142" height="62" class="active"/>
+  <text x="481" y="70" text-anchor="middle" class="text">listen()</text>
+  <text x="481" y="90" text-anchor="middle" class="small">LISTEN_TABLE</text>
+
+  <rect x="615" y="42" width="142" height="62" class="io"/>
+  <text x="686" y="70" text-anchor="middle" class="text">accept4()</text>
+  <text x="686" y="90" text-anchor="middle" class="small">new connected fd</text>
+
+  <rect x="215" y="198" width="132" height="62" class="active"/>
+  <text x="281" y="226" text-anchor="middle" class="text">connect()</text>
+  <text x="281" y="246" text-anchor="middle" class="small">remote endpoint</text>
+
+  <rect x="410" y="198" width="142" height="62" class="io"/>
+  <text x="481" y="226" text-anchor="middle" class="text">send / recv</text>
+  <text x="481" y="246" text-anchor="middle" class="small">read/write/poll</text>
+
+  <rect x="615" y="198" width="142" height="62" class="end"/>
+  <text x="686" y="226" text-anchor="middle" class="text">shutdown / close</text>
+  <text x="686" y="246" text-anchor="middle" class="small">drop handle</text>
+
+  <rect x="790" y="115" width="98" height="62" class="state"/>
+  <text x="839" y="143" text-anchor="middle" class="text">execve</text>
+  <text x="839" y="163" text-anchor="middle" class="small">CLOEXEC</text>
+
+  <path d="M152 130 C185 112 195 78 215 73" class="arrow"/>
+  <path d="M347 73 H410" class="arrow"/>
+  <path d="M552 73 H615" class="arrow"/>
+
+  <path d="M152 162 C185 183 195 223 215 229" class="arrow"/>
+  <path d="M347 229 H410" class="arrow"/>
+  <path d="M552 229 H615" class="arrow"/>
+
+  <path d="M757 229 C790 210 804 182 824 177" class="arrow"/>
+  <path d="M757 73 C790 92 804 120 824 124" class="arrow"/>
+</svg>
