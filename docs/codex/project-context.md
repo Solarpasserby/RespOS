@@ -80,6 +80,10 @@ Linux/POSIX Phase 0--4 主体已经推进完成。2026-08-13 起按两条线并�
   Linux/POSIX Phase 5，先推进与架构低耦合的 IPC/network 和 task/signal，再在底层 shootdown 接口
   稳定后合入 mmap EOF/truncate/SIGBUS。`MemorySet`、scheduler/processor/task、trap context 和公共
   arch API 是共享集成面，修改前必须先约定接口与验证责任。
+- 性能线新增负责 BuildStorm ext4/PageCache 关键路径优化，但这是按不变量协作而非永久文件归属：
+  性能线可以跨 ext4、PageCache、VFS/file/namei 完成完整调用链；Phase 线保有 Linux/POSIX 可观察
+  契约。inode identity/generation、dirty-owner/writeback、truncate 和 mmap 是共享协议，同一时段
+  单写入者，方案与门禁见 [buildstorm-smp-plan.md](./buildstorm-smp-plan.md)。
 - 后续影响：平台不可用期间以本地构建、Linux 对照、专项 probe、SMP 压力和固定窗口作为开发证据，
   但不申报平台成绩；平台恢复后先复评当前 HEAD，再按新增改动补正式镜像门禁。
 

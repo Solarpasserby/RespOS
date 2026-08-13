@@ -16,6 +16,85 @@ completion、ASID op=4 与失效范围传播，并以 LA 12 GiB/12 hart 完整 f
 替代平台结论。双线协作时，架构线修改 `MemorySet`、scheduler/processor、trap context 或公共 arch API
 前，须与 Linux/POSIX Phase 线先约定接口；具体分工见 [current-status.md](./current-status.md) 首节。
 
+## 2026-08-13 BuildStorm ext4/PageCache 关键路径优化包
+
+### 选择依据与目标
+
+该任务由架构/性能线推进，但按**不变量和接口**协作，不按文件机械隔离。现有 LA 30 秒窗口中，
+`EXT4_OP_LOCK` 获取 37373 次，累计 wait/hold 为约 `0.017/9.217` CPU 秒；hold 主要分布在 read
+`2.976s`、lookup `2.542s`、namespace `1.718s`、attributes `1.293s` 和 readdir `0.475s`。
+同时 128 MiB PageCache 达到 32768 页，hit/miss/eviction 为 `108486/7521/24135`，block read 为
+18837 次、373223424 bytes。该数据证明文件读取/查找和缓存淘汰位于关键路径，但极低的累计 wait
+尚不支持直接拆 `EXT4_OP_LOCK`；“累计持锁工作”也不能等同于可直接扣除的墙钟时间。
+
+本任务目标是降低固定 BuildStorm 进度下的 lower ext4 调用、锁内 CPU/I/O、PageCache refill/eviction
+和小块读取，而不是以放松 Linux/POSIX 语义换分。第一里程碑以当前 HEAD、关闭 LTO、同一 pub 镜像
+重新建立 LA 12 GiB/12-hart 30 秒计数基线；历史 `0c21575` 的 1773.01 秒完整结果仅作相邻参考，
+不能替代当前提交入口的基线。阶段收益门槛为：短窗口至少一项关键工作量按相同进度下降且无反向
+放大，最终无 feature 完整 final 保持 `ok=true`；若完整墙钟改善不足 5%，不继续扩大重构范围。
+
+### 所有权与协作边界
+
+- 性能线拥有本任务的测量、热点归因、ext4 lower-call 封装、只读 fast path、PageCache 读取/淘汰策略
+  和 BuildStorm A/B。为形成完整实现，可以修改 `os/src/fs/ext4/**`、`os/src/fs/page_cache.rs`、
+  VFS/file/namei 的相关调用链及 perf 计数；不因文件归属保留重复转换、重复 lookup 或半套缓存协议。
+- Phase 线继续拥有返回值/errno、权限、namespace 原子性、metadata/time、writeback error、fsync/syncfs、
+  mmap EOF/truncate/SIGBUS 等 Linux/POSIX 可观察契约。性能线若触及这些状态机，必须先提交接口说明和
+  Linux baseline，双方共同审查，不得把语义变化隐藏为缓存或锁优化。
+- `PageCache`、inode metadata generation、dirty-owner/writeback、truncate 串行化、VFS inode/dentry
+  identity 是共享接口。两线可以跨文件完成闭环，但同一接口同一时段只保留一个写入者；另一线以
+  probe、review 或后续可审查 patch 接入。队友的 IPC/network 与 task/signal 工作不需要等待本任务。
+- 当前唯一 `EXT4_OP_LOCK` 保护 lwext4 的 mount、block cache 和目录遍历共享 C 状态，并跨 root/x1
+  实例串行。没有上游线程安全证明、源码审计和双实例压力证据前，所有 lwext4 C 入口继续持该锁；
+  per-inode Rust 锁、PageCache 锁或目录 generation 不能替代它。
+
+### 分阶段方案
+
+#### E0：当前 HEAD 基线与可归因测量
+
+1. 固定镜像 hash、`mode=diagnostic`、LA 12 GiB/12 hart、`NI=-10/CLS=TS`，记录 30/120 秒窗口；
+   同时补 `1/3/6/12` 短窗口，记录相同构建阶段而不是只比较 timeout 时的总计数。
+2. 在现有 stat/lookup/read/write/readdir/namespace/attributes/superblock 分类上，进一步区分：进入
+   lwext4 C 调用前的 Rust 准备、C 调用及同步 block I/O、返回后的 VFS/PageCache 发布。计数器只在
+   `perf_counters` 启用；无 feature 路径静态消除。
+3. 同时记录 inode read requested/completed、PageCache fill/hit/miss/eviction、block request size、
+   ext4 acquisition/wait/hold/max、dentry hit/miss、guest timed 进度和宿主 CPU/RSS。若 wait 在缩放中
+   仍近零，明确否决“先拆锁”；若 eviction/read amplification 主导，优先缓存/读取路径。
+
+#### E1：不改变 lwext4 并发模型的完整热路径收缩
+
+1. 审计每个高占比入口，把 CString/path 规范化、Rust buffer 分配、KStat/dirent 转换、用户 copy、
+   PageCache 查找与发布等不访问 lwext4 共享状态的工作移到锁外；锁外准备失败不得留下 lower mutation。
+2. 复用已有 inode/dentry/metadata generation 做可证明的只读 fast path，消除同一 namei/stat/read
+   链上的重复 lower lookup/stat。cache key 必须含 filesystem id 和 inode identity；namespace、属性、
+   truncate、unlink/rename 成功后按现有 generation 精确失效，失败不得提前发布。
+3. 对连续只读 miss 合并 PageCache fill 与 lower read，调整预读只依据访问跨度和 eviction 数据；
+   不用无界扩大 cache 掩盖生命周期问题，也不在持 `MemorySet`、PageCache page 或用户锁时进入 ext4。
+4. namespace/attributes 首轮只移出纯准备和发布工作，不合并本应独立失败的 lower mutation，不改变
+   rollback、只读挂载、权限、timestamp、nlink 或 dentry 可见性语义。
+
+#### E2：按证据决定缓存策略或锁域并行
+
+- 若固定进度下 PageCache eviction、refill bytes 或小块 block read 仍占主导，评估冷热分离、自适应
+  预读和容量 A/B；容量修改必须同时检查 heap/frame 余量、dirty owner 与完整运行资源闭环。
+- 只有 `1/3/6/12` 显示 ext4 wait/max-wait 随并发显著增长，且 E1 已排除锁内无关工作后，才研究
+  per-superblock/对象锁。进入前必须审计 lwext4 mount/block-cache/journal/目录 iterator 的共享全局，
+  为 root 与 x1 建立并发 probe；无法证明 C 层可并发时继续保留全局锁。
+- 异步 VirtIO、多队列、PageCache 私有只读映射共享或 allocator 改造是独立实验，不与 E1/E2 同一
+  提交混合，否则无法把 BuildStorm 收益归因。
+
+### 正确性、性能与交付门禁
+
+每个主题独立提交，至少通过 `git diff --check`、内核/用户格式检查、Rust 1.86 RV64/LA64 顺序 release
+构建，以及 RV64/LA64 的 file/metadata/namespace/xattr/writeback probes。涉及 PageCache、truncate、
+inode identity 或 mmap 时，追加 private-map、shared-MM、frame-reclaim、Phase3 writeback fault/persist
+门禁；涉及 namespace 并发时保留 cwd-unlink、rename/link rollback 和双实例 mount。短窗口确认收益后
+再跑 LA 12-hart CAgent 与完整 BuildStorm；正式结果必须无 feature、产物有效、脚本退出 0。
+
+交付文档同时记录：commit、镜像 hash、QEMU/宿主调度、LTO/features、相同进度、计数前后差异、完整
+wall time 与已运行 probe。性能线不得把“wait 下降”冒充语义正确，Phase 线也不得因文件边界复制一套
+metadata/PageCache 状态；双方共同维护唯一的 inode identity、generation 和 writeback 协议。
+
 ## 目标与边界
 
 最初目标是在不破坏 RV64 CAgent 回归的前提下，使内核真实使用 BuildStorm 所需的多个 CPU，并跑通

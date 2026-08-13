@@ -209,13 +209,29 @@
 
 | 推进线 | 当前负责人 | 当前任务包 | 本地退出证据 | 平台恢复后的补验 |
 | --- | --- | --- | --- | --- |
-| 架构线 | 学长 | LA 缩放与 Global kernel mapping 评估；保留 range+op=4 安全边界；36 GiB 启动 | 双架构顺序构建，LA 12-hart shared-MM/Phase3/ASID churn、完整 BuildStorm | LA `-m 36G -smp 12` 正式镜像和时限；必要时 RV64 正式回归 |
+| 架构/性能线 | 学长 | LA 缩放与 Global kernel mapping 评估；保留 range+op=4 安全边界；BuildStorm ext4/PageCache 关键路径 E0/E1；36 GiB 启动 | 双架构顺序构建，LA 12-hart shared-MM/Phase3/ASID churn、FS/写回专项、固定窗口 A/B 与完整 BuildStorm | LA `-m 36G -smp 12` 正式镜像和时限；必要时 RV64 正式回归 |
 | Phase 线 | 当前维护者 | 继续 Phase 5，并独立维护 POSIX 语义覆盖任务；先收敛与架构代码低耦合的 IPC/network，再做 task/signal、基础 POSIX 缺口；待 TLB/MM 接口稳定后实现 mmap EOF/truncate/SIGBUS | POSIX 覆盖矩阵、Linux 对照 probe、RV64 专项与 SMP 回归、LA/RV 顺序构建；高风险修改补 shared-MM/资源闭环 | 正式镜像的完整 workload、LTP/比赛 runner 与平台计时 |
 
 默认文件边界如下：架构线拥有 `os/src/arch/**` 以及 LA SMP/TLB/ASID 的底层协议；Phase 线拥有
 `os/src/net/**`、`os/src/signal/**`、相应 syscall/用户 probe 和 Linux 对照。`os/src/mm/memory_set.rs`、
 `os/src/task/{task,processor,scheduler}.rs`、trap context、公共 arch API 和本状态页是共享集成面；两条线
 改动这些文件前先约定接口和验证责任，同一时段只保留一个写入者，另一方以可审查 patch 接入。
+
+### 双线并行新增任务：BuildStorm ext4/PageCache 关键路径
+
+- **负责人和目标**：架构/性能线负责测量并降低 BuildStorm 的 ext4 read/lookup 与 PageCache
+  refill/eviction 关键路径；完整方案和门禁见 [buildstorm-smp-plan.md](./buildstorm-smp-plan.md)。该任务
+  可以跨 `fs/ext4`、PageCache、VFS/file/namei 和 perf 计数完成闭环，不以文件隔离牺牲实现完整性。
+- **当前证据边界**：历史 LA 30 秒窗口 ext4 hold 约 9.217 CPU 秒但 wait 仅约 0.017 秒，同时
+  PageCache 满 32768 页并 eviction 24135 次。故第一步是当前 HEAD 的同口径基线和锁内阶段细分，
+  不是直接拆全局锁；lwext4 C 层线程安全未证明前保留唯一 `EXT4_OP_LOCK`。
+- **给 Phase 线保留的空间**：Phase 线可独立继续 IPC/network 与 task/signal。涉及权限、namespace、
+  metadata/time、writeback error、fsync/syncfs、mmap EOF/truncate/SIGBUS 的可观察语义仍由 Phase 线
+  定义；性能线触及相同状态机前先共享接口说明和 baseline。PageCache、inode generation/identity、
+  dirty-owner 和 truncate/writeback 是共享协议，同一时段单写入者、双方共同门禁。
+- **当前退出标准**：先完成 E0 测量；E1 只做锁外准备/发布、可证明的 generation fast path 与连续
+  read/fill 合并。只有缩放数据证明 wait 随 hart 显著增长才进入 E2 锁域并行。每项需双架构构建、
+  FS/写回/资源专项和固定窗口 A/B；完整收益低于 5% 时不扩大高风险重构。
 
 ### POSIX 语义覆盖任务（待推进，Phase 线）
 
