@@ -1,5 +1,53 @@
 # RespOS 当前状态
 
+## 2026-08-13 LA op=5 完整门禁失败并回退 range 至 op=4（当前工作树）
+
+- **当前实现与健全性边界**：单页 op=5 已从本地与远端执行路径删除；address-space 和所有 range
+  均执行一次 op=4，root 激活、ASID retired 批量复用的 all 请求和非法请求仍执行 op=0。范围传播、
+  同步 request/ack、residency mask 与 frame completion 均保留，且不在 IPI handler 中逐页循环。
+- **构建与正确性门禁**：LA/RV64 无 feature release 顺序构建通过，LA 汇编器接受 op=5 寄存器形式。
+  LA `-m 4G -smp 12 -snapshot` 上 2400 次 exec 与连续两次 shared-MM 各 100 轮通过；全新 snapshot
+  中 Phase3 30 轮通过，结束 `free_kb=3903436 dirty_kb=0 heap_kb=4752`。首轮 Phase3 曾有一个
+  `net_loopback_smoke` 读到 EOF 后未结束，故该轮未记为通过；全新 guest 复跑不再复现。
+- **op=5 实验计数**：清零后 2400 次 exec 返回 0，range 请求 `3015` 个且全部为单页，invalid 为
+  0；当时执行计数 full/ASID/page 分别为 `2460/21662/294531`。这些短门禁只能证明路径被执行，
+  已被下述完整 final 内存破坏否决。
+- **30 秒 BuildStorm 窗口**：通过 toolchain/minibuild，untimed `tg-xtask` 12.02 秒，随后 timed
+  arceos 外层准备 4.64 秒并进入实际构建。shutdown 快照记录 range `6052`，其中单页/2--16/
+  17--256/>256 为 `6009/8/18/17`；full/ASID/page 执行为 `1660/8706/209948`，invalid 为 0。
+  相比上一协议阶段 range 回退 op=0 的 full `23114`，完整失效已降回低位；短窗口进度受 I/O 与
+  fault 波动影响，仍不作为正式 wall-time 加速比。
+- **完整 final 门禁失败**：同一无计数器内核以官方 LA pub x0、final x1、`-snapshot -m 12G
+  -smp 12` 运行。CAgent 10/10、退出 0；BuildStorm minibuild 随后出现
+  `stack smashing detected`，正式 arceos 构建在编译 `std/core/libc/compiler_builtins` 时报告
+  `free(): chunks in smallbin corrupted`，脚本因 SIGABRT 退出 134。日志为
+  `/tmp/respos-la-op5-final-local.log`。因此单页 op=5 当前不能作为可提交实现。
+- **op=4 单变量 A/B**：只把单页执行回退为 op=4 后，比赛 nightly 双架构 release 构建通过；LA
+  2400 exec、双 shared-MM 与 Phase3 30 轮通过。相同 final 配置下 CAgent 退出 0、minibuild 从 fail
+  恢复为 ok，并越过原先在 `compiler_builtins/core/libc/std` 处的 allocator corruption。完整构建最终
+  输出 `BUILDSTORM_COMPILE mode=multi ok=true cores=12 bytes=1714568 arch=loongarch64`，BuildStorm
+  脚本退出 0 并正常关机；Cargo release 为 `29m 22s`，axbuild 报 `1773.01s`。脚本自身
+  `elapsed_s=0.00` 是镜像计时字段异常，不作为耗时。完整日志
+  `/tmp/respos-la-op4-range-final-ab.log`。该单变量 A/B 支持保留 range 协议但禁用 op=5。
+
+## 2026-08-13 LA 叶 PTE 失效范围传播（当前工作树）
+
+- **实现与边界**：LA `PageTable` 的 map/unmap/permission/COW/replace 入口在成功修改叶 PTE 后，
+  累积半开 VPN 最小包络；`MemorySet::flush_tlb()` 与 retired-data-frame 批次一起冻结该范围，并向
+  residency 目标发布带 ASID 的 `range` 请求。包络可包含稀疏修改之间的未变页，但不会漏掉修改页。
+  无实际 PTE 变化的 lazy mmap/brk flush 回退为 address-space；完整 root activate 会清除已由 op=0
+  覆盖的构建期包络。本阶段 range handler 仍按既定保守边界执行 op=0，尚未启用 op=5。
+- **正确性门禁**：LA/RV64 无 feature release 顺序构建通过。LA `-m 4G -smp 12 -snapshot` 上
+  2400 次 exec、shared-MM 连续两次各 100 轮和 Phase3 30 轮通过；结束状态
+  `free_kb=3821452 heap_kb=17151 tasks=3`。`mmap_phase5_probe` 仍返回仓库既有的 7 项
+  `EXPECTED_FAIL` 并输出 `CURRENT DIFFERENCES CONFIRMED`，没有新增崩溃，但不记为 COW PASS。
+- **30 秒范围分布**：同 P0 口径通过 toolchain/minibuild，untimed `tg-xtask` 12.93 秒并进入 timed
+  arceos build。5900 个 range 请求累计 31020 页，最大 10938 页；单页/2--16/17--256/>256 页
+  分别为 `5856/9/18/17`，即约 99.25% 是单页。另有 1032 个无范围 address-space 请求，invalid 为 0。
+- **性能边界**：因本阶段 range handler 有意回退 op=0，full invalidations 从上一阶段 1543 临时升至
+  23114；这是协议验证成本，不是性能改进。下一阶段应给 op=5 设置小范围阈值，大范围继续 op=4，
+  不能按最大 10938 页包络逐页执行 INVTLB。
+
 ## 2026-08-13 LA 按 ASID 执行 INVTLB op=4（当前工作树）
 
 - **实现与安全边界**：LA 新增带 10-bit 边界检查的 `sfence_asid()`，普通 `MemorySet` PTE writer
@@ -22,8 +70,8 @@
 - **协议边界**：LA 每目标 hart 的 generation 槽现在同时发布 `all`、`address-space` 或 `range`
   请求及 ASID/页对齐区间；发送端校验并分类计数，接收端在 ack 前重建和校验同一描述。ASID
   retired 批次回收使用 `all`，普通 `MemorySet` PTE 刷新使用自身 ASID 的 `address-space`。
-  为保持本阶段可回退且不把协议验证冒充硬件语义验证，handler 仍统一执行保守的 `invtlb op=0`；
-  `range` 仅有协议表示，尚无调用方，也尚未启用 op=4/op=5。
+  该协议阶段当时为保持可回退且不把协议验证冒充硬件语义验证，handler 仍统一执行保守的
+  `invtlb op=0`；当时 `range` 仅有协议表示且尚无调用方。
 - **正确性门禁**：LA/RV64 无 feature release 顺序构建通过。LA `-m 4G -smp 12 -snapshot`
   上 shared-MM 两次各 100 轮、Phase3 30 轮通过。另由 diagnostic Bash 脚本串行 exec 2400 次，
   返回 0、PID 达 2407；窗口记录 `all/address-space/range/invalid=4/3476/0/0`，随后 shared-MM

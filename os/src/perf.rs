@@ -113,6 +113,12 @@ counters!(
     tlb_shootdown_all_requests,
     tlb_shootdown_address_space_requests,
     tlb_shootdown_range_requests,
+    tlb_shootdown_range_pages,
+    tlb_shootdown_range_max_pages,
+    tlb_shootdown_range_single_page,
+    tlb_shootdown_range_le16_pages,
+    tlb_shootdown_range_le256_pages,
+    tlb_shootdown_range_gt256_pages,
     tlb_shootdown_invalid_requests,
     scheduler_ipis,
     ipis_received,
@@ -283,6 +289,7 @@ increment_functions!(
         tlb_shootdown_address_space_requests
     ),
     (tlb_shootdown_range_request, tlb_shootdown_range_requests),
+    (tlb_shootdown_range_pages, tlb_shootdown_range_pages),
     (
         tlb_shootdown_invalid_request,
         tlb_shootdown_invalid_requests
@@ -376,6 +383,32 @@ increment_functions!(
         ext4_lock_superblock_hold_ticks
     ),
 );
+
+#[inline(always)]
+pub fn observe_tlb_shootdown_range_pages(value: usize) {
+    #[cfg(feature = "perf_counters")]
+    observe_max(&COUNTERS.tlb_shootdown_range_max_pages, value);
+    #[cfg(not(feature = "perf_counters"))]
+    let _ = value;
+}
+
+#[inline(always)]
+pub fn classify_tlb_shootdown_range(pages: usize) {
+    #[cfg(feature = "perf_counters")]
+    let counter = if pages == 1 {
+        &COUNTERS.tlb_shootdown_range_single_page
+    } else if pages <= 16 {
+        &COUNTERS.tlb_shootdown_range_le16_pages
+    } else if pages <= 256 {
+        &COUNTERS.tlb_shootdown_range_le256_pages
+    } else {
+        &COUNTERS.tlb_shootdown_range_gt256_pages
+    };
+    #[cfg(feature = "perf_counters")]
+    counter.fetch_add(1, Ordering::Relaxed);
+    #[cfg(not(feature = "perf_counters"))]
+    let _ = pages;
+}
 
 #[inline(always)]
 pub fn block_read_size(size: usize) {
@@ -616,10 +649,16 @@ pub fn render() -> String {
     );
     let _ = writeln!(
         out,
-        "tlb_shootdown_all_requests={} tlb_shootdown_address_space_requests={} tlb_shootdown_range_requests={} tlb_shootdown_invalid_requests={}",
+        "tlb_shootdown_all_requests={} tlb_shootdown_address_space_requests={} tlb_shootdown_range_requests={} tlb_shootdown_range_pages={} tlb_shootdown_range_max_pages={} tlb_shootdown_range_single_page={} tlb_shootdown_range_le16_pages={} tlb_shootdown_range_le256_pages={} tlb_shootdown_range_gt256_pages={} tlb_shootdown_invalid_requests={}",
         s.tlb_shootdown_all_requests,
         s.tlb_shootdown_address_space_requests,
         s.tlb_shootdown_range_requests,
+        s.tlb_shootdown_range_pages,
+        s.tlb_shootdown_range_max_pages,
+        s.tlb_shootdown_range_single_page,
+        s.tlb_shootdown_range_le16_pages,
+        s.tlb_shootdown_range_le256_pages,
+        s.tlb_shootdown_range_gt256_pages,
         s.tlb_shootdown_invalid_requests
     );
     let _ = writeln!(

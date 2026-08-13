@@ -48,6 +48,20 @@ const PTE_NR: usize = 1usize << 61;
 const PTE_NX: usize = 1usize << 62;
 const PTE_PPN_MASK: usize = ((1usize << PPN_WIDTH) - 1) << 12;
 
+struct PendingTlbRange {
+    start_vpn: usize,
+    end_vpn: usize,
+}
+
+impl PendingTlbRange {
+    const fn empty() -> Self {
+        Self {
+            start_vpn: usize::MAX,
+            end_vpn: 0,
+        }
+    }
+}
+
 pub struct PageTable {
     root_ppn: PhysPageNum,
     frames: Vec<FrameTracker>,
@@ -59,6 +73,11 @@ pub struct PageTable {
     // Page-table frames cannot be reused while an exiting task still runs on
     // this root. The last active-hart transition releases this owned batch.
     retired_page_table_frames: Mutex<Vec<FrameTracker>>,
+    // Conservative half-open VPN envelope covering every successful leaf
+    // PTE mutation since the previous synchronous flush. The envelope may
+    // include untouched pages between sparse changes, but never omits one.
+    // &mut PTE writers use get_mut(); activate() only needs interior reset.
+    pending_tlb_range: Mutex<PendingTlbRange>,
 }
 
 impl PageTable {
@@ -96,6 +115,7 @@ impl PageTable {
             bits = (bits & !PTE_G) | PMD_HGLOBAL;
         }
         pmd.bits = bits | PMD_HUGE;
+        self.record_tlb_range(VirtPageNum::from(va_raw >> PAGE_SIZE_BITS), 512);
         Ok(())
     }
 
@@ -106,6 +126,7 @@ impl PageTable {
             frames: vec![frame],
             retired_data_frames: Vec::new(),
             retired_page_table_frames: Mutex::new(Vec::new()),
+            pending_tlb_range: Mutex::new(PendingTlbRange::empty()),
         }
     }
 
@@ -122,6 +143,7 @@ impl PageTable {
             frames: vec![frame],
             retired_data_frames: Vec::new(),
             retired_page_table_frames: Mutex::new(Vec::new()),
+            pending_tlb_range: Mutex::new(PendingTlbRange::empty()),
         })
     }
 
@@ -131,6 +153,7 @@ impl PageTable {
             frames: Vec::new(),
             retired_data_frames: Vec::new(),
             retired_page_table_frames: Mutex::new(Vec::new()),
+            pending_tlb_range: Mutex::new(PendingTlbRange::empty()),
         }
     }
 
@@ -144,6 +167,41 @@ impl PageTable {
 
     pub fn take_retired_data_frames(&mut self) -> Vec<Arc<FrameTracker>> {
         core::mem::take(&mut self.retired_data_frames)
+    }
+
+    fn record_tlb_range(&mut self, start: VirtPageNum, pages: usize) {
+        if pages == 0 {
+            return;
+        }
+        let end = start.0.checked_add(pages).expect("TLB range VPN overflow");
+        let pending = self.pending_tlb_range.get_mut();
+        pending.start_vpn = pending.start_vpn.min(start.0);
+        pending.end_vpn = pending.end_vpn.max(end);
+    }
+
+    fn record_tlb_change(&mut self, vpn: VirtPageNum) {
+        self.record_tlb_range(vpn, 1);
+    }
+
+    pub fn take_pending_tlb_range(&mut self) -> Option<(usize, usize)> {
+        let pending = self.pending_tlb_range.get_mut();
+        if pending.start_vpn == usize::MAX {
+            debug_assert_eq!(pending.end_vpn, 0);
+            return None;
+        }
+        let start_vpn = pending.start_vpn;
+        let end_vpn = pending.end_vpn;
+        *pending = PendingTlbRange::empty();
+        debug_assert!(start_vpn < end_vpn);
+        Some((
+            usize::from(VirtAddr::from(VirtPageNum(start_vpn))),
+            usize::from(VirtAddr::from(VirtPageNum(end_vpn))),
+        ))
+    }
+
+    pub fn discard_pending_tlb_range(&self) {
+        let mut pending = self.pending_tlb_range.lock();
+        *pending = PendingTlbRange::empty();
     }
 
     pub fn retire_owned_frames(&mut self) {
@@ -243,6 +301,7 @@ impl PageTable {
             return Err(Errno::EEXIST);
         }
         *pte = PageTableEntry::new(ppn, flags | PTEFlags::VALID | PTEFlags::ACCESSED);
+        self.record_tlb_change(vpn);
         Ok(())
     }
 
@@ -250,6 +309,7 @@ impl PageTable {
         let pte = self.find_pte(vpn).unwrap();
         assert!(pte.is_valid(), "vpn {:?} is invalid before unmapping", vpn);
         *pte = PageTableEntry::empty();
+        self.record_tlb_change(vpn);
     }
 
     pub fn try_unmap(&mut self, vpn: VirtPageNum) {
@@ -261,12 +321,14 @@ impl PageTable {
             return;
         }
         *pte = PageTableEntry::empty();
+        self.record_tlb_change(vpn);
     }
 
     pub fn modify_pte(&mut self, vpn: VirtPageNum, flags: PTEFlags) {
         let pte = self.find_pte(vpn).unwrap();
         assert!(pte.is_valid(), "vpn {:?} is invalid in modify_pte", vpn);
         *pte = PageTableEntry::new(pte.ppn(), flags | PTEFlags::VALID | PTEFlags::ACCESSED);
+        self.record_tlb_change(vpn);
     }
 
     /// Atomically replace an existing leaf mapping without allocating page-table
@@ -282,23 +344,27 @@ impl PageTable {
             return Err(Errno::EFAULT);
         }
         *pte = PageTableEntry::new(ppn, flags | PTEFlags::VALID | PTEFlags::ACCESSED);
+        self.record_tlb_change(vpn);
         Ok(())
     }
 
     pub fn set_pte_cow(&mut self, vpn: VirtPageNum) {
         let pte = self.find_pte(vpn).unwrap();
         pte.set_cow_bit();
+        self.record_tlb_change(vpn);
     }
 
     pub fn make_pte_cow(&mut self, vpn: VirtPageNum) {
         let pte = self.find_pte(vpn).unwrap();
         assert!(pte.is_valid(), "vpn {:?} is invalid in make_pte_cow", vpn);
         pte.make_cow();
+        self.record_tlb_change(vpn);
     }
 
     pub fn clear_pte_cow(&mut self, vpn: VirtPageNum) {
         let pte = self.find_pte(vpn).unwrap();
         pte.clear_cow_bit();
+        self.record_tlb_change(vpn);
     }
 }
 

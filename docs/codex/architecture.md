@@ -132,8 +132,8 @@
   软件 MMU token；切换汇编保存 CSR.ASID 时必须屏蔽只读 ASIDBITS 高位，恢复 PGDL/PGDH/ASID 后
   不执行逐切换 `invtlb`。无外部 CLONE_VM owner 的进程退出路径在数据页全在线失效后及时退役
   ASID；Drop 是幂等 fallback。编号耗尽时冻结 retired 批次，完成全在线失效后才复用。
-- 后续影响：PTE writer 仍使用 Stage 1B 的完整 shootdown，direct map 仍非 Global。按 ASID/VA
-  精确失效和 Global kernel TLB 必须独立验证；不能把 `invtlb op=3` 误当按 ASID 失效。
+- 后续影响：PTE writer 已按下述范围规则使用 op=4，direct map 仍非 Global。Global kernel
+  TLB 必须独立验证；不能把 `invtlb op=3` 误当按 ASID 失效。
 
 ### RV64 返回用户态前必须保持 kernel trap 状态
 
@@ -486,7 +486,8 @@ FdTable slot (FdEntry: descriptor flags)
 - 页表失效：RV64 通过 SBI RFENCE 对 active address-space mask 做同步远端 TLB shootdown；
   LoongArch 通过 IOCSR IPI vector 1 和 per-target generation request/ack 槽完成同一协议。页表 root
   切换不发远端请求；LA 槽同时携带 `all`、`address-space` 或 `range`、ASID 和页对齐区间。
-  ASID 批量回收发布 `all`，普通 PTE writer 发布其 `MemorySet` ASID 的 `address-space` 请求。
+  ASID 批量回收发布 `all`；普通 PTE writer 有叶修改时发布带 ASID 的 `range`，无实际叶修改时
+  发布 `address-space` 请求。
   `MemorySet` 另以 residency mask 记录自上次同步失效后加载过其 ASID 的 hart，只向该集合
   shootdown，完成后把 residency 收缩回 active mask。不能直接只用当前 active mask：已经切到 idle
   的 hart 仍可能保留同 ASID 的旧项。
@@ -497,10 +498,14 @@ FdTable slot (FdEntry: descriptor flags)
   所属 `PageTable` 的退役槽，最后一个 active hart 在 `__switch` 已恢复 idle/kernel root 后清 bit，
   并在 `active_hart_mask` 变为 0 的单一转换点释放页表页。本来就没有 active hart 的构造失败/未激活
   地址空间可立即释放。LA 内核态通常关中断，SpinMutex 和 MemorySet RwLock 的等待点会轮询 IPI。
-- 执行：普通 `MemorySet` writer 在本地和远端对已校验的 address-space 请求执行 `invtlb op=4`；
-  `all`、root 激活、非法请求与尚无调用方的 `range` 仍保守执行 `op=0`。运行期 kernel/user PTE
-  当前均不设置 Global 位，因此 op=4 会清除目标 ASID 的共享高半区项；boot root 的 Global 映射由
-  root 激活保留的 op=0 覆盖。
-- 边界：选择 op=5 或 Global kernel 映射仍须重新验证 software refill、generation、成对 G 位与
-  frame 回收顺序；不能把 retired-frame 所有权恢复为跨 MemorySet 全局队列，也不能只依据 active
-  mask 释放旧 frame。
+- 执行：已校验的 address-space 与 range 请求均执行一次 `invtlb op=4`，避免在 IPI handler 中
+  形成与长度相关的循环。`all`、root 激活和非法请求仍执行 op=0。运行期 kernel/user PTE 当前均
+  不设置 Global 位，因此 op=4 覆盖目标 ASID 的共享高半区项；boot root 的 Global 映射由 root
+  激活保留的 op=0 覆盖。
+- 范围传播：LA `PageTable` 的每个成功叶 PTE 写入口累积半开 VPN 最小包络，flush 时与所属
+  retired-data-frame 批次一起冻结；有包络则发布 range，没有实际叶修改则发布 address-space。
+  新 root 首次 activate 的 op=0 会清除构建期包络。包络是保守上界，可覆盖稀疏修改之间的页；
+  当前所有包络均以一次 op=4 覆盖；最大实测包络为 10938 页。
+- 边界：Global kernel 映射仍须重新验证 software refill、generation、成对 G 位与 frame 回收顺序；
+  不能把 retired-frame 所有权恢复为跨 MemorySet 全局队列，也不能只依据 active mask 释放旧 frame。
+  重新启用 op=5 前必须解释完整 BuildStorm 内存破坏并重跑完整 final，而不只是短窗口和专项。

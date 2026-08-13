@@ -68,7 +68,6 @@ impl TlbShootdownRequest {
         }
     }
 
-    #[allow(dead_code)]
     pub const fn range(asid: usize, start: usize, end: usize) -> Self {
         Self {
             kind: TLB_KIND_RANGE,
@@ -101,6 +100,10 @@ impl TlbShootdownRequest {
             crate::perf::tlb_shootdown_address_space_request(1);
         } else {
             crate::perf::tlb_shootdown_range_request(1);
+            let pages = (self.end - self.start) / crate::config::PAGE_SIZE;
+            crate::perf::tlb_shootdown_range_pages(pages);
+            crate::perf::observe_tlb_shootdown_range_pages(pages);
+            crate::perf::classify_tlb_shootdown_range(pages);
         }
     }
 
@@ -111,9 +114,11 @@ impl TlbShootdownRequest {
         }
         match self.kind {
             TLB_KIND_ADDRESS_SPACE => crate::arch::sfence_asid(self.asid),
-            // Range requests remain a protocol-only representation in this
-            // stage. Fall back to op=0 until the op=5 VA rules are verified.
-            TLB_KIND_ALL | TLB_KIND_RANGE => crate::arch::sfence(),
+            // A single op=4 safely covers every page in the ASID. Keep range
+            // metadata for measurement, but do not rely on op=5 until the
+            // full BuildStorm corruption is understood.
+            TLB_KIND_RANGE => crate::arch::sfence_asid(self.asid),
+            TLB_KIND_ALL => crate::arch::sfence(),
             _ => unreachable!(),
         }
     }

@@ -1779,11 +1779,16 @@ impl MemorySet {
     /// Flush this hart's cached entries for this address space after a PTE
     /// update. LA can retain unrelated ASIDs; RV keeps its existing full
     /// local SFENCE.VMA behavior.
+    #[cfg(target_arch = "riscv64")]
     fn flush_local_tlb(&self) {
         core::sync::atomic::fence(Ordering::SeqCst);
-        #[cfg(target_arch = "riscv64")]
         sfence();
-        #[cfg(target_arch = "loongarch64")]
+        crate::perf::local_sfence(1);
+    }
+
+    #[cfg(target_arch = "loongarch64")]
+    fn flush_local_tlb(&self) {
+        core::sync::atomic::fence(Ordering::SeqCst);
         crate::arch::sfence_asid(self.asid.load(Ordering::Acquire));
         crate::perf::local_sfence(1);
     }
@@ -1804,6 +1809,8 @@ impl MemorySet {
         // every hart, including this one.
         #[cfg(target_arch = "loongarch64")]
         let retired = self.page_table.take_retired_data_frames();
+        #[cfg(target_arch = "loongarch64")]
+        let pending_range = self.page_table.take_pending_tlb_range();
         self.flush_local_tlb();
         #[cfg(target_arch = "riscv64")]
         {
@@ -1827,12 +1834,14 @@ impl MemorySet {
             let remote_mask = targets & !(1 << current);
             if remote_mask != 0 {
                 crate::perf::remote_rfence(1);
-                crate::arch::smp::remote_tlb_shootdown(
-                    remote_mask,
-                    crate::arch::smp::TlbShootdownRequest::address_space(
-                        self.asid.load(Ordering::Acquire),
-                    ),
-                );
+                let asid = self.asid.load(Ordering::Acquire);
+                let request = match pending_range {
+                    Some((start, end)) => {
+                        crate::arch::smp::TlbShootdownRequest::range(asid, start, end)
+                    }
+                    None => crate::arch::smp::TlbShootdownRequest::address_space(asid),
+                };
+                crate::arch::smp::remote_tlb_shootdown(remote_mask, request);
             }
             // The write lock excludes scheduler mark/clear transitions. Every
             // inactive resident has now acknowledged the new PTE generation;
@@ -1900,6 +1909,9 @@ impl MemorySet {
         // Keep root activation conservative. This also covers the one-time
         // transition from the boot root, whose mappings are global.
         self.flush_local_tlb_all();
+        // This full invalidation subsumes mappings installed while a new root
+        // was constructed; do not carry that historical envelope forward.
+        self.page_table.discard_pending_tlb_range();
     }
 
     /// 生成页表对应 `stap` 寄存器值

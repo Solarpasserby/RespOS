@@ -478,15 +478,15 @@
   `smp_shared_mm_probe`、Phase3、2400 短进程 ASID 复用与 30 秒 BuildStorm `perf_counters` 窗口
 - 内容：IOCSR IPI vector 1 表示“检查本 hart 的 shootdown 槽”。请求者按 hart id 顺序独占每个
   target slot，发布 generation 和经过校验的 `all`/`address-space`/`range`、ASID、页对齐区间后发送
-  IPI 并同步等待 ack；目标在确认前读取同一描述。当前目标仍统一执行本地 `invtlb op=0`，语义字段
-  是后续精确失效的协议前置，不代表 op=4/op=5 已启用。启用 ASID 后，每个 MemorySet 以独立
+  IPI 并同步等待 ack；目标在确认前读取同一描述。当前 all/address-space/单页 range/多页 range
+  分别执行 op=0/op=4/op=4/op=4。启用 ASID 后，每个 MemorySet 以独立
   residency mask 记录自上次同步失效后可能缓存其 TLB 的 hart；普通 PTE 更新向 residency
   shootdown，完成后收缩为 active mask。只用 active mask 不安全，因为 inactive hart 仍可保留
   同 ASID 的旧项。
 - 后续影响：旧数据 frame 批次必须保持在所属 `PageTable`/`MemorySet`，不得恢复为混合多个
   ASID 的全局队列。释放前必须对该地址空间的 residency 完成同步 shootdown；只用 active mask
-  仍不安全。LA 关中断内核的锁等待必须服务 pending IPI，handler 不得拿普通锁。按 ASID/VA
-  精确失效、Global 映射或异步 shootdown 仍须单独验证。
+  仍不安全。LA 关中断内核的锁等待必须服务 pending IPI，handler 不得拿普通锁。Global 映射或
+  异步 shootdown 仍须单独验证。
 
 ## LoongArch 普通地址空间失效使用 INVTLB op=4
 
@@ -497,10 +497,38 @@
   12-hart 2400 exec rollover、双 shared-MM、Phase3 与 30 秒 BuildStorm `perf_counters` 窗口
 - 内容：已校验的 address-space 请求以 ASID 作为 `invtlb op=4` 的 rj 操作数，本地 writer 使用同一
   封装。现有运行期 PTE 不设置 Global 位；root 激活仍使用 op=0，覆盖 boot root Global 映射的转换。
-  ASID retired 批次复用发布 `all` 并保持 op=0；非法描述和 range 也回退到 op=0。
+  ASID retired 批次复用发布 `all` 并保持 op=0；非法描述也回退到 op=0，所有 range 使用 op=4。
 - 后续影响：不得把 ASID rollover、boot/final root 过渡改为 op=4。启用 Global kernel PTE 前必须
-  同时验证成对 G 位与 kernel 映射更新协议。op=5 需要先让 PTE 修改路径携带可靠的页对齐 VA 范围，
-  不能仅根据现有 range 数据结构宣称已安全。
+  同时验证成对 G 位与 kernel 映射更新协议。不得把大范围展开为无界的逐页 op=5 循环。
+
+## LoongArch 叶 PTE 修改由 PageTable 累积失效范围
+
+- 状态：已采用范围传播，op=5 已否决
+- 适用范围：LA 页错误、COW、mmap/munmap/mprotect、fork 与远端 shootdown 请求
+- 最后验证：2026-08-13
+- 证据：`os/src/arch/loongarch64/mm/page_table.rs`、`os/src/mm/memory_set.rs`；12-hart 2400 exec、
+  双 shared-MM、Phase3 和 30 秒 BuildStorm range 分布
+- 内容：所有成功的 LA 叶 PTE map/unmap/replace/permission/COW 入口在所属 `PageTable` 累积半开
+  VPN 包络。flush 同时冻结范围和 retired frame 批次；有范围时发布 range 请求，无范围时退回
+  address-space。完整 root activate 清除已由 op=0 覆盖的构建期包络。稀疏修改允许扩大包络，
+  但不得缩小到遗漏任一修改页。
+- 后续影响：当前所有 range 统一执行一次 op=4。30 秒窗口最大包络 10938 页；重新启用 op=5
+  必须先解释完整 BuildStorm 内存破坏并通过相同 final 门禁。
+
+## LoongArch 当前拒绝单页 INVTLB op=5，range 统一使用 op=4
+
+- 状态：op=5 已否决，op=4 回退已采用
+- 适用范围：LA `MemorySet` 本地 PTE flush 与远端 range shootdown handler
+- 最后验证：2026-08-13
+- 证据：LoongArch ISA Volume 1 `INVTLB` 定义；`os/src/arch/loongarch64/{register/mod.rs,mod.rs,smp.rs}`、
+  `os/src/mm/memory_set.rs`；12-hart 2400 exec rollover、双 shared-MM、Phase3 与 30 秒 BuildStorm
+- 决策：所有 range 执行一次 op=4。发送端范围校验、同步 ack 和 retired-frame 生命周期不变；
+  op=5 封装与执行计数从当前实现删除。
+- 原因：单页 op=5 通过 2400 exec/shared-MM/Phase3 和 30 秒窗口，但完整 final 在 minibuild 与 std
+  构建中出现 stack smashing/smallbin corruption。仅回退 op=4 的相同配置 A/B 恢复 minibuild 并
+  越过原崩溃点。ISA/QEMU 操作数审计尚未给出足以证明安全的解释，故选择保守且有界的 op=4。
+- 后续影响：root 激活、ASID 批量回收 all 和非法请求不得降级为 op=4/op=5。若引入 Global PTE、
+  非 4 KiB 用户叶或重新启用 op=5，必须重新审计匹配语义、页大小与同步回收门禁，并跑完整 final。
 
 ## 页表页在最后 active hart 切离 root 后释放
 
