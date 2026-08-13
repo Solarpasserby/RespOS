@@ -2,6 +2,8 @@
 
 //! ### 系统调用模块
 
+use core::sync::atomic::{AtomicUsize, Ordering};
+
 const SYSCALL_SETXATTR: usize = 5;
 const SYSCALL_LSETXATTR: usize = 6;
 const SYSCALL_FSETXATTR: usize = 7;
@@ -259,6 +261,23 @@ pub fn check_all_task_timers() {
     check_timerfd_expirations();
     crate::task::check_active_itimers();
     check_posix_timers();
+}
+
+static LAST_SAFE_POINT_TIMER_MS: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+/// Consume deferred global timer work at an explicit no-lock kernel safe point.
+///
+/// The boot hart is the sole global timer service CPU. Long blocking syscalls
+/// that retry wholly in kernel mode must call this between iterations because
+/// their kernel-mode timer traps only acknowledge the hardware tick.
+pub fn service_task_timers_at_safe_point() {
+    if !crate::arch::smp::is_timer_service_hart() {
+        return;
+    }
+    let now_ms = crate::timer::get_timeout_ms();
+    if LAST_SAFE_POINT_TIMER_MS.swap(now_ms, Ordering::AcqRel) != now_ms {
+        check_all_task_timers();
+    }
 }
 
 fn merge_offset_arg(low: usize, high: usize) -> isize {

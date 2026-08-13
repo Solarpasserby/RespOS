@@ -290,6 +290,31 @@
   的 MM、task/signal、IPC/network 语义。Phase 6 的大规模调度器、allocator、异步 I/O 重构仍由数据
   触发，不因平台暂不可用而提前展开。
 
+### 2026-08-13 Phase 5 iperf daemon 后 iozone timer 停滞修复
+
+- **根因**：glibc iozone throughput 打印 initial writers 的 `Min xfer` 后先执行 `sync()`，随后
+  `sleep(2)`。诊断确认 `sync()` 已返回，nanosleep deadline 也已登记；真正阻塞者是遗留的
+  `iperf3 -s -D`。daemon 在 inet socket 上调用 `poll()`，而 TCP/UDP `FileOp` 尚不支持事件式
+  poll waiter，`block_for_poll()` 因而在同一次 kernel syscall 内持续 yield。普通 kernel timer trap
+  只重编程 tick，boot hart 又一直带着 current task，原有 user/idle 两类高层 timer 安全点均不会运行，
+  iozone 的 nanosleep 永远无法到期。此前关于 `wait4`、SIGCHLD、daemon reparent 的联合根因假设已否定。
+- **修复边界**：新增 timer-service-hart 专用的显式 syscall 安全点，按 monotonic millisecond 至多扫描
+  一次 futex/nanosleep/timerfd/itimer/POSIX timer registry；inet `ppoll/pselect` 非事件 fallback 以及
+  TCP/UDP blocking retry 都在不持有 socket/task/signal/timer 锁的位置消费延迟 timer work。没有修改
+  比赛 runner、测试顺序或 daemon 生命周期。
+- **回归探针**：`net_timer_progress_probe` 同时保留阻塞 TCP accept 和模拟 iperf 的 UDP socket
+  infinite `ppoll`，父进程的 100 ms nanosleep 必须打印 `NET_TIMER_PROGRESS_WAKE` 与
+  `NET_TIMER_PROGRESS_PROBE_PASS`。RV64/LA64 release、4 GiB、1 hart 均通过；两架构的
+  `net_loopback_smoke`、`socket_phase5_probe`、`task_a_clock_probe` 也通过。
+- **比赛顺序验证**：RV64 release、`img/sdcard-rv-pre.img`、4 GiB/1 hart、snapshot 下按
+  `/musl/iperf_testcode.sh → /glibc/iperf_testcode.sh → /glibc/iozone_testcode.sh` 运行，两组 iperf
+  六项均 success，iozone 越过原卡点并输出 `#### OS COMP TEST GROUP END iozone-glibc ####`。
+  LA64 同配置用 `iperf3 -s -D → iozone -t 4 -i 0 -i 1 -r 1k -s 1m` 完成 initial writers、
+  rewriters、readers、re-readers。正式完整 preliminary runner 与平台结果仍 `待验证`。
+- **构建证据**：`RUSTUP_TOOLCHAIN=nightly-2025-01-18 make build-rv RV_MODE=release` 与
+  `RUSTUP_TOOLCHAIN=nightly-2025-01-18 make build-la LA_MODE=release` 顺序通过。适用代码基线为
+  `51bed0e` 加本节工作树；未提交的 Makefile/log 文档和 PPT 资料保持原样。
+
 ### 双线分工与共享边界
 
 | 推进线 | 当前负责人 | 当前任务包 | 本地退出证据 | 平台恢复后的补验 |
@@ -2486,9 +2511,10 @@
   同一卡点。两个 iperf 脚本都使用 `iperf3 -s -D` 且不停止 daemon；在诊断
   路径中只杀掉遗留 `iperf3` 后，iozone 立即越过 rewriters/readers。将 TCP timeout
   兜底从 1 ms 改为 10 ms/1000 ms 均不能解除，已撤销这些无效实验。
-- 当前结论：触发器是“存活的 iperf TCP daemon + iozone 的 wait/kill/多进程同步”，
-  不是镜像基线或 iozone 单独写盘。内核中的 PID/PPID/process-group、signal 或 wait4
-  联合根因仍 `待验证`；不能把 runner 杀 daemon 当作 Linux 语义修复。
+- 2026-08-13 后续结论：本节当时确认的触发器成立，但 wait/kill/process-group 假设已由后续
+  syscall/timer 观测否定。实际停在 initial-writer 后的 `sleep(2)`；iperf daemon 的 inet poll
+  fallback 长期留在 kernel yield 循环，使 nanosleep deadline 没有高层 timer 安全点可消费。
+  修复和双架构证据见本文件顶部同日 Phase 5 更新；runner 仍未增加 kill daemon 绕过。
 
 ## 工作区注意事项
 

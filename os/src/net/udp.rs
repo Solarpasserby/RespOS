@@ -25,7 +25,7 @@ use crate::{
 };
 
 use super::tcp::PollState;
-use super::{SocketSetWrapper, poll_interfaces, socket_set};
+use super::{SocketSetWrapper, poll_interfaces, service_task_timers, socket_set};
 
 /// UDP 套接字。
 ///
@@ -310,6 +310,7 @@ impl UdpSocket {
             let task = current_task().ok_or(Errno::ESRCH)?;
             task.set_interruptible(true);
             let result = loop {
+                service_task_timers();
                 poll_interfaces();
                 task.check_real_timer();
                 if task.check_signal_interrupt() || task.is_interrupted() {

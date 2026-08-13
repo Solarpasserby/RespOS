@@ -415,14 +415,17 @@
 
 - 状态：已确认
 - 适用范围：RV64 SMP timer、timeout、signal、futex/timerfd/POSIX timer registry
-- 最后验证：2026-08-06
+- 最后验证：2026-08-13
 - 证据：`os/src/arch/rv64/trap/mod.rs`；2 核 `ACTIVE_ITIMER_TASKS` 中断重入 GDB 栈
   `/tmp/respos-smp2-dynamic-bt.txt`；2/4/8 核各三轮退出压力
 - 内容：普通 kernel-mode timer trap 只确认并重编程 tick，不调用会获取 task/signal/timer
   锁的 `check_all_task_timers()`。高层 timer work 当前由 user-mode timer trap 和 boot hart 的无 current
-  idle context 串行服务。
+  idle context 串行服务。对于不会返回用户态、也不会让 boot hart 进入 idle 的 kernel blocking retry，
+  允许在明确不持有 FileOp/socket/task/signal/timer 锁的安全点消费同一延迟工作；该入口只在
+  timer-service hart 生效，并按 monotonic millisecond 限频。当前调用者是 inet poll fallback 与
+  TCP/UDP blocking retry。
 - 后续影响：不以“把某一把锁换成 NoIrq”逐个遮掩高层中断重入；需更强及时性时改为
-  中断只发布 pending，再在明确安全点消费。
+  中断只发布 pending，再在明确安全点消费。任何 kernel 内部 yield 循环都需审计 timer progress。
 
 ## RV64 shootdown 复用目标 OpenSBI 的同步 RFENCE
 

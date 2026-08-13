@@ -294,17 +294,16 @@ runner 的前提下完成以下语义工作：
 
 Phase 5 的退出门槛是：上述 probe 在 Linux 与 RespOS 上的 ABI 可观察结果一致；
 iperf BASIC/PARALLEL/REVERSE UDP/TCP、空闲 listener 旁的 sleep/timeout、信号中断和
-poll/epoll 回归全部通过。当前人为把 iperf 放到 basic 之前时的后续 `test_sleep`
-停滞仍是 `待验证`，是本阶段必须关闭的边界，不能由 1 ms 轮询或 runner 顺序
-掩盖。
+poll/epoll 回归全部通过。2026-08-13 已关闭“iperf daemon 后 sleep 不醒”的 timer-progress
+边界：inet poll fallback 和 TCP/UDP blocking retry 在 no-lock 安全点推进延迟 timer work；仍需按
+本清单继续收敛 socket 的 Linux ABI，不能把这一调度修复视为网络 Phase 5 全部完成。
 
 Phase 5 还必须保留 2026-08-11 确认的跨子系统回归：先运行 musl/glibc iperf
-脚本（两者均遗留 `iperf3 -s -D`），再运行 glibc iozone throughput。当前会在
-`Children see throughput for 4 initial writers` 后永久停滞；只终止遗留 daemon 则立即
-越过 rewriters/readers。重构时需在卡点记录 iozone 与 iperf 的 PID/PPID/TGID/PGRP/session、
-task state、children/zombie/wait selector、pending/masked signal、socket waiter 和 task-timeout；先用 Linux
-对照确定 `wait()`/`kill()` 契约，再修状态所有权。杀 daemon、调换 runner 顺序或调大 TCP
-poll timeout 都不算语义修复。
+脚本（两者均遗留 `iperf3 -s -D`），再运行 glibc iozone throughput。2026-08-13 的 RV64
+release/4 GiB/1 hart 回归已完整输出 iozone group end；LA64 的 daemon→iozone throughput 专项也完成。
+根因是 daemon 的 inet `poll()` fallback 长期停留在 kernel yield 循环，令 iozone 的 nanosleep
+deadline 无高层 timer 安全点可消费，不是 wait/kill/process-group 契约。该顺序继续作为固定回归；
+杀 daemon、调换 runner 顺序或调大 TCP poll timeout 仍不算修复。正式完整 runner 结果仍 `待验证`。
 
 ## Phase 6：细粒度并发与性能模型
 

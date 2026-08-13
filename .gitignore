@@ -22,6 +22,8 @@ disk-la.img
 testrunner_output.log
 rv-output.txt
 la-output.txt
+rv-final-output.txt
+la-final-output.txt
 output-rv.txt
 output-la.txt
 debug-laoutput.txt

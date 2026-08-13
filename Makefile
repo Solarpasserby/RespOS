@@ -57,10 +57,10 @@ RV_DIAGNOSTIC_SMP ?= 1
 LA_DIAGNOSTIC_MEM ?= 12G
 LA_DIAGNOSTIC_SMP ?= 12
 
-RV_PRE_OUTPUT ?= /tmp/respos-rv-preliminary.log
-LA_PRE_OUTPUT ?= /tmp/respos-la-preliminary.log
-RV_FINAL_OUTPUT ?= /tmp/respos-rv-final.log
-LA_FINAL_OUTPUT ?= /tmp/respos-la-final.log
+RV_PRE_OUTPUT ?= rv-output.txt
+LA_PRE_OUTPUT ?= la-output.txt
+RV_FINAL_OUTPUT ?= rv-final-output.txt
+LA_FINAL_OUTPUT ?= la-final-output.txt
 RV_DIAGNOSTIC_OUTPUT ?= /tmp/respos-rv-diagnostic.log
 LA_DIAGNOSTIC_OUTPUT ?= /tmp/respos-la-diagnostic.log
 

@@ -251,9 +251,14 @@
   heap guard 都必须在本地 `InterruptGuard` 内执行，解锁顺序为先 heap、后恢复中断。
   `check_all_task_timers()` 会进入 task/signal/timer 高层锁，不得从中断任意 kernel 临界区的
   timer trap 重入。RV64 当前安全点是 user-mode timer trap，以及 boot hart 上
-  `current_task == None` 的 per-CPU idle context。
+  `current_task == None` 的 per-CPU idle context。另有显式 no-lock syscall 安全点供长时间停留在
+  kernel mode 的阻塞重试路径消费延迟 timer work：inet socket 尚未提供事件式 poll waiter，
+  `ppoll/pselect` fallback 会在 yield 前调用该安全点；TCP/UDP `block_on` 在新一轮协议 poll 前调用。
+  显式路径仍只允许 timer-service hart 扫描，并按 monotonic millisecond 至多执行一次。
 - 后续影响：新增中断内工作前要列出其触及的所有锁；若需在长 syscall 期间精确处理
   timeout，应建立 lock-free pending + 安全点延迟工作，不能直接恢复 kernel trap 里的高层扫描。
+  新增“循环内 yield 但不返回用户态”的 syscall 还必须证明会到达 idle，或显式接入同一 no-lock
+  安全点；接入点不得持有 FileOp、socket、task、signal 或 timer registry 锁。
 
 ### futex 锁内用户访问边界
 

@@ -192,6 +192,9 @@ make run-rv-final RV_FINAL_MEM=16G RV_FINAL_SMP=8
 make run-la-final LA_FINAL_MEM=12G LA_FINAL_SMP=12  # 本机内存不足时的功能配置
 ```
 
+- 初赛串口日志默认分别写入仓库根目录的 `rv-output.txt` 和 `la-output.txt`，决赛日志分别写入新建的
+  `rv-final-output.txt` 和 `la-final-output.txt`；四个文件均由 `tee` 同步输出到终端，并已在
+  `.gitignore` 中排除。可通过对应的 `*_OUTPUT` 变量临时覆盖路径。
 - 内容补充：本地目标分别在 `/tmp` 重建独立辅助盘，不会覆盖 `make all` 的提交产物。
   初赛 profile 为 `mode=preliminary`，决赛 profile 为 `mode=final`，线上 profile 为 `mode=auto`。
   LA 会通过 QEMU-virt

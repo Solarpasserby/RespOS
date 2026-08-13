@@ -763,13 +763,15 @@
 
 ## 一个存活的 TCP daemon 不应破坏无关进程的 wait/信号同步
 
-- 状态：已稳定复现，内核根因待 Phase 5 重构定位
-- 适用范围：RV64 SMP=1，iperf3 daemon 存活时的 glibc iozone throughput
-- 最后验证：2026-08-11
-- 证据：`rv-output.txt`、`/tmp/respos-iperf-iozone*.log`、`current-status.md` 对应记录
+- 状态：已确认并修复
+- 适用范围：inet poll fallback、TCP/UDP blocking retry 与全局 task timer progress
+- 最后验证：2026-08-13
+- 证据：`os/src/syscall/fs.rs::block_for_poll`、`os/src/syscall/mod.rs`、
+  `user/src/bin/net_timer_progress_probe.rs`；RV64 官方 iperf→iozone 顺序和 LA64 daemon→iozone 专项
 - 内容：iozone-only 可完成；`iperf-musl → iperf-glibc → iozone-glibc` 在 initial writers
-  后停滞；只杀 `iperf3` 即恢复。TCP 兜底 timeout 修改为 10/1000 ms 均无效，
-  说明不能仅按调度频率问题处理。
-- 后续影响：不能用 runner 清理、测例换序或缩短清单声称修复。优先审计
-  daemon reparent、process group/session、`kill()` 目标选择、SIGCHLD 发布、`wait()/wait4()`
-  消费和 TCP waiter/task-timeout 的退出清理。
+  后停滞；只杀 `iperf3` 即恢复。卡点不是 writer 的 `wait4`，而是其后 `sleep(2)`：daemon 的
+  inet `poll()` 因无事件式 FileOp waiter 而在 kernel fallback 中持续 yield，阻止 boot hart 到达
+  user/idle timer 安全点。单纯调整 TCP 兜底 timeout 不会改变这条路径。
+- 后续影响：不能用 runner 清理、测例换序或缩短清单声称修复。遇到“某 daemon 使无关 sleep/
+  timeout 卡住”时，先检查 daemon 是否长期停留在一次 kernel syscall 的 polling/yield 循环，以及该
+  循环是否在无锁位置服务延迟 timer work；不要先归因于 wait、SIGCHLD 或文件写回。

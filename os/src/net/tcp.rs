@@ -34,8 +34,8 @@ use crate::{
 };
 
 use super::{
-    LISTEN_TABLE, SocketSetWrapper, poll_interfaces, register_tcp_waiter, socket_set,
-    unregister_tcp_waiter,
+    LISTEN_TABLE, SocketSetWrapper, poll_interfaces, register_tcp_waiter, service_task_timers,
+    socket_set, unregister_tcp_waiter,
 };
 
 /// 描述 socket 的当前可读/可写状态。
@@ -240,6 +240,7 @@ impl TcpSocket {
             let task = current_task().ok_or(Errno::ESRCH)?;
             task.set_interruptible(true);
             let result = loop {
+                service_task_timers();
                 poll_interfaces();
                 task.check_real_timer();
                 if task.check_signal_interrupt() || task.is_interrupted() {

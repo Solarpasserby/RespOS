@@ -3353,6 +3353,12 @@ fn block_for_poll(
     if !registration.event_driven {
         registration.clear();
         task.set_interruptible(false);
+        // Network FileOps currently expose readiness by polling rather than
+        // event-driven waiter registration. A daemon can therefore remain in
+        // this kernel retry loop indefinitely. Consume deferred timer work at
+        // this no-lock point so unrelated nanosleep/poll deadlines still
+        // progress while that daemon is alive.
+        super::service_task_timers_at_safe_point();
         crate::perf::fs_yield(1);
         crate::perf::fs_syscall_yield(1);
         yield_current_task();

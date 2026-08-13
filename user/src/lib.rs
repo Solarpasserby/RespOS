@@ -436,6 +436,19 @@ pub fn time_get() -> isize {
         err => err,
     }
 }
+pub fn nanosleep(req: &TimeSpec, rem: &mut TimeSpec) -> isize {
+    // TimeSpec and the legacy syscall helper's TimeVal have the same two-word
+    // ABI layout; pass nanoseconds in the second field as Linux expects.
+    let req = TimeVal {
+        sec: req.sec,
+        usec: req.nsec,
+    };
+    let mut legacy_rem = TimeVal::default();
+    let result = sys_nanosleep(&req, &mut legacy_rem);
+    rem.sec = legacy_rem.sec;
+    rem.nsec = legacy_rem.usec;
+    result
+}
 pub fn getpid() -> isize {
     sys_getpid()
 }

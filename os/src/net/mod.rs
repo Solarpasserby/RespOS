@@ -242,6 +242,16 @@ fn wake_tcp_waiters() {
     }
 }
 
+/// Consume deferred global timer work from a network retry safe point.
+///
+/// Blocking socket loops can keep the timer-service hart in kernel mode while
+/// at least one waiter remains runnable, so neither a user timer trap nor the
+/// idle safe point is guaranteed to run. Call this only while holding no
+/// socket, task, signal, or timer lock.
+pub(crate) fn service_task_timers() {
+    crate::syscall::service_task_timers_at_safe_point();
+}
+
 pub(crate) struct TcpProcEntry {
     local: IpEndpoint,
     remote: IpEndpoint,
