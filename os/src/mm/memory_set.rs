@@ -2243,6 +2243,15 @@ impl MemorySet {
             );
         }
 
+        // User roots copy kernel root entries by value.  Establish the full
+        // kernel-half root topology before the first user address space is
+        // created, so later dynamic mappings such as kernel stacks only add
+        // entries below already-shared root branches.
+        memory_set
+            .page_table
+            .prepare_kernel_root_branches()
+            .expect("failed to prepare dynamic kernel root branches");
+
         memory_set
     }
 

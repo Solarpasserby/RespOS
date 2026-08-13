@@ -704,9 +704,10 @@ pub fn sys_epoll_ctl(epfd: usize, op: usize, fd: usize, event: *const u8) -> Sys
         // already surface peer close as read-ready followed by EOF, so the
         // interest bit is accepted even though readiness is reported through
         // EPOLLIN rather than a separate RDHUP bit for now.
+        const EPOLLPRI: u32 = 0x002;
         const EPOLLRDHUP: u32 = 0x2000;
         const EPOLL_SUPPORTED_EVENTS: u32 =
-            0x001 | 0x004 | 0x008 | 0x010 | EPOLLRDHUP | (1 << 31) | (1 << 30);
+            0x001 | EPOLLPRI | 0x004 | 0x008 | 0x010 | EPOLLRDHUP | (1 << 31) | (1 << 30);
         let mut raw = [0u8; 12];
         copy_from_user(raw.as_mut_ptr(), event, raw.len())?;
         let events = u32::from_ne_bytes(raw[..4].try_into().unwrap());
@@ -809,7 +810,7 @@ pub fn sys_epoll_pwait(
             }
 
             if let Some(deadline_us) = deadline_us {
-                super::register_task_timeout(task.tid(), deadline_us.saturating_add(999) / 1000);
+                super::register_task_timeout_us(task.tid(), deadline_us);
             }
 
             if prepare_current_task_blocked() {
@@ -991,14 +992,15 @@ pub fn sys_open_tree(_dfd: isize, _path: *const u8, _flags: usize) -> SysResult<
 
 pub fn sys_memfd_create(name: *const u8, flags: usize) -> SysResult<usize> {
     const MEMFD_NAME_MAX: usize = 249;
+    const MFD_RECOGNIZED_FLAGS: usize = MFD_ALLOWED_FLAGS | MFD_HUGETLB | MFD_HUGE_MASK;
+    if flags & !MFD_RECOGNIZED_FLAGS != 0 {
+        return Err(Errno::EINVAL);
+    }
+    if flags & MFD_HUGE_MASK != 0 && flags & MFD_HUGETLB == 0 {
+        return Err(Errno::EINVAL);
+    }
     if flags & MFD_HUGETLB != 0 {
         return Err(Errno::EOPNOTSUPP);
-    }
-    if flags & MFD_HUGE_MASK != 0 {
-        return Err(Errno::EINVAL);
-    }
-    if flags & !MFD_ALLOWED_FLAGS != 0 {
-        return Err(Errno::EINVAL);
     }
     let name = copy_cstr_from_user(name)?;
     if name.len() > MEMFD_NAME_MAX {

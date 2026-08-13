@@ -1,5 +1,68 @@
 # RespOS 已确认易错点
 
+## 100 Hz 扫描会把亚 10 ms timeout 量化到下一 tick
+
+- 状态：已确认并对 task/futex deadline 修复
+- 适用范围：nanosleep、poll/select/epoll、futex；RV64/LA64 QEMU
+- 最后验证：2026-08-13
+- 证据：八个 LTP case 修复前四环境共同失败、1 ms 请求约 10.2 ms；修复后四环境全通过
+- 内容：用户可见时钟达到微秒分辨率，不代表阻塞唤醒也有同样精度。若 timeout 只被 100 Hz timer
+  scan 消费，1/2/5 ms 都会等到约 10 ms。单纯把 deadline 从毫秒改成微秒不能消除扫描量化；单纯设置
+  精确 QEMU compare 也可能因注入延迟超出 LTP 容差。
+- 后续影响：同时检查 deadline 表示、硬件 rearm、SMP 服务 hart 通知和 QEMU 注入延迟。提前 compare
+  必须配合有界等待到权威软件 deadline，不能以提前唤醒换取通过；不要先全局提高 tick 频率掩盖问题。
+
+## 用户 root 创建后新增内核根 PTE 会在映射本身成功后继续缺页
+
+- 状态：已确认并修复
+- 适用范围：共享高半区、动态 kernel stack、RV64/LA64 三级页表
+- 最后验证：2026-08-13
+- 证据：RV64 完整初赛 slot 16384 的 StorePageFault；强制 slot 16383→16384 专项
+- 内容：用户 root 只复制内核 root PTE 的当时值。若动态映射跨入此前为空的 1 GiB 根分支，
+  `KERNEL_SPACE` 可以成功建表并映射 leaf，但旧用户 root 的对应根项仍无效；普通 sfence 不能把一个
+  不存在的 PTE 复制过去。坏地址可能精确落在新内核栈的 trap context，看起来像 clone/memcpy 崩溃。
+- 后续影响：先在 boot 阶段固定高半区 root 拓扑，再允许运行期按需修改共享下级表。排查高编号栈或
+  动态内核 VA fault 时，同时计算 root/PMD 边界，不能只检查物理 frame 是否已经分配。
+
+## devfs 自定义 inode 缺少 owner setter 会让 create 被 namei 原子回滚
+
+- 状态：已确认并修复 `/dev/shm`
+- 适用范围：namei create、devfs/tmpfs 风格 inode、LTP newlib、libctest 临时文件
+- 最后验证：2026-08-13
+- 证据：`os/src/fs/namei.rs::install_created_inode()`、`os/src/fs/dev/shm.rs`；双架构
+  `confstr01/openat02` 与 RV64 libctest-only 日志
+- 内容：create 的 lower inode 分配成功不等于 syscall 成功；namei 还要提交 mode/uid/gid。trait 默认
+  `set_owner()` 返回 `EINVAL`，因此只实现 create/read/write/set_mode 的 shm inode 会被回滚，并使
+  `open(O_CREAT)`、`mkstemp()`、`tmpfile()` 和 LTP harness 同时失败。初赛 runner 又把 `/tmp` 链到
+  `/dev/shm`，会让问题伪装成两个文件系统同时故障。
+- 后续影响：任何可创建 inode 的内存/devfs 后端都要实现并由 stat 回报 create 协议要求的元数据；
+  遇到大量临时文件 `EINVAL` 时先解析 mount/symlink 后的真实后端，再检查首个 metadata commit。
+
+## 初赛镜像的 `/tmp` 默认指向轻量 `/dev/shm`，创建修复不等于完整 tmpfs 语义
+
+- 状态：已确认并通过 runner 的 ext4 `/tmp` 隔离
+- 适用范围：初赛镜像、libcbench、libctest、LTP 文件系统测例
+- 最后验证：2026-08-13
+- 证据：当前 RV64/LA64 初赛根镜像 `debugfs stat /tmp`；双架构 7-case musl/glibc 聚焦日志
+- 内容：官方初赛镜像本身就把 `/tmp` 链到 `/dev/shm`，不能只根据 testrunner 的
+  `prepare_libcbench_tmp()` 判断链接来源。shm inode 实现 owner/mode 后能创建普通文件，但仍缺少完整
+  timestamp、symlink、hardlink、FIFO 和 xattr 语义，因而 LTP 会从“全部创建 EINVAL”变成多类分散失败。
+  当前 runner 在 libcbench 后把 `/tmp` 建成根 ext4 上的 `01777` 目录，LTP-only 也执行该准备。
+- 后续影响：完整 tmpfs 是独立实现任务，不能把 ext4 runner 隔离宣称为 `/dev/shm` 已完整兼容。若日志
+  再出现 `/dev/shm/LTP_*`，先确认实际 `/tmp` 后端和 runner 入口，再分析具体 syscall。
+
+## 直接从 `wait4` 返回 EINTR 会绕过 SA_RESTART 并放大成 LTP 任务泄漏
+
+- 状态：已确认并对 `wait4` 修复
+- 适用范围：signal handler、`wait4/waitpid`、LTP newlib harness
+- 最后验证：2026-08-13
+- 证据：完整初赛日志中 RV64/LA64 的 259/211 次 `waitpid(...)=EINTR` 与 task health 增长；双架构专项
+- 内容：用户 handler 由 `signal()` 安装时通常带 `SA_RESTART`。若内核仍把 interruptible wait 的
+  `EINTR` 直接返回用户态，LTP 的 `SAFE_WAITPID` 会 TBROK，清理父进程提前退出，后代继续运行并把输出
+  串入后续 case；这会表现为大量不相关失败、ready/blocked task 单调增长甚至晚期假死。
+- 后续影响：不能在 wait 内核循环里简单忽略信号，因为 handler 必须先执行；应在 signal frame 中保存
+  重执行上下文。分析大量 LTP TBROK 时同时看 `SA_RESTART`、task health 和跨 case 输出串台。
+
 ## 辅助盘 profile 不会随平台根镜像变化，线上阶段不能固定为 final
 
 - 状态：已确认；通过 `mode=auto` 与根盘标志检测修复

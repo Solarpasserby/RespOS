@@ -153,6 +153,16 @@ pub fn kick_one_idle_hart_in(allowed_harts: usize) {
     }
 }
 
+/// Notify the sole global timer-service hart that an earlier task deadline was
+/// published. The IPI handler only rearms hardware from atomic state.
+pub fn kick_timer_service_hart() {
+    let hart = boot_hart();
+    if hart == current_hart_id() {
+        return;
+    }
+    let _ = arch::sbi::send_ipi(1 << hart, 0);
+}
+
 /// 清除本 hart 的 software interrupt pending 位并记录一次 IPI。
 ///
 /// 该函数只可从 supervisor software interrupt trap 调用；不得获取 scheduler

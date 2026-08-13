@@ -2192,9 +2192,12 @@ pub fn sys_fallocate(fd: usize, mode: usize, offset: isize, len: isize) -> SysRe
     if mode & FALLOC_FL_PUNCH_HOLE != 0 {
         return file.punch_hole(offset as usize, len as usize);
     }
+    if mode == 0 {
+        return file.allocate_range(offset as usize, len as usize);
+    }
     let _ = end;
-    // truncate 只能改变逻辑长度，不能兑现 fallocate 的空间预留承诺。
-    // KEEP_SIZE 更不能作为无操作返回成功。
+    // KEEP_SIZE 不能作为无操作返回成功；当前后端也没有独立于
+    // 逻辑长度的预分配状态。
     Err(Errno::EOPNOTSUPP)
 }
 
@@ -3365,8 +3368,7 @@ fn block_for_poll(
         return Ok(PollWake::Retry);
     }
     if let Some(deadline_us) = deadline_us {
-        let deadline_ms = deadline_us.saturating_add(999) / 1000;
-        super::register_task_timeout(task.tid(), deadline_ms);
+        super::register_task_timeout_us(task.tid(), deadline_us);
     }
 
     if !prepare_current_task_blocked() {

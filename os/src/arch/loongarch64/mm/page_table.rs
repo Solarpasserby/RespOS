@@ -119,6 +119,24 @@ impl PageTable {
         Ok(())
     }
 
+    /// Populate every still-empty kernel-half root entry before user roots
+    /// copy the kernel half.  Later dynamic mappings then only mutate shared
+    /// lower-level tables, so an old user root cannot miss a newly-created
+    /// kernel-stack root branch.
+    pub fn prepare_kernel_root_branches(&mut self) -> SysResult {
+        let first_kernel_index = (KERNEL_BASE >> (PAGE_SIZE_BITS + 18)) & 0x1ff;
+        for index in first_kernel_index..512 {
+            let root = &mut self.root_ppn.get_pte_array()[index];
+            if root.is_valid() {
+                continue;
+            }
+            let frame = alloc_frame().ok_or(Errno::ENOMEM)?;
+            *root = PageTableEntry::new_table(frame.ppn());
+            self.frames.push(frame);
+        }
+        Ok(())
+    }
+
     pub fn new() -> Self {
         let frame = alloc_frame().expect("Failed to allocate frame for page table");
         Self {

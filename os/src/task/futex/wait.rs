@@ -50,6 +50,15 @@ impl FutexDeadline {
             FutexDeadline::TimeoutClock(deadline_us) => get_timeout_us() >= deadline_us,
         }
     }
+
+    fn remaining_us(self) -> usize {
+        match self {
+            FutexDeadline::UserClock(deadline_us) => deadline_us.saturating_sub(get_time_us()),
+            FutexDeadline::TimeoutClock(deadline_us) => {
+                deadline_us.saturating_sub(get_timeout_us())
+            }
+        }
+    }
 }
 
 struct FutexWait {
@@ -163,6 +172,17 @@ impl FutexWaits {
             &mut expired,
         );
         expired
+    }
+
+    fn next_deadlines(&self) -> [Option<FutexDeadline>; 2] {
+        [
+            self.user_deadlines
+                .first_key_value()
+                .map(|(deadline, _)| FutexDeadline::UserClock(*deadline)),
+            self.timeout_deadlines
+                .first_key_value()
+                .map(|(deadline, _)| FutexDeadline::TimeoutClock(*deadline)),
+        ]
     }
 
     fn expire_clock(
@@ -367,6 +387,9 @@ fn futex_wait_common(
 
 fn register_futex_wait(tid: usize, deadline: Option<FutexDeadline>) {
     FUTEX_WAITS.lock().register(tid, deadline);
+    if let Some(deadline) = deadline {
+        crate::timer::request_task_timer_after_us(deadline.remaining_us());
+    }
 }
 
 fn complete_futex_wait(tid: usize, completion: WaitCompletion) -> bool {
@@ -382,18 +405,22 @@ fn cancel_futex_wait(tid: usize) {
 }
 
 pub fn check_futex_timeouts() {
-    let expired = {
+    let (expired, next_deadlines) = {
         // Lock order: FUTEX_QUEUES -> FUTEX_WAITS -> SCHEDULER.
         let mut queues = FUTEX_QUEUES.lock();
-        let expired = FUTEX_WAITS.lock().expire(get_time_us(), get_timeout_us());
+        let mut waits = FUTEX_WAITS.lock();
+        let expired = waits.expire(get_time_us(), get_timeout_us());
         for tid in &expired {
             queues.remove_tid(*tid);
         }
-        expired
+        (expired, waits.next_deadlines())
     };
 
     for tid in expired {
         wakeup_task(tid);
+    }
+    for deadline in next_deadlines.into_iter().flatten() {
+        crate::timer::request_task_timer_after_us(deadline.remaining_us());
     }
 }
 

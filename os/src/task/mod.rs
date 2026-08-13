@@ -47,6 +47,6 @@ pub fn add_initproc() {
     add_task(INITPROC.clone());
 }
 
-pub fn handle_signals() {
-    crate::signal::handle_signal();
+pub fn handle_signals(restart_syscall_arg0: Option<usize>) {
+    crate::signal::handle_signal(restart_syscall_arg0);
 }

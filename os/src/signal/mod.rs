@@ -35,7 +35,7 @@ fn make_sig_context(x: [usize; 32], pc: usize, mask: SigSet, info: usize) -> Sig
 //信号是异步的——进程可能在任何时刻收到信号，但处理时机必须统一。内核选在每个 trap 返回用户态之前检查信号，
 //此时 TrapContext已经准备好了，改它就能劫持返回路径。
 //如果进程没有陷入过内核（一直在用户态跑），那等下一次 trap（定时器中断、系统调用等）自然会检查。
-pub fn handle_signal() {
+pub fn handle_signal(restart_syscall_arg0: Option<usize>) {
     let task = current_task().unwrap();
 
     while let Some((sig, siginfo)) = task.op_sig_pending_mut(|p| p.fetch_signal()) {
@@ -72,6 +72,18 @@ pub fn handle_signal() {
             }
         } else {
             let trap_cx = task.get_trap_cx();
+
+            // wait4/waitpid are restartable when the signal handler was
+            // installed with SA_RESTART. The trap path has already advanced
+            // the PC past the syscall and replaced a0 with -EINTR; rewrite
+            // the context before building the signal frame so sigreturn
+            // re-executes the syscall with its original first argument.
+            if action.flags.contains(SigActionFlag::SA_RESTART) {
+                if let Some(arg0) = restart_syscall_arg0 {
+                    trap_cx.set_a0(arg0);
+                    trap_cx.set_sepc(trap_cx.get_sepc().saturating_sub(4));
+                }
+            }
 
             // SA_NODEFER：handler 执行期间不屏蔽当前信号自身
             if !action.flags.contains(SigActionFlag::SA_NODEFER) {
@@ -173,9 +185,6 @@ pub fn handle_signal() {
                     exit_by_signal_and_run_next(sig.raw());
                 }
             }
-
-            // TODO: SA_RESTART 路径
-            //   被信号打断的系统调用应返回 ERESTARTSYS，由内核自动重试。
 
             // 修改 trapframe：sret 后进入用户 handler
             trap_cx.set_a0(sig.raw() as usize);

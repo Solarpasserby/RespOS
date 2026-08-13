@@ -268,4 +268,19 @@ impl FileOp for SpecialFd {
         data[offset..end].fill(0);
         Ok(0)
     }
+
+    fn allocate_range(&self, offset: usize, len: usize) -> SysResult<usize> {
+        let end = offset.checked_add(len).ok_or(Errno::EINVAL)?;
+        let mut data = self.data.as_ref().ok_or(Errno::EOPNOTSUPP)?.lock();
+        if end <= data.len() {
+            return Ok(0);
+        }
+        if self.seals() & F_SEAL_GROW != 0 {
+            return Err(Errno::EPERM);
+        }
+        let additional = end - data.len();
+        data.try_reserve(additional).map_err(|_| Errno::ENOSPC)?;
+        data.resize(end, 0);
+        Ok(0)
+    }
 }

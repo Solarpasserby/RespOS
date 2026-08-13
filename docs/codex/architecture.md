@@ -201,6 +201,21 @@
 - 后续影响：不得在仍执行旧 `satp` 时提前清 bit，也不得绕过 `MemorySet` 锁修改 PTE。移植到
   非 OpenSBI firmware 时必须重新确认 RFENCE completion 语义；未知实现不能沿用当前验收结论。
 
+### 动态内核映射只能修改用户 root 已共享的下级页表
+
+- 状态：已实现并验证 RV64 首个跨 1 GiB kernel-stack 边界
+- 适用范围：RV64/LA64 共享高半区、用户页表创建、动态内核栈
+- 最后验证：2026-08-13
+- 证据：`os/src/arch/{rv64,loongarch64}/mm/page_table.rs`、
+  `os/src/mm/memory_set.rs::new_kernel()`；强制 slot 16383→16384 的 RV64 release 日志
+  `/tmp/respos-rv-kstack-slot16384.log`
+- 内容：用户页表按值复制内核高半区的 root PTE，并共享这些 PTE 指向的下级页表。内核初始化必须在
+  首个用户 root 创建前为所有尚为空的高半区 root 项准备共享下级分支；之后内核栈等动态映射仍可
+  按需分配 leaf 与更低层页表，但不能再要求旧用户 root 学习一个全新的 root PTE。
+- 后续影响：新增 vmalloc、per-CPU 区或其他动态高半区映射时，应复用已准备的根拓扑。若未来需要在
+  运行期替换 root 项，必须建立同步传播到所有用户 root 的显式协议，不能只修改 `KERNEL_SPACE` 并
+  依赖 TLB flush。
+
 ## task、scheduler 与 futex
 
 ### 调度状态只有一个所有者提交
@@ -212,6 +227,39 @@
 - 内容：scheduler 使用 RT、normal、idle 多级队列并维护 `task_index`/blocked 集合；状态先准备，
   再由调度路径提交。退出任务通过 `DEAD_TASKS` 延迟 drop，避免在自身内核栈上释放自身。
 - 后续影响：不要从多个路径重复入队或重复唤醒；close/signal/timeout 竞争必须保持 single-winner。
+
+### 精确 task deadline 由 timer-service hart 单点编程
+
+- 状态：已实现并通过双架构单核/SMP 专项
+- 适用范围：nanosleep、poll/pselect/epoll timeout、futex timeout；RV64/LA64
+- 最后验证：2026-08-13
+- 证据：`os/src/arch/{rv64,loongarch64}/{timer,smp}.rs`、`os/src/syscall/{mod,time,fs,special_fd}.rs`、
+  `os/src/task/futex/wait.rs`；双架构 8-case LTP 与 2-hart deadline 日志
+- 内容：100 Hz 周期 tick 继续负责调度和未迁移 timer。需要精确唤醒的 waiter 在进入阻塞前发布一个
+  微秒级 deadline 原子提示；timer-service hart 是唯一编程该全局最早 deadline 的 CPU，其他 hart
+  通过 IPI 请求其重新读取提示。高层 timer scan 清空提示后检查权威 waiter 注册表，再由仍存活的
+  waiter 重建最小值，因此原子状态只是可丢弃/可重复的 rearm hint，不承担 waiter 生命周期。
+- QEMU 边界：compare 提前 800 us，timer trap 只在该有界窗口内等待软件 deadline，保证 timeout 不会
+  提前可见，同时规避第二次 QEMU timer 注入的数百微秒延迟。实机采用该提前量前需要重新测量；不得
+  将它解释为通用硬件延迟模型。
+- 后续影响：新增精确 timeout 注册表时，注册完成后才能发布 hint，scan 必须在释放自身锁后重发下一
+  deadline。IPI handler 只能读取原子状态并编程硬件，不能取得 waiter/scheduler 锁；撤销 waiter 不必
+  同步删除 hint，最坏只能多一次早中断。
+
+### `wait4` 的 SA_RESTART 在 signal frame 中保存重执行上下文
+
+- 状态：已实现并通过双架构专项
+- 适用范围：RV64/LA64 syscall trap、`wait4/waitpid`、signal frame、`sigreturn`
+- 最后验证：2026-08-13
+- 证据：`os/src/arch/{rv64,loongarch64}/trap/mod.rs`、`os/src/signal/mod.rs`、
+  `user/src/bin/task_a_wait4_probe.rs`；`/tmp/respos-{rv,la}-wait4-restart-probe.log`
+- 内容：`wait4` 因可投递信号返回 `EINTR` 时，trap 层暂存 syscall 原始 arg0。只有实际取出的用户
+  handler 带 `SA_RESTART`，signal frame 才保存回退 4 字节的 syscall PC 和原始 arg0；handler 返回后
+  `sigreturn` 恢复该上下文并重新执行 syscall。不带标志的 handler 继续观察到 `EINTR`，默认忽略信号
+  不会触发该路径。
+- 后续影响：不要在 `sys_wait4()` 内直接吞信号并继续阻塞，否则 handler 无法执行。扩展到 read、socket、
+  futex 等 syscall 前必须先确认 Linux 的 restart class、partial side effect 与 timeout 剩余时间语义；
+  不能把所有 `EINTR` 一律重启。
 
 ### 进程组资源回收按 live owner 判定
 

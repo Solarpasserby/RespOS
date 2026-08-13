@@ -275,6 +275,15 @@ pub fn kick_one_idle_hart_in(allowed_harts: usize) {
     crate::perf::scheduler_ipi(1);
 }
 
+/// Notify hart 0 that an earlier task deadline was published. Scheduler and
+/// timer notifications may share the wakeup vector because the trap handler
+/// reads the deadline from atomic state.
+pub fn kick_timer_service_hart() {
+    if current_hart_id() != 0 {
+        send_ipi(0, IPI_SCHEDULER);
+    }
+}
+
 /// Service a pending IOCSR IPI while normal kernel execution keeps CRMD.IE=0.
 ///
 /// MemorySet lock acquisition uses this hook so a hart waiting behind a page

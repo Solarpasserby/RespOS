@@ -1,5 +1,106 @@
 # RespOS 当前状态
 
+## 2026-08-13 初赛亚 10 ms 精确 deadline 修复（当前工作树）
+
+- **根因**：`poll02`、`pselect01`/`pselect01_64`、`select02`、`epoll_wait02`、`futex_wait05`、
+  `nanosleep01`、`clock_nanosleep02` 在 RV64/LA64、musl/glibc 都失败。它们覆盖 1/2/5/10/25/100/
+  1000 ms timeout；旧实现只依赖 100 Hz 周期扫描，1 ms 请求实测约 10.2 ms，属于统一的 tick 量化，
+  不是八个独立 syscall 错误。
+- **实现边界**：保留 100 Hz 调度 tick；nanosleep、poll/pselect/epoll task timeout 与 futex waiter
+  额外发布微秒级最早 deadline。timer-service hart 直接缩短硬件 compare，其他 hart 只经 IPI 通知其
+  读取原子提示。timer 扫描先清空提示，再从权威 waiter 注册表重建下一 deadline；过期/撤销提示最多
+  造成一次额外中断，不决定 timeout 语义。
+- **QEMU 注入补偿**：RV64/LA64 QEMU 的 one-shot timer 注入有数百微秒延迟。当前提前 800 us 设置
+  compare，并只在这段有界窗口内等待软件权威 deadline，避免提前唤醒和第二次注入延迟。该常量是
+  当前 QEMU 正确性门禁的一部分，不是实机性能结论。
+- **双架构专项门禁**：初赛 snapshot、4 GiB/1 hart，使用
+  `TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=poll02,pselect01,pselect01_64,select02,epoll_wait02,futex_wait05,nanosleep01,clock_nanosleep02`
+  分别运行 `make run-rv-pre` 与 `make run-la-pre`；两架构 musl/glibc 均为
+  `8 passed, 0 failed, 0 skipped`。日志为 `/tmp/respos-rv-exact-deadline-ltp-v2.log` 与
+  `/tmp/respos-la-exact-deadline-ltp.log`。
+- **SMP/时钟门禁**：RV64/LA64 均以 `PRE_SMP=2` 验证 `nanosleep01,futex_wait05`，两组 libc 均
+  `2 passed, 0 failed`；日志为 `/tmp/respos-{rv,la}-exact-deadline-smp2.log`。两架构
+  `TASK_A_CLOCK_PROBE=1` 各 20 轮全部 `ALL PASS`，日志为
+  `/tmp/respos-{rv,la}-clock-probe-exact-deadline.log`。Rust 1.86 release 双架构构建通过。
+- **剩余门禁**：本专项消除了上一轮 40 个四环境共同失败中的 8 个；完整初赛尚未在精确 deadline
+  改动后重新跑完，因此本节不能替代下一次完整 summary，也不能据专项结果推算当前总分。
+
+## 2026-08-13 初赛完整复跑与 epoll/memfd 专项修复（当前工作树）
+
+- **完整初赛复跑**：基于 `adf874b8b8f6c2e06594a0b90b43300d97116c43` 加当前未提交工作树，
+  2026-08-13 20:28 UTC 更新的 `rv-output.txt` 与 `la-output.txt` 均正常关闭全部 19 个测试组，未见
+  kernel panic/page fault，末段 health 仍为 `tasks=2 ready=0 blocked=1`。RV64 的 LTP musl/glibc
+  汇总分别为 `626/45/24`、`635/39/21`，LA64 分别为 `626/46/23`、`634/41/20`（顺序为
+  passed/failed/skipped，均选择 695 个 case）。相对修复前基线分别改善 `+3/-3/0`、`+2/-2/0`、
+  `+3/-3/0`、`+4/-4/0`；最后一组多出的一项改善不能仅凭本轮日志归因给三个目标修复。
+- **筛选边界**：`user/oscomp_ltp_list.txt` 当前注释了 `linkat02`、`rename11`、`waitpid11`、
+  `shmctl01` 四个已确认会长时间运行或卡死的 case，因此 695 是当前筛选集，不是未删减的 LTP 集合。
+- **epoll 修复**：`epoll_ctl()` 接受 `EPOLLPRI` 作为合法监听位；就绪扫描暂不凭空合成异常带外事件。
+  此前合法事件组合被事件掩码误判为 `EOPNOTSUPP`，导致 `epoll_ctl03` 失败。
+- **memfd 修复**：`memfd_create()` 先拒绝未知 flag，再把已识别但尚不支持的 `MFD_HUGETLB` 返回
+  `EOPNOTSUPP`，从而恢复 Linux 的 `EINVAL`/`EOPNOTSUPP` 错误优先级；内存型 `SpecialFd` 实现
+  `fallocate(mode=0)` 的扩容语义，并遵守 `F_SEAL_GROW`。普通不支持预分配的后端仍返回
+  `EOPNOTSUPP`，没有伪造成功。
+- **双架构专项门禁**：使用
+  `TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=epoll_ctl03,memfd_create01,memfd_create02` 分别运行
+  `make run-rv-pre` 与 `make run-la-pre`，RV64/LA64 的 musl/glibc 均为
+  `3 passed, 0 failed, 0 skipped`。其中 `memfd_create01` 每组 157 项、`epoll_ctl03` 每组 256 项均
+  完整通过；日志为 `/tmp/respos-{rv,la}-epoll-memfd-ltp.log`。完整复跑再次确认三个 case 在四组
+  环境中都返回 0。Rust 1.86 release 双架构构建通过。
+- **剩余失败结构**：解析四组 case 后有 40 个失败/损坏 case 为 RV64/LA64 与 musl/glibc 共同项，
+  说明下一阶段应优先处理跨架构共性语义，而不是先追逐单环境波动。四组失败集合并集为 54 个；其余
+  差异项需用筛选回归确认可重复性后再归因。
+- **后续进展**：上述 8 个亚 10 ms deadline 共性失败已由同日精确 deadline 子轮修复并通过双架构
+  单核/SMP 专项；完整初赛仍需复跑后才能更新总 summary。
+
+## 2026-08-13 初赛 `wait4` SA_RESTART 与 ext4 `/tmp` 修复（当前工作树）
+
+- **完整日志归因**：用户复跑的 `rv-output.txt`/`la-output.txt` 都完整结束了双架构两组 iozone，随后
+  分别在 `ltp-musl` 第 602/462 个 case 处被外部终止；两份日志均无 kernel panic/page fault。已完成
+  case 中 `waitpid(...)=EINTR` 分别出现 259/211 次，且 task health 从基线 2 增长到 282/256，说明
+  LTP newlib 父进程被意外中断后留下大量后代，是当前最大框架级放大器。
+- **SA_RESTART 修复**：RV64/LA64 syscall trap 在 `wait4` 返回 `EINTR` 时保留原始 arg0；实际送达的
+  用户 handler 若带 `SA_RESTART`，signal frame 改为保存 syscall 指令 PC 和原始 arg0，handler 经
+  `sigreturn` 后重新执行 `wait4`。无 `SA_RESTART` 时仍向用户返回 `EINTR`。当前只把 Linux 可重启的
+  `wait4/waitpid` 纳入该机制，其他阻塞 syscall 仍需逐项审计后扩展。
+- **`/tmp` 后端修复**：当前官方初赛压缩基线展开后的根镜像本身就把 `/tmp` 链到 `/dev/shm`，
+  libcbench 的准备逻辑只是重建同一链接。shm owner 修复后临时文件可创建，但其轻量 inode 仍不支持
+  LTP 需要的完整 timestamp/symlink/hardlink/FIFO/xattr 语义。testrunner 现在保留 libcbench 的 shm
+  环境，之后把 `/tmp` 重建为根盘上的 `01777` ext4 目录；LTP-only 入口也执行相同准备。
+- **双架构验证**：Rust 1.86 release 双架构构建通过。`TASK_A_WAIT4_PROBE=1` 在 RV64/LA64 均验证
+  无 restart handler 返回 `EINTR`、带 `SA_RESTART` handler 执行后自动重启并回收子进程，日志为
+  `/tmp/respos-{rv,la}-wait4-restart-probe.log`。初赛 snapshot、4 GiB/1 hart 筛选
+  `confstr01,openat02,lstat01,statfs02,fstat02,dup05,flistxattr02`，两架构 musl/glibc 均为
+  `7 passed, 0 failed`，结束时 tasks 保持 2；日志为 `/tmp/respos-{rv,la}-restart-tmp-ltp.log`。
+- **剩余门禁**：完整双架构初赛尚需复跑；该专项不证明其他 692 个 LTP case 或 libctest 全部通过。
+  LA 专项宿主 QEMU 为 `CLS=TS/NI=0`，结果只用于正确性，不用于性能结论。
+
+## 2026-08-13 初赛 RV64 内核栈边界与 `/dev/shm`/`/tmp` 创建修复（当前工作树）
+
+- **触发与根因**：`adf874b` 上的完整 RV64 初赛在 `ltp-glibc/posix_fadvise03_64` 创建下一任务时
+  发生 kernel StorePageFault。坏地址 `0xffffffffbfffede0` 精确等于 kernel-stack slot 16384 的
+  top 减去 RV64 `TrapContext` 大小 `0x220`。用户页表创建时按值复制内核高半区根 PTE；动态内核栈
+  第一次跨过 1 GiB 根页表边界后，`KERNEL_SPACE` 新建的根 PTE 不会出现在已有用户 root 中。
+- **内核映射修复**：RV64/LA64 在首个用户地址空间创建前，为尚为空的内核高半区根 PTE 建立共享的
+  下级页表分支；物理栈页和更低层页表仍按需分配。这样用户 root 的根拓扑保持不变，后续内核栈映射
+  只修改已共享的下级表。临时把 allocator 起始 slot 设为 16383 的 RV64 release 诊断中，initproc
+  后首个 fork 强制跨到 slot 16384，musl/glibc `exit01` 均通过并正常关机；临时改动已撤销，日志为
+  `/tmp/respos-rv-kstack-slot16384.log`。
+- **shm 元数据修复**：`ShmFileInode` 与 `ShmDirInode` 现在保存并报告 uid/gid，并实现
+  `set_owner()`/`set_owner_and_mode()`。此前 namei 的 create 协议在 lower create 后提交 mode/owner，
+  shm inode 缺少 owner setter，默认返回 `EINVAL` 并回滚文件，因而所有 LTP newlib 框架文件都在
+  `/dev/shm/ltp_*` 创建阶段 TBROK。
+- **`/tmp` 归因与 libctest**：官方初赛根镜像本身已把 `/tmp` 链到 `/dev/shm`，testrunner 在
+  libcbench 前会重建同一链接；故此前 `mkstemp()`、`tmpfile()` 和 `mkdtemp(/tmp/LTP_*)` 的 `EINVAL`
+  与上项是同一故障链，不是 ext4 `/tmp` 的独立问题。RV64 临时 libctest-only release 运行中 static/dynamic 均无
+  `FAIL`，原先的 `fdopen/fscanf/fwscanf/pthread_cancel_points/ungetc/utime/fflush_exit/`
+  `ftello_unflushed_append/lseek_large` 创建级联全部消失；wrapper 仍打印既有的 raw status `256`，
+  日志为 `/tmp/respos-rv-libctest-only-after-shm.log`。
+- **LTP 专项**：双架构 release、4 GiB/1 hart、初赛 snapshot 上筛选 `confstr01,openat02`；两架构
+  musl/glibc 的 `openat02` 六项均通过，RV64 musl `confstr01` 32 项通过。其余 `confstr01` 运行已越过
+  `/dev/shm` open，但随后暴露 `waitpid(...)=EINTR` 的独立 LTP blocker，不能计作 shm 修复失败或整体
+  LTP 通过。日志为 `/tmp/respos-{rv,la}-shm-ltp.log`；完整初赛仍待用户复跑。
+
 ## 2026-08-13 ext4/PageCache E0 当前 HEAD 基线（`51bed0e1`）
 
 - **可复现口径**：代码为 `51bed0e1c598c33eab4bc2da7703534525149ac4`，使用
@@ -365,8 +466,8 @@
    `1/3/6/12` 缩放与 `perf_counters` 定位，不能把短窗口写成正式成绩。
 2. Phase 线先补 Linux 对照和 RespOS probe，再依次推进 socket timeout/nonblocking connect/MSG flags/
    poll、遗留 daemon 与 wait/signal 生命周期；每个主题独立提交和验证。
-3. task leader exit/non-leader exec、`SA_RESTART`/process-pending 等跨 task/signal 项单独设计；不得和
-   网络状态机或 scheduler 性能重构混在同一修改中。
+3. task leader exit/non-leader exec、`wait4` 之外的 `SA_RESTART`/process-pending 等跨 task/signal
+   项单独设计；不得和网络状态机或 scheduler 性能重构混在同一修改中。
 4. mmap EOF/truncate/SIGBUS 先完成契约、probe 和 VMA/inode identity 设计；底层 shootdown/frame
    completion 已稳定，但实现前仍须和架构线约定 `MemorySet` 接口与验证责任。
 5. 平台恢复后先复评未经平台确认的当前 HEAD，再分别补两条线的正式镜像门禁；平台结果只更新
@@ -761,8 +862,9 @@
   `-m 16G -smp 8 -snapshot`、宿主 `NI=-10/CLS=TS` 输出 `SIGNAL_PHASE5 ALL PASS`。同一内核继续通过
   `task_a_clock_probe` 和 BusyBox `timeout 1 sleep 10`；后者由 SIGTERM 结束 sleep。RV64/LA64
   no-feature release 构建通过。
-- **保留边界**：`SA_RESTART` 尚无 syscall restart block；`SA_NOCLDWAIT`、精确 process-pending queue
-  和完整 job-control signal 仍待后续子轮，不以本专项通过宣称 signal 子系统已完成。
+- **保留边界**：2026-08-13 后 `wait4/waitpid` 已有窄化的 `SA_RESTART` 路径，其他 syscall restart
+  class 仍未实现通用 restart block；`SA_NOCLDWAIT`、精确 process-pending queue 和完整 job-control
+  signal 仍待后续子轮，不以本专项通过宣称 signal 子系统已完成。
 
 ## 2026-08-11 Linux/POSIX Phase 5 task 生命周期审计（基于 `76f7c61` 的本轮工作树）
 

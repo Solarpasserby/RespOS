@@ -27,6 +27,7 @@ pub(super) fn shm_dir() -> Arc<dyn InodeOp> {
 struct ShmDirInode {
     ino: u64,
     mode: Mutex<u32>,
+    owner: Mutex<(u32, u32)>,
     entries: Mutex<BTreeMap<String, Arc<dyn InodeOp>>>,
 }
 
@@ -35,6 +36,7 @@ impl ShmDirInode {
         Self {
             ino,
             mode: Mutex::new(mode),
+            owner: Mutex::new((0, 0)),
             entries: Mutex::new(BTreeMap::new()),
         }
     }
@@ -50,11 +52,15 @@ impl InodeOp for ShmDirInode {
     }
 
     fn stat(&self, _path: &str) -> SysResult<KStat> {
-        Ok(KStat::minimal(0, InodeType::Directory)
+        let (uid, gid) = *self.owner.lock();
+        let mut stat = KStat::minimal(0, InodeType::Directory)
             .with_dev(DEVFS_DEV)
             .with_ino(self.ino)
             .with_mode(*self.mode.lock())
-            .with_nlink(2))
+            .with_nlink(2);
+        stat.uid = uid;
+        stat.gid = gid;
+        Ok(stat)
     }
 
     fn lookup(&self, _parent_path: &str, name: &str) -> SysResult<Arc<dyn InodeOp>> {
@@ -122,6 +128,19 @@ impl InodeOp for ShmDirInode {
         Ok(())
     }
 
+    fn set_owner(&self, _path: &str, uid: u32, gid: u32) -> SysResult {
+        *self.owner.lock() = (uid, gid);
+        Ok(())
+    }
+
+    fn set_owner_and_mode(&self, _path: &str, uid: u32, gid: u32, mode: Option<u32>) -> SysResult {
+        if let Some(mode) = mode {
+            *self.mode.lock() = mode & 0o7777;
+        }
+        *self.owner.lock() = (uid, gid);
+        Ok(())
+    }
+
     fn link(&self, _old_path: &str, _bare_dentry: Arc<Dentry>) -> SysResult {
         Err(Errno::EPERM)
     }
@@ -150,6 +169,7 @@ impl InodeOp for ShmDirInode {
 struct ShmFileInode {
     ino: u64,
     mode: Mutex<u32>,
+    owner: Mutex<(u32, u32)>,
     data: Mutex<Vec<u8>>,
 }
 
@@ -158,6 +178,7 @@ impl ShmFileInode {
         Self {
             ino,
             mode: Mutex::new(0o666),
+            owner: Mutex::new((0, 0)),
             data: Mutex::new(Vec::new()),
         }
     }
@@ -174,10 +195,14 @@ impl InodeOp for ShmFileInode {
 
     fn stat(&self, _path: &str) -> SysResult<KStat> {
         let size = self.data.lock().len();
-        Ok(KStat::minimal(size, InodeType::Regular)
+        let (uid, gid) = *self.owner.lock();
+        let mut stat = KStat::minimal(size, InodeType::Regular)
             .with_dev(DEVFS_DEV)
             .with_ino(self.ino)
-            .with_mode(*self.mode.lock()))
+            .with_mode(*self.mode.lock());
+        stat.uid = uid;
+        stat.gid = gid;
+        Ok(stat)
     }
 
     fn read_at(&self, _path: &str, off: usize, buf: &mut [u8]) -> SysResult<usize> {
@@ -213,6 +238,19 @@ impl InodeOp for ShmFileInode {
 
     fn set_mode(&self, _path: &str, mode: u32) -> SysResult {
         *self.mode.lock() = mode & 0o7777;
+        Ok(())
+    }
+
+    fn set_owner(&self, _path: &str, uid: u32, gid: u32) -> SysResult {
+        *self.owner.lock() = (uid, gid);
+        Ok(())
+    }
+
+    fn set_owner_and_mode(&self, _path: &str, uid: u32, gid: u32, mode: Option<u32>) -> SysResult {
+        if let Some(mode) = mode {
+            *self.mode.lock() = mode & 0o7777;
+        }
+        *self.owner.lock() = (uid, gid);
         Ok(())
     }
 

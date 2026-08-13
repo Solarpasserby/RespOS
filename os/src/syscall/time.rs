@@ -356,6 +356,9 @@ fn is_posix_timer_clock(clock_id: usize) -> bool {
 
 fn register_nanosleep_wait(tid: usize, clock_id: usize, deadline_us: usize) {
     NANOSLEEP_WAITS.lock().register(tid, clock_id, deadline_us);
+    if let Ok(now_us) = nanosleep_clock_us(clock_id) {
+        crate::timer::request_task_timer_after_us(deadline_us.saturating_sub(now_us));
+    }
 }
 
 fn finish_nanosleep_wait(tid: usize) -> bool {
@@ -363,11 +366,11 @@ fn finish_nanosleep_wait(tid: usize) -> bool {
 }
 
 pub fn register_task_timeout(tid: usize, deadline_ms: usize) {
-    register_nanosleep_wait(
-        tid,
-        NANOSLEEP_TIMEOUT_CLOCK,
-        deadline_ms.saturating_mul(1000),
-    );
+    register_task_timeout_us(tid, deadline_ms.saturating_mul(1000));
+}
+
+pub fn register_task_timeout_us(tid: usize, deadline_us: usize) {
+    register_nanosleep_wait(tid, NANOSLEEP_TIMEOUT_CLOCK, deadline_us);
 }
 
 pub fn finish_task_timeout(tid: usize) -> bool {
@@ -384,7 +387,7 @@ fn nanosleep_clock_us(clock_id: usize) -> SysResult<usize> {
 
 pub fn check_nanosleep_timeouts() {
     let mut expired = Vec::new();
-    {
+    let next_deadlines = {
         let mut waits = NANOSLEEP_WAITS.lock();
         let clock_ids: Vec<usize> = waits.deadlines.keys().copied().collect();
         for clock_id in clock_ids {
@@ -422,10 +425,24 @@ pub fn check_nanosleep_timeouts() {
                 }
             }
         }
-    }
+        waits
+            .deadlines
+            .iter()
+            .filter_map(|(clock_id, deadlines)| {
+                deadlines
+                    .first_key_value()
+                    .map(|(deadline_us, _)| (*clock_id, *deadline_us))
+            })
+            .collect::<Vec<_>>()
+    };
 
     for tid in expired {
         crate::task::wakeup_task(tid);
+    }
+    for (clock_id, deadline_us) in next_deadlines {
+        if let Ok(now_us) = nanosleep_clock_us(clock_id) {
+            crate::timer::request_task_timer_after_us(deadline_us.saturating_sub(now_us));
+        }
     }
 }
 

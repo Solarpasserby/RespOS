@@ -198,7 +198,7 @@ const SYSCALL_RECVMMSG: usize = 243;
 const SYSCALL_COPY_FILE_RANGE: usize = 285;
 const SYSCALL_PREADV2: usize = 286;
 const SYSCALL_PWRITEV2: usize = 287;
-const SYSCALL_WAIT4: usize = 260;
+pub const SYSCALL_WAIT4: usize = 260;
 const SYSCALL_PRLIMIT64: usize = 261;
 const SYSCALL_FANOTIFY_INIT: usize = 262;
 const SYSCALL_CLOCK_ADJTIME: usize = 266;
@@ -252,15 +252,17 @@ use time::*;
 
 pub use time::{
     check_nanosleep_timeouts, check_posix_timers, finish_task_timeout, register_task_timeout,
-    remove_posix_timers_for_owner,
+    register_task_timeout_us, remove_posix_timers_for_owner,
 };
 
 pub fn check_all_task_timers() {
+    crate::timer::reset_task_timer_requests();
     crate::task::check_futex_timeouts();
     check_nanosleep_timeouts();
     check_timerfd_expirations();
     crate::task::check_active_itimers();
     check_posix_timers();
+    crate::timer::rearm_task_timer_request();
 }
 
 static LAST_SAFE_POINT_TIMER_MS: AtomicUsize = AtomicUsize::new(usize::MAX);

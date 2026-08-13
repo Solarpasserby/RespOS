@@ -142,6 +142,31 @@
   wanted set，也不能把目标信号按普通 interrupt 处理，否则 handler/EINTR 会抢先消费 sigtimedwait
   语义。timer 注册必须在所有返回路径清理。
 
+## syscall restart 先窄化覆盖 `wait4`，由实际 handler 的 SA_RESTART 决定
+
+- 状态：已采用
+- 适用范围：`wait4/waitpid`、signal delivery、sigreturn；RV64/LA64
+- 最后验证：2026-08-13
+- 证据：双架构 `task_a_wait4_probe` 与 LTP `confstr01` 聚焦回归
+- 内容：restart 决策不能只在 syscall 返回 `EINTR` 时完成，因为此时尚未确定实际送达哪个 signal。
+  trap 层只记录 `wait4` 的原始 arg0，signal 层取出 signal 并读取 action 后，才在 `SA_RESTART` 分支
+  改写要保存的 PC/arg0。这样 handler 正常执行，sigreturn 后重做 syscall；无标志分支保持 `EINTR`。
+- 后续影响：当前不引入对所有 syscall 通用的内部 `ERESTART*`。扩大覆盖时按 Linux restart class
+  逐个加入，并补无标志/有标志、side effect 与双架构 trap ABI 门禁。
+
+## 保留 100 Hz 调度 tick，以一次性 deadline 缩短精确 timeout
+
+- 状态：已采用
+- 适用范围：RV64/LA64 timer、nanosleep、poll/pselect/epoll、futex
+- 最后验证：2026-08-13
+- 证据：双架构 8-case LTP 单核专项、`nanosleep01,futex_wait05` 2-hart 专项和 20 轮 clock probe
+- 内容：不通过全局提高 `TICKS_PER_SEC` 修复亚 10 ms timeout。保留既有 100 Hz 周期负载，只让有
+  精确 waiter 的最早 deadline 缩短 timer-service hart compare；原子最小值是可重建提示，waiter 注册表
+  才是权威状态。QEMU compare 提前 800 us 后仅在 trap 内等待到软件 deadline，不允许提前唤醒。
+- 后续影响：该选择避免所有 workload 无条件承担高频 tick，但增加了一次性 timer/IPI 协议。修改服务
+  hart、idle 或 timer scan 时必须保留单点编程、注册后发布、扫描后重建和无早醒四项不变量；实机需
+  独立校准或移除 QEMU 提前量。
+
 ## ext4 多字段时间戳在一次 inode transaction 中提交
 
 - 状态：已采用，当前工作树待提交

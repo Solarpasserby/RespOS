@@ -6,10 +6,14 @@
 use super::{register, sbi::set_timer};
 use crate::config::{ACCOUNTING_CLOCK_FREQ, HARDWARE_CLOCK_FREQ, USER_CLOCK_FREQ};
 use core::arch::asm;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 const TICKS_PER_SEC: usize = 100;
 const MSEC_PER_SEC: usize = 1000;
 const USEC_PER_SEC: usize = 1_000_000;
+const TASK_TIMER_ADVANCE_US: usize = 800;
+static REQUESTED_TASK_TIMER: AtomicUsize = AtomicUsize::new(usize::MAX);
+static PROGRAMMED_SERVICE_TIMER: AtomicUsize = AtomicUsize::new(usize::MAX);
 
 // 时间频率刻意分成三类：
 // - hardware clock: timer interrupt 和 timeout 使用真实硬件尺度；
@@ -151,7 +155,84 @@ pub fn get_time() -> usize {
 
 /// 设置下一次时钟中断触发
 pub fn set_next_ti_trigger() {
-    set_timer(get_time() + get_hardware_clock_freq() / TICKS_PER_SEC);
+    let deadline = get_time() + get_hardware_clock_freq() / TICKS_PER_SEC;
+    if crate::arch::smp::is_timer_service_hart() {
+        PROGRAMMED_SERVICE_TIMER.store(deadline, Ordering::Release);
+    }
+    set_timer(deadline);
+}
+
+#[inline]
+fn hardware_ticks_from_us_ceil(us: usize) -> usize {
+    let freq = get_hardware_clock_freq();
+    let ticks = (us / USEC_PER_SEC).saturating_mul(freq).saturating_add(
+        (us % USEC_PER_SEC)
+            .saturating_mul(freq)
+            .div_ceil(USEC_PER_SEC),
+    );
+    ticks.max(4)
+}
+
+/// Publish a task timeout as a reason to shorten the timer-service hart's
+/// normal scheduler tick. Stale requests only cause an extra early interrupt;
+/// every safe high-level timer scan rebuilds the minimum from live waiters.
+pub fn request_task_timer_after_us(delay_us: usize) {
+    let deadline = get_time().saturating_add(hardware_ticks_from_us_ceil(delay_us));
+    let previous = REQUESTED_TASK_TIMER.fetch_min(deadline, Ordering::AcqRel);
+    if deadline >= previous {
+        return;
+    }
+    if crate::arch::smp::is_timer_service_hart() {
+        rearm_task_timer_request();
+    } else {
+        crate::arch::smp::kick_timer_service_hart();
+    }
+}
+
+pub fn reset_task_timer_requests() {
+    debug_assert!(crate::arch::smp::is_timer_service_hart());
+    REQUESTED_TASK_TIMER.store(usize::MAX, Ordering::Release);
+}
+
+pub fn rearm_task_timer_request() {
+    if !crate::arch::smp::is_timer_service_hart() {
+        return;
+    }
+    let requested = REQUESTED_TASK_TIMER.load(Ordering::Acquire);
+    let trigger = requested.saturating_sub(hardware_ticks_from_us_ceil(TASK_TIMER_ADVANCE_US));
+    let mut programmed = PROGRAMMED_SERVICE_TIMER.load(Ordering::Acquire);
+    while trigger < programmed {
+        match PROGRAMMED_SERVICE_TIMER.compare_exchange_weak(
+            programmed,
+            trigger,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => {
+                set_timer(trigger.max(get_time().saturating_add(4)));
+                return;
+            }
+            Err(current) => programmed = current,
+        }
+    }
+}
+
+pub fn await_task_timer_deadline() {
+    if !crate::arch::smp::is_timer_service_hart() {
+        return;
+    }
+    let advance = hardware_ticks_from_us_ceil(TASK_TIMER_ADVANCE_US);
+    loop {
+        let requested = REQUESTED_TASK_TIMER.load(Ordering::Acquire);
+        if requested == usize::MAX {
+            return;
+        }
+        let now = get_time();
+        if now >= requested || requested - now > advance {
+            return;
+        }
+        core::hint::spin_loop();
+    }
 }
 
 /// 读取用户可见运行时间（毫秒）

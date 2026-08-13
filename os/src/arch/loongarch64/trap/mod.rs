@@ -85,19 +85,23 @@ fn handle_user_page_fault(_cx: &TrapContext, exception: estat::Exception) {
     }
 }
 
-fn handle_user_syscall(cx: &mut TrapContext) {
+fn handle_user_syscall(cx: &mut TrapContext) -> Option<usize> {
     let syscall_id = cx.syscall_id();
     let syscall_args = cx.syscall_args();
     cx.era += 4;
     let ret = syscall(syscall_id, syscall_args);
     if syscall_id == SYSCALL_SIGRETURN && ret.is_ok() {
-        return;
+        return None;
     }
+
+    let restart_syscall_arg0 =
+        (ret == Err(Errno::EINTR) && syscall_id == SYSCALL_WAIT4).then_some(syscall_args[0]);
 
     cx.x[4] = match ret {
         Ok(ret) => ret,
         Err(err) => err.as_ret() as usize,
     };
+    restart_syscall_arg0
 }
 
 global_asm!(include_str!("trap.S"));
@@ -141,12 +145,14 @@ pub fn trap_handler(cx: &mut TrapContext) {
     if cx.extension_state_active() {
         crate::perf::extension_state_eager_save(1);
     }
+    let mut restart_syscall_arg0 = None;
     match estat::cause(estat::read()) {
         estat::Trap::Interrupt(estat::Interrupt::Timer) => {
             crate::perf::user_timer_trap(1);
             clear_timer_interrupt();
             set_next_ti_trigger();
             if crate::arch::smp::is_timer_service_hart() {
+                crate::timer::await_task_timer_deadline();
                 check_all_task_timers();
             }
             preempt_current_task();
@@ -154,10 +160,11 @@ pub fn trap_handler(cx: &mut TrapContext) {
         estat::Trap::Interrupt(estat::Interrupt::Ipi) => {
             crate::perf::user_ipi_trap(1);
             crate::arch::smp::acknowledge_ipi();
+            crate::timer::rearm_task_timer_request();
         }
         estat::Trap::Exception(estat::Exception::Syscall) => {
             crate::perf::user_syscall_trap(1);
-            handle_user_syscall(cx);
+            restart_syscall_arg0 = handle_user_syscall(cx);
         }
         estat::Trap::Exception(exception) if is_page_fault(exception) => {
             crate::perf::user_page_fault_trap(1);
@@ -199,7 +206,7 @@ pub fn trap_handler(cx: &mut TrapContext) {
             );
         }
     }
-    handle_signals();
+    handle_signals(restart_syscall_arg0);
 }
 
 #[unsafe(no_mangle)]
@@ -227,11 +234,13 @@ pub fn trap_from_kernel(cx: &mut TrapContext) {
             clear_timer_interrupt();
             set_next_ti_trigger();
             if crate::arch::smp::is_timer_service_hart() && crate::task::current_task().is_none() {
+                crate::timer::await_task_timer_deadline();
                 check_all_task_timers();
             }
         }
         estat::Trap::Interrupt(estat::Interrupt::Ipi) => {
             crate::arch::smp::acknowledge_ipi();
+            crate::timer::rearm_task_timer_request();
         }
         cause => {
             panic!(

@@ -183,7 +183,7 @@ fn prepare_noop_mkfs_in(prefix: &str) {
 }
 
 fn prepare_ltp_common_files() {
-    let _ = mkdir("/tmp\0", 0o777);
+    prepare_full_featured_tmp();
     let _ = mkdir("/etc\0", 0o755);
     ensure_text_file(
         "/etc/passwd\0",
@@ -283,6 +283,22 @@ fn prepare_libcbench_tmp() {
     let _ = unlink(TMP_PATH);
     let _ = rmdir(TMP_PATH);
     let _ = symlink(DEV_SHM_PATH, TMP_PATH);
+}
+
+fn prepare_full_featured_tmp() {
+    // The competition image ships /tmp as a symlink to the lightweight
+    // /dev/shm implementation. That is sufficient for libcbench, but later
+    // libc-test/LTP cases require timestamps, links, FIFOs and xattrs. Put
+    // /tmp back on the writable ext4 root before those suites start.
+    let _ = unlink(TMP_PATH);
+    let mkdir_result = mkdir(TMP_PATH, 0o1777);
+    let chmod_result = chmod(TMP_PATH, 0o1777);
+    if chmod_result != 0 {
+        println!(
+            "[testrunner] cannot prepare ext4 /tmp: mkdir={} chmod={}",
+            mkdir_result, chmod_result
+        );
+    }
 }
 
 fn run_libcbench_script(workdir: &str, shell_path: &str) {
@@ -1558,6 +1574,7 @@ fn main() -> i32 {
     _run_basic_glibc();
     _run_libcbench_musl();
     _run_libcbench_glibc();
+    prepare_full_featured_tmp();
     _run_busybox_musl();
     _run_busybox_glibc();
     _run_libctest_musl();
@@ -1646,6 +1663,7 @@ fn main() -> i32 {
     _run_basic_glibc();
     _run_libcbench_musl();
     _run_libcbench_glibc();
+    prepare_full_featured_tmp();
     _run_busybox_musl();
     _run_busybox_glibc();
     _run_libctest_musl();

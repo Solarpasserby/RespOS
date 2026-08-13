@@ -141,6 +141,11 @@ pub trait FileOp: Any + Send + Sync {
     fn punch_hole(&self, _offset: usize, _len: usize) -> SysResult<usize> {
         Err(Errno::EOPNOTSUPP)
     }
+    /// Preallocate the range and extend the logical size when needed.
+    /// Backends that cannot honor allocation guarantees must reject it.
+    fn allocate_range(&self, _offset: usize, _len: usize) -> SysResult<usize> {
+        Err(Errno::EOPNOTSUPP)
+    }
 }
 
 impl File {

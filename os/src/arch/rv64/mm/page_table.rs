@@ -154,6 +154,29 @@ impl PageTable {
         Ok(())
     }
 
+    /// Populate every kernel-half root entry that is still empty.
+    ///
+    /// User address spaces copy kernel root entries by value and then share
+    /// the lower-level tables they reference.  Dynamic kernel mappings (most
+    /// notably kernel stacks) may therefore add lower-level entries safely,
+    /// but they must never need to create a brand-new root entry after the
+    /// first user page table has been cloned.  Preparing the empty branches at
+    /// boot keeps the root topology immutable while retaining lazy leaf-page
+    /// allocation.
+    pub fn prepare_kernel_root_branches(&mut self) -> SysResult {
+        let first_kernel_index = (KERNEL_BASE >> (PAGE_SIZE_BITS + 18)) & 0x1ff;
+        for index in first_kernel_index..512 {
+            let pte = &mut self.root_ppn.get_pte_array()[index];
+            if pte.is_valid() {
+                continue;
+            }
+            let frame = frame_alloc().ok_or(Errno::ENOMEM)?;
+            *pte = PageTableEntry::new(frame.ppn(), PTEFlags::VALID);
+            self.frames.push(frame);
+        }
+        Ok(())
+    }
+
     /// 根据虚拟地址寻找目标页表项，若发现多级页表不存在则创建
     fn find_pte_create(&mut self, vpn: VirtPageNum) -> SysResult<&mut PageTableEntry> {
         let idxs = vpn.indexes();

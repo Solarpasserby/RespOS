@@ -87,13 +87,17 @@ pub fn trap_handler(cx: &mut TrapContext) {
     }
     let scause = scause::read();
     let stval = stval::read();
+    let mut restart_syscall_arg0 = None;
     match scause.cause() {
         Trap::Exception(Exception::UserEnvCall) => {
+            let syscall_id = cx.x[17];
+            let syscall_args = [cx.x[10], cx.x[11], cx.x[12], cx.x[13], cx.x[14], cx.x[15]];
             cx.sepc += 4; // 异常处理完成后直接执行后续指令
-            cx.x[10] = match syscall(
-                cx.x[17],
-                [cx.x[10], cx.x[11], cx.x[12], cx.x[13], cx.x[14], cx.x[15]],
-            ) {
+            let ret = syscall(syscall_id, syscall_args);
+            if ret == Err(Errno::EINTR) && syscall_id == SYSCALL_WAIT4 {
+                restart_syscall_arg0 = Some(syscall_args[0]);
+            }
+            cx.x[10] = match ret {
                 Ok(ret) => ret,
                 Err(err) => err.as_ret() as usize,
             };
@@ -189,12 +193,14 @@ pub fn trap_handler(cx: &mut TrapContext) {
                 }
             }
             if crate::arch::smp::is_timer_service_hart() {
+                crate::timer::await_task_timer_deadline();
                 check_all_task_timers();
             }
             preempt_current_task();
         }
         Trap::Interrupt(Interrupt::SupervisorSoft) => {
             crate::arch::smp::acknowledge_ipi();
+            crate::timer::rearm_task_timer_request();
         }
         _ => {
             panic!(
@@ -204,7 +210,7 @@ pub fn trap_handler(cx: &mut TrapContext) {
             );
         }
     };
-    handle_signals();
+    handle_signals(restart_syscall_arg0);
     return;
 }
 
@@ -256,11 +262,13 @@ pub fn kernel_trap_handler(cx: &mut TrapContext) {
             // The boot hart remains the sole global timer service CPU during
             // early SMP; secondary harts only re-arm their local tick.
             if crate::arch::smp::is_timer_service_hart() && crate::task::current_task().is_none() {
+                crate::timer::await_task_timer_deadline();
                 check_all_task_timers();
             }
         }
         Trap::Interrupt(Interrupt::SupervisorSoft) => {
             crate::arch::smp::acknowledge_ipi();
+            crate::timer::rearm_task_timer_request();
         }
         _ => {
             panic!(
