@@ -16,14 +16,16 @@
 
 ### 当前基线
 
-- 代码基线：`9bde322`（`fix: 让 PageCache 写回错误对同步接口可见`）；后续
-  RV64 16 GiB 支持见 [current-status.md](./current-status.md) 首节。
-- 最近已完成本地结果：当前无 feature RV64 工作树、本地 pub 镜像、16 GiB/8 核、
-  `NI=-10/CLS=TS`，BuildStorm 最终 `ok=true`、产物 1,681,000 B，axbuild `1178.08s`。
-- 资源边界：RV64 early/direct map 已覆盖 16 GiB QEMU RAM 及顶部 FDT；该本地结果仍不等于
-  新官方镜像和评测宿主上的正式成绩。
-- 现有门禁：RV64/LA64 release 构建，RV64 Unix socket、file、private-map、shared-MM、frame-reclaim
-  五项 probe，以及 `cargo fmt`、`git diff --check`。
+- 代码基线：`1788fa2`（包含 `0c21575` 与自动比赛镜像识别）；Phase 0--3 已闭合，Phase 4 主体已完成，
+  当前进入 Phase 5。
+- 最近已完成本地结果：RV64 16 GiB/8 核无 feature BuildStorm `ok=true`；LA64 12 GiB/12 hart
+  完整 BuildStorm `ok=true`，并已完成同步 shootdown、ASID、FP/LSX first-use、residency、按地址空间
+  frame 退役与 range 传播；op=5 完整 final 失败后已回退为 op=4。
+- 外部边界：课程评测平台当前暂不可用；当前基线的复评、正式镜像和平台 wall time 均为
+  `待验证`，不得用本地结果补写平台通过。
+- 现有门禁：RV64/LA64 顺序 release 构建，Linux 对照 probe，RV64 Phase4/socket/signal/task/MM、
+  file/private-map/shared-MM/frame-reclaim 专项，以及 `cargo fmt`、`git diff --check`。每项实际执行
+  结果仍应记录 commit、镜像、QEMU 参数和日期，不能把此清单当作自动通过。
 
 ### 证据优先级
 
@@ -79,8 +81,8 @@ Phase 1 复核发现最初的 hardlink 与目录 `ENOENT` 来自用户库 `stat(
 
 最小 LTP 清单采用仓库现有用例：`chmod01/03/05/07`、`chown01/02/03/05`、
 `fchmod01..05`、`fchmodat01/02`、`fchown01/02/03/05`、`fstat02/03`、`link02/04`、
-`linkat01/02`、`rename01/03..14`、`utime01..05/07`、`utimensat01`。完整 LTP 仍受当前 writable
-`MAP_SHARED` 框架阻断，清单表示修复后的目标门禁，不冒充已通过结果。
+`linkat01/02`、`rename01/03..14`、`utime01..05/07`、`utimensat01`。当时完整 LTP 曾受 writable
+`MAP_SHARED` 框架阻断；该阻断现已解除，但清单仍只是目标门禁，当前结果必须由新日志确认。
 
 ### 工作内容
 
@@ -204,7 +206,7 @@ lookup 与 mutation 的完整 seqlock/RCU 可见性协议、lwext4 orphan-list �
 - mmap+pwrite+truncate probe、稀疏文件与 frame reclaim 通过；
 - dirty/page/LRU/inode registry 不随累计工作量无界增长。
 
-## Phase 4：namei、权限与文件系统 ABI
+## Phase 4：namei、权限与文件系统 ABI（主体已完成，2026-08-11）
 
 ### 主题
 
@@ -220,6 +222,46 @@ syscall 层只解析 ABI 参数；权限、path walk 和 mutation transaction �
 用 Linux 对照 probe 定义预期 errno，再修改实现。
 
 ## Phase 5：MM、task/signal、IPC 与网络语义复核
+
+### 2026-08-13 当前状态与并行顺序
+
+已通过首轮专项的部分包括 Phase 4 文件系统 ABI、AF_UNIX 基本 pathname/close/poll、signal 查询与
+exec 保留语义；明确仍失败或未闭合的部分包括 mmap EOF/truncate/SIGBUS、task leader exit/non-leader
+exec、完整 signal restart/process-pending/job control、TCP socket 等价语义和 iperf daemon 后的
+iozone/wait 停滞。平台不可用只推迟正式镜像验收，不改变本地 Linux 对照和专项 probe 的退出门槛。
+
+与架构线并行时按以下顺序推进：
+
+1. 先做 IPC/network：socket timeout、nonblocking connect/`SO_ERROR`、MSG flags、half-close 和
+   poll/epoll；同步保留 daemon + iozone 跨子系统回归。
+2. 再独立处理 task/signal：leader 单独 exit、最后线程 zombie、non-leader exec/de-thread，随后才接
+   `SA_NOCLDWAIT`、process-pending 和 `SA_RESTART`，一次修改只覆盖一个状态所有权主题。
+3. mmap EOF/truncate/SIGBUS 先固定 Linux 契约、probe、VMA/inode identity 和失效范围；公共
+   shootdown/frame completion 已稳定，但改 `MemorySet` 前仍须与架构线约定接口和验证责任。
+4. Phase 1 保留的纳秒/realtime、atime 模式和 Phase 2 并发 namespace 边界不混入 Phase 5 主线，
+   除非新 probe 证明它们成为当前阻断。
+
+共享文件及接口规则以 [current-status.md](./current-status.md) 顶部双线分工为准。
+
+### 跨 Phase 的 POSIX 语义覆盖任务
+
+POSIX 覆盖作为 Phase 线的独立任务持续维护，不以 Linux syscall 编号数量作为完成标准。先建立接口
+覆盖矩阵，逐项记录规范选项、libc 实现路径、内核入口、当前语义状态、Linux 对照 probe、RespOS
+结果和双架构验证日期。Phase 5 已包含的 socket、task/signal 和 mmap 项直接引用本节状态，不重复
+设计或重复修复。
+
+当前任务包按以下优先级推进：
+
+1. 基础 POSIX：补 `getsid()`；闭合 termios/job control；把线程组 exit/exec、`SA_RESTART`、
+   process-pending、mmap EOF/truncate/SIGBUS 和 socket timeout/flags/`SO_ERROR` 纳入覆盖矩阵。
+2. libc 组合接口：以 musl/glibc probe 验证 `pthread_*`、`sem_open()`、`shm_open()`、`aio_*` 和
+   `posix_spawn()`；没有同名 syscall 不等于不支持，底层 futex、文件和共享内存语义仍须单独验证。
+3. 可选扩展：POSIX message queue、`mlockall()`/`munlockall()`、XSI SysV message/semaphore 保持
+   `待验证/按需实现`，只有规范目标、LTP 或比赛 workload 提供需求证据后才提升优先级。
+
+单项退出门槛为：规范契约明确，Linux baseline 与 RespOS probe 的返回值、errno、阻塞/唤醒和资源
+生命周期一致，相关专项及 RV64/LA64 顺序构建通过。平台不可用期间不得把本地覆盖矩阵外推为正式
+POSIX conformance 或平台成绩。
 
 文件系统模型稳定后，按风险和测试证据推进：
 
@@ -311,11 +353,12 @@ frame_reclaim_probe
 
 ### 性能门禁
 
-- 固定旧 pub 镜像、8 GiB/8 核、窗口外预构建 tg-xtask，运行 120 秒无关变量受控的 Cargo 窗口；
+- 固定同一 pub 镜像、RV64 16 GiB/8 核，运行 120 秒无关变量受控的 Cargo 窗口；旧镜像短窗口只作
+  本地 A/B，不作平台成绩；
 - 记录完成阶段、PageCache fill、ext4 lock classes、block I/O、heap、fault、scheduler idle；
-- Phase 1、Phase 3、Phase 6 收口时各跑一次无 feature 完整 BuildStorm；
-- RV64 16 GiB/8 核本地基线已建立；获得官方新镜像后按其 hash 和实际计时边界
-  重新验证，LA64 按公告资源独立验证。
+- Phase 5 每个跨子系统里程碑先跑专项与固定窗口；本地资源允许时再跑无 feature 完整 BuildStorm；
+- RV64 16 GiB/8 核与 LA 12 GiB/12-hart 本地功能基线已建立；平台恢复后按正式镜像 hash 和实际
+  计时边界重新验证，LA64 36 GiB 由架构线补验。
 
 ## 暂停、回退与提交规则
 
@@ -333,8 +376,9 @@ POSIX probe 成功也不能替代压力和资源闭环。
 
 ## 下一步
 
-Phase 3 已闭合 dirty-owner 强生命周期，补齐 `sync`/`syncfs`/unmount/shutdown 遍历、范围写回、
-共享 data timestamp 和受控 safe-point writeback，并取消最后 File drop 数据提交。退出门槛已由故障
-注入、两次启动持久化、mmap+pwrite+truncate、累计 owner 资源闭环和 16 GiB 完整 BuildStorm 覆盖。
-后续进入 Phase 4 namei/权限/文件系统 ABI；当前无硬件 dirty bit 的保守 mmap 写回和 mapped truncate
-后的精确 SIGBUS 仍作为 MM 扩展边界保留，不重新打开 Phase 3 所有权模型。
+Phase 3 已闭合，Phase 4 主体已完成。当前从 Phase 5 的 IPC/network 开始，按“Linux 对照 → RespOS
+expected-fail probe → 状态所有权设计 → 实现 → 专项/双架构/固定窗口”的闭环逐项推进；随后处理
+task/signal。mmap EOF/truncate/SIGBUS 先完成设计和 probe，再基于现有 TLB shootdown 与 frame
+completion 协议进入实现；改共享 `MemorySet` 前先完成接口交接。平台恢复前可以闭合本地语义任务，
+但所有正式镜像/成绩结论保持
+`待验证`；Phase 6 性能大改不提前并入。

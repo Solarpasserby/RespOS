@@ -153,6 +153,7 @@
   shootdown”对 full invalidation 与进度的影响；与此同时，PageCache 满容量淘汰和 ext4
   read/lookup/namespace 锁内工作是后续最强的两个非架构候选。本轮只建立基线，
   没有根据单个短窗口修改实现或宣称 wall-time 加速比。
+
 ## 2026-08-13 线上提交与本地比赛入口收敛（当前工作树）
 
 - **线上入口**：顶层 `make all` 固定等价于 `submit`，顺序生成 `kernel-rv`、`kernel-la`、
@@ -183,6 +184,68 @@
   LTO 后，RV64 CAgent 10/10 且 `BUILDSTORM_TOOLCHAIN/MINIBUILD ok`；LA64 12 hart 同样 CAgent 10/10
   且两个 BuildStorm 前置门禁通过。因此双架构 release config 固定 `lto=false`。完整 BuildStorm 和
   平台正式资源/计时仍待验证，不能由短回归外推。
+
+## 2026-08-13 状态收口与双线推进基线（当前工作树）
+
+- **代码与工作树**：当前分支为 `main`，代码基线为 `1788fa2`（已包含学长 `0c21575` 和自动比赛
+  镜像识别）。本次收口开始时
+  `git status --short` 为空；最新代码已按课程平台实际使用的 Rust 1.86 nightly 兼容基线完成
+  RV64/LA64 顺序构建。下文更早日期的“当前工作树”“下一步”和“仍阻塞”均是历史执行记录；若与
+  本节冲突，以本节及其后更新为准。
+- **外部评测阻塞**：课程评测平台当前暂不可用，因此当前基线的 score/rank、正式镜像
+  与宿主耗时都标记为 `待验证`。平台不可用不计为代码失败，也不能用本地结果替代平台通过；恢复后
+  首个动作是保存平台日志、工具链版本、镜像/命令口径和结果，再决定是否产生新的代码任务。
+- **已闭合主线**：RV64 16 GiB/8 核本地 final 路径已完成 CAgent 10/10 和完整 BuildStorm；LA64
+  12 GiB/12 hart 已完成完整 CAgent/BuildStorm，并完成同步 shootdown、ASID、FP/LSX first-use、
+  TLB residency、按地址空间 frame 退役、页表页 root-switch completion 和 range 传播。op=5 在完整
+  final 中导致内存破坏，已通过单变量 A/B 回退为安全的 op=4。Linux/POSIX Phase 0--3 已闭合，
+  Phase 4 主体已由 Linux 对照 probe、
+  双架构构建和 RV64 BuildStorm 覆盖。上述结论只适用于各节记录的 commit、镜像、QEMU 参数和日期。
+- **当前未闭合主线**：一是 LA 架构与 BuildStorm 性能/正式 36 GiB 验证；二是 Linux/POSIX Phase 5
+  的 MM、task/signal、IPC/network 语义。Phase 6 的大规模调度器、allocator、异步 I/O 重构仍由数据
+  触发，不因平台暂不可用而提前展开。
+
+### 双线分工与共享边界
+
+| 推进线 | 当前负责人 | 当前任务包 | 本地退出证据 | 平台恢复后的补验 |
+| --- | --- | --- | --- | --- |
+| 架构线 | 学长 | LA 缩放与 Global kernel mapping 评估；保留 range+op=4 安全边界；36 GiB 启动 | 双架构顺序构建，LA 12-hart shared-MM/Phase3/ASID churn、完整 BuildStorm | LA `-m 36G -smp 12` 正式镜像和时限；必要时 RV64 正式回归 |
+| Phase 线 | 当前维护者 | 继续 Phase 5，并独立维护 POSIX 语义覆盖任务；先收敛与架构代码低耦合的 IPC/network，再做 task/signal、基础 POSIX 缺口；待 TLB/MM 接口稳定后实现 mmap EOF/truncate/SIGBUS | POSIX 覆盖矩阵、Linux 对照 probe、RV64 专项与 SMP 回归、LA/RV 顺序构建；高风险修改补 shared-MM/资源闭环 | 正式镜像的完整 workload、LTP/比赛 runner 与平台计时 |
+
+默认文件边界如下：架构线拥有 `os/src/arch/**` 以及 LA SMP/TLB/ASID 的底层协议；Phase 线拥有
+`os/src/net/**`、`os/src/signal/**`、相应 syscall/用户 probe 和 Linux 对照。`os/src/mm/memory_set.rs`、
+`os/src/task/{task,processor,scheduler}.rs`、trap context、公共 arch API 和本状态页是共享集成面；两条线
+改动这些文件前先约定接口和验证责任，同一时段只保留一个写入者，另一方以可审查 patch 接入。
+
+### POSIX 语义覆盖任务（待推进，Phase 线）
+
+该任务独立于“增加 Linux syscall 数量”：以 POSIX.1-2024 源级接口和 musl/glibc 可观察行为为范围，
+维护“已支持 / syscall 存在但语义未闭合 / libc 组合路径待验证 / 可选扩展 / 不支持”覆盖矩阵。
+
+1. 基础接口先补明确缺项 `getsid()`，并为 termios/job control、线程组 exit/exec、signal restart、
+   mmap EOF/truncate/SIGBUS、socket flags/timeout/`SO_ERROR` 建立 Linux 对照 probe；已列入 Phase 5 的
+   子系统工作直接复用，不建立第二套实现任务。
+2. `pthread_*`、`sem_open()`、`shm_open()`、`aio_*`、`posix_spawn()` 先验证 libc 组合路径，不能因没有
+   同名 syscall 就判定缺失，也不能因程序能启动就判定完整支持。
+3. POSIX message queue、`mlockall()`/`munlockall()` 和 XSI SysV message/semaphore 单列为可选扩展，
+   由 LTP、比赛 workload 或明确需求触发优先级，不抢占基础语义闭合。
+4. 每个条目的本地退出证据至少包括规范契约、Linux baseline、RespOS expected-fail/通过 probe 和
+   RV64/LA64 顺序构建；涉及阻塞、signal、task 或 MM 时追加对应 SMP/资源闭环专项。
+5. 课程评测平台恢复前可以更新本地覆盖状态，但正式镜像、LTP 总体结果和平台通过保持 `待验证`。
+
+### 平台不可用期间的执行顺序
+
+1. 架构线先以当前本地镜像做 LA 12-hart 无 feature 完整运行；资源不足时使用同镜像、同窗口的
+   `1/3/6/12` 缩放与 `perf_counters` 定位，不能把短窗口写成正式成绩。
+2. Phase 线先补 Linux 对照和 RespOS probe，再依次推进 socket timeout/nonblocking connect/MSG flags/
+   poll、遗留 daemon 与 wait/signal 生命周期；每个主题独立提交和验证。
+3. task leader exit/non-leader exec、`SA_RESTART`/process-pending 等跨 task/signal 项单独设计；不得和
+   网络状态机或 scheduler 性能重构混在同一修改中。
+4. mmap EOF/truncate/SIGBUS 先完成契约、probe 和 VMA/inode identity 设计；底层 shootdown/frame
+   completion 已稳定，但实现前仍须和架构线约定 `MemorySet` 接口与验证责任。
+5. 平台恢复后先复评未经平台确认的当前 HEAD，再分别补两条线的正式镜像门禁；平台结果只更新
+   `current-status.md`，稳定的新不变量/决策再同步到 `architecture.md`/`decisions.md`。
+
 ## 2026-08-13 课程平台 Rust 编译器兼容性（当前工作树）
 
 - **平台证据**：课程评测于 2026-08-13 的 `make all` 在 RV64 内核阶段使用

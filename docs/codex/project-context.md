@@ -8,14 +8,19 @@
 队友同步仓库后，建议按以下顺序阅读：
 
 1. [current-status.md](./current-status.md)：当前提交、已验证结果和正在进行的阻断；
-2. [linux-posix-refactor-plan.md](./linux-posix-refactor-plan.md)：BuildStorm 跑通后的语义与模型重构路线；
+2. 按分工选择路线：[buildstorm-smp-plan.md](./buildstorm-smp-plan.md) 对应架构线，
+   [linux-posix-refactor-plan.md](./linux-posix-refactor-plan.md) 对应 Phase 线；
 3. [workflows.md](./workflows.md)：构建、镜像恢复和 QEMU 运行命令；
 4. [architecture.md](./architecture.md)：修改内核前需要遵守的调用链和不变量；
 5. [pitfalls.md](./pitfalls.md)：已知失败模式和排查顺序；
 6. [../cagent/day1.md](../cagent/day1.md)：题目一历史协作材料。
 
-当前协作目标是在提交 `7cdae1e` 已跑通本地 RV64 8 GiB/8 核 BuildStorm 的基础上，保持性能门禁，
-按 Linux/POSIX 可观察语义重构文件属性、inode/dentry、PageCache/writeback，再扩展到其他子系统。
+当前代码基线为 `1788fa2`（包含学长 `0c21575` 与自动比赛镜像识别）。RV64 16 GiB/8 核和 LA64
+12 GiB/12 hart 已建立本地完整 BuildStorm 基线；
+Linux/POSIX Phase 0--4 主体已经推进完成。2026-08-13 起按两条线并行：架构线继续 LA SMP/TLB/ASID
+与 BuildStorm 性能，Phase 线继续 Phase 5 的 MM、task/signal、IPC/network 语义。课程评测平台当前
+暂不可用，平台结果统一标记 `待验证`；最新分工和共享文件边界见 [current-status.md](./current-status.md)
+首节。
 
 ## 项目定位
 
@@ -65,28 +70,42 @@
 
 ## 当前开发基线与目标
 
-### A/B/C 重构已整合到 `dev`
+### 2026-08-13 双线开发基线
 
-- 状态：已确认
-- 适用范围：当前开发分支
+- 状态：当前
+- 适用范围：`1788fa2` 后续工作
+- 最后验证：2026-08-13
+- 证据：当前 Git HEAD、[current-status.md](./current-status.md) 顶部状态收口、双架构兼容构建记录
+- 内容：架构线负责 `os/src/arch/**` 和 LA SMP/TLB/ASID 的底层协议与性能验证；Phase 线负责
+  Linux/POSIX Phase 5，先推进与架构低耦合的 IPC/network 和 task/signal，再在底层 shootdown 接口
+  稳定后合入 mmap EOF/truncate/SIGBUS。`MemorySet`、scheduler/processor/task、trap context 和公共
+  arch API 是共享集成面，修改前必须先约定接口与验证责任。
+- 后续影响：平台不可用期间以本地构建、Linux 对照、专项 probe、SMP 压力和固定窗口作为开发证据，
+  但不申报平台成绩；平台恢复后先复评当前 HEAD，再按新增改动补正式镜像门禁。
+
+### A/B/C 重构历史基线
+
+- 状态：历史基线，已被后续提交覆盖
+- 适用范围：理解早期 task/MM/FS 所有权来源
 - 最后验证：2026-08-01
 - 证据：Git `44430df`、`50f040b`、`e0d69fd`、`2f736d4`、`cba8e24`；
   `docs/四天内核重构-ABC-整合审查.md`
-- 内容：task/runtime（A）、MM（B）、FS/file ABI（C）已经合并，当前 `dev` 指向
-  `44430df`。这是继续修复回归的开发基线，不是已经通过完整验收的发布基线。
+- 内容：task/runtime（A）、MM（B）、FS/file ABI（C）曾在 `dev@44430df` 完成整合。该提交解释
+  当前若干所有权不变量，但不再是当前开发 HEAD 或测试基线。
 - 后续影响：后续修改应尽量保留已建立的不变量和 ABI 诚实性，同时恢复原有有效测例；不能
   为提高用例数量重新引入假成功或破坏失败原子性。
 
-### 优先恢复有效历史测例，再继续优化
+### 保持有效历史测例，再继续优化
 
-- 状态：暂定
-- 适用范围：`dev` 后续工作
-- 最后验证：2026-08-01
-- 证据：当前开发方向；当前 `make rv`/`make la` 日志显示 LTP 被 mmap 策略阻断
+- 状态：持续原则；原 writable `MAP_SHARED` 阻断已解除
+- 适用范围：当前两条推进线
+- 最后验证：2026-08-13 状态收口
+- 证据：[current-status.md](./current-status.md) 的 Phase 3/4、RV64/LA64 运行记录
 - 内容：优化内核的同时维持原有具有语义价值的测例。依赖明显取巧行为的旧用例不自动构成
   兼容性要求，但排除前必须能解释其为何不代表目标 ABI。
-- 后续影响：先修复 writable file `MAP_SHARED` 的安全协议，使 LTP 真正执行；之后才依据真实
-  LTP 结果安排下一轮 task/MM/FS 重构。
+- 后续影响：writable file `MAP_SHARED` 已采用 PageCache 统一页帧和锁外写回协议，不再是当前入口。
+  当前根据 Linux 对照 probe 推进 Phase 5，并继续用真实日志判断 LTP/比赛 workload；不得把早期
+  600 余项历史分数当作当前结果。
 
 ## 证据优先级
 

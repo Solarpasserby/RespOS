@@ -1,17 +1,37 @@
 # BuildStorm SMP 启动与题二推进方案
 
+## 2026-08-13 当前适用状态
+
+RV64 8 核与 LA64 12 hart 的启动、调度、共享 MM 和 BuildStorm 功能链已经建立；下文 2026-08-05 至
+2026-08-08 的 Phase 0--5、单 Processor、并行 rustc SIGSEGV 和 minibuild 阻塞均为历史实施记录，
+不能继续当作当前 blocker。`0c21575` 又完成了 per-address-space frame 退役、页表页 root-switch
+completion、ASID op=4 与失效范围传播，并以 LA 12 GiB/12 hart 完整 final 验证 op=4；当前架构线
+只保留以下目标：
+
+1. 以 `1/3/6/12` 缩放和 TLB/ext4/scheduler 计数决定下一优化，不预设 scheduler 或 ext4 是主因；
+2. 独立评估 Global kernel mapping；范围请求暂以单次 op=4 覆盖，op=5 已因完整 final 内存破坏禁用；
+3. 在资源允许或平台恢复后验证正式 LA `-m 36G -smp 12` 镜像与时限。
+
+课程评测平台当前暂不可用；平台成绩与正式 36 GiB 结果标记 `待验证`。本地 12 GiB 功能或短窗口不能
+替代平台结论。双线协作时，架构线修改 `MemorySet`、scheduler/processor、trap context 或公共 arch API
+前，须与 Linux/POSIX Phase 线先约定接口；具体分工见 [current-status.md](./current-status.md) 首节。
+
 ## 目标与边界
 
-目标是在不破坏当前 RV64 单核 CAgent 回归的前提下，使内核真实使用 BuildStorm 所需的多个 CPU，随后跑通 Debian glibc 镜像中的 Rust 工具链与 arceos-helloworld 全量构建。
+最初目标是在不破坏 RV64 CAgent 回归的前提下，使内核真实使用 BuildStorm 所需的多个 CPU，并跑通
+Debian glibc 镜像中的 Rust 工具链与 arceos-helloworld 全量构建；该功能目标现已在 RV64 8 核和
+LA64 12 hart 本地完成，当前转入 LA 性能、Global mapping 评估和正式资源验收。
 
 2026-08-08 比赛官方群更新的决赛参数为 RV64 `-smp 8 -m 16G`、LA64
 `-smp 12 -m 36G`，整轮超时 6250 秒；脚本将 `nproc` 写入 `BUILDSTORM_COMPILE`。公告还说明新镜像
 会补回预编译 `tg-xtask`，计时仅包含测试用例自身编译，不包含前置依赖和编译后的运行验证。当前
 本地仍是旧 pub 镜像，以上口径在取得新镜像后必须以镜像 hash、脚本和实际命令再次验证。
 
-第一阶段只承诺 SMP 正确性，不承诺时间分。不得伪造 `/proc/cpuinfo`、`nproc` 或 `/proc/uptime`，也不得只启动 QEMU 多 vCPU 而让次核停机。
+历史第一阶段只承诺 SMP 正确性，不承诺时间分。后续仍不得伪造 `/proc/cpuinfo`、`nproc` 或
+`/proc/uptime`，也不得只启动 QEMU 多 vCPU 而让次核停机。
 
-范围：先实施 RV64；LA64 在 RV64 2/8 核稳定、公共抽象形成后接入。第一版允许全局 run queue 和全局锁，目标是可正确运行多线程 cargo/rustc；per-CPU run queue、work stealing、cache 优化属于后续性能阶段。题一 pub 入口继续保持 `SMP=1`。
+历史实施顺序为先 RV64、后 LA64；两架构现均已接入真实 SMP。全局 run queue 和全局锁仍是允许的
+正确性基线，per-CPU run queue、work stealing 和 cache 优化只有在计数证明为热点后才进入。
 
 ## BuildStorm 三层级优化总路线（2026-08-09）
 
@@ -43,8 +63,9 @@ LA64 12 核的完整构建，但诊断必须先取得 1/2/4/8（LA64 为 1/3/6/1
 - PageCache 以 `Arc<FrameTracker>` 承载缓存页，普通文件 `MAP_SHARED` 与缓存共用 frame；
 - PageCache 工作集提高到 64 MiB 并做最多 64 KiB 顺序预读；kernel heap 提高到 256 MiB。
 
-当前闭环任务：先定位并修复完整 RV64 BuildStorm 中并行 rustc SIGSEGV，再以同镜像、同 QEMU、
-无 feature kernel 证明正式构建成功。不得在该故障未定位时继续叠加缓存、调度或异步 I/O 重构。
+该层已于 2026-08-11 闭环：RV64 无 feature 完整 BuildStorm 和 LA 12-hart 功能 BuildStorm 均成功，
+历史并行 rustc SIGSEGV 不再是当前 blocker。后续若再次出现 SIGSEGV，必须按对应 commit/镜像重新
+归因，不能直接复用旧结论。
 
 第一层退出门槛：
 
@@ -95,8 +116,9 @@ runnable work 时发送/合并 IPI。Linux 的 per-CPU runqueue、wakeup placeme
 - 强引用 inode/PageCache 生命周期与后台/批量 writeback，使普通 close 可完全脱离数据提交；
 - per-CPU allocator cache 或按对象类型分配，前提是先证明全局 allocator 为热点并完成所有权审计；
 - ASID、精确 active-mask 和按地址/地址空间 shootdown，降低共享 MM 的远端 RFENCE；
-- 把 RV64 已验证的 PerCpu、runqueue、IPI、timer、TLB 协议接入 LA64，先 2 核，再 6/12 核；当前
-  LA64 `task/processor.rs` 仍只配置一个 Processor，不能把 `nproc=12` 当作实现完成；
+- LA64 已接入 12-hart PerCpu、runqueue、IPI、timer、同步 shootdown、ASID、按地址空间 frame 退役和
+  range 元数据；range 当前安全执行 op=4，op=5 已由完整 final 失败否决。下一步是 Global kernel
+  mapping、缩放诊断及正式 36 GiB 验证；
 - 最后才考虑 NUMA/复杂 scheduler domain、完整公平调度策略或更激进的无锁结构。
 
 第三层每项都是独立设计任务，必须有专项正确性测试和回退点；不得把多队列、ASID、allocator 与

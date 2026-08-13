@@ -99,9 +99,9 @@
 - 内容：架构定义中 op=0 清除所有 TLB 项，op=3 清除所有 `G=0` 项，按指定 ASID 清除非 global
   项的是 op=4。旧代码连续执行 op=0、op=3，第二条只重复清理已经为空的子集。当前保留 op=0，
   因而删除 op=3 不改变“全量本地失效”语义。
-- 后续影响：不能依据错误 opcode 注释设计 ASID 优化。若要保留 global kernel 项或按 ASID 失效，
-  必须先验证软件 refill、成对 TLB 项的 G 位、ASID 生命周期、页表回收和跨核 shootdown；仅把 op=0
-  改成 op=3 会改变语义，并已在 BuildStorm 探索中出现用户态内存破坏，不能直接合入。
+- 后续影响：不能依据错误 opcode 注释设计 ASID 优化。当前按 ASID/range 请求安全使用 op=4；
+  Global kernel mapping 仍须验证 software refill、成对 G 位、ASID 生命周期和跨核 shootdown。
+  op=5 已在完整 BuildStorm 中造成 allocator corruption，不能仅凭短专项重新启用。
 
 ## 启用 ASID 后当前 active mask 不覆盖全部潜在旧 TLB
 
@@ -112,7 +112,8 @@
 - 内容：hart 切到 idle 后会清除 active bit，但普通 ASID 切换不会清除该 hart 的旧 TLB。只向当前
   active mask 发送 PTE shootdown 会让任务以后迁回该 hart 时重新命中旧映射。必须记录自上次同步失效
   后加载过该 ASID 的 residency，或在每次重新激活时按 generation 补做本地失效。
-- 后续影响：全局 retired-frame 批次还可能混有其他 MemorySet，不能用单个地址空间的 residency 释放。
+- 后续影响：该故障已通过 per-PageTable retired frame 批次和同步 completion 修复；不得恢复跨
+  MemorySet 的全局 retired-frame 队列，也不能绕过 residency ack 提前释放旧 frame。
 
 ## RV64 最大支持 RAM 必须同时覆盖 early FDT 和正式 direct map
 
@@ -543,39 +544,43 @@
 - 状态：已确认
 - 适用范围：完整 QEMU 测试
 - 最后验证：2026-08-01
-- 证据：当前 `make rv`/`make la` 均退出 0，但 LTP 各有 600 余项失败
+- 证据：2026-08-01 的 `make rv`/`make la` 均退出 0，但当轮 LTP 各有 600 余项失败
 - 内容：顶层命令通过 pipefail 运行 QEMU 并 tee 日志；testrunner 即使记录用例失败仍会跑完并主动
   关机，因此外层成功主要表示 QEMU 正常结束。
 - 后续影响：验收必须解析 summary、TBROK、segfault、wrapper exit code 和分组 fail。
 
-## writable file `MAP_SHARED` 拒绝造成全局级联
+## writable file `MAP_SHARED` 拒绝曾造成全局级联
 
-- 状态：已确认
+- 状态：历史故障，当前拒绝策略已修复
 - 适用范围：basic、lmbench、LTP 以及依赖共享控制页的用户程序
-- 最后验证：2026-08-01
-- 证据：`os/src/fs/file.rs::mmap_allowed`、`os/src/syscall/mm.rs`、当前双架构日志
-- 内容：当前策略返回 `EOPNOTSUPP`。LTP 框架自身使用 fd-backed writable shared page，所以看似
-  无关的 getpid/fcntl/fs 等用例在初始化时一起 TBROK。
-- 后续影响：不要逐个修数百个 LTP case；先修 shared file mapping 协议。也不要直接删除检查，
-  因为旧实现仍有锁内 I/O 和写回错误传播风险。
+- 最后验证：故障 2026-08-01；修复状态收口 2026-08-13
+- 证据：历史 `os/src/fs/file.rs::mmap_allowed`、2026-08-01 双架构日志；当前实现与验证见
+  `architecture.md` 的 writable `MAP_SHARED` 协议和 `current-status.md` 的 Phase 3 结果
+- 内容：旧策略返回 `EOPNOTSUPP`，使使用 fd-backed writable shared page 的 LTP 框架初始化失败，
+  看似无关的 getpid/fcntl/fs 用例随之 TBROK。当前已采用 PageCache 统一 frame、锁外快照写回和
+  写回错误协议，不再无条件拒绝 writable file `MAP_SHARED`。
+- 后续影响：遇到大范围 LTP TBROK 时仍应先定位首个框架错误，不能逐个修后续 case；当前 mmap
+  主线问题已经转为 EOF/truncate 后的精确 SIGBUS、COW 尾页和跨 hart 失效，不得恢复旧拒绝策略。
 
 ## MM 锁内后端 I/O 是长期锁序风险
 
-- 状态：已确认
+- 状态：历史风险；核心 file mmap/writeback 路径已重构，新增路径仍须审计
 - 适用范围：file fault、shared unmap/writeback
-- 最后验证：2026-08-01
-- 证据：`os/src/mm/memory_set.rs`、`docs/四天内核重构-ABC-整合审查.md`
-- 内容：部分 file backing fault/writeback 仍可能持有 `MemorySet` 写锁访问文件后端；munmap 写回
-  错误也没有完整传播协议。
-- 后续影响：设计 writable shared 时把文件读写移到地址空间锁外，并在重新加锁后校验映射版本
-  或身份，再 commit。
+- 最后验证：故障 2026-08-01；Phase 3 收口 2026-08-11
+- 证据：历史 `os/src/mm/memory_set.rs`、`docs/四天内核重构-ABC-整合审查.md`；当前协议见
+  `architecture.md` 与 `current-status.md` 的 PageCache/写回章节
+- 内容：旧 file backing fault/writeback 曾在 `MemorySet` 写锁内访问后端，munmap 错误传播也不完整。
+  当前核心路径采用锁外准备/快照、重新校验后提交，并由 PageCache 写回状态和 error cursor 传播错误。
+- 后续影响：该锁序约束仍然有效。实现 mmap EOF/SIGBUS、truncate invalidation 或新 file backing 时，
+  不得重新在 MM 锁内执行 ext4/PageCache 后端 I/O；锁外阶段返回后必须校验 VMA/version/identity。
 
 ## LTP 的首个框架错误会污染后续结论
 
 - 状态：已确认
 - 适用范围：LTP harness 调试
 - 最后验证：2026-08-01
-- 证据：当前 mmap 初始化级联；`user/src/bin/testrunner.rs`；历史 `pipe2_02` helper 级联记录
+- 证据：2026-08-01 writable mmap 初始化级联；`user/src/bin/testrunner.rs`；历史 `pipe2_02` helper
+  级联记录
 - 内容：测试可能在 `tst_test.c` 资源准备、mount、helper exec 或共享控制页阶段失败，尚未进入目标
   syscall assertion。后续大量相同错误不是大量独立内核缺陷。
 - 后续影响：先定位第一个不同的失败点，并从 testsuit/image 脚本确认它属于 setup 还是测试主体。
