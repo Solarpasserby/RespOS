@@ -32,6 +32,92 @@ static IPI_COUNT: [AtomicUsize; MAX_HARTS] = [const { AtomicUsize::new(0) }; MAX
 static TLB_SHOOTDOWN_GENERATION: AtomicUsize = AtomicUsize::new(1);
 static TLB_SHOOTDOWN_REQUEST: [AtomicUsize; MAX_HARTS] = [const { AtomicUsize::new(0) }; MAX_HARTS];
 static TLB_SHOOTDOWN_ACK: [AtomicUsize; MAX_HARTS] = [const { AtomicUsize::new(0) }; MAX_HARTS];
+static TLB_SHOOTDOWN_KIND: [AtomicU8; MAX_HARTS] = [const { AtomicU8::new(0) }; MAX_HARTS];
+static TLB_SHOOTDOWN_ASID: [AtomicUsize; MAX_HARTS] = [const { AtomicUsize::new(0) }; MAX_HARTS];
+static TLB_SHOOTDOWN_START: [AtomicUsize; MAX_HARTS] = [const { AtomicUsize::new(0) }; MAX_HARTS];
+static TLB_SHOOTDOWN_END: [AtomicUsize; MAX_HARTS] = [const { AtomicUsize::new(0) }; MAX_HARTS];
+
+const TLB_KIND_ALL: u8 = 1;
+const TLB_KIND_ADDRESS_SPACE: u8 = 2;
+const TLB_KIND_RANGE: u8 = 3;
+
+#[derive(Clone, Copy, Debug)]
+pub struct TlbShootdownRequest {
+    kind: u8,
+    asid: usize,
+    start: usize,
+    end: usize,
+}
+
+impl TlbShootdownRequest {
+    pub const fn all() -> Self {
+        Self {
+            kind: TLB_KIND_ALL,
+            asid: 0,
+            start: 0,
+            end: 0,
+        }
+    }
+
+    pub const fn address_space(asid: usize) -> Self {
+        Self {
+            kind: TLB_KIND_ADDRESS_SPACE,
+            asid,
+            start: 0,
+            end: 0,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub const fn range(asid: usize, start: usize, end: usize) -> Self {
+        Self {
+            kind: TLB_KIND_RANGE,
+            asid,
+            start,
+            end,
+        }
+    }
+
+    fn is_valid(self) -> bool {
+        match self.kind {
+            TLB_KIND_ALL => self.asid == 0 && self.start == 0 && self.end == 0,
+            TLB_KIND_ADDRESS_SPACE => self.asid < 1024 && self.start == 0 && self.end == 0,
+            TLB_KIND_RANGE => {
+                self.asid < 1024
+                    && self.start < self.end
+                    && self.start % crate::config::PAGE_SIZE == 0
+                    && self.end % crate::config::PAGE_SIZE == 0
+            }
+            _ => false,
+        }
+    }
+
+    fn record(self) {
+        if !self.is_valid() {
+            crate::perf::tlb_shootdown_invalid_request(1);
+        } else if self.kind == TLB_KIND_ALL {
+            crate::perf::tlb_shootdown_all_request(1);
+        } else if self.kind == TLB_KIND_ADDRESS_SPACE {
+            crate::perf::tlb_shootdown_address_space_request(1);
+        } else {
+            crate::perf::tlb_shootdown_range_request(1);
+        }
+    }
+
+    fn invalidate_local(self) {
+        if !self.is_valid() {
+            crate::arch::sfence();
+            return;
+        }
+        match self.kind {
+            TLB_KIND_ADDRESS_SPACE => crate::arch::sfence_asid(self.asid),
+            // Range requests remain a protocol-only representation in this
+            // stage. Fall back to op=0 until the op=5 VA rules are verified.
+            TLB_KIND_ALL | TLB_KIND_RANGE => crate::arch::sfence(),
+            _ => unreachable!(),
+        }
+    }
+}
 
 unsafe extern "C" {
     fn _start_secondary_phys();
@@ -202,7 +288,9 @@ pub fn poll_pending_ipi() {
 /// cycle. One outstanding request per target also makes IOCSR vector
 /// coalescing harmless: the target acknowledges the published generation
 /// before its slot is reused.
-pub fn remote_tlb_shootdown(targets: usize) {
+pub fn remote_tlb_shootdown(targets: usize, request: TlbShootdownRequest) {
+    request.record();
+    debug_assert!(request.is_valid(), "invalid TLB shootdown request");
     let current = current_hart_id();
     let targets = targets & online_hart_mask() & !(1 << current);
     if targets == 0 {
@@ -227,6 +315,10 @@ pub fn remote_tlb_shootdown(targets: usize) {
         // Do not let a wrapped generation match an acknowledgement left by a
         // much older request. The slot is exclusively ours at this point.
         TLB_SHOOTDOWN_ACK[hart].store(0, Ordering::Relaxed);
+        TLB_SHOOTDOWN_KIND[hart].store(request.kind, Ordering::Relaxed);
+        TLB_SHOOTDOWN_ASID[hart].store(request.asid, Ordering::Relaxed);
+        TLB_SHOOTDOWN_START[hart].store(request.start, Ordering::Relaxed);
+        TLB_SHOOTDOWN_END[hart].store(request.end, Ordering::Release);
         pending &= !(1 << hart);
     }
 
@@ -260,7 +352,17 @@ pub fn acknowledge_ipi() {
         if pending & (1 << IPI_TLB_SHOOTDOWN) != 0 {
             let generation = TLB_SHOOTDOWN_REQUEST[hart].load(Ordering::Acquire);
             if generation != 0 {
-                crate::arch::sfence();
+                let request = TlbShootdownRequest {
+                    kind: TLB_SHOOTDOWN_KIND[hart].load(Ordering::Relaxed),
+                    asid: TLB_SHOOTDOWN_ASID[hart].load(Ordering::Relaxed),
+                    start: TLB_SHOOTDOWN_START[hart].load(Ordering::Relaxed),
+                    end: TLB_SHOOTDOWN_END[hart].load(Ordering::Acquire),
+                };
+                debug_assert!(
+                    request.is_valid(),
+                    "invalid published TLB shootdown request"
+                );
+                request.invalidate_local();
                 TLB_SHOOTDOWN_ACK[hart].store(generation, Ordering::Release);
             }
         }

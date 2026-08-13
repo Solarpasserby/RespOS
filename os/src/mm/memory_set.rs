@@ -120,33 +120,16 @@ fn allocate_asid() -> SysResult<usize> {
     let remote = crate::arch::smp::online_hart_mask() & !(1 << current);
     if remote != 0 {
         crate::perf::remote_rfence(1);
-        crate::arch::smp::remote_tlb_shootdown(remote);
+        crate::arch::smp::remote_tlb_shootdown(
+            remote,
+            crate::arch::smp::TlbShootdownRequest::all(),
+        );
     }
 
     let mut allocator = ASID_ALLOCATOR.lock();
     allocator.reclaim(retired);
     allocator.alloc().ok_or(Errno::ENOMEM)
 }
-#[cfg(target_arch = "loongarch64")]
-lazy_static! {
-    static ref RETIRED_DATA_FRAMES: Mutex<Vec<Arc<FrameTracker>>> = Mutex::new(Vec::new());
-}
-
-#[cfg(target_arch = "loongarch64")]
-fn retire_data_frame(frame: Arc<FrameTracker>) {
-    RETIRED_DATA_FRAMES.lock().push(frame);
-}
-
-#[cfg(not(target_arch = "loongarch64"))]
-fn retire_data_frame(frame: Arc<FrameTracker>) {
-    drop(frame);
-}
-
-#[cfg(target_arch = "loongarch64")]
-fn take_retired_data_frames() -> Vec<Arc<FrameTracker>> {
-    core::mem::take(&mut *RETIRED_DATA_FRAMES.lock())
-}
-
 const ET_DYN: u16 = 3;
 const PIE_LOAD_OFFSET: usize = 0x40_0000;
 
@@ -1313,7 +1296,7 @@ impl MemorySet {
             middle.notify_mmap_close();
             middle.unmap_ptes_only(&mut self.page_table);
             self.remove_area_with_overlap_range(new_range)?;
-            middle.rebase(new_start, new_pages);
+            middle.rebase(new_start, new_pages, &mut self.page_table);
             middle.remap_existing_frames(&mut self.page_table)?;
             middle.notify_mmap_open();
             self.areas.push(middle);
@@ -1363,7 +1346,7 @@ impl MemorySet {
         let mut middle = self.take_exact_area(old_range)?;
         middle.notify_mmap_close();
         middle.unmap_ptes_only(&mut self.page_table);
-        middle.rebase(new_start, new_pages);
+        middle.rebase(new_start, new_pages, &mut self.page_table);
         middle.remap_existing_frames(&mut self.page_table)?;
         middle.notify_mmap_open();
         self.areas.push(middle);
@@ -1793,12 +1776,20 @@ impl MemorySet {
         self.page_table.modify_pte(vpn, flags);
     }
 
-    /// Flush this hart after switching its page-table root.
-    ///
-    /// Root activation does not modify page-table contents, so it must not
-    /// wait for remote harts that are still legitimately using the same
-    /// address space. Page-table writers use `flush_tlb()` below.
+    /// Flush this hart's cached entries for this address space after a PTE
+    /// update. LA can retain unrelated ASIDs; RV keeps its existing full
+    /// local SFENCE.VMA behavior.
     fn flush_local_tlb(&self) {
+        core::sync::atomic::fence(Ordering::SeqCst);
+        #[cfg(target_arch = "riscv64")]
+        sfence();
+        #[cfg(target_arch = "loongarch64")]
+        crate::arch::sfence_asid(self.asid.load(Ordering::Acquire));
+        crate::perf::local_sfence(1);
+    }
+
+    #[cfg(target_arch = "loongarch64")]
+    fn flush_local_tlb_all(&self) {
         core::sync::atomic::fence(Ordering::SeqCst);
         sfence();
         crate::perf::local_sfence(1);
@@ -1807,12 +1798,12 @@ impl MemorySet {
     /// Publish a page-table modification and synchronously invalidate every
     /// hart that may cache this address space. Callers serialize this operation
     /// with active/residency transitions through the MemorySet write lock.
-    pub fn flush_tlb(&self) {
+    pub fn flush_tlb(&mut self) {
         // Freeze the batch before the local flush as well: a frame retired
         // concurrently after this point must wait for the next generation on
         // every hart, including this one.
         #[cfg(target_arch = "loongarch64")]
-        let retired = take_retired_data_frames();
+        let retired = self.page_table.take_retired_data_frames();
         self.flush_local_tlb();
         #[cfg(target_arch = "riscv64")]
         {
@@ -1829,18 +1820,19 @@ impl MemorySet {
             let current = crate::arch::smp::current_hart_id();
             // Without frame retirement, only harts that loaded this ASID since
             // its previous synchronous invalidation can retain stale entries.
-            // The global retirement batch may contain frames from unrelated
-            // MemorySets, so releasing a non-empty batch still requires every
-            // online hart to acknowledge a full invalidation.
-            let targets = if retired.is_empty() {
-                self.tlb_hart_mask.load(Ordering::Acquire)
-            } else {
-                crate::arch::smp::online_hart_mask()
-            };
+            // Retired data frames belong to this PageTable, so this ASID
+            // residency set is sufficient even when the batch is non-empty.
+            // Every possible stale translation is represented in this mask.
+            let targets = self.tlb_hart_mask.load(Ordering::Acquire);
             let remote_mask = targets & !(1 << current);
             if remote_mask != 0 {
                 crate::perf::remote_rfence(1);
-                crate::arch::smp::remote_tlb_shootdown(remote_mask);
+                crate::arch::smp::remote_tlb_shootdown(
+                    remote_mask,
+                    crate::arch::smp::TlbShootdownRequest::address_space(
+                        self.asid.load(Ordering::Acquire),
+                    ),
+                );
             }
             // The write lock excludes scheduler mark/clear transitions. Every
             // inactive resident has now acknowledged the new PTE generation;
@@ -1874,6 +1866,12 @@ impl MemorySet {
                 .active_hart_mask
                 .fetch_and(!(1 << hart), Ordering::AcqRel);
             debug_assert_ne!(old & (1 << hart), 0, "clearing an inactive address space");
+            if old == 1 << hart {
+                // __switch has already installed this CPU idle/kernel root.
+                // After the last active bit is cleared, no hart can page-walk
+                // the retired root, so its page-table frames may be reused.
+                self.page_table.release_retired_page_table_frames();
+            }
         }
     }
 
@@ -1899,7 +1897,9 @@ impl MemorySet {
         if !crate::arch::paging_enabled() {
             crate::arch::enable_mmu();
         }
-        self.flush_local_tlb();
+        // Keep root activation conservative. This also covers the one-time
+        // transition from the boot root, whose mappings are global.
+        self.flush_local_tlb_all();
     }
 
     /// 生成页表对应 `stap` 寄存器值
@@ -2063,10 +2063,13 @@ impl MemorySet {
             self.flush_tlb();
         }
         self.areas.clear();
-        // 退出路径可能仍短暂运行在当前用户页表上，页表页帧不能立刻
-        // 归还给通用分配器。各架构的 retire_owned_frames() 会把页表帧
-        // 放入有限隔离队列，过一段时间再释放。
+        // The exiting task may still execute on this root. Move page-table
+        // frames into the per-address-space retirement slot; the last active
+        // hart releases them after __switch installs its idle/kernel root.
         self.page_table.retire_owned_frames();
+        if self.active_hart_mask.load(Ordering::Acquire) == 0 {
+            self.page_table.release_retired_page_table_frames();
+        }
     }
 }
 
@@ -3157,7 +3160,7 @@ impl MapArea {
         }
     }
 
-    fn rebase(&mut self, new_start: VirtPageNum, new_pages: usize) {
+    fn rebase(&mut self, new_start: VirtPageNum, new_pages: usize, page_table: &mut PageTable) {
         let old_start = self.vpn_range.get_start();
         let mut data_frames = BTreeMap::new();
         for (vpn, frame) in core::mem::take(&mut self.data_frames) {
@@ -3165,7 +3168,7 @@ impl MapArea {
             if offset < new_pages {
                 data_frames.insert(VirtPageNum(new_start.0 + offset), frame);
             } else {
-                retire_data_frame(frame);
+                page_table.retire_data_frame(frame);
             }
         }
         self.data_frames = data_frames;
@@ -3322,7 +3325,7 @@ impl MapArea {
             .copy_from_slice(old_frame.ppn().get_bytes_array());
         page_table.replace_pte(vpn, ppn, PTEFlags::from(self.map_perm))?;
         if let Some(old_frame) = self.data_frames.insert(vpn, Arc::new(frame)) {
-            retire_data_frame(old_frame);
+            page_table.retire_data_frame(old_frame);
         }
         Ok(())
     }
@@ -3343,7 +3346,7 @@ impl MapArea {
         // succeeded. replace_pte cannot allocate, so ENOMEM never leaves a hole.
         page_table.replace_pte(vpn, ppn, PTEFlags::from(self.map_perm))?;
         if let Some(old_frame) = self.data_frames.insert(vpn, Arc::new(frame)) {
-            retire_data_frame(old_frame);
+            page_table.retire_data_frame(old_frame);
         }
         Ok(())
     }
@@ -3359,7 +3362,7 @@ impl MapArea {
                 // lock is held and executed by the syscall/task-exit owner
                 // after releasing it. Never perform FileOp I/O here.
                 if let Some(frame) = self.data_frames.remove(&vpn) {
-                    retire_data_frame(frame);
+                    page_table.retire_data_frame(frame);
                 }
             }
             _ => {}

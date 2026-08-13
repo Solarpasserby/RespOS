@@ -109,6 +109,11 @@ counters!(
     local_sfences,
     remote_rfences,
     full_tlb_invalidations,
+    asid_tlb_invalidations,
+    tlb_shootdown_all_requests,
+    tlb_shootdown_address_space_requests,
+    tlb_shootdown_range_requests,
+    tlb_shootdown_invalid_requests,
     scheduler_ipis,
     ipis_received,
     scheduler_lock_acquisitions,
@@ -271,6 +276,17 @@ increment_functions!(
     (local_sfence, local_sfences),
     (remote_rfence, remote_rfences),
     (full_tlb_invalidation, full_tlb_invalidations),
+    (asid_tlb_invalidation, asid_tlb_invalidations),
+    (tlb_shootdown_all_request, tlb_shootdown_all_requests),
+    (
+        tlb_shootdown_address_space_request,
+        tlb_shootdown_address_space_requests
+    ),
+    (tlb_shootdown_range_request, tlb_shootdown_range_requests),
+    (
+        tlb_shootdown_invalid_request,
+        tlb_shootdown_invalid_requests
+    ),
     (scheduler_ipi, scheduler_ipis),
     (ipi_received, ipis_received),
     (scheduler_lock_acquisition, scheduler_lock_acquisitions),
@@ -582,11 +598,12 @@ pub fn render() -> String {
     );
     let _ = writeln!(
         out,
-        "context_switches={} local_sfences={} remote_rfences={} full_tlb_invalidations={} scheduler_ipis={} ipis_received={} scheduler_yields={} syscall_yields={} quiescence_yields={} timer_preemptions={} blocking_switches={} task_running_ticks={} idle_ticks={}",
+        "context_switches={} local_sfences={} remote_rfences={} full_tlb_invalidations={} asid_tlb_invalidations={} scheduler_ipis={} ipis_received={} scheduler_yields={} syscall_yields={} quiescence_yields={} timer_preemptions={} blocking_switches={} task_running_ticks={} idle_ticks={}",
         s.context_switches,
         s.local_sfences,
         s.remote_rfences,
         s.full_tlb_invalidations,
+        s.asid_tlb_invalidations,
         s.scheduler_ipis,
         s.ipis_received,
         s.scheduler_yields,
@@ -596,6 +613,14 @@ pub fn render() -> String {
         s.blocking_switches,
         s.task_running_ticks,
         s.idle_ticks
+    );
+    let _ = writeln!(
+        out,
+        "tlb_shootdown_all_requests={} tlb_shootdown_address_space_requests={} tlb_shootdown_range_requests={} tlb_shootdown_invalid_requests={}",
+        s.tlb_shootdown_all_requests,
+        s.tlb_shootdown_address_space_requests,
+        s.tlb_shootdown_range_requests,
+        s.tlb_shootdown_invalid_requests
     );
     let _ = writeln!(
         out,

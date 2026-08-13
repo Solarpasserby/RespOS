@@ -473,17 +473,49 @@
 
 - 状态：已采用
 - 适用范围：LA SMP、共享 MemorySet、PTE 修改与 frame 回收
-- 最后验证：2026-08-12
+- 最后验证：2026-08-13
 - 证据：`os/src/arch/loongarch64/smp.rs`、`os/src/mm/memory_set.rs`；LA 12-hart 双
-  `smp_shared_mm_probe`、Phase3、1200 短进程 ASID 复用与 30 秒 BuildStorm `perf_counters` 窗口
+  `smp_shared_mm_probe`、Phase3、2400 短进程 ASID 复用与 30 秒 BuildStorm `perf_counters` 窗口
 - 内容：IOCSR IPI vector 1 表示“检查本 hart 的 shootdown 槽”。请求者按 hart id 顺序独占每个
-  target slot，发布 generation 后发送 IPI 并同步等待 ack；目标执行本地全 TLB 失效后确认。启用 ASID
-  后，每个 MemorySet 以独立 residency mask 记录自上次同步失效后可能缓存其 TLB 的 hart；普通 PTE
-  更新向 residency shootdown，完成后收缩为 active mask。只用 active mask 不安全，因为 inactive hart
-  仍可保留同 ASID 的旧项。
-- 后续影响：全局 retired-frame 批次可能混入多个 MemorySet，只要批次非空，释放前仍必须 shootdown
-  全部 online hart；residency 只优化不释放旧 frame 的普通 PTE 更新。LA 关中断内核的锁等待必须服务
-  pending IPI，handler 不得拿普通锁。按 ASID/VA 精确失效、Global 映射或异步 shootdown 仍须单独验证。
+  target slot，发布 generation 和经过校验的 `all`/`address-space`/`range`、ASID、页对齐区间后发送
+  IPI 并同步等待 ack；目标在确认前读取同一描述。当前目标仍统一执行本地 `invtlb op=0`，语义字段
+  是后续精确失效的协议前置，不代表 op=4/op=5 已启用。启用 ASID 后，每个 MemorySet 以独立
+  residency mask 记录自上次同步失效后可能缓存其 TLB 的 hart；普通 PTE 更新向 residency
+  shootdown，完成后收缩为 active mask。只用 active mask 不安全，因为 inactive hart 仍可保留
+  同 ASID 的旧项。
+- 后续影响：旧数据 frame 批次必须保持在所属 `PageTable`/`MemorySet`，不得恢复为混合多个
+  ASID 的全局队列。释放前必须对该地址空间的 residency 完成同步 shootdown；只用 active mask
+  仍不安全。LA 关中断内核的锁等待必须服务 pending IPI，handler 不得拿普通锁。按 ASID/VA
+  精确失效、Global 映射或异步 shootdown 仍须单独验证。
+
+## LoongArch 普通地址空间失效使用 INVTLB op=4
+
+- 状态：已采用
+- 适用范围：LA `MemorySet` PTE writer、本地失效、远端 shootdown handler
+- 最后验证：2026-08-13
+- 证据：`os/src/arch/loongarch64/{register/mod.rs,mod.rs,smp.rs}`、`os/src/mm/memory_set.rs`；
+  12-hart 2400 exec rollover、双 shared-MM、Phase3 与 30 秒 BuildStorm `perf_counters` 窗口
+- 内容：已校验的 address-space 请求以 ASID 作为 `invtlb op=4` 的 rj 操作数，本地 writer 使用同一
+  封装。现有运行期 PTE 不设置 Global 位；root 激活仍使用 op=0，覆盖 boot root Global 映射的转换。
+  ASID retired 批次复用发布 `all` 并保持 op=0；非法描述和 range 也回退到 op=0。
+- 后续影响：不得把 ASID rollover、boot/final root 过渡改为 op=4。启用 Global kernel PTE 前必须
+  同时验证成对 G 位与 kernel 映射更新协议。op=5 需要先让 PTE 修改路径携带可靠的页对齐 VA 范围，
+  不能仅根据现有 range 数据结构宣称已安全。
+
+## 页表页在最后 active hart 切离 root 后释放
+
+- 状态：已采用
+- 适用范围：RV64/LA64 进程退出、`MemorySet` 回收、页表页 frame 生命周期
+- 最后验证：2026-08-13
+- 证据：`os/src/{mm/memory_set.rs,task/processor.rs,arch/*/mm/page_table.rs}`；LA 12-hart 2400 次
+  exec、ASID 多轮复用后双 shared-MM 与 Phase3
+- 内容：`recycle_data_pages()` 可在退出 task 仍运行于其用户 root 时发生，因此不能当场
+  释放根/中间页表页。当前将页表页移入所属 `PageTable` 的退役槽；调度路径已切到
+  per-CPU idle/kernel root 后才清除该 hart active bit，最后一个 bit 的清除者释放退役页表页。
+  旧的全局 128 页 quarantine 依赖容量/时间推测安全期，已删除。
+- 后续影响：不得在切换 root 之前清 active bit，也不得跳过 `clear_current_hart_active()`。
+  页表页的 completion 是 root-switch/active ownership，数据页的 completion 是 PTE shootdown/residency，
+  两者不能混为一个“等待若干次分配”的通用 quarantine。
 
 ## LoongArch 用户 MemorySet 持有可延迟复用的 10-bit ASID
 

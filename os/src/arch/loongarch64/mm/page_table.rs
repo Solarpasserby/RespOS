@@ -27,12 +27,11 @@ use crate::mm::{
     KERNEL_SPACE, MapPermission, PPN_WIDTH, PhysAddr, PhysPageNum, VirtAddr, VirtPageNum,
 };
 use crate::syscall::{Errno, SysResult};
-use alloc::collections::VecDeque;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use bitflags::bitflags;
-use lazy_static::lazy_static;
 use spin::Mutex;
 
 const PTE_V: usize = 1 << 0;
@@ -49,50 +48,17 @@ const PTE_NR: usize = 1usize << 61;
 const PTE_NX: usize = 1usize << 62;
 const PTE_PPN_MASK: usize = ((1usize << PPN_WIDTH) - 1) << 12;
 
-const PAGE_TABLE_FRAME_QUARANTINE_LIMIT: usize = 128;
-
-lazy_static! {
-    static ref PAGE_TABLE_FRAME_QUARANTINE: Mutex<PageTableFrameQuarantine> =
-        Mutex::new(PageTableFrameQuarantine::new());
-}
-
-struct PageTableFrameQuarantine {
-    page_count: usize,
-    retired: VecDeque<Vec<FrameTracker>>,
-}
-
-impl PageTableFrameQuarantine {
-    fn new() -> Self {
-        Self {
-            page_count: 0,
-            retired: VecDeque::new(),
-        }
-    }
-
-    fn retire(&mut self, frames: Vec<FrameTracker>) -> Vec<Vec<FrameTracker>> {
-        if frames.is_empty() {
-            return Vec::new();
-        }
-
-        self.page_count += frames.len();
-        self.retired.push_back(frames);
-
-        let mut expired = Vec::new();
-        while self.page_count > PAGE_TABLE_FRAME_QUARANTINE_LIMIT {
-            let Some(frames) = self.retired.pop_front() else {
-                self.page_count = 0;
-                break;
-            };
-            self.page_count -= frames.len();
-            expired.push(frames);
-        }
-        expired
-    }
-}
-
 pub struct PageTable {
     root_ppn: PhysPageNum,
     frames: Vec<FrameTracker>,
+    // Data frames whose PTEs were removed or replaced. Keep them with the
+    // owning address space until its synchronous shootdown completes; a
+    // process-independent retirement queue cannot safely choose a target
+    // hart set for a batch containing multiple ASIDs.
+    retired_data_frames: Vec<Arc<FrameTracker>>,
+    // Page-table frames cannot be reused while an exiting task still runs on
+    // this root. The last active-hart transition releases this owned batch.
+    retired_page_table_frames: Mutex<Vec<FrameTracker>>,
 }
 
 impl PageTable {
@@ -138,6 +104,8 @@ impl PageTable {
         Self {
             root_ppn: frame.ppn(),
             frames: vec![frame],
+            retired_data_frames: Vec::new(),
+            retired_page_table_frames: Mutex::new(Vec::new()),
         }
     }
 
@@ -152,6 +120,8 @@ impl PageTable {
         Ok(PageTable {
             root_ppn: frame.ppn(),
             frames: vec![frame],
+            retired_data_frames: Vec::new(),
+            retired_page_table_frames: Mutex::new(Vec::new()),
         })
     }
 
@@ -159,6 +129,8 @@ impl PageTable {
         Self {
             root_ppn: PhysPageNum::from((token >> 12) & ((1usize << PPN_WIDTH) - 1)),
             frames: Vec::new(),
+            retired_data_frames: Vec::new(),
+            retired_page_table_frames: Mutex::new(Vec::new()),
         }
     }
 
@@ -166,16 +138,26 @@ impl PageTable {
         self.root_ppn.0 << 12
     }
 
-    /// 延迟回收当前页表持有的页表页帧。
-    ///
-    /// LoongArch release 下，短进程密集退出时立刻回收并复用页表页帧会触发
-    /// 上下文切换后的卡死。这里把页表页帧放进有限隔离队列，避免立即复用，
-    /// 队列超过上限后再释放最旧的一批，防止进程数量增长时无限占用内存。
+    pub fn retire_data_frame(&mut self, frame: Arc<FrameTracker>) {
+        self.retired_data_frames.push(frame);
+    }
+
+    pub fn take_retired_data_frames(&mut self) -> Vec<Arc<FrameTracker>> {
+        core::mem::take(&mut self.retired_data_frames)
+    }
+
     pub fn retire_owned_frames(&mut self) {
-        let expired = PAGE_TABLE_FRAME_QUARANTINE
-            .lock()
-            .retire(core::mem::take(&mut self.frames));
-        drop(expired);
+        let frames = core::mem::take(&mut self.frames);
+        if frames.is_empty() {
+            return;
+        }
+        let mut retired = self.retired_page_table_frames.lock();
+        debug_assert!(retired.is_empty(), "page-table frames retired twice");
+        *retired = frames;
+    }
+
+    pub fn release_retired_page_table_frames(&self) {
+        self.retired_page_table_frames.lock().clear();
     }
 
     pub fn translate(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {

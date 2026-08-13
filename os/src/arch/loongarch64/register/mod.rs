@@ -402,6 +402,18 @@ pub mod mmu {
             core::arch::asm!("ibar 0", options(nostack));
         }
     }
+
+    #[inline(always)]
+    pub unsafe fn flush_tlb_asid(asid: usize) {
+        debug_assert!(asid < 1024, "LoongArch ASID exceeds the 10-bit field");
+        unsafe {
+            core::arch::asm!("dbar 0", options(nostack));
+            // INVTLB op=4 clears non-global entries whose ASID matches rj.
+            // rk is ignored for this operation.
+            core::arch::asm!("invtlb 0x4, {asid}, $r0", asid = in(reg) asid, options(nostack));
+            core::arch::asm!("ibar 0", options(nostack));
+        }
+    }
 }
 
 #[inline(always)]

@@ -83,6 +83,15 @@ pub fn sfence() {
 }
 
 #[inline]
+pub fn sfence_asid(asid: usize) {
+    assert!(asid < 1024, "LoongArch ASID exceeds the 10-bit field");
+    crate::perf::asid_tlb_invalidation(1);
+    unsafe {
+        register::mmu::flush_tlb_asid(asid);
+    }
+}
+
+#[inline]
 pub fn paging_enabled() -> bool {
     register::crmd::paging_enabled()
 }

@@ -476,7 +476,7 @@ FdTable slot (FdEntry: descriptor flags)
 
 - 状态：部分验证
 - 适用范围：多核启动、per-CPU idle/context、跨核调度唤醒、地址空间切换
-- 最后验证：2026-08-11
+- 最后验证：2026-08-13
 - 证据：`arch/{rv64,loongarch64}/smp.rs`、`task/processor.rs`、LoongArch QEMU
   `-m 12G -smp 12` 串口 online mask 与 BuildStorm 并行编译
 - 内容：RV64 通过 SBI HSM/IPI，LoongArch QEMU-virt 通过 IOCSR mailbox/IPI 启动 secondary。
@@ -485,12 +485,22 @@ FdTable slot (FdEntry: descriptor flags)
   在进入用户态前最多等待 1 秒收集 online mask，较小的 `-smp` 覆盖不会阻止启动。
 - 页表失效：RV64 通过 SBI RFENCE 对 active address-space mask 做同步远端 TLB shootdown；
   LoongArch 通过 IOCSR IPI vector 1 和 per-target generation request/ack 槽完成同一协议。页表 root
-  切换不发远端请求；LA `MemorySet` 另以 residency mask 记录自上次同步失效后加载过其 ASID 的 hart，
-  普通 PTE 更新只向该集合 shootdown，完成后把 residency 收缩回 active mask。不能直接只用当前 active
-  mask：已经切到 idle 的 hart 仍可能保留同 ASID 的旧项。
-- frame 回收：LA 清除或替换的旧数据页先进入全局退役批次。冻结到非空批次时仍对全部 online hart
-  完成全量失效后才能释放，因为批次可能混合多个 MemorySet；空批次的映射新增/权限更新才使用当前
-  MemorySet 的 residency。LA 内核态通常关中断，SpinMutex 和 MemorySet RwLock 的等待点会轮询 IPI。
-- 边界：本阶段仍执行全量本地 `invtlb op=0`，只缩小远端目标 hart 集合。按 ASID/VA 精确失效或
-  Global kernel 映射仍须重新验证 software refill、generation、G 位与 frame 回收顺序；不能把全局
-  retired-frame 批次的 online mask 缩成某一个 MemorySet 的 residency/active mask。
+  切换不发远端请求；LA 槽同时携带 `all`、`address-space` 或 `range`、ASID 和页对齐区间。
+  ASID 批量回收发布 `all`，普通 PTE writer 发布其 `MemorySet` ASID 的 `address-space` 请求。
+  `MemorySet` 另以 residency mask 记录自上次同步失效后加载过其 ASID 的 hart，只向该集合
+  shootdown，完成后把 residency 收缩回 active mask。不能直接只用当前 active mask：已经切到 idle
+  的 hart 仍可能保留同 ASID 的旧项。
+- frame 回收：LA 清除或替换的旧数据页由所属 `PageTable` 保持强引用，因而批次与唯一
+  `MemorySet`/ASID 绑定。PTE writer 冻结本地址空间批次，对其 residency 中每个可能保留旧转换的
+  hart 完成同步失效和 ack 后才释放 frame。共享 frame 若仍被其他地址空间映射，其 `Arc`
+  仍阻止物理页归还。页表页不再使用固定容量 quarantine；`recycle_data_pages()` 将它们移入
+  所属 `PageTable` 的退役槽，最后一个 active hart 在 `__switch` 已恢复 idle/kernel root 后清 bit，
+  并在 `active_hart_mask` 变为 0 的单一转换点释放页表页。本来就没有 active hart 的构造失败/未激活
+  地址空间可立即释放。LA 内核态通常关中断，SpinMutex 和 MemorySet RwLock 的等待点会轮询 IPI。
+- 执行：普通 `MemorySet` writer 在本地和远端对已校验的 address-space 请求执行 `invtlb op=4`；
+  `all`、root 激活、非法请求与尚无调用方的 `range` 仍保守执行 `op=0`。运行期 kernel/user PTE
+  当前均不设置 Global 位，因此 op=4 会清除目标 ASID 的共享高半区项；boot root 的 Global 映射由
+  root 激活保留的 op=0 覆盖。
+- 边界：选择 op=5 或 Global kernel 映射仍须重新验证 software refill、generation、成对 G 位与
+  frame 回收顺序；不能把 retired-frame 所有权恢复为跨 MemorySet 全局队列，也不能只依据 active
+  mask 释放旧 frame。

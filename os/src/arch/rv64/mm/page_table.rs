@@ -6,53 +6,11 @@ use crate::mm::{
     VirtPageNum, frame_alloc,
 };
 use crate::syscall::{Errno, SysResult};
-use alloc::collections::VecDeque;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::{vec, vec::Vec};
 use bitflags::*;
-use lazy_static::lazy_static;
 use spin::Mutex;
-
-const PAGE_TABLE_FRAME_QUARANTINE_LIMIT: usize = 128;
-
-lazy_static! {
-    static ref PAGE_TABLE_FRAME_QUARANTINE: Mutex<PageTableFrameQuarantine> =
-        Mutex::new(PageTableFrameQuarantine::new());
-}
-
-struct PageTableFrameQuarantine {
-    page_count: usize,
-    retired: VecDeque<Vec<FrameTracker>>,
-}
-
-impl PageTableFrameQuarantine {
-    fn new() -> Self {
-        Self {
-            page_count: 0,
-            retired: VecDeque::new(),
-        }
-    }
-
-    fn retire(&mut self, frames: Vec<FrameTracker>) -> Vec<Vec<FrameTracker>> {
-        if frames.is_empty() {
-            return Vec::new();
-        }
-
-        self.page_count += frames.len();
-        self.retired.push_back(frames);
-
-        let mut expired = Vec::new();
-        while self.page_count > PAGE_TABLE_FRAME_QUARANTINE_LIMIT {
-            let Some(frames) = self.retired.pop_front() else {
-                self.page_count = 0;
-                break;
-            };
-            self.page_count -= frames.len();
-            expired.push(frames);
-        }
-        expired
-    }
-}
 
 /// 页表
 ///
@@ -61,6 +19,7 @@ impl PageTableFrameQuarantine {
 pub struct PageTable {
     root_ppn: PhysPageNum,
     frames: Vec<FrameTracker>, // 追踪页表占用的物理页帧，自动回收
+    retired_page_table_frames: Mutex<Vec<FrameTracker>>,
 }
 
 impl PageTable {
@@ -70,6 +29,7 @@ impl PageTable {
         Self {
             root_ppn: frame.ppn(),
             frames: vec![frame],
+            retired_page_table_frames: Mutex::new(Vec::new()),
         }
     }
     /// 依据内核空间页表创建新页表
@@ -84,6 +44,7 @@ impl PageTable {
         Ok(PageTable {
             root_ppn: frame.ppn(),
             frames: vec![frame],
+            retired_page_table_frames: Mutex::new(Vec::new()),
         })
     }
     /// 临时页表无数据，仅用于查询用户程序的数据
@@ -91,6 +52,7 @@ impl PageTable {
         Self {
             root_ppn: PhysPageNum::from(satp & ((1usize << 44) - 1)),
             frames: Vec::new(),
+            retired_page_table_frames: Mutex::new(Vec::new()),
         }
     }
 
@@ -99,17 +61,24 @@ impl PageTable {
         (8usize << 60) | self.root_ppn.0
     }
 
-    /// 延迟回收当前页表持有的页表页帧。
-    ///
-    /// 进程退出时内核仍可能暂时运行在该进程的 satp 上，不能立刻释放根页表。
-    /// 将页表帧放入有限隔离队列，超过上限后再释放最旧的一批，既避免
-    /// 退出路径上复用仍可能被硬件观察到的页表帧，也防止长时间 LTP 压力下
-    /// 页表帧无限累积。
+    /// Preserve the existing RV64 immediate-release behavior. The retirement
+    /// ownership change in this stage is specific to the LA ASID protocol.
+    pub fn retire_data_frame(&mut self, frame: Arc<FrameTracker>) {
+        drop(frame);
+    }
+
     pub fn retire_owned_frames(&mut self) {
-        let expired = PAGE_TABLE_FRAME_QUARANTINE
-            .lock()
-            .retire(core::mem::take(&mut self.frames));
-        drop(expired);
+        let frames = core::mem::take(&mut self.frames);
+        if frames.is_empty() {
+            return;
+        }
+        let mut retired = self.retired_page_table_frames.lock();
+        debug_assert!(retired.is_empty(), "page-table frames retired twice");
+        *retired = frames;
+    }
+
+    pub fn release_retired_page_table_frames(&self) {
+        self.retired_page_table_frames.lock().clear();
     }
 
     /// 转译虚拟页号为对应页表项

@@ -1,5 +1,111 @@
 # RespOS 当前状态
 
+## 2026-08-13 LA 按 ASID 执行 INVTLB op=4（当前工作树）
+
+- **实现与安全边界**：LA 新增带 10-bit 边界检查的 `sfence_asid()`，普通 `MemorySet` PTE writer
+  的本地失效以及远端 `address-space` handler 使用 `invtlb op=4`。ASID 批量回收的 `all`、root
+  激活、非法请求和 `range` 请求仍执行 `op=0`；运行期页表未设置 Global PTE，故 op=4 会覆盖目标
+  ASID 的用户项和共享高半区非 Global 项。本阶段没有启用 op=5，也没有改变 frame 释放屏障。
+- **正确性门禁**：LA/RV64 无 feature release 顺序构建通过；LA `-m 4G -smp 12 -snapshot`
+  串行 exec 2400 次后，shared-MM 连续两次各 100 轮、Phase3 30 轮全部通过。结束状态
+  `free_kb=3821976 heap_kb=16993 tasks=3`，未见 stale translation、卡死或回收异常。
+- **执行分类**：带计数 rollover 窗口返回 0、PID 达 2407，请求分类
+  `all/address-space/range/invalid=4/3649/0/0`；执行计数为 full 2459、ASID 316801。full 主要包含
+  2400 次保守 root 激活及 4 次 all 请求的远端执行，证明 rollover 没有被错误降级成 op=4。
+- **30 秒对照**：同 P0 口径通过 toolchain/minibuild、untimed `tg-xtask` 13.45 秒完成并进入 timed
+  arceos 构建。相邻协议阶段为 full 184406；本阶段为 full 1543、ASID 184271，remote RFENCE
+  6819 且全部为 address-space、invalid 为 0。该窗口说明失效类型替换生效且进度未回退；由于 I/O、
+  fault 数和宿主调度仍有波动，不作为最终 wall-time 加速比。
+
+## 2026-08-13 LA shootdown 请求语义显式化（当前工作树）
+
+- **协议边界**：LA 每目标 hart 的 generation 槽现在同时发布 `all`、`address-space` 或 `range`
+  请求及 ASID/页对齐区间；发送端校验并分类计数，接收端在 ack 前重建和校验同一描述。ASID
+  retired 批次回收使用 `all`，普通 `MemorySet` PTE 刷新使用自身 ASID 的 `address-space`。
+  为保持本阶段可回退且不把协议验证冒充硬件语义验证，handler 仍统一执行保守的 `invtlb op=0`；
+  `range` 仅有协议表示，尚无调用方，也尚未启用 op=4/op=5。
+- **正确性门禁**：LA/RV64 无 feature release 顺序构建通过。LA `-m 4G -smp 12 -snapshot`
+  上 shared-MM 两次各 100 轮、Phase3 30 轮通过。另由 diagnostic Bash 脚本串行 exec 2400 次，
+  返回 0、PID 达 2407；窗口记录 `all/address-space/range/invalid=4/3476/0/0`，随后 shared-MM
+  100 轮通过，健康状态为 `free_kb=3835452 heap_kb=14960 tasks=3`。临时脚本已从工作树删除。
+- **30 秒活性/分类**：同 P0 配置通过 toolchain/minibuild，untimed `tg-xtask` 在 13.49 秒完成。
+  计数为 remote RFENCE 6814、full invalidations 184406，请求分类
+  `all/address-space/range/invalid=0/6814/0/0`。该结果证明普通路径的语义分类和协议传输一致；
+  因执行端仍为 op=0，本阶段不宣称 TLB 性能提升。
+
+## 2026-08-13 页表页按 root-switch completion 退役（当前工作树）
+
+- **实现**：删除 RV64/LA64 共同的全局 128 页 `PAGE_TABLE_FRAME_QUARANTINE`。
+  `recycle_data_pages()` 将根和中间页表 frame 移入所属 `PageTable` 的退役槽；如果地址空间
+  从未 active 则立即释放，否则由调度路径在 `__switch` 已恢复 per-CPU idle/kernel root 后清除
+  active bit，最后一个 bit 的清除者释放页表页。这将释放条件从“已有 128 页更新的退役页”
+  改为“已证明无 hart 仍使用该 root”。本阶段仍未修改 LA `invtlb op=0` 或 shootdown 范围。
+- **构建门禁**：LA/RV64 无 feature release 顺序构建通过；os/user fmt 与 `git diff --check`
+  通过。
+- **立即复用压力**：LA `-m 4G -smp 12 -snapshot`上 BusyBox xargs 串行 exec 2400 次返回 0，
+  PID 达 2405，覆盖两轮以上 10-bit ASID 空间且页表页不再受旧 quarantine 保护。随后
+  `smp_shared_mm_probe` 连续两次各 100 轮、Phase3 30 轮全部通过；结束为
+  `free_kb=3821344 heap_kb=17094 tasks=4`，未见 stale translation、卡死或页表页线性泄漏。
+- **30 秒活性复测**：LA `-m 12G -smp 12` perf 窗口继续通过 toolchain/minibuild，并在
+  timeout 前输出 untimed `tg-xtask` `Finished dev profile ... in 13.80s`，进度比前两轮更远。本轮
+  page faults/full invalidations/remote RFENCE 为 `110674/180248/6794`；由于实际进度和 COW
+  faults 不同，不用总计数宣称性能加速。
+
+## 2026-08-13 LA 数据 frame 按地址空间退役（当前工作树）
+
+- **所有权修复**：删除混合所有 LA `MemorySet` 的全局 retired-data-frame 队列。每个 LA
+  `PageTable` 现在保留自己 PTE 被撤销/替换后的 `Arc<FrameTracker>`；`flush_tlb()` 在本地
+  失效前冻结该批次，对同一地址空间的 residency mask 同步 shootdown，所有目标 ack 后
+  才 drop 批次。这使 frame 释放屏障与唯一 ASID/地址空间绑定，不再由一个无法证明归属的
+  全局批次强制全 online hart 失效。本阶段没有修改 `invtlb op=0`、ASID 编号复用规则或
+  request/ack 协议。RV64 保持原 immediate-release 路径。
+- **正确性门禁**：LA/RV64 无 feature release 顺序构建通过，fmt 与 `git diff --check` 通过。
+  LA `-m 12G -smp 12 -snapshot` 上 `smp_shared_mm_probe` 连续两次各 100 轮通过，Phase3
+  30 轮通过，结束时 `free_kb=12288936 tasks=4`。LA `-m 4G -smp 12` 上 BusyBox xargs 串行
+  exec 1200 次返回 0，PID 达 1205；ASID rollover 后 shared-MM 100 轮和 Phase3 30 轮再次通过。
+  `smp_shared_mm_probe` 在两 hart 间反复执行固定 VA `munmap + MAP_FIXED mmap + read`，是本轮
+  stale-TLB/frame-reuse 的直接专项，不是仅观察 BuildStorm 不崩溃。
+- **30 秒同口径 A/B**：变更前/后均通过 toolchain/minibuild 并停在 untimed `tg-xtask`。变更后
+  user traps/page faults 为 `203559/106329`（变更前 `196826/106178`），负载量级相当且
+  `file_closes=4065` 高于前轮 `3270`。remote RFENCE `7656 -> 6788`（约 -11.3%），full TLB
+  invalidation `183563 -> 175784`（约 -4.2%），IPI received `38795 -> 29211`。该结果符合
+  “只消除跨地址空间的误伤目标”边界，不作为精确 ASID/VA 失效或 wall-time 加速证明。
+- **后续边界**：数据 frame 退役所有权已闭合；页表页的容量型 quarantine 也已由上方
+  root-switch/active completion 取代。按 ASID/VA 精确失效仍是独立的下一阶段，不能由
+  本轮生命周期门禁直接推导为已安全。
+
+## 2026-08-13 LA BuildStorm P0 30 秒性能基线（`bba2ee3`）
+
+- **口径**：当前干净工作树 `bba2ee3a72eb372ecca909a93cd6c6fd3ee86ab0`，LA release kernel
+  仅开启 `perf_counters`；QEMU LA virt 使用公开决赛 x0、临时 `mode=diagnostic` x1、
+  `-snapshot -m 12G -smp 12`，online mask `0xfff`。在 shell 中一次性预排 perf reset、
+  `busybox timeout 30 /bin/bash /glibc/buildstorm_testcode.sh`、读取 `/proc/respos_perf` 和 `quit`，
+  避免 stdin 空轮询污染。该旧 pub 镜像的 30 秒窗口包含 toolchain、minibuild 和 untimed
+  `tg-xtask`，因此是诊断基线，不是正式 timed BuildStorm 成绩。
+- **进度与活性**：`BUILDSTORM_TOOLCHAIN ok` 和 `BUILDSTORM_MINIBUILD ok` 均出现；窗口在
+  `----- pre-build tg-xtask (untimed) -----` 中由 timeout 结束，shell 报该进程 exit code 15，
+  随后 perf proc 读取成功且 launcher 正常关机。`scheduler_yields=2`，两次均属于 process
+  路径；stdio/fs/futex/net/signal-time 的 yield 均为 0。
+- **MM/TLB 计数**：user traps `196826`，其中 page fault `106178`；private-file/anonymous/COW
+  fault 分别为 `82855/51667/9377`。local sfence `148381`、remote RFENCE `7656`、full TLB
+  invalidation `183563`。extension eager save `196152`，说明 Rust 工具链进程激活扩展状态后，
+  首次使用门控无法避免绝大多数后续 trap 的 eager save。
+- **FS/PageCache 计数**：128 MiB PageCache 到达 `32768` pages，hit/miss/eviction 为
+  `108486/7521/24135`，fill `336661498` bytes。block read 为 `18837` requests / `373223424`
+  bytes，block write 为 `45726` requests / `178389504` bytes。ext4 lock acquisition `37373`，
+  wait/hold 为 `1696486/921703055` ticks（100 MHz 下约 `0.017/9.217` 累计 CPU 秒）；hold
+  主要来自 read `2.976s`、lookup `2.542s`、namespace `1.718s`、attributes `1.293s` 和
+  readdir `0.475s`。dentry cache `69208/9800/0` hits/misses/evictions，本窗口不支持优先
+  继续扩容 dentry cache。
+- **scheduler/heap 边界**：context switch `4406`，scheduler ready peak `3`，lock wait
+  `2203636` ticks（约 `0.022s`），不支持优先重构 per-CPU runqueue。heap peak 约
+  `34.8 MB`；alloc/dealloc core 约 `1.413/0.919s`，lock wait 合计约 `0.390s`，明显低于
+  ext4 hold，不支持优先更换 allocator 或扩大 kernel heap。
+- **P0 判读**：下一轮优先用同口径验证“按 MemorySet 拆 retired batch / 按 ASID 精确
+  shootdown”对 full invalidation 与进度的影响；与此同时，PageCache 满容量淘汰和 ext4
+  read/lookup/namespace 锁内工作是后续最强的两个非架构候选。本轮只建立基线，
+  没有根据单个短窗口修改实现或宣称 wall-time 加速比。
+
 ## 2026-08-13 课程平台 Rust 编译器兼容性（当前工作树）
 
 - **平台证据**：课程评测于 2026-08-13 的 `make all` 在 RV64 内核阶段使用
