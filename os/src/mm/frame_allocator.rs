@@ -46,7 +46,17 @@ impl FrameTracker {
 
 impl Drop for FrameTracker {
     fn drop(&mut self) {
-        FRAME_ALLOCATOR.lock().dealloc(self.ppn());
+        let started = crate::perf::now_ticks();
+        let mut allocator = FRAME_ALLOCATOR.lock();
+        let locked = crate::perf::now_ticks();
+        allocator.dealloc(self.ppn());
+        let operated = crate::perf::now_ticks();
+        drop(allocator);
+        crate::perf::frame_dealloc(
+            crate::perf::elapsed_since(started),
+            locked.wrapping_sub(started),
+            operated.wrapping_sub(locked),
+        );
     }
 }
 
@@ -172,10 +182,23 @@ pub fn init_frame_allocator(reserved_end: usize) {
 }
 
 pub fn frame_alloc() -> Option<FrameTracker> {
-    FRAME_ALLOCATOR
-        .lock()
-        .alloc()
-        .map(|ppn| FrameTracker::new(ppn))
+    let started = crate::perf::now_ticks();
+    let mut allocator = FRAME_ALLOCATOR.lock();
+    let locked = crate::perf::now_ticks();
+    let ppn = allocator.alloc();
+    let operated = crate::perf::now_ticks();
+    drop(allocator);
+
+    let frame = ppn.map(|ppn| FrameTracker::new(ppn));
+    let finished = crate::perf::now_ticks();
+    crate::perf::frame_alloc(
+        finished.wrapping_sub(started),
+        locked.wrapping_sub(started),
+        operated.wrapping_sub(locked),
+        finished.wrapping_sub(operated),
+        frame.is_some(),
+    );
+    frame
 }
 
 #[allow(unused)]

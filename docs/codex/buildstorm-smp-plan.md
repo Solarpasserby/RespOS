@@ -52,6 +52,26 @@ completion、ASID op=4 与失效范围传播，并以 LA 12 GiB/12 hart 完整 f
 
 #### E0：当前 HEAD 基线与可归因测量
 
+2026-08-13 已完成当前 HEAD 的 LA 12-hart 30/120 秒首轮基线，具体 commit、镜像/内核 hash、日志和
+计数见 `current-status.md`。30 秒仍是 wait 近零、hold 约 9.21 CPU 秒；120 秒进入 timed 并发编译后，
+wait/hold 升至约 4.56/22.54 CPU 秒，且 PageCache eviction 达 80604、kernel heap 锁等待约 10.32
+CPU 秒。因此 E0 尚未闭合：必须补分段计数与 `1/3/6/12` 同进度缩放，不能据单个 12-hart 累计值
+直接拆锁；E1 可以先审计并移出锁内 Rust 分配/转换，但不能在缺少 C 层线程安全证明时并发调用 lwext4。
+首轮分段烟测已覆盖 stat/lookup/read/readdir：除 read 约有 0.260 CPU 秒锁内非 lower 工作外，其余
+类别的 hold 几乎均为 lower C/I/O；frame alloc 的约 2.093 CPU 秒中约 1.949 秒是页清零，锁等待仅
+约 0.006 秒。这否决了“先重写 frame allocator 元数据结构”的性能优先级，但不影响后续以独立提交
+补齐 VirtIO 连续帧所有权。E0 余项为 namespace/attributes 分段和 `1/3/6/12` 同进度缩放。
+后续全类别分段显示约 8.054 CPU 秒 hold 中约 7.729 秒属于明确 lower C/I/O，namespace/attributes
+也几乎全部是 lower；因此分段项已闭合，E0 仅余缩放。PageCache 候选/发布计数进一步确认未优化
+样本约 33% 预读候选在发布时已存在。E1 首项采用“预读 run 遇到已发布页即截断”，不新增锁或等待；
+per-inode fill gate 因错误串行同一大文件的不同区间且没有合并同页 miss，已否决并完整回退。
+E1 的 120 秒同进度 A/B 进一步确认：fill bytes 约 -36.0%、block read bytes 约 -33.8%、ext4
+wait/hold 约 -22.2%/-14.6%，竞态候选仅 0.70%。锁外 immutable path 准备已收口；read 的错误路径
+buffer 语义与 readdir iterator 快照保持不变。短窗口门槛已通过，进入无 feature 完整 final 验收。
+完整 final 随后以 `ok=true` 和脚本退出 0 通过，axbuild `1743.70s`，较相邻 `1773.01s` 基线仅改善
+约 1.65%。按既定门槛，本 E1 收口并保留，但不继续扩大 ext4/PageCache 重构；E0 的 hart 缩放作为
+后续选题证据独立完成，不阻塞本次可归因提交。
+
 1. 固定镜像 hash、`mode=diagnostic`、LA 12 GiB/12 hart、`NI=-10/CLS=TS`，记录 30/120 秒窗口；
    同时补 `1/3/6/12` 短窗口，记录相同构建阶段而不是只比较 timeout 时的总计数。
 2. 在现有 stat/lookup/read/write/readdir/namespace/attributes/superblock 分类上，进一步区分：进入

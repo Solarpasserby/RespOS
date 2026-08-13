@@ -1,5 +1,90 @@
 # RespOS 当前状态
 
+## 2026-08-13 ext4/PageCache E0 当前 HEAD 基线（`51bed0e1`）
+
+- **可复现口径**：代码为 `51bed0e1c598c33eab4bc2da7703534525149ac4`，使用
+  `RUSTUP_TOOLCHAIN=nightly-2025-01-18`（Rust 1.86）构建仅带 `perf_counters` 的 LA release
+  kernel，kernel SHA-256 为 `36828ea9b7b74800d38b2dd4dd1b05f1ecf6300faa7126e87e7a8214de4b9fc1`；
+  pub x0 SHA-256 为 `450682fd547c43a19379ff0cf46f211eb7ba0b22463165dc88443701bd9ee9ca`。
+  QEMU 10.0.2 以 `-snapshot -m 12G -smp 12` 运行，online mask `0xfff`；启动后核验宿主
+  QEMU 为 `CLS=TS / NI=-10`。30/120 秒日志分别为
+  `/tmp/respos-la-e0-rust186-12h-30s.log` 和 `/tmp/respos-la-e0-rust186-12h-120s.log`，SHA-256
+  分别为 `aa31df0c37a40f1eb7dd81076be4755349d743dc1ce74f69af5090cc68006236`、
+  `090a0a303479a782428b9725b38eb2e63c8ae89e0373e8ea68e84924bad72ac3`。
+- **30 秒窗口**：toolchain/minibuild 通过，untimed `tg-xtask` 13.81 秒后被 timeout；ext4
+  acquisition `43357`，wait/hold `2106964/921225232` ticks，即约 `0.021/9.212` CPU 秒。
+  hold 以 lookup/read/namespace/attributes 为主，约 `2.630/2.681/1.745/1.470` 秒；PageCache
+  hit/miss/eviction 为 `108747/8207/24856`，fill `337866624` bytes，inode read 约 `2.683` 秒。
+  该阶段 wait 近零，仍否决直接拆 `EXT4_OP_LOCK`。
+- **120 秒窗口**：停止于 timed `arceos-helloworld` 编译，完成的 workload 进度与另一 120 秒窗口
+  可直接对照。ext4 acquisition `85136`，wait/hold 升至 `456195698/2253604957` ticks，即约
+  `4.562/22.536` CPU 秒；lookup/read wait 约 `2.434/1.080` 秒，证明并发编译阶段全局锁竞争会
+  出现，但尚未通过 `1/3/6/12` 缩放证明拆锁收益。PageCache hit/miss/eviction 为
+  `324575/14267/80604`，fill `688721334` bytes，inode read 约 `7.382` 秒；固定 32768 页下存在
+  明显 eviction/refill 压力。
+- **allocator 交叉证据**：120 秒内 kernel heap alloc/dealloc 共约 `22.523` CPU 秒，其中 lock wait
+  共约 `10.318` 秒；它与 ext4 并发阶段同时放大，不能把全部墙钟损失归因于 ext4。下一步先补锁内
+  prepare/C-call/publish 分段计数，并做 `1/3/6/12` 同进度缩放；E1 优先移出可证明的锁内 Rust
+  分配/转换和重复 lookup，保留 lwext4 C 全局串行。allocator 改造仍作为独立实验，不混入 E1。
+- **排除样本**：同日先误用 Rust 1.89、默认宿主调度跑出的两轮只用于发现阶段变化，不属于正式
+  E0；一次请求 `nice -10` 但实际继承为 `CLS=IDL` 的空载启动也已立即退出，均不得用于 A/B。
+- **E0 分段计数烟测（未提交工作树）**：新增计数不改变 allocator 或 ext4 行为，并在 Rust 1.86
+  LA/RV64 `perf_counters`、LA 无 feature release 构建通过。LA 12-hart/12 GiB、`CLS=TS/NI=-10`
+  的 30 秒日志为 `/tmp/respos-la-e0-segmented-12h-30s.log`，toolchain/minibuild 通过并进入 timed
+  构建。frame alloc `179022` 次、失败 0，总计约 `2.093` CPU 秒，其中清零约 `1.949` 秒、allocator
+  core 约 `0.138` 秒、锁等待约 `0.006` 秒；frame dealloc 约 `0.017` 秒。因此当前帧 allocator
+  元数据和锁不是 BuildStorm 一级性能瓶颈，连续/批量接口仍是 VirtIO DMA 健全性任务，不能据此
+  预期普遍加速单页 fault。
+- **ext4 分段结果与覆盖边界**：本轮只对 stat/lookup/read/readdir 的明确 lwext4 调用或调用序列计时，
+  未覆盖 write/namespace/attributes/superblock，故 `profiled_lower` 不能与全部 ext4 hold 直接相减。
+  已覆盖类别的 lower/hold 分别约为 stat `0.066/0.073`、lookup `2.563/2.605`、read
+  `1.949/2.209`、readdir `0.417/0.431` CPU 秒。lookup/stat/readdir 的锁内成本几乎都在 lower C/I/O；
+  read 尚有约 `0.260` CPU 秒锁内非 lower 工作。E1 应先审计 read buffer 准备和可合并 lower read，
+  不能把移动 CString 或结果转换描述成主要收益；namespace/attributes 仍需补同口径分段后再动实现。
+- **E0 全类别分段闭合**：后续 12-hart 30 秒窗口 `/tmp/respos-la-e0-full-segments-12h-30s.log`
+  已覆盖 write/namespace/attributes/superblock。ext4 总 hold 约 `8.054` CPU 秒，明确 lower C/I/O
+  约 `7.729` 秒；namespace lower/hold `1.374/1.377`、attributes `1.309/1.309`、write
+  `0.107/0.107`、superblock `0.033/0.033` 秒。全部类别锁内非 lower 工作合计仅约 `0.325` 秒，
+  因而 E1 的主目标改为减少/截断无效 lower 调用，而不是大规模搬移 CString/结果转换。E0 尚余
+  `1/3/6/12` 同进度缩放；短 timeout 受宿主速度影响明显，不能直接按总计数比较。
+- **PageCache 重叠预读证据**：新增候选/发布/竞态页计数后，未优化行为的 30 秒样本
+  `/tmp/respos-la-e0-page-publish-12h-30s.log` 在尚未完成 untimed `tg-xtask` 时已有候选 `81304`、
+  发布 `54475`、发布时已存在 `26829` 页，约 33% 候选页对应重复 fill/清零。该轮宿主整体较慢，
+  绝对 wall time 和 CPU ticks 不用于 A/B，但同一 guest 内候选与发布差值可用于定位工作放大。
+- **E1 预读边界优化**：`PageCache::get_or_load` 在规划顺序预读时检查前方已发布页面，并在首个
+  cached page 前截断 speculative run；请求页、lower 错误、size-version 重试和发布协议不变，也未
+  增加等待或新锁。优化后 `/tmp/respos-la-e1-readahead-boundary-12h-30s.log` 已进入 timed 构建，
+  候选/发布/竞态为 `56129/56129/0`，fill bytes `221070975`、block read bytes `259740160`；相邻
+  未优化样本分别约 `330.7/359.4 MiB`，但因进度与宿主速度不同，只确认“重叠发布浪费归零”，
+  完整 wall-time 收益仍待无 feature final 验证。
+- **否决实验与正确性门禁**：per-inode miss-fill gate 将同一大文件不同页区间错误串行，样本
+  `coalesced_misses=0` 且 30 秒无法完成 untimed 阶段，已完整回退，不在当前 diff 中。当前保留的
+  cached-boundary 实现通过 Rust 1.86 LA/RV64 无 feature release 构建；LA 4 GiB/12-hart 无 feature
+  客体通过 `buildstorm_file_probe` 与 `fs_writeback_probe normal`，日志
+  `/tmp/respos-la-e1-pagecache-probes.log`；LA 专项明确跳过 RV64-only private-map probe。
+- **E1 120 秒同进度 A/B**：最终计数窗口 `/tmp/respos-la-e1-final-12h-120s.log` 与上方当前 HEAD
+  Rust 1.86 基线均停止在 timed `arceos-helloworld` 的相同编译阶段，`file_closes=12853`，stat
+  `221528`（基线 `221527`）、create `412` 完全对齐。PageCache fill bytes 从 `688721334` 降至
+  `441110664`（约 -36.0%），block read bytes 从 `732134912` 降至 `484924416`（约 -33.8%），
+  eviction `80604 -> 77753`；候选/发布/竞态页为 `110400/109632/768`，竞态浪费仅 0.70%。ext4
+  wait/hold 从约 `4.562/22.536` 降至 `3.549/19.256` CPU 秒，read hold `6.609 -> 5.069`
+  秒。该结果支持保留 cached-boundary E1；它证明工作量和累计 CPU 成本下降，不等同于完整 final
+  wall-time 收益，后者仍以无 feature 完整运行验收。
+- **E1 锁外准备收口**：lookup/link/symlink/rename/remove 的 immutable path/CString 在取得
+  `EXT4_OP_LOCK` 前构造；构造失败仍早于任何 lower mutation。read 的 sparse-hole 预清零仍保留在
+  open/seek 成功后和锁内，避免为性能改变 lower 失败时 buffer 状态；readdir 也保留单次 iterator
+  快照，不拆成可能观察不同目录 generation 的多轮调用。create 后 lookup 在本窗口仅 412 次，未为
+  消除低频调用扩展 vendor mutation API。
+- **E1 完整无 feature final**：Rust 1.86 no-LTO 内核 SHA-256
+  `cdde3c22caa04476ad86bbd12c6edc49c36c8b5cefe8a4c0922871874e60516c`，LA 12 GiB/12 hart、
+  `CLS=TS/NI=-10`、pub x0 与临时 final x1 下完整运行。CAgent 脚本退出 0，原始逐项为 9 个
+  `pass`、`cpu` 1 个 `reject`，不记作 10/10；BuildStorm 输出 `ok=true cores=12 bytes=1714568`，
+  脚本退出 0并正常关机。Cargo release `28m53s`，axbuild `1743.70s`；相邻旧 op=4 完整基线
+  `1773.01s`，改善 `29.31s`，约 1.65%。日志 `/tmp/respos-la-e1-full-final.log`，SHA-256
+  `dc325a471c1714ef3b83ed774f42a4aae426342c81d13ca77d0e7a92e35af31f`。完整收益低于 5% 门槛，
+  因此保留已证明降低读取放大的低风险 E1，但不据此扩大 ext4/PageCache 高风险重构；下一性能主题
+  由缩放和 allocator 数据重新选择。
+
 ## 2026-08-13 LA op=5 完整门禁失败并回退 range 至 op=4（当前工作树）
 
 - **当前实现与健全性边界**：单页 op=5 已从本地与远端执行路径删除；address-space 和所有 range

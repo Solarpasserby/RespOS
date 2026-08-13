@@ -49,12 +49,15 @@ impl Ext4SuperBlock {
         // Use the same lock as inode operations.  `inner` only protects the
         // Rust wrapper's lifetime; it does not serialize lwext4's global
         // mount/block-cache state against create/write/rename on other CPUs.
-        let _op_guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Superblock);
+        let op_guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Superblock);
         let inner = self.inner.lock();
         if inner.is_none() {
             return Err(Errno::EIO);
         }
-        let rc = unsafe { bindings::ext4_cache_flush(self.mount_point.as_ptr().cast()) };
+        let rc = {
+            let _lower = op_guard.profile_lower();
+            unsafe { bindings::ext4_cache_flush(self.mount_point.as_ptr().cast()) }
+        };
         drop(inner);
         if rc == 0 { Ok(()) } else { Err(Errno::EIO) }
     }
@@ -62,11 +65,12 @@ impl Ext4SuperBlock {
     pub fn shutdown(&self) -> SysResult {
         super::reap_deferred_inodes();
         self.flush_cache()?;
-        let _op_guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Superblock);
+        let op_guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Superblock);
         let mut inner = self.inner.lock();
         let mut wrapper = inner.take();
         drop(inner);
         if let Some(wrapper) = wrapper.as_mut() {
+            let _lower = op_guard.profile_lower();
             wrapper.shutdown().map_err(|_| Errno::EIO)?;
         }
         drop(wrapper);
@@ -83,10 +87,16 @@ impl SuperBlockOp for Ext4SuperBlock {
     }
 
     fn statfs(&self) -> SysResult<Statfs64> {
-        let _op_guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Superblock);
+        let op_guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Superblock);
         let mut stats: bindings::ext4_mount_stats = unsafe { core::mem::zeroed() };
-        let rc = unsafe {
-            bindings::ext4_mount_point_stats(self.mount_point.as_ptr() as *const c_char, &mut stats)
+        let rc = {
+            let _lower = op_guard.profile_lower();
+            unsafe {
+                bindings::ext4_mount_point_stats(
+                    self.mount_point.as_ptr() as *const c_char,
+                    &mut stats,
+                )
+            }
         };
         if rc != 0 {
             return Err(Errno::EIO);

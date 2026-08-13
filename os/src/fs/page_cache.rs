@@ -521,13 +521,26 @@ impl PageCache {
         let file_size = *self.file_size.lock();
         let page_start = page_idx * PAGE_SIZE;
         let available_pages = file_size.div_ceil(PAGE_SIZE).saturating_sub(page_idx);
-        let load_pages = if lower.is_some() && page_start < file_size {
+        let mut load_pages = if lower.is_some() && page_start < file_size {
             read_ahead_pages
                 .clamp(1, READ_AHEAD_PAGES)
                 .min(available_pages)
         } else {
             1
         };
+
+        // Do not read through a page that another access has already
+        // published. Besides wasting lower I/O, an overlapping run allocates
+        // and clears frames that are discarded when candidates are published.
+        // The requested page was checked above; only bound speculative pages.
+        if load_pages > 1 {
+            let pages = self.pages.lock();
+            if let Some(first_cached) =
+                (1..load_pages).find(|run_idx| pages.contains_key(&(page_idx + run_idx)))
+            {
+                load_pages = first_cached;
+            }
+        }
 
         // Read a sequential run while outside the PageCache lock.  One 64 KiB
         // lwext4 operation replaces up to sixteen 4 KiB operations and lets
@@ -538,6 +551,7 @@ impl PageCache {
             0
         };
         let mut read_buf = Vec::new();
+        let did_lower_fill = read_len != 0;
         if read_len != 0 {
             read_buf
                 .try_reserve_exact(read_len)
@@ -546,6 +560,7 @@ impl PageCache {
             if let Some((inode, path)) = lower {
                 crate::perf::page_cache_fill_call(1);
                 crate::perf::page_cache_fill_bytes(read_len);
+                crate::perf::page_cache_fill_candidate_pages(load_pages);
                 match inode.read_at(path, page_start, &mut read_buf) {
                     Ok(_) | Err(Errno::ENOENT) => {}
                     Err(err) => return Err(err),
@@ -589,6 +604,10 @@ impl PageCache {
             }
         }
         drop(pages);
+        if did_lower_fill {
+            crate::perf::page_cache_fill_published_pages(inserted_count);
+            crate::perf::page_cache_fill_raced_pages(load_pages - inserted_count);
+        }
         if inserted_count != 0 {
             PAGE_CACHE_PAGE_COUNT.fetch_add(inserted_count, Ordering::Relaxed);
             for (candidate_idx, candidate, inserted) in candidates.iter() {

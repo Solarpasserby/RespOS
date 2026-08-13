@@ -7,6 +7,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::any::Any;
+use core::marker::PhantomData;
 use core::sync::atomic::{AtomicBool, Ordering};
 use hashbrown::HashMap;
 use lazy_static::lazy_static;
@@ -101,10 +102,77 @@ impl ProfiledExt4Lock {
     }
 }
 
+impl Ext4LockClass {
+    fn observe_lower(self, ticks: usize) {
+        crate::perf::ext4_lower_call(1);
+        crate::perf::ext4_lower_ticks(ticks);
+        match self {
+            Ext4LockClass::Stat => {
+                crate::perf::ext4_lower_stat_call(1);
+                crate::perf::ext4_lower_stat_ticks(ticks);
+            }
+            Ext4LockClass::Lookup => {
+                crate::perf::ext4_lower_lookup_call(1);
+                crate::perf::ext4_lower_lookup_ticks(ticks);
+            }
+            Ext4LockClass::Read => {
+                crate::perf::ext4_lower_read_call(1);
+                crate::perf::ext4_lower_read_ticks(ticks);
+            }
+            Ext4LockClass::Write => {
+                crate::perf::ext4_lower_write_call(1);
+                crate::perf::ext4_lower_write_ticks(ticks);
+            }
+            Ext4LockClass::Readdir => {
+                crate::perf::ext4_lower_readdir_call(1);
+                crate::perf::ext4_lower_readdir_ticks(ticks);
+            }
+            Ext4LockClass::Namespace => {
+                crate::perf::ext4_lower_namespace_call(1);
+                crate::perf::ext4_lower_namespace_ticks(ticks);
+            }
+            Ext4LockClass::Attributes => {
+                crate::perf::ext4_lower_attributes_call(1);
+                crate::perf::ext4_lower_attributes_ticks(ticks);
+            }
+            Ext4LockClass::Superblock => {
+                crate::perf::ext4_lower_superblock_call(1);
+                crate::perf::ext4_lower_superblock_ticks(ticks);
+            }
+        }
+    }
+}
+
 pub(super) struct ProfiledExt4Guard<'a> {
     _guard: spin::MutexGuard<'a, ()>,
     acquired: usize,
     class: Ext4LockClass,
+}
+
+impl ProfiledExt4Guard<'_> {
+    /// Profile one bounded lwext4 call or call sequence inside this lock.
+    /// Keeping this explicit makes unprofiled Rust preparation/publication
+    /// visible as the remainder of the existing lock-hold measurement.
+    pub(super) fn profile_lower(&self) -> ProfiledExt4LowerGuard<'_> {
+        ProfiledExt4LowerGuard {
+            started: crate::perf::now_ticks(),
+            class: self.class,
+            _lock_guard: PhantomData,
+        }
+    }
+}
+
+pub(super) struct ProfiledExt4LowerGuard<'a> {
+    started: usize,
+    class: Ext4LockClass,
+    _lock_guard: PhantomData<&'a ()>,
+}
+
+impl Drop for ProfiledExt4LowerGuard<'_> {
+    fn drop(&mut self) {
+        self.class
+            .observe_lower(crate::perf::elapsed_since(self.started));
+    }
 }
 
 impl Drop for ProfiledExt4Guard<'_> {
@@ -203,15 +271,18 @@ pub fn reap_deferred_inodes() {
         }
     }
 
-    let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Namespace);
+    let guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Namespace);
     let mut retry = Vec::new();
     for (fs_id, mount, ino) in pending {
-        let ret = unsafe { bindings::ext4_inode_discard(mount.as_ptr().cast(), ino) };
+        let ret = {
+            let _lower = guard.profile_lower();
+            unsafe { bindings::ext4_inode_discard(mount.as_ptr().cast(), ino) }
+        };
         if ret != 0 && ret != 22 {
             retry.push((fs_id, mount, ino));
         }
     }
-    drop(_guard);
+    drop(guard);
 
     if !retry.is_empty() {
         DEFERRED_INODE_DISCARDS.lock().extend(retry);
@@ -309,11 +380,14 @@ impl Ext4Inode {
     }
 
     fn file_link(old_path: &str, hardlink_path: &str) -> SysResult {
+        let old_path = CString::new(old_path).map_err(|_| Errno::EINVAL)?;
+        let new_path = CString::new(hardlink_path).map_err(|_| Errno::EINVAL)?;
         {
-            let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Namespace);
-            let old_path = CString::new(old_path).map_err(|_| Errno::EINVAL)?;
-            let new_path = CString::new(hardlink_path).map_err(|_| Errno::EINVAL)?;
-            let ret = unsafe { bindings::ext4_flink(old_path.as_ptr(), new_path.as_ptr()) };
+            let guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Namespace);
+            let ret = {
+                let _lower = guard.profile_lower();
+                unsafe { bindings::ext4_flink(old_path.as_ptr(), new_path.as_ptr()) }
+            };
             if ret != 0 {
                 return Err(Self::map_lwext4_err(ret));
             }
@@ -322,12 +396,17 @@ impl Ext4Inode {
     }
 
     fn file_symlink(target: &str, path: &str) -> SysResult {
+        // Validate and allocate both immutable arguments before entering the
+        // global lwext4 critical section. Failure still precedes mutation.
+        let target = CString::new(target).map_err(|_| Errno::EINVAL)?;
+        let path = CString::new(path).map_err(|_| Errno::EINVAL)?;
         {
-            let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Namespace);
+            let guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Namespace);
             // lwext4 负责选择 fast symlink 或普通数据块存储；VFS 层只传入目标字符串和新路径。
-            let target = CString::new(target).map_err(|_| Errno::EINVAL)?;
-            let path = CString::new(path).map_err(|_| Errno::EINVAL)?;
-            let ret = unsafe { bindings::ext4_fsymlink(target.as_ptr(), path.as_ptr()) };
+            let ret = {
+                let _lower = guard.profile_lower();
+                unsafe { bindings::ext4_fsymlink(target.as_ptr(), path.as_ptr()) }
+            };
             if ret != 0 {
                 return Err(Self::map_lwext4_err(ret));
             }
@@ -336,11 +415,14 @@ impl Ext4Inode {
     }
 
     pub(crate) fn file_rename(old_path: &str, new_path: &str) -> SysResult {
+        let c_old = CString::new(old_path).map_err(|_| Errno::EINVAL)?;
+        let c_new = CString::new(new_path).map_err(|_| Errno::EINVAL)?;
         {
-            let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Namespace);
-            let c_old = CString::new(old_path).map_err(|_| Errno::EINVAL)?;
-            let c_new = CString::new(new_path).map_err(|_| Errno::EINVAL)?;
-            let ret = unsafe { bindings::ext4_frename(c_old.as_ptr(), c_new.as_ptr()) };
+            let guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Namespace);
+            let ret = {
+                let _lower = guard.profile_lower();
+                unsafe { bindings::ext4_frename(c_old.as_ptr(), c_new.as_ptr()) }
+            };
             if ret != 0 {
                 return Err(Self::map_lwext4_err(ret));
             }
@@ -349,14 +431,17 @@ impl Ext4Inode {
     }
 
     pub(crate) fn remove_path(path: &str, ty: InodeType, deferred: bool) -> SysResult {
-        let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Namespace);
         let path = CString::new(path).map_err(|_| Errno::EINVAL)?;
-        let ret = unsafe {
-            match (ty, deferred) {
-                (InodeType::Directory, true) => bindings::ext4_dir_rm_deferred(path.as_ptr()),
-                (InodeType::Directory, false) => bindings::ext4_dir_rm(path.as_ptr()),
-                (_, true) => bindings::ext4_fremove_deferred(path.as_ptr()),
-                (_, false) => bindings::ext4_fremove(path.as_ptr()),
+        let guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Namespace);
+        let ret = {
+            let _lower = guard.profile_lower();
+            unsafe {
+                match (ty, deferred) {
+                    (InodeType::Directory, true) => bindings::ext4_dir_rm_deferred(path.as_ptr()),
+                    (InodeType::Directory, false) => bindings::ext4_dir_rm(path.as_ptr()),
+                    (_, true) => bindings::ext4_fremove_deferred(path.as_ptr()),
+                    (_, false) => bindings::ext4_fremove(path.as_ptr()),
+                }
             }
         };
         if ret == 0 {
@@ -385,13 +470,15 @@ impl Ext4Inode {
     }
 
     fn lookup_dirent(parent_path: &str, name: &str) -> SysResult<(u64, Ext4InodeTypes)> {
-        let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Lookup);
         let child_path = Self::child_path(parent_path, name);
         let c_path = CString::new(child_path).map_err(|_| Errno::EINVAL)?;
         let mut ino = 0u32;
         let mut raw_inode: bindings::ext4_inode = unsafe { core::mem::zeroed() };
-        let ret =
-            unsafe { bindings::ext4_raw_inode_fill(c_path.as_ptr(), &mut ino, &mut raw_inode) };
+        let guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Lookup);
+        let ret = {
+            let _lower = guard.profile_lower();
+            unsafe { bindings::ext4_raw_inode_fill(c_path.as_ptr(), &mut ino, &mut raw_inode) }
+        };
         if ret != 0 {
             return Err(Self::map_lwext4_err(ret));
         }
@@ -403,7 +490,9 @@ impl Ext4Inode {
         let c_path = CString::new(path).ok()?;
         let c_path = c_path.into_raw();
         let mut mode = 0;
+        let started = crate::perf::now_ticks();
         let ret = unsafe { bindings::ext4_mode_get(c_path, &mut mode) };
+        Ext4LockClass::Readdir.observe_lower(crate::perf::elapsed_since(started));
         unsafe {
             drop(CString::from_raw(c_path));
         }
@@ -482,19 +571,22 @@ impl Ext4Inode {
             | (u32::from(lower_ctime.is_some()) << 4);
         let (uid, gid) = owner.unwrap_or_default();
         let mount = self.mount_point_c;
-        let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Attributes);
-        let ret = unsafe {
-            bindings::ext4_setattr_ino(
-                mount.as_ptr().cast(),
-                self.ino as u32,
-                mask,
-                mode.unwrap_or(0) & 0o7777,
-                uid,
-                gid,
-                lower_atime.unwrap_or(0),
-                lower_mtime.unwrap_or(0),
-                lower_ctime.unwrap_or(0),
-            )
+        let guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Attributes);
+        let ret = {
+            let _lower = guard.profile_lower();
+            unsafe {
+                bindings::ext4_setattr_ino(
+                    mount.as_ptr().cast(),
+                    self.ino as u32,
+                    mask,
+                    mode.unwrap_or(0) & 0o7777,
+                    uid,
+                    gid,
+                    lower_atime.unwrap_or(0),
+                    lower_mtime.unwrap_or(0),
+                    lower_ctime.unwrap_or(0),
+                )
+            }
         };
         if ret == 0 {
             Ok(())
@@ -623,15 +715,18 @@ impl Ext4Inode {
 
         drop(state);
         let raw_inode = {
-            let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Stat);
+            let guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Stat);
             let mut raw_inode: bindings::ext4_inode = unsafe { core::mem::zeroed() };
             let mount = self.mount_point_c;
-            let ret = unsafe {
-                bindings::ext4_raw_inode_fill_ino(
-                    mount.as_ptr().cast(),
-                    self.ino as u32,
-                    &mut raw_inode,
-                )
+            let ret = {
+                let _lower = guard.profile_lower();
+                unsafe {
+                    bindings::ext4_raw_inode_fill_ino(
+                        mount.as_ptr().cast(),
+                        self.ino as u32,
+                        &mut raw_inode,
+                    )
+                }
             };
             if ret != 0 {
                 return Err(Self::map_lwext4_err(ret));
@@ -725,18 +820,25 @@ impl InodeOp for Ext4Inode {
 
         let started = crate::perf::now_ticks();
         let read_size = {
-            let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Read);
+            let guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Read);
             let file = &mut Ext4File::new(self.mount_point, self.ty.clone());
-            file.inode_open(self.ino as u32, bindings::O_RDONLY)
-                .map_err(Self::map_lwext4_err)?;
-            file.file_seek(off as i64, bindings::SEEK_SET)
-                .map_err(Self::map_lwext4_err)?;
+            {
+                let _lower = guard.profile_lower();
+                file.inode_open(self.ino as u32, bindings::O_RDONLY)
+                    .map_err(Self::map_lwext4_err)?;
+                file.file_seek(off as i64, bindings::SEEK_SET)
+                    .map_err(Self::map_lwext4_err)?;
+            }
             // lwext4 advances across sparse extents but does not reliably
             // write zeroes into every byte of the caller's buffer.  POSIX hole
             // reads must return zero, and file-backed mmap depends on that.
             buf.fill(0);
-            let read_size = file.file_read(buf).map_err(Self::map_lwext4_err)?;
-            file.file_close().map_err(Self::map_lwext4_err)?;
+            let read_size = {
+                let _lower = guard.profile_lower();
+                let read_size = file.file_read(buf).map_err(Self::map_lwext4_err)?;
+                file.file_close().map_err(Self::map_lwext4_err)?;
+                read_size
+            };
             read_size
         };
         // lwext4 may update atime while reading.  Invalidate only after the
@@ -753,8 +855,9 @@ impl InodeOp for Ext4Inode {
         let started = crate::perf::now_ticks();
 
         let write_size = {
-            let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Write);
+            let guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Write);
             let file = &mut Ext4File::new(self.mount_point, self.ty.clone());
+            let _lower = guard.profile_lower();
             file.inode_open(self.ino as u32, bindings::O_RDWR)
                 .map_err(Self::map_lwext4_err)?;
             // lwext4's fseek rejects offsets beyond EOF and the Rust wrapper
@@ -790,8 +893,9 @@ impl InodeOp for Ext4Inode {
 
         self.page_cache.with_writeback_exclusion(|| {
             {
-                let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Write);
+                let guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Write);
                 let file = &mut Ext4File::new(self.mount_point, self.ty.clone());
+                let _lower = guard.profile_lower();
                 file.inode_open(self.ino as u32, bindings::O_RDWR)
                     .map_err(Self::map_lwext4_err)?;
                 file.file_truncate(size as u64)
@@ -892,16 +996,19 @@ impl InodeOp for Ext4Inode {
         }
         let name = CString::new(name).map_err(|_| Errno::EINVAL)?;
         let mount = self.mount_point_c;
-        let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Attributes);
-        let ret = unsafe {
-            bindings::ext4_setxattr_ino(
-                mount.as_ptr().cast(),
-                self.ino as u32,
-                name.as_ptr(),
-                name.as_bytes().len(),
-                value.as_ptr().cast(),
-                value.len(),
-            )
+        let guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Attributes);
+        let ret = {
+            let _lower = guard.profile_lower();
+            unsafe {
+                bindings::ext4_setxattr_ino(
+                    mount.as_ptr().cast(),
+                    self.ino as u32,
+                    name.as_ptr(),
+                    name.as_bytes().len(),
+                    value.as_ptr().cast(),
+                    value.len(),
+                )
+            }
         };
         if ret == 0 {
             Ok(())
@@ -913,33 +1020,39 @@ impl InodeOp for Ext4Inode {
     fn get_xattr(&self, name: &str) -> Result<Vec<u8>, Errno> {
         let name = CString::new(name).map_err(|_| Errno::EINVAL)?;
         let mount = self.mount_point_c;
-        let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Attributes);
+        let guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Attributes);
         let mut size = 0usize;
-        let mut ret = unsafe {
-            bindings::ext4_getxattr_ino(
-                mount.as_ptr().cast(),
-                self.ino as u32,
-                name.as_ptr(),
-                name.as_bytes().len(),
-                core::ptr::null_mut(),
-                0,
-                &mut size,
-            )
+        let mut ret = {
+            let _lower = guard.profile_lower();
+            unsafe {
+                bindings::ext4_getxattr_ino(
+                    mount.as_ptr().cast(),
+                    self.ino as u32,
+                    name.as_ptr(),
+                    name.as_bytes().len(),
+                    core::ptr::null_mut(),
+                    0,
+                    &mut size,
+                )
+            }
         };
         if ret != 0 {
             return Err(Self::map_lwext4_err(ret));
         }
         let mut value = vec![0u8; size];
-        ret = unsafe {
-            bindings::ext4_getxattr_ino(
-                mount.as_ptr().cast(),
-                self.ino as u32,
-                name.as_ptr(),
-                name.as_bytes().len(),
-                value.as_mut_ptr().cast(),
-                value.len(),
-                &mut size,
-            )
+        ret = {
+            let _lower = guard.profile_lower();
+            unsafe {
+                bindings::ext4_getxattr_ino(
+                    mount.as_ptr().cast(),
+                    self.ino as u32,
+                    name.as_ptr(),
+                    name.as_bytes().len(),
+                    value.as_mut_ptr().cast(),
+                    value.len(),
+                    &mut size,
+                )
+            }
         };
         if ret != 0 {
             return Err(Self::map_lwext4_err(ret));
@@ -950,29 +1063,35 @@ impl InodeOp for Ext4Inode {
 
     fn list_xattr(&self) -> Result<Vec<String>, Errno> {
         let mount = self.mount_point_c;
-        let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Attributes);
+        let guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Attributes);
         let mut size = 0usize;
-        let mut ret = unsafe {
-            bindings::ext4_listxattr_ino(
-                mount.as_ptr().cast(),
-                self.ino as u32,
-                core::ptr::null_mut(),
-                0,
-                &mut size,
-            )
+        let mut ret = {
+            let _lower = guard.profile_lower();
+            unsafe {
+                bindings::ext4_listxattr_ino(
+                    mount.as_ptr().cast(),
+                    self.ino as u32,
+                    core::ptr::null_mut(),
+                    0,
+                    &mut size,
+                )
+            }
         };
         if ret != 0 {
             return Err(Self::map_lwext4_err(ret));
         }
         let mut list = vec![0u8; size];
-        ret = unsafe {
-            bindings::ext4_listxattr_ino(
-                mount.as_ptr().cast(),
-                self.ino as u32,
-                list.as_mut_ptr().cast(),
-                list.len(),
-                &mut size,
-            )
+        ret = {
+            let _lower = guard.profile_lower();
+            unsafe {
+                bindings::ext4_listxattr_ino(
+                    mount.as_ptr().cast(),
+                    self.ino as u32,
+                    list.as_mut_ptr().cast(),
+                    list.len(),
+                    &mut size,
+                )
+            }
         };
         if ret != 0 {
             return Err(Self::map_lwext4_err(ret));
@@ -991,14 +1110,17 @@ impl InodeOp for Ext4Inode {
     fn remove_xattr(&self, name: &str) -> SysResult {
         let name = CString::new(name).map_err(|_| Errno::EINVAL)?;
         let mount = self.mount_point_c;
-        let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Attributes);
-        let ret = unsafe {
-            bindings::ext4_removexattr_ino(
-                mount.as_ptr().cast(),
-                self.ino as u32,
-                name.as_ptr(),
-                name.as_bytes().len(),
-            )
+        let guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Attributes);
+        let ret = {
+            let _lower = guard.profile_lower();
+            unsafe {
+                bindings::ext4_removexattr_ino(
+                    mount.as_ptr().cast(),
+                    self.ino as u32,
+                    name.as_ptr(),
+                    name.as_bytes().len(),
+                )
+            }
         };
         if ret == 0 {
             Ok(())
@@ -1034,16 +1156,19 @@ impl InodeOp for Ext4Inode {
         self.check_type(InodeType::Directory)?;
         let started = crate::perf::now_ticks();
 
-        let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Readdir);
+        let guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Readdir);
         let mut dir: bindings::ext4_dir = unsafe { core::mem::zeroed() };
         let mount = self.mount_point_c;
-        let ret = unsafe {
-            bindings::ext4_inode_open(
-                &mut dir.f,
-                mount.as_ptr().cast(),
-                self.ino as u32,
-                bindings::O_RDONLY,
-            )
+        let ret = {
+            let _lower = guard.profile_lower();
+            unsafe {
+                bindings::ext4_inode_open(
+                    &mut dir.f,
+                    mount.as_ptr().cast(),
+                    self.ino as u32,
+                    bindings::O_RDONLY,
+                )
+            }
         };
         dir.next_off = 0;
         if ret != 0 {
@@ -1054,7 +1179,10 @@ impl InodeOp for Ext4Inode {
         let mut next_off = 0usize;
 
         loop {
-            let dirent = unsafe { bindings::ext4_dir_entry_next(&mut dir) };
+            let dirent = {
+                let _lower = guard.profile_lower();
+                unsafe { bindings::ext4_dir_entry_next(&mut dir) }
+            };
             if dirent.is_null() {
                 break;
             }
@@ -1088,11 +1216,14 @@ impl InodeOp for Ext4Inode {
             });
         }
 
-        let ret = unsafe { bindings::ext4_dir_close(&mut dir) };
+        let ret = {
+            let _lower = guard.profile_lower();
+            unsafe { bindings::ext4_dir_close(&mut dir) }
+        };
         if ret != 0 {
             return Err(Self::map_lwext4_err(ret));
         }
-        drop(_guard);
+        drop(guard);
         // Directory iteration may update atime in lwext4.  Do not retain a
         // raw timestamp snapshot across a successful readdir operation.
         self.invalidate_raw_metadata();
@@ -1109,8 +1240,9 @@ impl InodeOp for Ext4Inode {
         let path = Self::child_path(parent_path, name);
         let ext4_ty = Ext4InodeTypes::from(ty);
         {
-            let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Namespace);
+            let guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Namespace);
             let file = &mut Ext4File::new(parent_path, self.ty.clone());
+            let _lower = guard.profile_lower();
 
             if file.check_inode_exist(&path, ext4_ty.clone()) {
                 return Err(Errno::EEXIST);
@@ -1242,8 +1374,9 @@ impl InodeOp for Ext4Inode {
             return Err(Errno::EINVAL);
         }
         const MAX_LINK_TARGET: usize = 4096;
-        let _guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Read);
+        let guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Read);
         let file = &mut Ext4File::new(self.mount_point, self.ty.clone());
+        let _lower = guard.profile_lower();
         file.inode_open(self.ino as u32, bindings::O_RDONLY)
             .map_err(Self::map_lwext4_err)?;
         let mut buf = vec![0u8; MAX_LINK_TARGET];

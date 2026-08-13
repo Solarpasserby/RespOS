@@ -73,6 +73,9 @@ counters!(
     page_cache_writeback_bytes,
     page_cache_fill_calls,
     page_cache_fill_bytes,
+    page_cache_fill_candidate_pages,
+    page_cache_fill_published_pages,
+    page_cache_fill_raced_pages,
     inode_read_calls,
     inode_read_requested_bytes,
     inode_read_completed_bytes,
@@ -182,6 +185,24 @@ counters!(
     ext4_lock_superblock_acquisitions,
     ext4_lock_superblock_wait_ticks,
     ext4_lock_superblock_hold_ticks,
+    ext4_lower_calls,
+    ext4_lower_ticks,
+    ext4_lower_stat_calls,
+    ext4_lower_stat_ticks,
+    ext4_lower_lookup_calls,
+    ext4_lower_lookup_ticks,
+    ext4_lower_read_calls,
+    ext4_lower_read_ticks,
+    ext4_lower_write_calls,
+    ext4_lower_write_ticks,
+    ext4_lower_readdir_calls,
+    ext4_lower_readdir_ticks,
+    ext4_lower_namespace_calls,
+    ext4_lower_namespace_ticks,
+    ext4_lower_attributes_calls,
+    ext4_lower_attributes_ticks,
+    ext4_lower_superblock_calls,
+    ext4_lower_superblock_ticks,
     heap_alloc_calls,
     heap_dealloc_calls,
     heap_alloc_bytes,
@@ -196,6 +217,18 @@ counters!(
     heap_dealloc_core_ticks,
     heap_max_alloc_ticks,
     heap_max_dealloc_ticks,
+    frame_alloc_calls,
+    frame_alloc_failures,
+    frame_alloc_ticks,
+    frame_alloc_lock_wait_ticks,
+    frame_alloc_core_ticks,
+    frame_alloc_clear_ticks,
+    frame_alloc_max_ticks,
+    frame_dealloc_calls,
+    frame_dealloc_ticks,
+    frame_dealloc_lock_wait_ticks,
+    frame_dealloc_core_ticks,
+    frame_dealloc_max_ticks,
     copy_from_user_calls,
     copy_from_user_bytes,
     copy_from_user_ticks,
@@ -247,6 +280,15 @@ increment_functions!(
     (page_cache_writeback_bytes, page_cache_writeback_bytes),
     (page_cache_fill_call, page_cache_fill_calls),
     (page_cache_fill_bytes, page_cache_fill_bytes),
+    (
+        page_cache_fill_candidate_pages,
+        page_cache_fill_candidate_pages
+    ),
+    (
+        page_cache_fill_published_pages,
+        page_cache_fill_published_pages
+    ),
+    (page_cache_fill_raced_pages, page_cache_fill_raced_pages),
     (inode_read_call, inode_read_calls),
     (inode_read_requested_bytes, inode_read_requested_bytes),
     (inode_read_completed_bytes, inode_read_completed_bytes),
@@ -382,6 +424,24 @@ increment_functions!(
         ext4_lock_superblock_hold_ticks,
         ext4_lock_superblock_hold_ticks
     ),
+    (ext4_lower_call, ext4_lower_calls),
+    (ext4_lower_ticks, ext4_lower_ticks),
+    (ext4_lower_stat_call, ext4_lower_stat_calls),
+    (ext4_lower_stat_ticks, ext4_lower_stat_ticks),
+    (ext4_lower_lookup_call, ext4_lower_lookup_calls),
+    (ext4_lower_lookup_ticks, ext4_lower_lookup_ticks),
+    (ext4_lower_read_call, ext4_lower_read_calls),
+    (ext4_lower_read_ticks, ext4_lower_read_ticks),
+    (ext4_lower_write_call, ext4_lower_write_calls),
+    (ext4_lower_write_ticks, ext4_lower_write_ticks),
+    (ext4_lower_readdir_call, ext4_lower_readdir_calls),
+    (ext4_lower_readdir_ticks, ext4_lower_readdir_ticks),
+    (ext4_lower_namespace_call, ext4_lower_namespace_calls),
+    (ext4_lower_namespace_ticks, ext4_lower_namespace_ticks),
+    (ext4_lower_attributes_call, ext4_lower_attributes_calls),
+    (ext4_lower_attributes_ticks, ext4_lower_attributes_ticks),
+    (ext4_lower_superblock_call, ext4_lower_superblock_calls),
+    (ext4_lower_superblock_ticks, ext4_lower_superblock_ticks),
 );
 
 #[inline(always)]
@@ -528,6 +588,60 @@ pub fn heap_dealloc(size: usize, ticks: usize, lock_wait_ticks: usize, core_tick
 }
 
 #[inline(always)]
+pub fn frame_alloc(
+    ticks: usize,
+    lock_wait_ticks: usize,
+    core_ticks: usize,
+    clear_ticks: usize,
+    succeeded: bool,
+) {
+    #[cfg(feature = "perf_counters")]
+    {
+        COUNTERS.frame_alloc_calls.fetch_add(1, Ordering::Relaxed);
+        COUNTERS
+            .frame_alloc_ticks
+            .fetch_add(ticks, Ordering::Relaxed);
+        COUNTERS
+            .frame_alloc_lock_wait_ticks
+            .fetch_add(lock_wait_ticks, Ordering::Relaxed);
+        COUNTERS
+            .frame_alloc_core_ticks
+            .fetch_add(core_ticks, Ordering::Relaxed);
+        COUNTERS
+            .frame_alloc_clear_ticks
+            .fetch_add(clear_ticks, Ordering::Relaxed);
+        observe_max(&COUNTERS.frame_alloc_max_ticks, ticks);
+        if !succeeded {
+            COUNTERS
+                .frame_alloc_failures
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    #[cfg(not(feature = "perf_counters"))]
+    let _ = (ticks, lock_wait_ticks, core_ticks, clear_ticks, succeeded);
+}
+
+#[inline(always)]
+pub fn frame_dealloc(ticks: usize, lock_wait_ticks: usize, core_ticks: usize) {
+    #[cfg(feature = "perf_counters")]
+    {
+        COUNTERS.frame_dealloc_calls.fetch_add(1, Ordering::Relaxed);
+        COUNTERS
+            .frame_dealloc_ticks
+            .fetch_add(ticks, Ordering::Relaxed);
+        COUNTERS
+            .frame_dealloc_lock_wait_ticks
+            .fetch_add(lock_wait_ticks, Ordering::Relaxed);
+        COUNTERS
+            .frame_dealloc_core_ticks
+            .fetch_add(core_ticks, Ordering::Relaxed);
+        observe_max(&COUNTERS.frame_dealloc_max_ticks, ticks);
+    }
+    #[cfg(not(feature = "perf_counters"))]
+    let _ = (ticks, lock_wait_ticks, core_ticks);
+}
+
+#[inline(always)]
 pub fn copy_from_user(bytes: usize, ticks: usize) {
     #[cfg(feature = "perf_counters")]
     {
@@ -612,6 +726,13 @@ pub fn render() -> String {
         s.inode_read_requested_bytes,
         s.inode_read_completed_bytes,
         s.inode_read_ticks
+    );
+    let _ = writeln!(
+        out,
+        "page_cache_fill_candidate_pages={} published_pages={} raced_pages={}",
+        s.page_cache_fill_candidate_pages,
+        s.page_cache_fill_published_pages,
+        s.page_cache_fill_raced_pages
     );
     let _ = writeln!(
         out,
@@ -745,6 +866,32 @@ pub fn render() -> String {
     );
     let _ = writeln!(
         out,
+        "ext4_profiled_lower_calls={} ticks={} by_class_stat={} lookup={} read={} write={} readdir={} namespace={} attributes={} superblock={}",
+        s.ext4_lower_calls,
+        s.ext4_lower_ticks,
+        s.ext4_lower_stat_calls,
+        s.ext4_lower_lookup_calls,
+        s.ext4_lower_read_calls,
+        s.ext4_lower_write_calls,
+        s.ext4_lower_readdir_calls,
+        s.ext4_lower_namespace_calls,
+        s.ext4_lower_attributes_calls,
+        s.ext4_lower_superblock_calls
+    );
+    let _ = writeln!(
+        out,
+        "ext4_profiled_lower_ticks_by_class_stat={} lookup={} read={} write={} readdir={} namespace={} attributes={} superblock={}",
+        s.ext4_lower_stat_ticks,
+        s.ext4_lower_lookup_ticks,
+        s.ext4_lower_read_ticks,
+        s.ext4_lower_write_ticks,
+        s.ext4_lower_readdir_ticks,
+        s.ext4_lower_namespace_ticks,
+        s.ext4_lower_attributes_ticks,
+        s.ext4_lower_superblock_ticks
+    );
+    let _ = writeln!(
+        out,
         "ext4_ops_stat_calls={} stat_ticks={} stat_cache_hits={} stat_cache_misses={} stat_cache_refills={} stat_cache_uncacheable={} stat_cache_invalidations={} lookup_calls={} lookup_ticks={} readdir_calls={} readdir_ticks={} create_calls={} create_ticks={} write_calls={} write_ticks={}",
         s.ext4_stat_calls,
         s.ext4_stat_ticks,
@@ -802,6 +949,26 @@ pub fn render() -> String {
         s.heap_dealloc_lock_wait_ticks,
         s.heap_alloc_core_ticks,
         s.heap_dealloc_core_ticks
+    );
+    let _ = writeln!(
+        out,
+        "frame_alloc_calls={} failures={} alloc_ticks={} lock_wait_ticks={} core_ticks={} clear_ticks={} max_ticks={}",
+        s.frame_alloc_calls,
+        s.frame_alloc_failures,
+        s.frame_alloc_ticks,
+        s.frame_alloc_lock_wait_ticks,
+        s.frame_alloc_core_ticks,
+        s.frame_alloc_clear_ticks,
+        s.frame_alloc_max_ticks
+    );
+    let _ = writeln!(
+        out,
+        "frame_dealloc_calls={} dealloc_ticks={} lock_wait_ticks={} core_ticks={} max_ticks={}",
+        s.frame_dealloc_calls,
+        s.frame_dealloc_ticks,
+        s.frame_dealloc_lock_wait_ticks,
+        s.frame_dealloc_core_ticks,
+        s.frame_dealloc_max_ticks
     );
     let _ = writeln!(
         out,
