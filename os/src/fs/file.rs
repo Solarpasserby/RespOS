@@ -486,10 +486,10 @@ impl File {
             }
         } else {
             self.inode.truncate(&path, size)?;
-            if size < old_size
-                && let Some((dev, ino)) = self.shared_page_identity
-            {
-                crate::mm::truncate_shared_file_pages(dev, ino, size);
+            if size < old_size {
+                if let Some((dev, ino)) = self.shared_page_identity {
+                    crate::mm::truncate_shared_file_pages(dev, ino, size);
+                }
             }
         }
         if inner.offset > size {
@@ -582,10 +582,10 @@ impl File {
             Ok(n)
         } else {
             let n = self.inode.write_at(&path, offset, buf)?;
-            if n != 0
-                && let Some((dev, ino)) = self.shared_page_identity
-            {
-                crate::mm::update_shared_file_pages(dev, ino, offset, &buf[..n]);
+            if n != 0 {
+                if let Some((dev, ino)) = self.shared_page_identity {
+                    crate::mm::update_shared_file_pages(dev, ino, offset, &buf[..n]);
+                }
             }
             Ok(n)
         }
@@ -752,10 +752,10 @@ impl FileOp for File {
             n
         } else {
             let n = self.inode.write_at(&path, offset, buf)?;
-            if n != 0
-                && let Some((dev, ino)) = self.shared_page_identity
-            {
-                crate::mm::update_shared_file_pages(dev, ino, offset, &buf[..n]);
+            if n != 0 {
+                if let Some((dev, ino)) = self.shared_page_identity {
+                    crate::mm::update_shared_file_pages(dev, ino, offset, &buf[..n]);
+                }
             }
             n
         };

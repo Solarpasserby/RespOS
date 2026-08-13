@@ -3269,37 +3269,36 @@ impl MapArea {
             // 随机映射，物理页号和虚拟页号无关，用于用户程序，分配页帧统一管理
             MapType::Framed => {
                 let page_offset = (vpn - self.vpn_range.get_start()) * PAGE_SIZE;
-                let frame = if let Some(backing) = &self.file_backing
-                    && (self.shared || !self.map_perm.contains(MapPermission::WRITE))
-                {
+                let frame = match &self.file_backing {
                     // Clean read-only MAP_PRIVATE pages have the same bytes
                     // as PageCache and cannot be modified through this PTE.
                     // Sharing avoids one frame allocation and 4 KiB copy per
                     // process while writable private mappings retain their
                     // existing copy-on-fault behavior.
-                    shared_file_frame(backing, page_offset)?
-                } else if self.shared {
-                    if let Some(backing) = &self.file_backing {
+                    Some(backing)
+                        if self.shared || !self.map_perm.contains(MapPermission::WRITE) =>
+                    {
                         shared_file_frame(backing, page_offset)?
-                    } else {
-                        Arc::new(frame_alloc().ok_or(Errno::ENOMEM)?)
                     }
-                } else {
-                    let frame = frame_alloc().ok_or(Errno::ENOMEM)?;
-                    let frame_ppn = frame.ppn();
-                    if let Some(backing) = &self.file_backing {
-                        if page_offset < backing.len {
-                            let file_offset =
-                                backing.offset.checked_add(page_offset).ok_or(Errno::EIO)?;
-                            let read_len = (backing.len - page_offset).min(PAGE_SIZE);
-                            read_file_at(
-                                backing.file.clone(),
-                                file_offset,
-                                &mut frame_ppn.get_bytes_array()[..read_len],
-                            )?;
+                    Some(backing) if self.shared => shared_file_frame(backing, page_offset)?,
+                    None if self.shared => Arc::new(frame_alloc().ok_or(Errno::ENOMEM)?),
+                    backing => {
+                        let frame = frame_alloc().ok_or(Errno::ENOMEM)?;
+                        let frame_ppn = frame.ppn();
+                        if let Some(backing) = backing {
+                            if page_offset < backing.len {
+                                let file_offset =
+                                    backing.offset.checked_add(page_offset).ok_or(Errno::EIO)?;
+                                let read_len = (backing.len - page_offset).min(PAGE_SIZE);
+                                read_file_at(
+                                    backing.file.clone(),
+                                    file_offset,
+                                    &mut frame_ppn.get_bytes_array()[..read_len],
+                                )?;
+                            }
                         }
+                        Arc::new(frame)
                     }
-                    Arc::new(frame)
                 };
                 ppn = frame.ppn();
                 self.data_frames.insert(vpn, frame);

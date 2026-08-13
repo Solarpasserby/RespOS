@@ -7,6 +7,7 @@ COPY codex-priority /usr/local/bin/codex-priority
 RUN set -eux; \
     test -d /root/.cargo; \
     test -d /root/.rustup; \
+    rustup component add rust-analyzer --toolchain nightly-2025-05-20; \
     chmod o+x /root; \
     chmod a+x /opt/kendryte-toolchain/bin/riscv64-unknown-elf-*; \
     rm -rf /home/ubuntu/.cargo /home/ubuntu/.rustup; \

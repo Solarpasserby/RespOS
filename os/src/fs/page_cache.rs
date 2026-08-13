@@ -196,11 +196,12 @@ pub fn writeback_dirty_owners_if_needed() {
         .cloned()
         .collect();
     for owner in owners {
-        if sync_owner(&owner, None).is_err()
-            && let Some(current) = DIRTY_OWNERS.lock().get_mut(&owner.cache.id)
-            && current.generation == owner.generation
-        {
-            current.background_failed = true;
+        if sync_owner(&owner, None).is_err() {
+            if let Some(current) = DIRTY_OWNERS.lock().get_mut(&owner.cache.id) {
+                if current.generation == owner.generation {
+                    current.background_failed = true;
+                }
+            }
         }
     }
 }

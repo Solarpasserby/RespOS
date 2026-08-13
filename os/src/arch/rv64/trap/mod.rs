@@ -169,22 +169,22 @@ pub fn trap_handler(cx: &mut TrapContext) {
             set_next_ti_trigger();
             #[cfg(feature = "debug_traces")]
             {
-                if let Some(task) = current_task()
-                    && task.tgid() == 20
-                {
-                    let now = crate::timer::get_time_ms();
-                    let last = LAST_LD_TRACE_MS.load(Ordering::Relaxed);
-                    if now.saturating_sub(last) >= 1_000
-                        && LAST_LD_TRACE_MS
-                            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
-                            .is_ok()
-                    {
-                        println!(
-                            "[ldtrace] hart={} tid={} sepc={:#x}",
-                            crate::arch::smp::current_hart_id(),
-                            task.tid(),
-                            cx.sepc
-                        );
+                if let Some(task) = current_task() {
+                    if task.tgid() == 20 {
+                        let now = crate::timer::get_time_ms();
+                        let last = LAST_LD_TRACE_MS.load(Ordering::Relaxed);
+                        if now.saturating_sub(last) >= 1_000
+                            && LAST_LD_TRACE_MS
+                                .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                                .is_ok()
+                        {
+                            println!(
+                                "[ldtrace] hart={} tid={} sepc={:#x}",
+                                crate::arch::smp::current_hart_id(),
+                                task.tid(),
+                                cx.sepc
+                            );
+                        }
                     }
                 }
             }

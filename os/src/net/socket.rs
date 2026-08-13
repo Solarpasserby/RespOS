@@ -517,10 +517,10 @@ impl UnixSocket {
                 .poll_waiters
                 .register(tid, events & POLL_WRITE);
         }
-        if events & POLL_READ != 0
-            && let Some(listener) = self.listener.lock().clone()
-        {
-            listener.poll_waiters.register(tid, POLL_READ);
+        if events & POLL_READ != 0 {
+            if let Some(listener) = self.listener.lock().clone() {
+                listener.poll_waiters.register(tid, POLL_READ);
+            }
         }
     }
 

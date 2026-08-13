@@ -71,6 +71,19 @@ ls -lh img/sdcard-rv.img img/sdcard-la.img \
 
 ## 构建
 
+### 课程平台 Rust 兼容基线
+
+课程平台在 2026-08-13 的日志表明其内核编译器为
+`rustc 1.86.0-nightly (2025-01-17)`。提交前，若本地安装了对应 toolchain，应使用：
+
+```bash
+RUSTUP_TOOLCHAIN=nightly-2025-01-18 make all
+```
+
+`os/Cargo.toml` 和 `user/Cargo.toml` 声明 `rust-version = "1.85"`。不要使用在该平台
+仍不稳定的 `let` chains、`usize::is_multiple_of` 或其他需要 `#![feature(...)]` 的语言/标准库
+能力；以实际课程日志为准，不能只按本机较新的 nightly 判断可提交性。
+
 ### 决赛设计文档
 
 - 状态：已实现

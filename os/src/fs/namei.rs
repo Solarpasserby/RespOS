@@ -1262,12 +1262,12 @@ pub fn filename_rename(
     if let Some((inode, backup_path, ty, deferred)) = replaced_target {
         // 主 rename 已提交，清理暂存目录失败不能再向用户报告 rename 失败，
         // 否则会造成“返回错误但命名空间已改变”的 ABI。残留备份可在后续维护清理。
-        if Ext4Inode::remove_path(&backup_path, ty, deferred).is_ok()
-            && let Some(inode) = inode.as_any().downcast_ref::<Ext4Inode>()
-        {
-            inode.invalidate_raw_metadata();
-            if deferred {
-                inode.mark_unlinked();
+        if Ext4Inode::remove_path(&backup_path, ty, deferred).is_ok() {
+            if let Some(inode) = inode.as_any().downcast_ref::<Ext4Inode>() {
+                inode.invalidate_raw_metadata();
+                if deferred {
+                    inode.mark_unlinked();
+                }
             }
         }
     }

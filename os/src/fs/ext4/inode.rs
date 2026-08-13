@@ -602,13 +602,17 @@ impl Ext4Inode {
         );
         let mut state = self.metadata.lock();
         let namespace_generation = state.generation;
-        if cacheable && let Some(metadata) = state.raw {
-            if ty != InodeType::Directory || metadata.namespace_generation == namespace_generation {
-                crate::perf::ext4_stat_cache_hit(1);
-                return Ok(metadata);
+        if cacheable {
+            if let Some(metadata) = state.raw {
+                if ty != InodeType::Directory
+                    || metadata.namespace_generation == namespace_generation
+                {
+                    crate::perf::ext4_stat_cache_hit(1);
+                    return Ok(metadata);
+                }
+                state.raw = None;
+                crate::perf::ext4_stat_cache_invalidation(1);
             }
-            state.raw = None;
-            crate::perf::ext4_stat_cache_invalidation(1);
         }
         crate::perf::ext4_stat_cache_miss(1);
         if cacheable {
@@ -1185,10 +1189,10 @@ impl InodeOp for Ext4Inode {
         // }
 
         Self::file_link(old_path, &bare_dentry.abs_path)?;
-        if let Some(parent) = bare_dentry.get_parent()
-            && let Some(parent) = parent.get_inode().as_any().downcast_ref::<Ext4Inode>()
-        {
-            parent.namespace_changed();
+        if let Some(parent) = bare_dentry.get_parent() {
+            if let Some(parent) = parent.get_inode().as_any().downcast_ref::<Ext4Inode>() {
+                parent.namespace_changed();
+            }
         }
         self.invalidate_raw_metadata();
         Ok(())

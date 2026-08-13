@@ -1,5 +1,36 @@
 # RespOS 已确认易错点
 
+## VS Code bundled rust-analyzer 必须与镜像 Rust toolchain 匹配
+
+- 状态：已确认；容器重建后生效
+- 适用范围：`.devcontainer/Dockerfile`、VS Code Rust Analyzer extension
+- 最后验证：2026-08-13
+- 证据：扩展 `rust-analyzer 0.3.3008-standalone` 状态提示要求 `rustc >= 1.94`，当前镜像默认
+  `nightly-2025-05-20` 实际为 `rustc 1.89.0-nightly (2025-05-19)`。
+- 内容：Dockerfile 在 root 构建阶段为 `nightly-2025-05-20` 安装 `rust-analyzer` component；
+  `.vscode/settings.json` 显式指定该 component 的二进制路径。不要让扩展的 standalone server
+  代替工具链配套的 component，也不要仅为 IDE 提示升级默认 Rust，因为提交兼容性仍以
+  `nightly-2025-01-18` 复现的比赛 Rust 1.86 为准。
+- 后续影响：修改 Dockerfile 后必须执行 Dev Containers: Rebuild Container，不能只 Reload Window。
+
+## rust-analyzer 的自动检查会与 lwext4 CMake 构建脚本竞争同一源码目录
+
+- 状态：已确认并通过 IDE 配置规避
+- 适用范围：VS Code rust-analyzer、`vendor/lwext4_rust/build.rs`、正常 `make` 构建
+- 最后验证：2026-08-13
+- 证据：rust-analyzer Language Server 日志中的 Flycheck 命令与
+  `vendor/lwext4_rust/c/lwext4/build_musl-generic/CMakeFiles/...o.d` 缺失错误；该 build script
+  每次执行都会删除并重建源码树中的 `build_musl-generic`。
+- 内容：rust-analyzer 的 `cargo check` 和前台 `make` 共用该 CMake 输出路径时，任一方可删除
+  另一方正在写入的依赖文件，表现为编辑器持续 `Flycheck failed`，但不是 Rust 源码错误。
+  `.vscode/settings.json` 为分析器关闭 build scripts、save 时 Flycheck 和原生诊断，并使用独立
+  target directory；后者规避 bundled rust-analyzer 0.3.3008 对本 `no_std` 交叉目标触发的
+  `inference diagnostic in desugared expr` 内部错误。代码导航、补全和格式化仍可用，实际
+  RV64/LA64 验证必须使用顶层 Makefile。
+- 后续影响：不要在未把 lwext4 CMake 输出移到 Cargo `OUT_DIR` 前重新启用
+  `rust-analyzer.checkOnSave`。需要即时编译诊断时，应显式顺序运行 `make build-rv` 或
+  `make build-la`，不要与另一个构建并行。
+
 ## `build-rv` 与 `build-la` 不能并行共享可变 Cargo 配置
 
 - 状态：已确认；串行重建可恢复

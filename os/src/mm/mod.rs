@@ -291,7 +291,7 @@ pub fn read_user_u32_nofault(src: *const u32) -> SysResult<u32> {
     if src.is_null() {
         return Err(Errno::EFAULT);
     }
-    if !addr.is_multiple_of(core::mem::align_of::<u32>()) {
+    if addr % core::mem::align_of::<u32>() != 0 {
         return Err(Errno::EINVAL);
     }
 

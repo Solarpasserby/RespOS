@@ -89,7 +89,7 @@ pub fn do_futex(
 }
 
 fn validate_futex_address(uaddr: usize) -> SysResult {
-    if !uaddr.is_multiple_of(core::mem::align_of::<u32>()) {
+    if uaddr % core::mem::align_of::<u32>() != 0 {
         return Err(Errno::EINVAL);
     }
     Ok(())

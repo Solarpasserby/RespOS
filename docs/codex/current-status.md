@@ -1,5 +1,21 @@
 # RespOS 当前状态
 
+## 2026-08-13 课程平台 Rust 编译器兼容性（当前工作树）
+
+- **平台证据**：课程评测于 2026-08-13 的 `make all` 在 RV64 内核阶段使用
+  `rustc 1.86.0-nightly (2025-01-17)`；日志中的“缺少 score/rank”是平台对编译中断的
+  外层提示，实际结果为 `Compile Error`、`score: 0`。编译器不支持 `let_chains` 和
+  `unsigned_is_multiple_of`，因此拒绝了 13 处新语法/API。
+- **兼容基线**：`os` 与 `user_lib` 的 `rust-version` 固定为 1.85；内核代码不得引入
+  Rust 1.86 nightly 尚未稳定的标准库 API 或需要 feature gate 的语法。相关条件均改写为
+  嵌套 `if` / `match` 和取模对齐检查，保持原控制流与错误语义。
+- **本地复现环境**：`nightly-2025-01-18` 实际报告同一版本字符串
+  `rustc 1.86.0-nightly (6067b3631 2025-01-17)`，并安装 RV64、LA64 bare-metal targets。
+  在受限环境外顺序执行 `RUSTUP_TOOLCHAIN=nightly-2025-01-18 make build-rv` 和
+  `RUSTUP_TOOLCHAIN=nightly-2025-01-18 make build-la` 均成功（仅保留既有 target-feature
+  warnings），已生成 `kernel-rv` 与 `kernel-la`。首次沙箱内尝试曾被宿主 seccomp 在 lwext4 的
+  `riscv64-linux-musl-gcc` 调用处中止（`Bad system call`），该限制不影响受限环境外的验证结论。
+
 ## 2026-08-12 LA SMP 阶段 1E：按 TLB residency 缩小远端失效目标（当前工作树）
 
 - **实现**：LA `MemorySet` 新增独立 `tlb_hart_mask`。scheduler 激活地址空间时同时记录 active 与
