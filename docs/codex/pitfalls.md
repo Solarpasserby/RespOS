@@ -1,5 +1,36 @@
 # RespOS 已确认易错点
 
+## 辅助盘 profile 不会随平台根镜像变化，线上阶段不能固定为 final
+
+- 状态：已确认；通过 `mode=auto` 与根盘标志检测修复
+- 适用范围：`respos/profile`、`disk*.img`、`contest_launcher`、初赛复测与决赛评分
+- 最后验证：2026-08-13
+- 证据：x0/x1 挂载关系；RV64/LA64 四份官方镜像的脚本检查；同一 auto 辅助盘的双架构四镜像启动；
+  RV64 决赛不挂载 x1 的启动日志
+- 内容：比赛方替换作为 x0 的官方根镜像不会改写我们作为 x1 提交的辅助盘。若 x1 固定
+  `mode=final`，平台在初赛复测中仍挂载 x1 时会错误启动决赛脚本。当前线上 profile 使用
+  `mode=auto`：优先检查 CAgent/BuildStorm 决赛脚本，再检查 musl/glibc basic 初赛脚本；profile
+  缺失、空白或无效也走自动检测，未知根盘告警后回退 preliminary。本地显式 profile 仍可强制阶段。
+- 后续影响：不得把 `make all` 的 profile 改回固定 preliminary/final，也不能根据辅助盘名或 QEMU
+  资源猜阶段。官方镜像脚本路径发生变化时，必须先取得新镜像/公告证据，再更新检测标志并完成
+  双架构两阶段启动矩阵。
+
+## 平台 Rust 1.86 的 RV64 thin LTO 产物会破坏动态程序执行
+
+- 状态：已确认；通过关闭 submission release LTO 规避
+- 适用范围：`os/cargo/config-{riscv64,loongarch64}.toml`、线上 `make all`、决赛动态 glibc workload
+- 最后验证：2026-08-13
+- 证据：同源码/镜像/QEMU 的 rustc 1.86 thin-LTO、rustc 1.86 no-LTO、rustc 1.89 thin-LTO A/B；
+  RV64 CAgent 与 BuildStorm toolchain/minibuild；LA64 12-hart CAgent 与前置门禁
+- 内容：平台同版 `rustc 1.86.0-nightly (2025-01-17)` 能成功链接 RV64 thin-LTO 内核，但该产物下
+  `simple_llm_server`、mount、rustc/cargo 等动态程序稳定 SIGSEGV。增加无关 `fault_trace` feature
+  或换 Rust 1.89 会改变布局并掩盖问题；不能据此把诊断 feature 当修复。关闭内核 release LTO 后，
+  平台编译器产物恢复双架构 final CAgent 和 BuildStorm 前置门禁。现有证据能确认工具链相关的代码生成/
+  布局敏感问题，但尚未定位到更小的编译器 bug 或源码 UB，细因标记 `待验证`。
+- 后续影响：线上兼容门禁不能止于“Rust 1.86 编译成功”，至少要用该工具链产物启动动态 glibc 程序。
+  在找到更小且可证明的根因前不得重新开启 thin/fat LTO；若为性能恢复 LTO，必须重新完成平台同版
+  编译器的 RV/LA CAgent、BuildStorm toolchain/minibuild 和完整构建，而不能只用较新本机 rustc。
+
 ## VS Code bundled rust-analyzer 必须与镜像 Rust toolchain 匹配
 
 - 状态：已确认；容器重建后生效

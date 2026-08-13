@@ -35,8 +35,10 @@
   `EXT4_OP_LOCK`。关机路径先尝试 shutdown 辅助 superblock，再 shutdown 根 superblock；即使
   一个设备 flush 失败，也必须继续尝试另一个设备。
 - 启动入口：内嵌 `initproc` 启动内嵌 `contest_launcher`。launcher 从 `/respos/profile`
-  读取 `mode=preliminary|final|diagnostic`；缺失、无效或 preliminary 时 exec 原内嵌 `testrunner`，final
-  时在 `/glibc` 中使用 `/bin/bash` 严格串行运行当前官方决赛镜像固定的
+  读取 `mode=auto|preliminary|final|diagnostic`。线上 `auto` 以及 profile 缺失、空白或无效时，先检查
+  根盘上的 CAgent/BuildStorm 决赛脚本，再检查 musl/glibc basic 初赛脚本；决赛标志优先，未知镜像
+  打印告警并安全回退到 preliminary。preliminary exec 原内嵌 `testrunner`；final
+  在 `/glibc` 中使用 `/bin/bash` 严格串行运行当前官方决赛镜像固定的
   `cagent_testcode.sh`、`buildstorm_testcode.sh`，全部结束后关机。diagnostic 只供显式本地 profile
   使用，进入内嵌 `user_shell`，默认提交镜像不会选择它。dispatcher 失败时
   `initproc` 仍依次回退到内嵌 `testrunner` 和 `user_shell`。测例策略不进入内核。

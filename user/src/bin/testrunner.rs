@@ -2,6 +2,12 @@
 #![no_main]
 #![allow(unused)]
 
+// Preliminary-round and local-regression orchestrator.
+//
+// `contest_launcher` execs this binary only for mode=preliminary (or as a
+// startup fallback).  Final-round scoring bypasses it and runs the official
+// glibc CAgent/BuildStorm scripts from the root image directly.
+
 #[macro_use]
 extern crate user_lib;
 extern crate alloc;

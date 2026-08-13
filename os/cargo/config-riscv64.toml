@@ -13,7 +13,10 @@ panic = "abort"
 
 [profile.release]
 debug = false
-lto = "thin"
+# The contest platform uses rustc 1.86 nightly.  Its RV64 thin-LTO output
+# reproducibly corrupts dynamic-program execution; the same sources without
+# LTO pass CAgent and the BuildStorm toolchain/minibuild gate.
+lto = false
 panic = "abort"
 
 [profile.release-debug]

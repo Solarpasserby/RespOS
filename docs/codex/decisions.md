@@ -3,6 +3,24 @@
 这里只收录能解释当前代码形态或避免重复踩坑的决策。日期是当前证据最后核验时间，不一定是
 最初提出时间。
 
+## `make all` 固定为线上自动识别提交入口，本地阶段使用显式目标
+
+- 状态：已采用
+- 适用范围：顶层构建、线上提交、初赛复测、决赛本地回归
+- 最后验证：2026-08-13
+- 证据：课程平台实际 `make all` 日志、顶层 `Makefile`、`respos/profile`、
+  `user/src/bin/{contest_launcher,testrunner}.rs`；
+  `RUSTUP_TOOLCHAIN=nightly-2025-01-18 make check-submit`；双架构初赛/决赛 auto 启动日志
+- 内容：`make all` 只顺序构建 `kernel-rv`、`kernel-la` 和包含 `mode=auto` 的
+  `disk.img`、`disk-la.img`，不下载镜像、不启动 QEMU，也不接受本地 profile 覆盖。
+  `.NOTPARALLEL` 防止双架构共享 Cargo config 竞态。本地使用 `run-{rv,la}-pre`、
+  `run-{rv,la}-final`、`run-{rv,la}-diagnostic`；三类目标使用独立辅助盘。
+  自动模式先检测官方根盘的 CAgent/BuildStorm 决赛脚本，再检测 musl/glibc basic 初赛脚本；
+  preliminary 由 `contest_launcher` exec 内嵌 `testrunner`，final 则绕过它并执行官方根盘的
+  CAgent/BuildStorm glibc 脚本。显式本地 profile 可强制阶段，不参与线上提交。
+- 后续影响：不得把本地根镜像检查、QEMU 资源或诊断 profile 加进 `make all`。调整提交产物、
+  profile 或 final 脚本协议前，必须先取得新的平台日志/公告证据并重新完成 Rust 1.86 双架构构建。
+
 ## ext4 setattr 使用单 inode transaction，缓存只在成功后发布
 
 - 状态：已采用

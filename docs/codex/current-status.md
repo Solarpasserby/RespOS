@@ -153,7 +153,36 @@
   shootdown”对 full invalidation 与进度的影响；与此同时，PageCache 满容量淘汰和 ext4
   read/lookup/namespace 锁内工作是后续最强的两个非架构候选。本轮只建立基线，
   没有根据单个短窗口修改实现或宣称 wall-time 加速比。
+## 2026-08-13 线上提交与本地比赛入口收敛（当前工作树）
 
+- **线上入口**：顶层 `make all` 固定等价于 `submit`，顺序生成 `kernel-rv`、`kernel-la`、
+  `disk.img`、`disk-la.img`。提交辅助盘固定从 `respos/` 构建，并在构建前验证 profile 为
+  `mode=auto`；launcher 根据平台根盘自动识别阶段，决赛 CAgent/BuildStorm 脚本优先，随后检查初赛
+  musl/glibc basic 脚本，未知镜像回退 preliminary。该构建路径不访问本地大镜像、不运行 QEMU。
+  Makefile 全局 `.NOTPARALLEL`，避免 RV/LA
+  共用 `os/.cargo/config.toml` 与 `user/.cargo/config.toml` 时发生交叉嵌入。
+- **本地入口**：新增 `prepare-pre-images`、`run-rv-pre`、`run-la-pre`、`run-rv-final`、
+  `run-la-final`、`run-rv-diagnostic`、`run-la-diagnostic`。初赛镜像从保留的 `.xz` 恢复为
+  `sdcard-*-pre.img` 并检查 `basic_testcode.sh`；决赛镜像检查 CAgent/BuildStorm 两个官方脚本；
+  三种 mode 使用 `/tmp` 下不同的 x1 辅助盘且都以 `-snapshot` 启动。
+- **testrunner 边界**：`testrunner` 只负责初赛全量组、LTP 筛选及专项诊断，并输出初赛 judge group
+  marker；决赛 final 由 `contest_launcher` 直接顺序运行 `/glibc/cagent_testcode.sh` 和
+  `/glibc/buildstorm_testcode.sh`。旧 `eval` feature 不再选择启动路径，默认 user feature 已清空。
+- **验证**：`RUSTUP_TOOLCHAIN=nightly-2025-01-18 make check-submit` 通过，确认平台 Rust 1.86
+  兼容的 RV64/LA64 release 构建和四个提交产物，两个辅助盘均含 `mode=auto`。同一提交辅助盘分别
+  搭配 RV64/LA64 初赛与决赛官方根盘启动：两架构初赛都自动进入 `testrunner` 并越过 basic 组，
+  两架构决赛都自动进入 CAgent、10/10 pass，并继续通过 BuildStorm toolchain/minibuild 前置门禁；
+  RV64 决赛不挂载 x1 时也从 profile 缺失进入自动检测。日志为
+  `/tmp/respos-{rv,la}-auto-{pre,final}.log` 与 `/tmp/respos-rv-auto-no-profile.log`。这些限时烟测
+  只验证阶段分派，不代替正式资源下的完整 BuildStorm。显式 Make 入口烟测中，
+  LA preliminary 正确进入 `contest_launcher → testrunner` 并跑完 basic-musl/basic-glibc；RV final
+  正确进入官方两个脚本。平台 score/rank 仍为 `待验证`。
+- **Rust 1.86 LTO 阻断与修复**：平台同版 rustc 的 RV64 `lto="thin"` 无 feature 内核可编译、启动，
+  但两个冷 `-snapshot` 运行均使 `simple_llm_server`、mount、rustc/cargo 稳定 SIGSEGV，CAgent 0/10，
+  BuildStorm toolchain/minibuild 失败；同源码 Rust 1.89 thin-LTO 内核则 CAgent 10/10。Rust 1.86 关闭
+  LTO 后，RV64 CAgent 10/10 且 `BUILDSTORM_TOOLCHAIN/MINIBUILD ok`；LA64 12 hart 同样 CAgent 10/10
+  且两个 BuildStorm 前置门禁通过。因此双架构 release config 固定 `lto=false`。完整 BuildStorm 和
+  平台正式资源/计时仍待验证，不能由短回归外推。
 ## 2026-08-13 课程平台 Rust 编译器兼容性（当前工作树）
 
 - **平台证据**：课程评测于 2026-08-13 的 `make all` 在 RV64 内核阶段使用

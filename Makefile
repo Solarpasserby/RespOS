@@ -1,39 +1,91 @@
 SHELL := /bin/bash
 .SHELLFLAGS := -o pipefail -c
 
+# The contest platform invokes `make all`.  Keep that path deterministic:
+# release kernels for both architectures plus the two auto-detect auxiliary
+# disks consumed as the second virtio block device.  Local run targets are
+# deliberately separate and never change the submission profile.
+.NOTPARALLEL:
+
 MODE ?= release
 RV_MODE ?= $(MODE)
 LA_MODE ?= $(MODE)
-MEM ?= 4G
-SMP ?= 1
-LA_MEM ?= 12G
-LA_SMP ?= 12
-RV_FS_IMG ?= img/sdcard-rv.img
-LA_FS_IMG ?= img/sdcard-la.img
-PUB_INTERACTIVE_MEM ?= 4G
-LA_PUB_INTERACTIVE_MEM ?= 12G
-PUB_INTERACTIVE_SMP ?= 1
-LA_PUB_INTERACTIVE_SMP ?= 12
-RV_PUB_FS_IMG ?= img/sdcard-rv-pub.img
-LA_PUB_FS_IMG ?= img/sdcard-la-pub.img
-RV_DISK_IMG ?= disk.img
-LA_DISK_IMG ?= disk-la.img
-AUX_FS_DIR ?= respos
-AUX_FS_SIZE ?= 16M
-QEMU_RV ?= qemu-system-riscv64
-QEMU_LA ?= qemu-system-loongarch64
 
 RV_TARGET := riscv64gc-unknown-none-elf
 LA_TARGET := loongarch64-unknown-none
 
-RV_OUTPUT ?= rv-output.txt
-LA_OUTPUT ?= la-output.txt
-RV_PUB_OUTPUT ?= /tmp/respos-rv-pub-output.txt
-LA_PUB_OUTPUT ?= /tmp/respos-la-pub-output.txt
-RV_USER_FEATURES ?= eval
-LA_USER_FEATURES ?= eval
+KERNEL_RV := kernel-rv
+KERNEL_LA := kernel-la
+RV_ELF = os/target/$(RV_TARGET)/$(RV_CARGO_TARGET_DIR)/os
+LA_ELF = os/target/$(LA_TARGET)/$(LA_CARGO_TARGET_DIR)/os
+
+# Submission artifacts.  These names and the auto profile are intentionally
+# fixed: command-line overrides must not silently turn `make all` into a local
+# preliminary or diagnostic build.
+override SUBMIT_AUX_FS_DIR := respos
+override SUBMIT_RV_DISK_IMG := disk.img
+override SUBMIT_LA_DISK_IMG := disk-la.img
+override SUBMIT_AUX_FS_SIZE := 16M
+
+# Local root images.  Preliminary images are restored under unambiguous names
+# from the retained official archives; final images are the public large disks.
+RV_PRE_ARCHIVE ?= img/sdcard-rv.img.xz
+LA_PRE_ARCHIVE ?= img/sdcard-la.img.xz
+RV_PRE_FS_IMG ?= img/sdcard-rv-pre.img
+LA_PRE_FS_IMG ?= img/sdcard-la-pre.img
+RV_FINAL_FS_IMG ?= img/sdcard-rv-pub.img
+LA_FINAL_FS_IMG ?= img/sdcard-la-pub.img
+
+RV_PRE_DISK_IMG ?= /tmp/respos-rv-preliminary.img
+LA_PRE_DISK_IMG ?= /tmp/respos-la-preliminary.img
+RV_FINAL_DISK_IMG ?= /tmp/respos-rv-final.img
+LA_FINAL_DISK_IMG ?= /tmp/respos-la-final.img
+RV_DIAGNOSTIC_DISK_IMG ?= /tmp/respos-rv-diagnostic.img
+LA_DIAGNOSTIC_DISK_IMG ?= /tmp/respos-la-diagnostic.img
+LOCAL_AUX_FS_SIZE ?= 16M
+
+# Local resource profiles.  The final defaults mirror the latest contest
+# parameters recorded for RespOS; the platform itself supplies its QEMU args.
+PRE_MEM ?= 4G
+PRE_SMP ?= 1
+RV_FINAL_MEM ?= 16G
+RV_FINAL_SMP ?= 8
+LA_FINAL_MEM ?= 36G
+LA_FINAL_SMP ?= 12
+RV_DIAGNOSTIC_MEM ?= 4G
+RV_DIAGNOSTIC_SMP ?= 1
+LA_DIAGNOSTIC_MEM ?= 12G
+LA_DIAGNOSTIC_SMP ?= 12
+
+RV_PRE_OUTPUT ?= /tmp/respos-rv-preliminary.log
+LA_PRE_OUTPUT ?= /tmp/respos-la-preliminary.log
+RV_FINAL_OUTPUT ?= /tmp/respos-rv-final.log
+LA_FINAL_OUTPUT ?= /tmp/respos-la-final.log
+RV_DIAGNOSTIC_OUTPUT ?= /tmp/respos-rv-diagnostic.log
+LA_DIAGNOSTIC_OUTPUT ?= /tmp/respos-la-diagnostic.log
+
+QEMU_RV ?= qemu-system-riscv64
+QEMU_LA ?= qemu-system-loongarch64
+
+# User features are empty by default.  The legacy `eval` feature no longer
+# selects the launcher; /respos/profile selects explicit or automatic policy.
+RV_USER_FEATURES ?=
+LA_USER_FEATURES ?=
 RV_KERNEL_FEATURES ?=
 LA_KERNEL_FEATURES ?=
+
+REQUESTED_GOALS := $(if $(MAKECMDGOALS),$(MAKECMDGOALS),all)
+ifneq ($(filter all submit check-submit,$(REQUESTED_GOALS)),)
+ifneq ($(RV_MODE),release)
+$(error Submission entry requires RV_MODE=release)
+endif
+ifneq ($(LA_MODE),release)
+$(error Submission entry requires LA_MODE=release)
+endif
+ifneq ($(strip $(RV_USER_FEATURES)$(LA_USER_FEATURES)$(RV_KERNEL_FEATURES)$(LA_KERNEL_FEATURES)),)
+$(error Submission entry does not accept user or kernel features)
+endif
+endif
 
 ifneq ($(strip $(RV_KERNEL_FEATURES)),)
 	RV_KERNEL_FEATURE_ARGS := --features "$(RV_KERNEL_FEATURES)"
@@ -68,29 +120,37 @@ else
 	$(error Unsupported LA_MODE '$(LA_MODE)'. Use debug, release, or release-debug)
 endif
 
-KERNEL_RV := kernel-rv
-KERNEL_LA := kernel-la
-RV_ELF := os/target/$(RV_TARGET)/$(RV_CARGO_TARGET_DIR)/os
-LA_ELF := os/target/$(LA_TARGET)/$(LA_CARGO_TARGET_DIR)/os
+.PHONY: all submit check-submit validate-submit-profile build-submit-disks build-disks \
+	build-rv build-la prepare-rv-cargo-config prepare-la-cargo-config \
+	prepare-pre-images check-rv-pre-image check-la-pre-image \
+	check-rv-final-image check-la-final-image \
+	build-rv-local-disk build-la-local-disk run-rv-qemu run-la-qemu \
+	run-rv-pre run-la-pre run-rv-final run-la-final \
+	run-rv-diagnostic run-la-diagnostic rv la run-rv-pub run-la-pub \
+	help clean
 
-RV_QEMU_DISK_ARGS := -drive file=$(RV_DISK_IMG),if=none,format=raw,id=x1 \
-	-device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1
+# Online-platform entry.  Do not add QEMU runs, downloads, or local root-image
+# checks here: the evaluator provides those and only needs reproducible outputs.
+all: submit
 
-LA_QEMU_DISK_ARGS := -drive file=$(LA_DISK_IMG),if=none,format=raw,id=x1 \
-	-device virtio-blk-pci,drive=x1
+submit: validate-submit-profile build-rv build-la build-submit-disks
 
-.PHONY: all build-rv build-la build-disks force-build-disk rv la run-rv-pub run-la-pub \
-	check-pub-images prepare-rv-cargo-config prepare-la-cargo-config clean check-submit
+validate-submit-profile:
+	@mode="$$(awk '{ line=$$0; sub(/^[ \t]+/, "", line); if (line != "" && substr(line, 1, 1) != "#") { print line; exit } }' $(SUBMIT_AUX_FS_DIR)/profile)"; \
+		test "$$mode" = "mode=auto" || { \
+			echo "submission profile must start with mode=auto, got '$$mode'" >&2; \
+			exit 1; \
+		}
 
-all: build-rv build-la build-disks
+build-submit-disks: validate-submit-profile
+	truncate -s $(SUBMIT_AUX_FS_SIZE) $(SUBMIT_RV_DISK_IMG)
+	mkfs.ext4 -q -F -d $(SUBMIT_AUX_FS_DIR) $(SUBMIT_RV_DISK_IMG)
+	truncate -s $(SUBMIT_AUX_FS_SIZE) $(SUBMIT_LA_DISK_IMG)
+	mkfs.ext4 -q -F -d $(SUBMIT_AUX_FS_DIR) $(SUBMIT_LA_DISK_IMG)
 
-build-disks: $(RV_DISK_IMG) $(LA_DISK_IMG)
-
-force-build-disk:
-
-$(RV_DISK_IMG) $(LA_DISK_IMG): force-build-disk $(AUX_FS_DIR)/profile
-	truncate -s $(AUX_FS_SIZE) $@
-	mkfs.ext4 -q -F -d $(AUX_FS_DIR) $@
+# Compatibility name used by older documentation.  It now always means the
+# fixed auto-detect submission disks, never a caller-selected local profile.
+build-disks: build-submit-disks
 
 prepare-rv-cargo-config:
 	mkdir -p os/.cargo user/.cargo
@@ -118,7 +178,69 @@ build-la: prepare-la-cargo-config
 	cp $(LA_ELF) $(KERNEL_LA)
 	@rust-readobj -h -l $(KERNEL_LA) | awk '/Entry:/ || /VirtualAddress:/ || /PhysicalAddress:/ { print }'
 
-rv: build-rv build-disks
+$(RV_PRE_FS_IMG): $(RV_PRE_ARCHIVE)
+	@mkdir -p $(@D)
+	xz -dc $< > $@.tmp
+	mv $@.tmp $@
+
+$(LA_PRE_FS_IMG): $(LA_PRE_ARCHIVE)
+	@mkdir -p $(@D)
+	xz -dc $< > $@.tmp
+	mv $@.tmp $@
+
+prepare-pre-images: $(RV_PRE_FS_IMG) $(LA_PRE_FS_IMG)
+
+check-rv-pre-image: $(RV_PRE_FS_IMG)
+	@test "$$(stat -c %s $(RV_PRE_FS_IMG))" -ge 1073741824 || { \
+		echo "$(RV_PRE_FS_IMG) is too small for the preliminary suite; restore it from $(RV_PRE_ARCHIVE)" >&2; \
+		exit 1; \
+	}
+	@debugfs -R 'stat /musl/basic_testcode.sh' $(RV_PRE_FS_IMG) 2>&1 | grep -q '^Inode:' || { \
+		echo "$(RV_PRE_FS_IMG) does not contain the preliminary test suite" >&2; \
+		exit 1; \
+	}
+
+check-la-pre-image: $(LA_PRE_FS_IMG)
+	@test "$$(stat -c %s $(LA_PRE_FS_IMG))" -ge 1073741824 || { \
+		echo "$(LA_PRE_FS_IMG) is too small for the preliminary suite; restore it from $(LA_PRE_ARCHIVE)" >&2; \
+		exit 1; \
+	}
+	@debugfs -R 'stat /musl/basic_testcode.sh' $(LA_PRE_FS_IMG) 2>&1 | grep -q '^Inode:' || { \
+		echo "$(LA_PRE_FS_IMG) does not contain the preliminary test suite" >&2; \
+		exit 1; \
+	}
+
+check-rv-final-image:
+	@test -r $(RV_FINAL_FS_IMG) || { echo "missing $(RV_FINAL_FS_IMG)" >&2; exit 1; }
+	@debugfs -R 'stat /glibc/cagent_testcode.sh' $(RV_FINAL_FS_IMG) 2>&1 | grep -q '^Inode:' || { \
+		echo "$(RV_FINAL_FS_IMG) has no CAgent script" >&2; exit 1; \
+	}
+	@debugfs -R 'stat /glibc/buildstorm_testcode.sh' $(RV_FINAL_FS_IMG) 2>&1 | grep -q '^Inode:' || { \
+		echo "$(RV_FINAL_FS_IMG) has no BuildStorm script" >&2; exit 1; \
+	}
+
+check-la-final-image:
+	@test -r $(LA_FINAL_FS_IMG) || { echo "missing $(LA_FINAL_FS_IMG)" >&2; exit 1; }
+	@debugfs -R 'stat /glibc/cagent_testcode.sh' $(LA_FINAL_FS_IMG) 2>&1 | grep -q '^Inode:' || { \
+		echo "$(LA_FINAL_FS_IMG) has no CAgent script" >&2; exit 1; \
+	}
+	@debugfs -R 'stat /glibc/buildstorm_testcode.sh' $(LA_FINAL_FS_IMG) 2>&1 | grep -q '^Inode:' || { \
+		echo "$(LA_FINAL_FS_IMG) has no BuildStorm script" >&2; exit 1; \
+	}
+
+build-rv-local-disk:
+	@test -r $(AUX_FS_DIR)/profile || { echo "missing $(AUX_FS_DIR)/profile" >&2; exit 1; }
+	truncate -s $(LOCAL_AUX_FS_SIZE) $(RV_DISK_IMG)
+	mkfs.ext4 -q -F -d $(AUX_FS_DIR) $(RV_DISK_IMG)
+
+build-la-local-disk:
+	@test -r $(AUX_FS_DIR)/profile || { echo "missing $(AUX_FS_DIR)/profile" >&2; exit 1; }
+	truncate -s $(LOCAL_AUX_FS_SIZE) $(LA_DISK_IMG)
+	mkfs.ext4 -q -F -d $(AUX_FS_DIR) $(LA_DISK_IMG)
+
+run-rv-qemu:
+	@test -r $(RV_FS_IMG) || { echo "missing root image $(RV_FS_IMG)" >&2; exit 1; }
+	@test -r $(RV_DISK_IMG) || { echo "missing auxiliary image $(RV_DISK_IMG)" >&2; exit 1; }
 	$(QEMU_RV) -machine virt \
 		-kernel $(KERNEL_RV) \
 		-m $(MEM) \
@@ -132,9 +254,12 @@ rv: build-rv build-disks
 		-device virtio-net-device,netdev=net \
 		-netdev user,id=net \
 		-rtc base=utc \
-		$(RV_QEMU_DISK_ARGS) |& tee $(RV_OUTPUT)
+		-drive file=$(RV_DISK_IMG),if=none,format=raw,id=x1 \
+		-device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 |& tee $(RV_OUTPUT)
 
-la: build-la build-disks
+run-la-qemu:
+	@test -r $(LA_FS_IMG) || { echo "missing root image $(LA_FS_IMG)" >&2; exit 1; }
+	@test -r $(LA_DISK_IMG) || { echo "missing auxiliary image $(LA_DISK_IMG)" >&2; exit 1; }
 	$(QEMU_LA) -machine virt \
 		-kernel $(KERNEL_LA) \
 		-m $(LA_MEM) \
@@ -147,33 +272,105 @@ la: build-la build-disks
 		-device virtio-net-pci,netdev=net0 \
 		-netdev user,id=net0,hostfwd=tcp::5555-:5555,hostfwd=udp::5555-:5555 \
 		-rtc base=utc \
-		$(LA_QEMU_DISK_ARGS) |& tee $(LA_OUTPUT)
+		-drive file=$(LA_DISK_IMG),if=none,format=raw,id=x1 \
+		-device virtio-blk-pci,drive=x1 |& tee $(LA_OUTPUT)
 
-# Pub-image targets. RV keeps its conservative interactive defaults; LA uses
-# the same 12 GiB / 12-hart topology as the normal local final-round run.
-run-rv-pub: RV_FS_IMG=$(RV_PUB_FS_IMG)
-run-rv-pub: RV_USER_FEATURES=
-run-rv-pub: MEM=$(PUB_INTERACTIVE_MEM)
-run-rv-pub: SMP=$(PUB_INTERACTIVE_SMP)
-run-rv-pub: RV_OUTPUT=$(RV_PUB_OUTPUT)
-run-rv-pub: check-pub-images rv
+# Preliminary: contest_launcher reads mode=preliminary and execs the embedded
+# testrunner, which emits the preliminary judge group markers.
+run-rv-pre: RV_FS_IMG = $(RV_PRE_FS_IMG)
+run-rv-pre: RV_DISK_IMG = $(RV_PRE_DISK_IMG)
+run-rv-pre: AUX_FS_DIR = respos-preliminary
+run-rv-pre: MEM = $(PRE_MEM)
+run-rv-pre: SMP = $(PRE_SMP)
+run-rv-pre: RV_OUTPUT = $(RV_PRE_OUTPUT)
+run-rv-pre: build-rv check-rv-pre-image build-rv-local-disk run-rv-qemu
 
-run-la-pub: LA_FS_IMG=$(LA_PUB_FS_IMG)
-run-la-pub: LA_USER_FEATURES=
-run-la-pub: LA_MEM=$(LA_PUB_INTERACTIVE_MEM)
-run-la-pub: LA_SMP=$(LA_PUB_INTERACTIVE_SMP)
-run-la-pub: LA_OUTPUT=$(LA_PUB_OUTPUT)
-run-la-pub: check-pub-images la
+run-la-pre: LA_FS_IMG = $(LA_PRE_FS_IMG)
+run-la-pre: LA_DISK_IMG = $(LA_PRE_DISK_IMG)
+run-la-pre: AUX_FS_DIR = respos-preliminary
+run-la-pre: LA_MEM = $(PRE_MEM)
+run-la-pre: LA_SMP = $(PRE_SMP)
+run-la-pre: LA_OUTPUT = $(LA_PRE_OUTPUT)
+run-la-pre: build-la check-la-pre-image build-la-local-disk run-la-qemu
 
-check-pub-images:
-	@test -r "$(RV_PUB_FS_IMG)" || { echo "missing $(RV_PUB_FS_IMG)" >&2; exit 1; }
-	@test -r "$(LA_PUB_FS_IMG)" || { echo "missing $(LA_PUB_FS_IMG)" >&2; exit 1; }
-	@file "$(RV_PUB_FS_IMG)" "$(LA_PUB_FS_IMG)"
+# Final: contest_launcher bypasses testrunner and serially runs the two official
+# glibc scripts from the public root image.
+run-rv-final: RV_FS_IMG = $(RV_FINAL_FS_IMG)
+run-rv-final: RV_DISK_IMG = $(RV_FINAL_DISK_IMG)
+run-rv-final: AUX_FS_DIR = respos-final
+run-rv-final: MEM = $(RV_FINAL_MEM)
+run-rv-final: SMP = $(RV_FINAL_SMP)
+run-rv-final: RV_OUTPUT = $(RV_FINAL_OUTPUT)
+run-rv-final: build-rv check-rv-final-image build-rv-local-disk run-rv-qemu
 
-check-submit: all
-	@file $(KERNEL_RV)
-	@file $(KERNEL_LA)
+run-la-final: LA_FS_IMG = $(LA_FINAL_FS_IMG)
+run-la-final: LA_DISK_IMG = $(LA_FINAL_DISK_IMG)
+run-la-final: AUX_FS_DIR = respos-final
+run-la-final: LA_MEM = $(LA_FINAL_MEM)
+run-la-final: LA_SMP = $(LA_FINAL_SMP)
+run-la-final: LA_OUTPUT = $(LA_FINAL_OUTPUT)
+run-la-final: build-la check-la-final-image build-la-local-disk run-la-qemu
+
+# Diagnostic: use the final root image but enter the embedded user shell so a
+# single official script or an embedded probe can be run manually.
+run-rv-diagnostic: RV_FS_IMG = $(RV_FINAL_FS_IMG)
+run-rv-diagnostic: RV_DISK_IMG = $(RV_DIAGNOSTIC_DISK_IMG)
+run-rv-diagnostic: AUX_FS_DIR = respos-diagnostic
+run-rv-diagnostic: MEM = $(RV_DIAGNOSTIC_MEM)
+run-rv-diagnostic: SMP = $(RV_DIAGNOSTIC_SMP)
+run-rv-diagnostic: RV_OUTPUT = $(RV_DIAGNOSTIC_OUTPUT)
+run-rv-diagnostic: build-rv check-rv-final-image build-rv-local-disk run-rv-qemu
+
+run-la-diagnostic: LA_FS_IMG = $(LA_FINAL_FS_IMG)
+run-la-diagnostic: LA_DISK_IMG = $(LA_DIAGNOSTIC_DISK_IMG)
+run-la-diagnostic: AUX_FS_DIR = respos-diagnostic
+run-la-diagnostic: LA_MEM = $(LA_DIAGNOSTIC_MEM)
+run-la-diagnostic: LA_SMP = $(LA_DIAGNOSTIC_SMP)
+run-la-diagnostic: LA_OUTPUT = $(LA_DIAGNOSTIC_OUTPUT)
+run-la-diagnostic: build-la check-la-final-image build-la-local-disk run-la-qemu
+
+# Backward-compatible aliases.  New scripts and documentation should use the
+# explicit names above.
+rv:
+	@echo "make rv is an alias for make run-rv-pre"
+	@$(MAKE) run-rv-pre
+
+la:
+	@echo "make la is an alias for make run-la-pre"
+	@$(MAKE) run-la-pre
+
+run-rv-pub:
+	@echo "make run-rv-pub is an alias for make run-rv-final"
+	@$(MAKE) run-rv-final
+
+run-la-pub:
+	@echo "make run-la-pub is an alias for make run-la-final"
+	@$(MAKE) run-la-final
+
+check-submit: submit
+	@test -s $(KERNEL_RV) -a -s $(KERNEL_LA)
+	@test -s $(SUBMIT_RV_DISK_IMG) -a -s $(SUBMIT_LA_DISK_IMG)
+	@file $(KERNEL_RV) $(KERNEL_LA) $(SUBMIT_RV_DISK_IMG) $(SUBMIT_LA_DISK_IMG)
+	@for image in $(SUBMIT_RV_DISK_IMG) $(SUBMIT_LA_DISK_IMG); do \
+		mode="$$(debugfs -R 'cat /profile' $$image 2>/dev/null | awk '{ line=$$0; sub(/^[ \t]+/, "", line); if (line != "" && substr(line, 1, 1) != "#") { print line; exit } }')"; \
+		test "$$mode" = "mode=auto" || { echo "$$image does not contain mode=auto" >&2; exit 1; }; \
+	done
+
+help:
+	@echo "Online submission:"
+	@echo "  make all              build kernels and auto-detect submission disks"
+	@echo "  make check-submit     rebuild and validate all four submission artifacts"
+	@echo "Local preliminary suite (embedded testrunner):"
+	@echo "  make prepare-pre-images"
+	@echo "  make run-rv-pre"
+	@echo "  make run-la-pre"
+	@echo "Local final scoring scripts:"
+	@echo "  make run-rv-final     default: 16 GiB / 8 harts"
+	@echo "  make run-la-final     default: 36 GiB / 12 harts"
+	@echo "Interactive diagnostics:"
+	@echo "  make run-rv-diagnostic"
+	@echo "  make run-la-diagnostic"
 
 clean:
-	rm -f $(KERNEL_RV) $(KERNEL_LA) $(RV_DISK_IMG) $(LA_DISK_IMG)
+	rm -f $(KERNEL_RV) $(KERNEL_LA) $(SUBMIT_RV_DISK_IMG) $(SUBMIT_LA_DISK_IMG)
 	$(MAKE) -C os clean

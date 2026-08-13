@@ -17,9 +17,11 @@ const FINAL_SCRIPTS: &[&str] = &[
     "/glibc/cagent_testcode.sh\0",
     "/glibc/buildstorm_testcode.sh\0",
 ];
+const PRELIMINARY_MARKERS: &[&str] = &["/musl/basic_testcode.sh\0", "/glibc/basic_testcode.sh\0"];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ContestMode {
+    Auto,
     Preliminary,
     Final,
     Diagnostic,
@@ -28,21 +30,21 @@ enum ContestMode {
 fn contest_mode() -> ContestMode {
     let fd = open(PROFILE, O_RDONLY, 0);
     if fd < 0 {
-        println!("[contest_launcher] no profile; using preliminary mode");
-        return ContestMode::Preliminary;
+        println!("[contest_launcher] no profile; detecting the root image");
+        return ContestMode::Auto;
     }
 
     let mut data = [0u8; 512];
     let size = read(fd as usize, &mut data);
     let _ = close(fd as usize);
     if size <= 0 {
-        println!("[contest_launcher] empty profile; using preliminary mode");
-        return ContestMode::Preliminary;
+        println!("[contest_launcher] empty profile; detecting the root image");
+        return ContestMode::Auto;
     }
 
     let Ok(text) = core::str::from_utf8(&data[..size as usize]) else {
-        println!("[contest_launcher] invalid UTF-8 profile; using preliminary mode");
-        return ContestMode::Preliminary;
+        println!("[contest_launcher] invalid UTF-8 profile; detecting the root image");
+        return ContestMode::Auto;
     };
     for line in text.lines() {
         let line = line.trim();
@@ -50,6 +52,7 @@ fn contest_mode() -> ContestMode {
             continue;
         }
         match line {
+            "mode=auto" | "auto" => return ContestMode::Auto,
             "mode=final" | "final" => return ContestMode::Final,
             "mode=preliminary" | "preliminary" => return ContestMode::Preliminary,
             "mode=diagnostic" | "diagnostic" => return ContestMode::Diagnostic,
@@ -57,8 +60,8 @@ fn contest_mode() -> ContestMode {
         }
     }
 
-    println!("[contest_launcher] profile has no known mode; using preliminary mode");
-    ContestMode::Preliminary
+    println!("[contest_launcher] profile has no known mode; detecting the root image");
+    ContestMode::Auto
 }
 
 fn run_preliminary() -> i32 {
@@ -79,7 +82,7 @@ fn run_diagnostic() -> i32 {
     127
 }
 
-fn script_exists(path: &str) -> bool {
+fn path_exists(path: &str) -> bool {
     let fd = open(path, O_RDONLY, 0);
     if fd < 0 {
         false
@@ -89,9 +92,25 @@ fn script_exists(path: &str) -> bool {
     }
 }
 
+fn detect_root_image_mode() -> ContestMode {
+    // Final markers take precedence in case a later final image also keeps
+    // compatibility files from the preliminary suite.
+    if FINAL_SCRIPTS.iter().any(|path| path_exists(path)) {
+        println!("[contest_launcher] auto-detected final-round root image");
+        return ContestMode::Final;
+    }
+    if PRELIMINARY_MARKERS.iter().any(|path| path_exists(path)) {
+        println!("[contest_launcher] auto-detected preliminary-round root image");
+        return ContestMode::Preliminary;
+    }
+
+    println!("[contest_launcher] unknown root image; falling back to preliminary mode");
+    ContestMode::Preliminary
+}
+
 fn run_final_script(script: &str) {
     let display = script.strip_suffix('\0').unwrap_or(script);
-    if !script_exists(script) {
+    if !path_exists(script) {
         println!(
             "[contest_launcher] final script missing; skipping {}",
             display
@@ -142,7 +161,12 @@ fn run_final() -> i32 {
 
 #[unsafe(no_mangle)]
 fn main() -> i32 {
-    match contest_mode() {
+    let mode = match contest_mode() {
+        ContestMode::Auto => detect_root_image_mode(),
+        mode => mode,
+    };
+    match mode {
+        ContestMode::Auto => unreachable!(),
         ContestMode::Preliminary => run_preliminary(),
         ContestMode::Final => run_final(),
         ContestMode::Diagnostic => run_diagnostic(),

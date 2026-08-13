@@ -25,7 +25,7 @@ git clone --branch final-2026 --depth 1 \
 ### 可选 `/respos` 辅助镜像
 
 顶层 `Makefile` 的 `make all` 从 `respos/` 生成 16 MiB ext4 `disk.img` 和 `disk-la.img`；
-`RV_DISK_IMG`/`LA_DISK_IMG` 可覆盖名称，`os/Makefile` 使用 `DISK_IMG`。文件存在时，RV64 将其连接到 `virtio-mmio-bus.1`，LoongArch
+提交产物名称和 profile 不接受命令行覆盖。文件存在时，RV64 将其连接到 `virtio-mmio-bus.1`，LoongArch
 将其添加为第二个 `virtio-blk-pci`。文件不存在时不添加 x1。
 `build-disks` 每次都完整重建两个小镜像，因此 `respos/` 中辅助文件的新增、修改和删除都会反映到产物，
 不会因 Make 只观察 `profile` 而沿用陈旧内容。
@@ -33,18 +33,20 @@ git clone --branch final-2026 --depth 1 \
 辅助镜像必须是 ext4，其根目录将在 guest 中显示为 `/respos`。最小 profile 例子：
 
 ```text
-mode=preliminary
+mode=auto
 ```
 
-初赛提交保持 `mode=preliminary`；决赛提交改为 `mode=final`。本地显式诊断可使用
+线上提交使用 `mode=auto`，由 launcher 检查官方根盘中的测试脚本自动适配初赛复测或决赛；本地
+强制初赛/决赛分别使用 `mode=preliminary`/`mode=final`。本地显式诊断可使用
 `respos-diagnostic/profile` 的 `mode=diagnostic` 进入内嵌 `user_shell`；该目录不参与默认
-`make all` 生成的提交镜像。profile 最多读取 512 bytes，
-忽略空行和以 `#` 开头的行；缺失或无法识别时安全回退到 preliminary。final launcher
+`make all` 生成的提交镜像。profile 最多读取 512 bytes，忽略空行和以 `#` 开头的行；缺失、空白
+或无法识别时也进入自动检测。自动检测先检查 CAgent/BuildStorm 决赛脚本，再检查 musl/glibc basic
+初赛脚本；决赛标志优先，两类标志都没有时告警并回退 preliminary。final launcher
 固定串行运行当前官方 pub 镜像的 `/glibc/cagent_testcode.sh` 和
 `/glibc/buildstorm_testcode.sh`，不扫描宿主机或在 Makefile 中推断测例。
 
 验证时应使用 `-snapshot`，并分别覆盖：不提供 x1、提供合法 ext4 x1、提供
-非 ext4 x1。还应分别用两种 mode 验证初赛进入原 `testrunner`，以及决赛脚本严格
+非 ext4 x1。还应验证 auto 对初赛/决赛根盘的识别、两种显式 mode 的强制行为，以及决赛脚本严格
 `fork → execve → waitpid` 串行并在全部完成后关机。
 
 ### 准备比赛镜像
@@ -109,16 +111,19 @@ bash docs/决赛文档/build.sh
 - 内容：
 
 ```bash
-make all                  # RV/LA release，生成 kernel-rv、kernel-la
+make all                  # 线上评测入口：生成 kernel-rv/kernel-la/disk.img/disk-la.img
 make build-rv             # 只构建 RV release
 make build-la             # 只构建 LA release
 make MODE=debug all       # 双架构 debug
 make MODE=release-debug all
-make check-submit         # 构建并检查两个 ELF 产物类型
+make check-submit         # 构建并检查四个提交产物和 auto profile
 ```
 
 顶层构建会复制架构对应的 Cargo config 到 `os/.cargo/config.toml` 和
 `user/.cargo/config.toml`，先构建用户程序，再通过 `os/build.rs` 嵌入内核。
+Makefile 使用 `.NOTPARALLEL`，因为两个架构共享可变 Cargo config。`make all` 固定读取
+`respos/profile`，并在构建前验证第一个有效配置项为 `mode=auto`；命令行不能把线上提交入口
+静默改成 preliminary/diagnostic。平台提供大型官方根镜像，仓库只生成第二块小型 ext4 辅助盘。
 
 - 后续影响：不要并行执行 RV/LA 构建命令；共享 config 文件可能相互覆盖。
 
@@ -171,20 +176,26 @@ ps -o pid,ppid,ni,cls,stat,etime,cmd -p "$qemu_pid"
 - 内容：
 
 ```bash
-make rv                   # 输出同时写入 rv-output.txt
-make la                   # 输出同时写入 la-output.txt
+make prepare-pre-images   # 从保留的 .xz 恢复 4 GiB 初赛全量镜像
+make run-rv-pre           # 初赛 RV64，进入内嵌 testrunner
+make run-la-pre           # 初赛 LA64，进入内嵌 testrunner
+make run-rv-final         # 决赛 RV64，官方 CAgent + BuildStorm
+make run-la-final         # 决赛 LA64，官方 CAgent + BuildStorm
 ```
 
 常用覆盖参数：
 
 ```bash
-make rv MEM=4G SMP=1 RV_OUTPUT=/tmp/respos-rv.log
-make la LA_MEM=12G LA_SMP=12 LA_OUTPUT=/tmp/respos-la.log
+make run-rv-pre PRE_MEM=4G PRE_SMP=1 RV_PRE_OUTPUT=/tmp/respos-rv-pre.log
+make run-la-pre PRE_MEM=4G PRE_SMP=1 LA_PRE_OUTPUT=/tmp/respos-la-pre.log
+make run-rv-final RV_FINAL_MEM=16G RV_FINAL_SMP=8
+make run-la-final LA_FINAL_MEM=12G LA_FINAL_SMP=12  # 本机内存不足时的功能配置
 ```
 
-- 内容补充：两目标依赖 `build-disks`，分别挂载 `disk.img`/`disk-la.img` 为 x1。默认
-  RV 使用 `MEM=4G`、`SMP=1`；LA 使用独立的 `LA_MEM=12G`、`LA_SMP=12`，均可在命令行
-  覆盖。LA 会通过 QEMU-virt IOCSR mailbox/IPI 启动最多 12 个 hart，并在进入用户态前输出
+- 内容补充：本地目标分别在 `/tmp` 重建独立辅助盘，不会覆盖 `make all` 的提交产物。
+  初赛 profile 为 `mode=preliminary`，决赛 profile 为 `mode=final`，线上 profile 为 `mode=auto`。
+  LA 会通过 QEMU-virt
+  IOCSR mailbox/IPI 启动最多 12 个 hart，并在进入用户态前输出
   online mask；`0xfff` 表示 12 个 hart 均已上线。本地 `rv`/`la` 目标默认使用 QEMU
   `-snapshot`，guest 在本轮仍可正常写盘，但不会因 Ctrl-C/超时把官方原始镜像留在
   journal/元数据不一致状态。RV64 使用网站给出的 virtio-mmio bus.0/1；LoongArch
@@ -196,7 +207,7 @@ make la LA_MEM=12G LA_SMP=12 LA_OUTPUT=/tmp/respos-la.log
 iozone 专项可用编译时诊断开关：
 
 ```bash
-IOZONE_ONLY=1 make rv
+IOZONE_ONLY=1 make run-rv-pre
 ```
 
 该开关只使 `testrunner` 依次运行 glibc/musl iozone 并关机，默认构建不受影响。当前
@@ -204,7 +215,7 @@ RV64 SMP=1、4 GiB 的干净镜像实测两组合计约 168 秒，不应用 60/1
 判定为卡死。中断前先检查日志中的 `Run began`、子项标题和 `iozone test complete.`
 是否持续增长。
 
-### pub 镜像交互式启动
+### 决赛镜像与交互式诊断
 
 - 状态：已验证（RV64 启动到交互式 shell）
 - 适用范围：决赛 pub 镜像的第一阶段检查
@@ -213,15 +224,17 @@ RV64 SMP=1、4 GiB 的干净镜像实测两组合计约 168 秒，不应用 60/1
 - 内容：
 
 ```bash
-make run-rv-pub       # RV pub 镜像，默认 4G、单核
-make run-la-pub       # LA pub 镜像，默认 12G、12 hart
+make run-rv-final       # RV pub 根盘，final profile
+make run-la-final       # LA pub 根盘，final profile
+make run-rv-diagnostic  # RV pub 根盘，diagnostic profile，进入 shell
+make run-la-diagnostic  # LA pub 根盘，diagnostic profile，进入 shell
 ```
 
-这两个目标通过 virtio block 设备加载 ext4 镜像，不执行宿主机挂载。当前启动阶段由
-`/respos/profile` 的 `mode=preliminary|final` 决定，不再由 `eval` feature直接选择shell或runner。
-`make rv` 和 `make la` 默认仍使用原初赛镜像路径；检查pub镜像应使用这两个专用目标或显式覆盖
-`RV_FS_IMG`/`LA_FS_IMG`。
-8 vCPU/8G 不是当前交互式入口的默认值；可按评测资源通过 `MEM`/`SMP` 覆盖。
+这些目标通过 virtio block 设备加载 ext4 镜像，不执行宿主机挂载。当前启动阶段由
+`/respos/profile` 的 `mode=auto|preliminary|final|diagnostic` 决定，不再由 `eval` feature 直接选择
+shell 或 runner。auto 根据根盘脚本识别阶段；下列本地目标仍使用显式 profile，便于隔离测试。
+旧的 `run-rv-pub`/`run-la-pub` 只是 final 入口兼容别名。诊断目标才进入 shell；final 目标直接
+运行 `/glibc/cagent_testcode.sh` 和 `/glibc/buildstorm_testcode.sh`。
 
 交互式 RV64 SMP 专项构建后，可在 shell 直接运行内嵌 probe：
 

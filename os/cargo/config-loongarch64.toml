@@ -13,7 +13,9 @@ panic = "abort"
 
 [profile.release]
 debug = false
-lto = "thin"
+# Keep the submission profile identical across architectures.  In particular,
+# avoid the platform rustc 1.86 thin-LTO code-generation failure seen on RV64.
+lto = false
 panic = "abort"
 
 [profile.release-debug]

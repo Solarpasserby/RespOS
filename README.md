@@ -9,7 +9,7 @@ RespOS 是一个使用 Rust 编写的教学与竞赛型操作系统内核，主�
 
 RespOS 以 Linux 用户态兼容为主要目标，内核提供接近 Linux ABI 的系统调用接口，并通过比赛镜像中的 musl/glibc 程序持续验证语义。项目在结构上保持内核、用户态运行时与测例入口分离：内核负责进程、内存、文件系统、网络和中断等基础能力，用户态部分提供系统调用封装、基础运行时和 `testrunner`。
 
-在实现上，RespOS 尽量保持跨架构公共逻辑复用，将 RISC-V 64 与 LoongArch 64 的差异收敛到 HAL、启动、陷入处理和页表等架构相关层；在测试流程上，则由 `testrunner` 按比赛镜像中的测例组织运行，并输出评测机可识别的日志。
+在实现上，RespOS 尽量保持跨架构公共逻辑复用，将 RISC-V 64 与 LoongArch 64 的差异收敛到 HAL、启动、陷入处理和页表等架构相关层。初赛及本地兼容性回归由内嵌 `testrunner` 组织；决赛评分绕过 `testrunner`，由 `contest_launcher` 直接执行官方镜像中的 CAgent 和 BuildStorm 脚本。
 
 | 模块 | 完成情况 |
 | --- | --- |
@@ -26,11 +26,11 @@ RespOS 以 Linux 用户态兼容为主要目标，内核提供接近 Linux ABI �
 ## 构建与运行准备
 
 ```bash
-make all          # 构建 kernel-rv 与 kernel-la
+make all          # 线上评测入口：构建双架构内核和自动识别辅助盘
 make build-rv     # 仅构建 RISC-V 内核
 make build-la     # 仅构建 LoongArch 内核
-make MODE=debug   # 使用 debug 配置构建
 make check-submit # 检查提交产物
+make help         # 查看明确的本地初赛/决赛/诊断入口
 make clean        # 清理构建产物
 ```
 
@@ -38,28 +38,39 @@ make clean        # 清理构建产物
 
 - `kernel-rv`
 - `kernel-la`
+- `disk.img`
+- `disk-la.img`
 
-这两个文件是比赛平台要求的 ELF 内核产物。
+线上平台执行 `make all`。两个 `kernel-*` 是 ELF 内核，两个 `disk*.img` 是包含
+`mode=auto` 的小型 ext4 辅助盘；平台提供大型官方根镜像并按比赛 QEMU 参数启动。
+`contest_launcher` 会优先检查 CAgent/BuildStorm 决赛脚本，再检查初赛 basic 脚本，从而让同一份
+提交同时适配决赛评分和后续初赛复测。
 
-第一次运行前需要在仓库根目录准备测试镜像：
-
-- RISC-V: `img/sdcard-rv.img`
-- LoongArch: `img/sdcard-la.img`
-
-可以直接执行脚本下载并解压官方测试仓库发布的镜像：
+第一次本地运行前可下载官方初赛和决赛镜像：
 
 ```bash
 bash scripts/get_img.sh
 ```
 
-脚本会把镜像放到 `img/` 目录，并保留 `.xz` 压缩包，后续镜像被写坏时可以从本地压缩包恢复。
+脚本会把镜像放到 `img/` 并保留压缩包。初赛全量镜像用下面的命令恢复到不会和 128 MiB 决赛子集混淆的新名字：
+
+```bash
+make prepare-pre-images
+```
 
 ## 运行
 
 ```bash
-make rv           # 构建并运行 RISC-V 版本
-make la           # 构建并运行 LoongArch 版本
+make run-rv-pre         # RISC-V 初赛全量测例，进入 testrunner
+make run-la-pre         # LoongArch 初赛全量测例，进入 testrunner
+make run-rv-final       # RISC-V 决赛 CAgent + BuildStorm
+make run-la-final       # LoongArch 决赛 CAgent + BuildStorm
+make run-rv-diagnostic  # 决赛镜像 + 交互式 shell
+make run-la-diagnostic
 ```
+
+所有本地 QEMU 入口都使用 `-snapshot`。`make rv`/`make la` 暂时保留为初赛入口别名，
+`make run-rv-pub`/`make run-la-pub` 保留为决赛入口别名；新脚本应使用上述明确名称。
 
 ## 目录结构
 
