@@ -69,37 +69,43 @@ impl<const ORDER: usize> DerefMut for IrqSafeHeapGuard<'_, ORDER> {
 unsafe impl<const ORDER: usize> GlobalAlloc for IrqSafeHeap<ORDER> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let _irq_guard = InterruptGuard::new();
-        let started = crate::perf::now_ticks();
+        let started = crate::perf::heap_timing_start();
         let mut heap = self.0.lock();
-        let locked = crate::perf::now_ticks();
+        let locked = crate::perf::heap_timing_checkpoint(started);
         let result = heap
             .alloc(layout)
             .map_or(core::ptr::null_mut(), |allocation| allocation.as_ptr());
-        let operated = crate::perf::now_ticks();
+        let operated = crate::perf::heap_timing_checkpoint(started);
         drop(heap);
+        let finished = crate::perf::heap_timing_checkpoint(started);
         crate::perf::heap_alloc(
             layout.size(),
-            crate::perf::elapsed_since(started),
+            layout.align(),
+            finished.wrapping_sub(started),
             locked.wrapping_sub(started),
             operated.wrapping_sub(locked),
             !result.is_null(),
+            started != 0,
         );
         result
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         let _irq_guard = InterruptGuard::new();
-        let started = crate::perf::now_ticks();
+        let started = crate::perf::heap_timing_start();
         let mut heap = self.0.lock();
-        let locked = crate::perf::now_ticks();
+        let locked = crate::perf::heap_timing_checkpoint(started);
         heap.dealloc(unsafe { NonNull::new_unchecked(ptr) }, layout);
-        let operated = crate::perf::now_ticks();
+        let operated = crate::perf::heap_timing_checkpoint(started);
         drop(heap);
+        let finished = crate::perf::heap_timing_checkpoint(started);
         crate::perf::heap_dealloc(
             layout.size(),
-            crate::perf::elapsed_since(started),
+            layout.align(),
+            finished.wrapping_sub(started),
             locked.wrapping_sub(started),
             operated.wrapping_sub(locked),
+            started != 0,
         );
     }
 }

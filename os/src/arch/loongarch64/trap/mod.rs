@@ -149,6 +149,7 @@ pub fn trap_handler(cx: &mut TrapContext) {
     match estat::cause(estat::read()) {
         estat::Trap::Interrupt(estat::Interrupt::Timer) => {
             crate::perf::user_timer_trap(1);
+            crate::perf::sample_concurrency();
             clear_timer_interrupt();
             set_next_ti_trigger();
             if crate::arch::smp::is_timer_service_hart() {
@@ -231,6 +232,7 @@ pub fn trap_from_kernel(cx: &mut TrapContext) {
             panic!("[kernel] Syscall from kernel!");
         }
         estat::Trap::Interrupt(estat::Interrupt::Timer) => {
+            crate::perf::sample_concurrency();
             clear_timer_interrupt();
             set_next_ti_trigger();
             if crate::arch::smp::is_timer_service_hart() && crate::task::current_task().is_none() {

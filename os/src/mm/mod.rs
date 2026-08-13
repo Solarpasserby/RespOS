@@ -40,6 +40,17 @@ pub fn heap_allocated() -> usize {
     heap_allocator::HEAP_ALLOCATOR.lock().stats_alloc_user()
 }
 
+#[cfg(feature = "perf_counters")]
+pub fn heap_perf_usage() -> (usize, usize) {
+    let heap = heap_allocator::HEAP_ALLOCATOR.lock();
+    (heap.stats_alloc_user(), heap.stats_peak_user())
+}
+
+#[cfg(feature = "perf_counters")]
+pub fn reset_heap_perf_peak() {
+    heap_allocator::HEAP_ALLOCATOR.lock().reset_peak_user();
+}
+
 pub fn try_free_frame_count() -> Option<usize> {
     Some(frame_allocator::FRAME_ALLOCATOR.try_lock()?.free_frames())
 }

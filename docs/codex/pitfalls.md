@@ -76,6 +76,23 @@
 - 后续影响：不能在 wait 内核循环里简单忽略信号，因为 handler 必须先执行；应在 signal frame 中保存
   重执行上下文。分析大量 LTP TBROK 时同时看 `SA_RESTART`、task health 和跨 case 输出串台。
 
+## 高频性能计数器本身会把共享 cache line 变成伪热点
+
+- 状态：已确认并修复 heap 计数结构；LA 重校准待验证
+- 适用范围：`perf_counters`、多 hart allocator/scheduler/锁热路径、BuildStorm A/B
+- 最后验证：2026-08-13
+- 证据：LA 相邻 130 秒 perf/no-feature 窗口；`os/src/perf.rs` 的 heap per-hart shards；RV64 8-hart
+  `smp_shared_mm_probe` 与闭合输出
+- 内容：Relaxed atomic 只放宽内存顺序，不消除多个 hart 对同一 cache line 的所有权争抢。第一版
+  heap size-class 全局原子使 dev/core 里程碑慢约 17--22%，已经大于要测的优化收益。当前 heap 高频
+  总量和分桶按 hart 分片，峰值在已有 allocator 临界区中维护；仅分片后的相邻样本仍有 5--13% 的
+  dev 阶段扰动，因此硬件时钟计时进一步改为每 hart 1/64 抽样估算；完整 feature 的 sampled/no-feature
+  单轮仍相差约 11--16%，说明其他逐事件计数和宿主波动也不可忽略。旧完整日志中的全局计数绝对时间
+  不能与新版本直接 A/B，完整 `perf_counters` 也不能用于判断小幅墙钟收益。
+- 后续影响：为每次 syscall、alloc、fault、lock 或 timer 增加计数前，先决定是否按 hart/CPU 分片；
+  不得用“仅 Relaxed”声称低开销。观测 feature 必须与 no-feature 做同阶段校准；超过 3% 时计数只作
+  结构/数量级诊断，优化收益改由关闭观测 feature 的生产路径 before/after A/B 决定。
+
 ## 辅助盘 profile 不会随平台根镜像变化，线上阶段不能固定为 final
 
 - 状态：已确认；通过 `mode=auto` 与根盘标志检测修复

@@ -173,6 +173,7 @@ pub fn acknowledge_ipi() {
     }
     let hart_id = current_hart_id();
     IPI_COUNT[hart_id].fetch_add(1, Ordering::Relaxed);
+    crate::perf::ipi_received(1);
 }
 
 #[inline]

@@ -7,6 +7,170 @@ use alloc::string::String;
 #[cfg(feature = "perf_counters")]
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+#[cfg(feature = "perf_counters")]
+static SCHEDULER_READY_CURRENT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "perf_counters")]
+static RUNNING_HARTS_CURRENT: AtomicUsize = AtomicUsize::new(0);
+
+const HEAP_CLASS_COUNT: usize = 10;
+const HEAP_TIMING_SAMPLE_RATE: usize = 64;
+const HEAP_CLASS_UPPER_BOUNDS: [usize; HEAP_CLASS_COUNT] =
+    [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, usize::MAX];
+
+#[cfg(feature = "perf_counters")]
+struct HeapClassCounters {
+    alloc_calls: [AtomicUsize; HEAP_CLASS_COUNT],
+    dealloc_calls: [AtomicUsize; HEAP_CLASS_COUNT],
+    alloc_bytes: [AtomicUsize; HEAP_CLASS_COUNT],
+    dealloc_bytes: [AtomicUsize; HEAP_CLASS_COUNT],
+    alloc_wait_ticks: [AtomicUsize; HEAP_CLASS_COUNT],
+    dealloc_wait_ticks: [AtomicUsize; HEAP_CLASS_COUNT],
+    alloc_core_ticks: [AtomicUsize; HEAP_CLASS_COUNT],
+    dealloc_core_ticks: [AtomicUsize; HEAP_CLASS_COUNT],
+    alloc_ticks: AtomicUsize,
+    dealloc_ticks: AtomicUsize,
+    max_alloc_ticks: AtomicUsize,
+    max_dealloc_ticks: AtomicUsize,
+    high_alignment_allocs: AtomicUsize,
+    alloc_timing_samples: AtomicUsize,
+    dealloc_timing_samples: AtomicUsize,
+    timing_sequence: AtomicUsize,
+}
+
+#[cfg(feature = "perf_counters")]
+static HEAP_CLASSES: [HeapClassCounters; crate::arch::smp::MAX_HARTS] = [const {
+    HeapClassCounters {
+        alloc_calls: [const { AtomicUsize::new(0) }; HEAP_CLASS_COUNT],
+        dealloc_calls: [const { AtomicUsize::new(0) }; HEAP_CLASS_COUNT],
+        alloc_bytes: [const { AtomicUsize::new(0) }; HEAP_CLASS_COUNT],
+        dealloc_bytes: [const { AtomicUsize::new(0) }; HEAP_CLASS_COUNT],
+        alloc_wait_ticks: [const { AtomicUsize::new(0) }; HEAP_CLASS_COUNT],
+        dealloc_wait_ticks: [const { AtomicUsize::new(0) }; HEAP_CLASS_COUNT],
+        alloc_core_ticks: [const { AtomicUsize::new(0) }; HEAP_CLASS_COUNT],
+        dealloc_core_ticks: [const { AtomicUsize::new(0) }; HEAP_CLASS_COUNT],
+        alloc_ticks: AtomicUsize::new(0),
+        dealloc_ticks: AtomicUsize::new(0),
+        max_alloc_ticks: AtomicUsize::new(0),
+        max_dealloc_ticks: AtomicUsize::new(0),
+        high_alignment_allocs: AtomicUsize::new(0),
+        alloc_timing_samples: AtomicUsize::new(0),
+        dealloc_timing_samples: AtomicUsize::new(0),
+        timing_sequence: AtomicUsize::new(0),
+    }
+};
+    crate::arch::smp::MAX_HARTS];
+
+#[derive(Clone, Copy, Default)]
+struct HeapClassSnapshot {
+    alloc_calls: [usize; HEAP_CLASS_COUNT],
+    dealloc_calls: [usize; HEAP_CLASS_COUNT],
+    alloc_bytes: [usize; HEAP_CLASS_COUNT],
+    dealloc_bytes: [usize; HEAP_CLASS_COUNT],
+    alloc_wait_ticks: [usize; HEAP_CLASS_COUNT],
+    dealloc_wait_ticks: [usize; HEAP_CLASS_COUNT],
+    alloc_core_ticks: [usize; HEAP_CLASS_COUNT],
+    dealloc_core_ticks: [usize; HEAP_CLASS_COUNT],
+    alloc_ticks: usize,
+    dealloc_ticks: usize,
+    max_alloc_ticks: usize,
+    max_dealloc_ticks: usize,
+    high_alignment_allocs: usize,
+    alloc_timing_samples: usize,
+    dealloc_timing_samples: usize,
+}
+
+#[inline(always)]
+#[cfg(feature = "perf_counters")]
+fn heap_class_index(size: usize, align: usize) -> usize {
+    let effective_size = size.max(align);
+    HEAP_CLASS_UPPER_BOUNDS
+        .iter()
+        .position(|upper| effective_size <= *upper)
+        .unwrap_or(HEAP_CLASS_COUNT - 1)
+}
+
+#[inline(always)]
+#[cfg(feature = "perf_counters")]
+fn current_heap_classes() -> &'static HeapClassCounters {
+    let hart = crate::arch::smp::current_hart_id();
+    debug_assert!(hart < HEAP_CLASSES.len());
+    &HEAP_CLASSES[hart]
+}
+
+fn heap_class_snapshot() -> HeapClassSnapshot {
+    #[cfg(feature = "perf_counters")]
+    {
+        let mut snapshot = HeapClassSnapshot {
+            alloc_calls: core::array::from_fn(|idx| {
+                HEAP_CLASSES
+                    .iter()
+                    .map(|classes| classes.alloc_calls[idx].load(Ordering::Relaxed))
+                    .sum()
+            }),
+            dealloc_calls: core::array::from_fn(|idx| {
+                HEAP_CLASSES
+                    .iter()
+                    .map(|classes| classes.dealloc_calls[idx].load(Ordering::Relaxed))
+                    .sum()
+            }),
+            alloc_bytes: core::array::from_fn(|idx| {
+                HEAP_CLASSES
+                    .iter()
+                    .map(|classes| classes.alloc_bytes[idx].load(Ordering::Relaxed))
+                    .sum()
+            }),
+            dealloc_bytes: core::array::from_fn(|idx| {
+                HEAP_CLASSES
+                    .iter()
+                    .map(|classes| classes.dealloc_bytes[idx].load(Ordering::Relaxed))
+                    .sum()
+            }),
+            alloc_wait_ticks: core::array::from_fn(|idx| {
+                HEAP_CLASSES
+                    .iter()
+                    .map(|classes| classes.alloc_wait_ticks[idx].load(Ordering::Relaxed))
+                    .sum()
+            }),
+            dealloc_wait_ticks: core::array::from_fn(|idx| {
+                HEAP_CLASSES
+                    .iter()
+                    .map(|classes| classes.dealloc_wait_ticks[idx].load(Ordering::Relaxed))
+                    .sum()
+            }),
+            alloc_core_ticks: core::array::from_fn(|idx| {
+                HEAP_CLASSES
+                    .iter()
+                    .map(|classes| classes.alloc_core_ticks[idx].load(Ordering::Relaxed))
+                    .sum()
+            }),
+            dealloc_core_ticks: core::array::from_fn(|idx| {
+                HEAP_CLASSES
+                    .iter()
+                    .map(|classes| classes.dealloc_core_ticks[idx].load(Ordering::Relaxed))
+                    .sum()
+            }),
+            ..HeapClassSnapshot::default()
+        };
+        for classes in &HEAP_CLASSES {
+            snapshot.alloc_ticks += classes.alloc_ticks.load(Ordering::Relaxed);
+            snapshot.dealloc_ticks += classes.dealloc_ticks.load(Ordering::Relaxed);
+            snapshot.max_alloc_ticks = snapshot
+                .max_alloc_ticks
+                .max(classes.max_alloc_ticks.load(Ordering::Relaxed));
+            snapshot.max_dealloc_ticks = snapshot
+                .max_dealloc_ticks
+                .max(classes.max_dealloc_ticks.load(Ordering::Relaxed));
+            snapshot.high_alignment_allocs += classes.high_alignment_allocs.load(Ordering::Relaxed);
+            snapshot.alloc_timing_samples += classes.alloc_timing_samples.load(Ordering::Relaxed);
+            snapshot.dealloc_timing_samples +=
+                classes.dealloc_timing_samples.load(Ordering::Relaxed);
+        }
+        snapshot
+    }
+    #[cfg(not(feature = "perf_counters"))]
+    HeapClassSnapshot::default()
+}
+
 macro_rules! counters {
     ($($name:ident),+ $(,)?) => {
         #[cfg(feature = "perf_counters")]
@@ -39,13 +203,31 @@ macro_rules! counters {
             #[cfg(feature = "perf_counters")]
             {
                 $(COUNTERS.$name.store(0, Ordering::Relaxed);)+
-                let heap_current = crate::mm::heap_allocated();
-                COUNTERS.heap_current_bytes.store(heap_current, Ordering::Relaxed);
-                COUNTERS.heap_peak_bytes.store(heap_current, Ordering::Relaxed);
+                crate::mm::reset_heap_perf_peak();
                 COUNTERS.dirty_pages_peak.store(
                     crate::fs::page_cache_dirty_page_count(),
                     Ordering::Relaxed,
                 );
+                for classes in &HEAP_CLASSES {
+                    for idx in 0..HEAP_CLASS_COUNT {
+                        classes.alloc_calls[idx].store(0, Ordering::Relaxed);
+                        classes.dealloc_calls[idx].store(0, Ordering::Relaxed);
+                        classes.alloc_bytes[idx].store(0, Ordering::Relaxed);
+                        classes.dealloc_bytes[idx].store(0, Ordering::Relaxed);
+                        classes.alloc_wait_ticks[idx].store(0, Ordering::Relaxed);
+                        classes.dealloc_wait_ticks[idx].store(0, Ordering::Relaxed);
+                        classes.alloc_core_ticks[idx].store(0, Ordering::Relaxed);
+                        classes.dealloc_core_ticks[idx].store(0, Ordering::Relaxed);
+                    }
+                    classes.alloc_ticks.store(0, Ordering::Relaxed);
+                    classes.dealloc_ticks.store(0, Ordering::Relaxed);
+                    classes.max_alloc_ticks.store(0, Ordering::Relaxed);
+                    classes.max_dealloc_ticks.store(0, Ordering::Relaxed);
+                    classes.high_alignment_allocs.store(0, Ordering::Relaxed);
+                    classes.alloc_timing_samples.store(0, Ordering::Relaxed);
+                    classes.dealloc_timing_samples.store(0, Ordering::Relaxed);
+                    classes.timing_sequence.store(0, Ordering::Relaxed);
+                }
             }
         }
     };
@@ -111,6 +293,10 @@ counters!(
     context_switches,
     local_sfences,
     remote_rfences,
+    remote_rfence_target_harts,
+    remote_rfence_empty_requests,
+    remote_rfence_wait_ticks,
+    remote_rfence_max_wait_ticks,
     full_tlb_invalidations,
     asid_tlb_invalidations,
     tlb_shootdown_all_requests,
@@ -129,6 +315,17 @@ counters!(
     scheduler_lock_wait_ticks,
     scheduler_lock_max_wait_ticks,
     scheduler_ready_peak,
+    concurrency_samples,
+    running_harts_0,
+    running_harts_1,
+    running_harts_2_3,
+    running_harts_4_7,
+    running_harts_8_plus,
+    scheduler_ready_0,
+    scheduler_ready_1,
+    scheduler_ready_2_3,
+    scheduler_ready_4_7,
+    scheduler_ready_8_plus,
     scheduler_yields,
     syscall_yields,
     quiescence_yields,
@@ -203,20 +400,6 @@ counters!(
     ext4_lower_attributes_ticks,
     ext4_lower_superblock_calls,
     ext4_lower_superblock_ticks,
-    heap_alloc_calls,
-    heap_dealloc_calls,
-    heap_alloc_bytes,
-    heap_dealloc_bytes,
-    heap_current_bytes,
-    heap_peak_bytes,
-    heap_alloc_ticks,
-    heap_dealloc_ticks,
-    heap_alloc_lock_wait_ticks,
-    heap_dealloc_lock_wait_ticks,
-    heap_alloc_core_ticks,
-    heap_dealloc_core_ticks,
-    heap_max_alloc_ticks,
-    heap_max_dealloc_ticks,
     frame_alloc_calls,
     frame_alloc_failures,
     frame_alloc_ticks,
@@ -322,7 +505,7 @@ increment_functions!(
     (cow_fault, cow_faults),
     (context_switch, context_switches),
     (local_sfence, local_sfences),
-    (remote_rfence, remote_rfences),
+    (remote_rfence_empty_request, remote_rfence_empty_requests),
     (full_tlb_invalidation, full_tlb_invalidations),
     (asid_tlb_invalidation, asid_tlb_invalidations),
     (tlb_shootdown_all_request, tlb_shootdown_all_requests),
@@ -520,71 +703,181 @@ pub fn observe_scheduler_lock_wait(value: usize) {
 }
 
 #[inline(always)]
+pub fn observe_remote_rfence(target_harts: usize, wait_ticks: usize) {
+    #[cfg(feature = "perf_counters")]
+    {
+        COUNTERS.remote_rfences.fetch_add(1, Ordering::Relaxed);
+        COUNTERS
+            .remote_rfence_target_harts
+            .fetch_add(target_harts, Ordering::Relaxed);
+        COUNTERS
+            .remote_rfence_wait_ticks
+            .fetch_add(wait_ticks, Ordering::Relaxed);
+        observe_max(&COUNTERS.remote_rfence_max_wait_ticks, wait_ticks);
+    }
+    #[cfg(not(feature = "perf_counters"))]
+    let _ = (target_harts, wait_ticks);
+}
+
+#[inline(always)]
 pub fn observe_scheduler_ready(value: usize) {
     #[cfg(feature = "perf_counters")]
-    observe_max(&COUNTERS.scheduler_ready_peak, value);
+    {
+        SCHEDULER_READY_CURRENT.store(value, Ordering::Relaxed);
+        observe_max(&COUNTERS.scheduler_ready_peak, value);
+    }
     #[cfg(not(feature = "perf_counters"))]
     let _ = value;
+}
+
+/// Mark one hart as executing a scheduled task. This is deliberately separate
+/// from scheduler locking so timer-side sampling stays lock-free.
+#[inline(always)]
+pub fn task_running_begin() {
+    #[cfg(feature = "perf_counters")]
+    {
+        RUNNING_HARTS_CURRENT.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[inline(always)]
+pub fn task_running_end() {
+    #[cfg(feature = "perf_counters")]
+    {
+        RUNNING_HARTS_CURRENT.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Take one low-overhead concurrency sample from a timer interrupt.
+#[inline(always)]
+pub fn sample_concurrency() {
+    #[cfg(feature = "perf_counters")]
+    {
+        fn bucket(
+            value: usize,
+            zero: &AtomicUsize,
+            one: &AtomicUsize,
+            two_three: &AtomicUsize,
+            four_seven: &AtomicUsize,
+            eight_plus: &AtomicUsize,
+        ) {
+            let target = match value {
+                0 => zero,
+                1 => one,
+                2..=3 => two_three,
+                4..=7 => four_seven,
+                _ => eight_plus,
+            };
+            target.fetch_add(1, Ordering::Relaxed);
+        }
+
+        COUNTERS.concurrency_samples.fetch_add(1, Ordering::Relaxed);
+        bucket(
+            RUNNING_HARTS_CURRENT.load(Ordering::Relaxed),
+            &COUNTERS.running_harts_0,
+            &COUNTERS.running_harts_1,
+            &COUNTERS.running_harts_2_3,
+            &COUNTERS.running_harts_4_7,
+            &COUNTERS.running_harts_8_plus,
+        );
+        bucket(
+            SCHEDULER_READY_CURRENT.load(Ordering::Relaxed),
+            &COUNTERS.scheduler_ready_0,
+            &COUNTERS.scheduler_ready_1,
+            &COUNTERS.scheduler_ready_2_3,
+            &COUNTERS.scheduler_ready_4_7,
+            &COUNTERS.scheduler_ready_8_plus,
+        );
+    }
 }
 
 #[inline(always)]
 pub fn heap_alloc(
     size: usize,
+    align: usize,
     ticks: usize,
     lock_wait_ticks: usize,
     core_ticks: usize,
     succeeded: bool,
+    timing_sampled: bool,
 ) {
     #[cfg(feature = "perf_counters")]
     {
-        COUNTERS.heap_alloc_calls.fetch_add(1, Ordering::Relaxed);
-        COUNTERS
-            .heap_alloc_ticks
-            .fetch_add(ticks, Ordering::Relaxed);
-        COUNTERS
-            .heap_alloc_lock_wait_ticks
-            .fetch_add(lock_wait_ticks, Ordering::Relaxed);
-        COUNTERS
-            .heap_alloc_core_ticks
-            .fetch_add(core_ticks, Ordering::Relaxed);
-        observe_max(&COUNTERS.heap_max_alloc_ticks, ticks);
+        let class = heap_class_index(size, align);
+        let classes = current_heap_classes();
+        classes.alloc_calls[class].fetch_add(1, Ordering::Relaxed);
+        if timing_sampled {
+            let estimated_ticks = ticks.saturating_mul(HEAP_TIMING_SAMPLE_RATE);
+            let estimated_wait = lock_wait_ticks.saturating_mul(HEAP_TIMING_SAMPLE_RATE);
+            let estimated_core = core_ticks.saturating_mul(HEAP_TIMING_SAMPLE_RATE);
+            classes
+                .alloc_ticks
+                .fetch_add(estimated_ticks, Ordering::Relaxed);
+            classes.alloc_wait_ticks[class].fetch_add(estimated_wait, Ordering::Relaxed);
+            classes.alloc_core_ticks[class].fetch_add(estimated_core, Ordering::Relaxed);
+            classes.alloc_timing_samples.fetch_add(1, Ordering::Relaxed);
+            observe_max(&classes.max_alloc_ticks, ticks);
+        }
+        if align > size {
+            classes
+                .high_alignment_allocs
+                .fetch_add(1, Ordering::Relaxed);
+        }
         if succeeded {
-            COUNTERS.heap_alloc_bytes.fetch_add(size, Ordering::Relaxed);
-            let current = COUNTERS
-                .heap_current_bytes
-                .fetch_add(size, Ordering::Relaxed)
-                + size;
-            observe_max(&COUNTERS.heap_peak_bytes, current);
+            classes.alloc_bytes[class].fetch_add(size, Ordering::Relaxed);
         }
     }
     #[cfg(not(feature = "perf_counters"))]
-    let _ = (size, ticks, lock_wait_ticks, core_ticks, succeeded);
+    let _ = (
+        size,
+        align,
+        ticks,
+        lock_wait_ticks,
+        core_ticks,
+        succeeded,
+        timing_sampled,
+    );
 }
 
 #[inline(always)]
-pub fn heap_dealloc(size: usize, ticks: usize, lock_wait_ticks: usize, core_ticks: usize) {
+pub fn heap_dealloc(
+    size: usize,
+    align: usize,
+    ticks: usize,
+    lock_wait_ticks: usize,
+    core_ticks: usize,
+    timing_sampled: bool,
+) {
     #[cfg(feature = "perf_counters")]
     {
-        COUNTERS.heap_dealloc_calls.fetch_add(1, Ordering::Relaxed);
-        COUNTERS
-            .heap_dealloc_bytes
-            .fetch_add(size, Ordering::Relaxed);
-        COUNTERS
-            .heap_dealloc_ticks
-            .fetch_add(ticks, Ordering::Relaxed);
-        COUNTERS
-            .heap_dealloc_lock_wait_ticks
-            .fetch_add(lock_wait_ticks, Ordering::Relaxed);
-        COUNTERS
-            .heap_dealloc_core_ticks
-            .fetch_add(core_ticks, Ordering::Relaxed);
-        COUNTERS
-            .heap_current_bytes
-            .fetch_sub(size, Ordering::Relaxed);
-        observe_max(&COUNTERS.heap_max_dealloc_ticks, ticks);
+        let class = heap_class_index(size, align);
+        let classes = current_heap_classes();
+        classes.dealloc_calls[class].fetch_add(1, Ordering::Relaxed);
+        classes.dealloc_bytes[class].fetch_add(size, Ordering::Relaxed);
+        if timing_sampled {
+            let estimated_ticks = ticks.saturating_mul(HEAP_TIMING_SAMPLE_RATE);
+            let estimated_wait = lock_wait_ticks.saturating_mul(HEAP_TIMING_SAMPLE_RATE);
+            let estimated_core = core_ticks.saturating_mul(HEAP_TIMING_SAMPLE_RATE);
+            classes
+                .dealloc_ticks
+                .fetch_add(estimated_ticks, Ordering::Relaxed);
+            classes.dealloc_wait_ticks[class].fetch_add(estimated_wait, Ordering::Relaxed);
+            classes.dealloc_core_ticks[class].fetch_add(estimated_core, Ordering::Relaxed);
+            classes
+                .dealloc_timing_samples
+                .fetch_add(1, Ordering::Relaxed);
+            observe_max(&classes.max_dealloc_ticks, ticks);
+        }
     }
     #[cfg(not(feature = "perf_counters"))]
-    let _ = (size, ticks, lock_wait_ticks, core_ticks);
+    let _ = (
+        size,
+        align,
+        ticks,
+        lock_wait_ticks,
+        core_ticks,
+        timing_sampled,
+    );
 }
 
 #[inline(always)]
@@ -681,7 +974,28 @@ pub fn render() -> String {
     if !cfg!(feature = "perf_counters") {
         return String::from("enabled=0\n");
     }
+    // Capture class counters before constructing the output String: formatting
+    // itself allocates and must not become part of the reported workload.
+    let heap_classes = heap_class_snapshot();
+    let (heap_current_bytes, heap_peak_bytes) = {
+        #[cfg(feature = "perf_counters")]
+        {
+            crate::mm::heap_perf_usage()
+        }
+        #[cfg(not(feature = "perf_counters"))]
+        {
+            (0, 0)
+        }
+    };
     let s = snapshot();
+    let class_alloc_calls: usize = heap_classes.alloc_calls.iter().sum();
+    let class_dealloc_calls: usize = heap_classes.dealloc_calls.iter().sum();
+    let class_alloc_bytes: usize = heap_classes.alloc_bytes.iter().sum();
+    let class_dealloc_bytes: usize = heap_classes.dealloc_bytes.iter().sum();
+    let class_alloc_wait_ticks: usize = heap_classes.alloc_wait_ticks.iter().sum();
+    let class_dealloc_wait_ticks: usize = heap_classes.dealloc_wait_ticks.iter().sum();
+    let class_alloc_core_ticks: usize = heap_classes.alloc_core_ticks.iter().sum();
+    let class_dealloc_core_ticks: usize = heap_classes.dealloc_core_ticks.iter().sum();
     let mut out = String::new();
     let _ = writeln!(out, "enabled=1");
     let _ = writeln!(
@@ -784,11 +1098,34 @@ pub fn render() -> String {
     );
     let _ = writeln!(
         out,
+        "remote_rfence_target_harts={} remote_rfence_empty_requests={} remote_rfence_wait_ticks={} remote_rfence_max_wait_ticks={}",
+        s.remote_rfence_target_harts,
+        s.remote_rfence_empty_requests,
+        s.remote_rfence_wait_ticks,
+        s.remote_rfence_max_wait_ticks
+    );
+    let _ = writeln!(
+        out,
         "scheduler_lock_acquisitions={} scheduler_lock_wait_ticks={} scheduler_lock_max_wait_ticks={} scheduler_ready_peak={}",
         s.scheduler_lock_acquisitions,
         s.scheduler_lock_wait_ticks,
         s.scheduler_lock_max_wait_ticks,
         s.scheduler_ready_peak
+    );
+    let _ = writeln!(
+        out,
+        "concurrency_samples={} running_harts_0={} running_harts_1={} running_harts_2_3={} running_harts_4_7={} running_harts_8_plus={} scheduler_ready_0={} scheduler_ready_1={} scheduler_ready_2_3={} scheduler_ready_4_7={} scheduler_ready_8_plus={}",
+        s.concurrency_samples,
+        s.running_harts_0,
+        s.running_harts_1,
+        s.running_harts_2_3,
+        s.running_harts_4_7,
+        s.running_harts_8_plus,
+        s.scheduler_ready_0,
+        s.scheduler_ready_1,
+        s.scheduler_ready_2_3,
+        s.scheduler_ready_4_7,
+        s.scheduler_ready_8_plus
     );
     let _ = writeln!(
         out,
@@ -921,12 +1258,12 @@ pub fn render() -> String {
     let _ = writeln!(
         out,
         "heap_alloc_calls={} heap_dealloc_calls={} heap_alloc_bytes={} heap_dealloc_bytes={} heap_current_bytes={} heap_peak_bytes={}",
-        s.heap_alloc_calls,
-        s.heap_dealloc_calls,
-        s.heap_alloc_bytes,
-        s.heap_dealloc_bytes,
-        s.heap_current_bytes,
-        s.heap_peak_bytes
+        class_alloc_calls,
+        class_dealloc_calls,
+        class_alloc_bytes,
+        class_dealloc_bytes,
+        heap_current_bytes,
+        heap_peak_bytes
     );
     let _ = writeln!(
         out,
@@ -935,20 +1272,60 @@ pub fn render() -> String {
     );
     let _ = writeln!(
         out,
-        "heap_alloc_ticks={} heap_dealloc_ticks={} heap_max_alloc_ticks={} heap_max_dealloc_ticks={} clock_hz={}",
-        s.heap_alloc_ticks,
-        s.heap_dealloc_ticks,
-        s.heap_max_alloc_ticks,
-        s.heap_max_dealloc_ticks,
+        "heap_alloc_ticks={} heap_dealloc_ticks={} heap_max_alloc_ticks={} heap_max_dealloc_ticks={} heap_high_alignment_allocs={} clock_hz={}",
+        heap_classes.alloc_ticks,
+        heap_classes.dealloc_ticks,
+        heap_classes.max_alloc_ticks,
+        heap_classes.max_dealloc_ticks,
+        heap_classes.high_alignment_allocs,
         crate::timer::get_hardware_clock_freq()
     );
     let _ = writeln!(
         out,
+        "heap_timing_sample_rate={} heap_alloc_timing_samples={} heap_dealloc_timing_samples={} heap_timing_estimated=1",
+        HEAP_TIMING_SAMPLE_RATE,
+        heap_classes.alloc_timing_samples,
+        heap_classes.dealloc_timing_samples
+    );
+    let _ = writeln!(
+        out,
         "heap_alloc_lock_wait_ticks={} heap_dealloc_lock_wait_ticks={} heap_alloc_core_ticks={} heap_dealloc_core_ticks={}",
-        s.heap_alloc_lock_wait_ticks,
-        s.heap_dealloc_lock_wait_ticks,
-        s.heap_alloc_core_ticks,
-        s.heap_dealloc_core_ticks
+        class_alloc_wait_ticks,
+        class_dealloc_wait_ticks,
+        class_alloc_core_ticks,
+        class_dealloc_core_ticks
+    );
+    for (idx, upper) in HEAP_CLASS_UPPER_BOUNDS.iter().enumerate() {
+        // `upper=0` denotes the final unbounded (>4096) class without relying
+        // on target-width-dependent usize::MAX text in parsers.
+        let upper_label = if *upper == usize::MAX { 0 } else { *upper };
+        let _ = writeln!(
+            out,
+            "heap_class={} upper={} alloc_calls={} dealloc_calls={} alloc_bytes={} dealloc_bytes={} alloc_wait_ticks={} dealloc_wait_ticks={} alloc_core_ticks={} dealloc_core_ticks={}",
+            idx,
+            upper_label,
+            heap_classes.alloc_calls[idx],
+            heap_classes.dealloc_calls[idx],
+            heap_classes.alloc_bytes[idx],
+            heap_classes.dealloc_bytes[idx],
+            heap_classes.alloc_wait_ticks[idx],
+            heap_classes.dealloc_wait_ticks[idx],
+            heap_classes.alloc_core_ticks[idx],
+            heap_classes.dealloc_core_ticks[idx]
+        );
+    }
+    let _ = writeln!(
+        out,
+        "heap_class_totals alloc_calls={} dealloc_calls={} alloc_bytes={} dealloc_bytes={} alloc_wait_ticks={} dealloc_wait_ticks={} alloc_core_ticks={} dealloc_core_ticks={} match_totals={}",
+        class_alloc_calls,
+        class_dealloc_calls,
+        class_alloc_bytes,
+        class_dealloc_bytes,
+        class_alloc_wait_ticks,
+        class_dealloc_wait_ticks,
+        class_alloc_core_ticks,
+        class_dealloc_core_ticks,
+        1
     );
     let _ = writeln!(
         out,
@@ -993,6 +1370,33 @@ pub fn now_ticks() -> usize {
     {
         0
     }
+}
+
+/// Select one out of every `HEAP_TIMING_SAMPLE_RATE` heap operations per hart.
+/// Exact calls/bytes remain unsampled; only the expensive clock-based timing is
+/// estimated from these samples.
+#[inline(always)]
+pub fn heap_timing_start() -> usize {
+    #[cfg(feature = "perf_counters")]
+    {
+        let sequence = current_heap_classes()
+            .timing_sequence
+            .fetch_add(1, Ordering::Relaxed);
+        if sequence % HEAP_TIMING_SAMPLE_RATE == 0 {
+            now_ticks()
+        } else {
+            0
+        }
+    }
+    #[cfg(not(feature = "perf_counters"))]
+    {
+        0
+    }
+}
+
+#[inline(always)]
+pub fn heap_timing_checkpoint(start: usize) -> usize {
+    if start == 0 { 0 } else { now_ticks() }
 }
 
 #[inline(always)]

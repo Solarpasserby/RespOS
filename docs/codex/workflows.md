@@ -159,6 +159,14 @@ qemu_pid="$(pgrep -n -f '[q]emu-system-(riscv64|loongarch64)')"
 ps -o pid,ppid,ni,cls,stat,etime,cmd -p "$qemu_pid"
 ```
 
+从可能继承 `SCHED_IDLE`/正 nice 值的 Codex 终端启动性能轮时，可通过 Make 的 QEMU 命令覆盖使用绝对
+优先级包装器，例如 `QEMU_LA='scripts/run_performance_command.sh qemu-system-loongarch64'`。不要用
+`nice -n -10` 代替：它是相对调整，若父进程 nice=16，子进程仍会是 nice=6。包装器需要允许执行
+`chrt`/`renice` 的宿主权限；启动后仍须用上述 `ps` 命令核验 `NI=-10, CLS=TS`。
+如需覆盖启动后很快结束的 CAgent，在同一 Make 命令设置 `RESPOS_PERF_SERIAL_LOG` 和
+`RESPOS_PERF_TIMELINE_DIR`；包装器会在 exec QEMU 时按同一 PID 自动启动采样，避免人工取得 PID 的
+时间窗。`RESPOS_PERF_INTERVAL` 可选，默认 1 秒。
+
 重建当前 devcontainer 后，由 Codex 启动的 QEMU 期望为 `NI=-10`、`CLS=TS`（Linux
 `SCHED_OTHER`）。若看到 `CLS=IDL`，或仍继承此前的 `NI=16`，应先停止该轮、修复 Codex 启动包装器
 或改从正常优先级终端启动，再重新运行；这类结果可用于定位功能问题，但墙钟时间和超时不应作为
@@ -551,6 +559,37 @@ LA64 对应使用 `LA_USER_FEATURES=` 和 `LA_KERNEL_FEATURES=perf_counters`。�
 heap 和文件关闭活动，因此分析大工作负载时忽略最后一次读取造成的常数扰动。未带 feature 的 kernel
 仍保留该 proc 路径，但只输出 `enabled=0`。
 
+heap 分桶按 allocator 实际服务尺度 `max(Layout::size, Layout::align)` 选择，`upper=0` 表示
+`>4096` 的无界末桶；`alloc_bytes/dealloc_bytes` 仍是调用者请求字节，不是 buddy 向上取整后的占用。
+各 hart 独立更新桶和 heap 总时长，读取时求和；`heap_class_totals match_totals=1` 表示同一次只读
+分桶快照生成的兼容总量闭合。运行中的并发写入不提供跨 hart 的瞬时原子快照，正式采样应在 timeout
+子进程已经 wait 完成或 guest 即将退出的静止点读取。`heap_current_bytes/heap_peak_bytes` 来自 allocator
+锁内的 live requested-byte 统计，reset 将 peak 基线设置为当时 current。calls/bytes 精确逐次累计；
+heap 的 total/wait/core ticks 为各 hart 每 64 次操作抽取一次并乘采样率的估算值，必须同时报告
+`heap_timing_sample_rate` 和 alloc/dealloc sample 数。max ticks 是被抽中样本的实际最大值，不乘 64，
+不能视为全窗口精确极值。
+
+任何新增高频计数器先做观测开销校准：同一 commit、冷 snapshot、QEMU 参数、宿主优先级和相同编译
+marker 下，交替运行 `perf_counters` 与 no-feature；比较两个 dev 阶段、`BUILDSTORM_BEGIN` 到
+`compile_core_begin`、完成 crate 数和宿主核秒。阶段时延中位数超过 3% 时不得用该计数版本指导 A/B，
+应先分片、采样或降低更新频率。一次相邻样本只能筛选，最终结论至少需要交替多轮或完整无 feature
+成绩；QEMU 未启动、串口为空或时间轴目录缺失的 timeout 样本直接作废。
+
+LA 本地 12 GiB 校准先分别构建 feature/no-feature kernel，再各自从同一只读根盘和重建后的同内容
+diagnostic/final 辅助盘启动。展开后的运行命令应显式固定 `-m 12G -smp 12 -snapshot`，外层使用：
+
+```bash
+timeout 130s env \
+  RESPOS_PERF_SERIAL_LOG=/tmp/respos-la-calibration.log \
+  RESPOS_PERF_TIMELINE_DIR=/tmp/respos-la-calibration-timeline \
+  scripts/run_performance_command.sh qemu-system-loongarch64 QEMU_ARGS... \
+  |& tee /tmp/respos-la-calibration.log
+```
+
+`QEMU_ARGS...` 必须用实际完整参数替换，不能原样执行；feature/no-feature 使用不同日志目录。若宿主无法
+分配默认 36 GiB，必须显式降到记录在 metadata 中的 12 GiB，不能让 QEMU 失败后仍等待 timeout 并把
+空文件当样本。
+
 LA64 的可复现短窗口可先生成不参与提交的 diagnostic 辅助盘：
 
 ```bash
@@ -778,6 +817,67 @@ context switch/IPI 和 ext4 lock 时间。该探针复用已缓存输入，主�
 - `/proc/respos_perf` 的 running/idle ticks、context switch、IPI、local/remote fence、page fault、
   PageCache、block request、ext4 lock 和 heap 数据；
 - 成功 marker、产物大小、首次 kernel/rustc 错误，而不是只记录 Cargo 最后一行。
+
+### BuildStorm 统一耗时评价时间轴
+
+只看宿主 QEMU `%CPU` 或 guest 累计 counter 都无法定位低利用率。长窗口和完整 final 启动 QEMU、
+核验 `CLS=TS/NI=-10` 后，用独立 shell 启动无侵入采样器：
+
+```bash
+scripts/monitor_qemu_timeline.sh QEMU_PID /tmp/respos-la-final.log \
+  /tmp/respos-la-timeline 1
+```
+
+输出包括：
+
+- `host-samples.csv`：每秒 QEMU 总 `%CPU`、RSS、线程数、状态与最近 CPU；
+- `host-threads.csv`：每个 QEMU 线程的 `%CPU`、状态与最近 CPU，用来区分 vCPU、主循环和 I/O；
+- `host-system.csv`：宿主可用内存、空闲 swap、swap-in/out、major fault 与 load average；
+- `serial-events.csv`：为 group、BuildStorm begin/compile、core/app compile 和 Cargo finish marker 记录
+  采样时的宿主 monotonic 秒；
+- `metadata.txt`：命令、宿主核数、采样间隔和起止 UTC。
+
+运行结束后生成宿主摘要：
+
+```bash
+scripts/summarize_qemu_timeline.sh /tmp/respos-la-timeline \
+  | tee /tmp/respos-la-timeline/summary.txt
+```
+
+摘要给出测量窗口、QEMU 核秒、平均/峰值 CPU、低于 400%/800% 的时间占比、峰值 RSS、宿主最低可用
+内存与 swap 活动，以及按线程名聚合的核秒与峰值。原始 CSV 仍是证据；摘要不能替代阶段 marker 和
+guest perf 快照。
+
+CPU 百分比由相邻 `/proc/PID[/task/TID]/stat` 的 `utime+stime` 差值除以宿主 `CLK_TCK` 和实际
+单调时间间隔得到；因此 `300%` 表示该区间约消耗 3 个宿主核，首个无前序样本记为 0。串口 marker
+只在采样周期内对齐，1 秒间隔下误差不超过约一个采样周期。
+
+带 `perf_counters` 的 guest 在每个 hart 的 timer tick 无锁采样全局 running hart 数与 ready queue
+深度，并在 `/proc/respos_perf` 输出 `running_harts_{0,1,2_3,4_7,8_plus}` 和
+`scheduler_ready_{0,1,2_3,4_7,8_plus}`。这些桶是 tick 样本数而不是墙钟秒数；各 hart tick 频率一致
+时桶占比可近似时间占比。更新 ready 状态发生在已经持有 scheduler 锁的队列变更路径，timer 侧只做
+原子 load/add，不额外获取 runqueue 锁。诊断结束必须同时保存 `concurrency_samples`，避免比较不同
+采样总量的绝对桶值。
+
+评价按四层同时报告：
+
+1. **正确性与进度**：group marker、退出码、`ok=true`、产物大小和相同编译 crate；
+2. **墙钟阶段**：前置、timed 准备、core/std、依赖 crate、应用与链接/转换；
+3. **宿主供给**：QEMU 总 CPU、各线程 CPU、RSS、宿主可用内存/swap 和调度类；
+4. **guest 原因**：running/idle 核时、runnable 分布、blocking switch、锁 wait/hold、fault/clear、
+   PageCache/block I/O、TLB shootdown completion。
+
+低利用率的判读必须联合四层：若只有约 300% 且 guest idle 高、ready 低，是 workload 串行或等待；
+ready 持续高但 idle 也高才指向 scheduler/wakeup；ready 低而 ext4/heap wait 增长指向锁阻塞；guest
+running 高但宿主 `%CPU` 低则优先检查宿主调度、线程阻塞或采样口径。后续 guest runnable 指标必须
+使用无锁原子状态采样，禁止在 timer interrupt 中为诊断强取 scheduler lock。
+
+子系统 `*_ticks` 是跨 hart 累计核时，且调用链可能嵌套（例如 inode read 包含 PageCache miss，后者又
+包含 block read；ext4 hold 又可能覆盖 lower call），所以禁止把各项直接相加当作墙钟分解。评价时应
+分别使用：`wait_ticks/acquisitions` 判断排队，`hold_ticks/acquisitions` 判断临界区，
+`operation_ticks/calls` 判断路径单次成本，bytes/requests/faults 判断工作量放大；再与同阶段
+`task_running_ticks`、host core-seconds 做 A/B。未被这些互不排他的指标可靠解释的部分标为
+`unattributed gap`，继续通过阶段缩小或新增专用计数器验证。
 
 判读顺序：
 

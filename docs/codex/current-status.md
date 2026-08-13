@@ -141,6 +141,123 @@
   `/dev/shm` open，但随后暴露 `waitpid(...)=EINTR` 的独立 LTP blocker，不能计作 shm 修复失败或整体
   LTP 通过。日志为 `/tmp/respos-{rv,la}-shm-ltp.log`；完整初赛仍待用户复跑。
 
+## 2026-08-13 BuildStorm M0 测量闭环与 allocator A0 入口（当前工作树）
+
+- **实现范围**：`perf_counters` 新增 heap effective-size 分桶（`max(size, align)`，上界
+  16/32/64/128/256/512/1024/2048/4096/>4096）、LA/RV user trap 分类、RV IPI，以及两架构 remote
+  shootdown/RFENCE 的目标 hart 数、空请求、完成等待和最大等待。heap calls/bytes/wait/core/total/max
+  均按 hart 分片，读取时汇总；heap 当前值/峰值在已经持有 allocator 锁的内部统计中维护，避免诊断
+  本身在每次 alloc/dealloc 上写同一全局 cache line。第二轮校准仍未过 3% 后，calls/bytes 保持精确，
+  硬件时钟 total/wait/core 改为每 hart 1/64 抽样估算并显式输出样本数；max 是抽中样本的真实最大值。
+  无 `perf_counters` 时峰值字段和更新分支静态消除。
+- **正确性验证**：`respos_buddy_allocator` 无 feature 2/2、带 feature 3/3 单测通过；LA/RV feature 开/关 release
+  构建均通过；比赛同版 `nightly-2025-01-18`（Rust 1.86）LA/RV feature release 也均通过。RV64
+  4 GiB/8 hart diagnostic 中 `smp_shared_mm_probe` 100 轮通过；统计记录约 300 次
+  remote RFENCE、300 个目标 hart，heap 分桶汇总 `match_totals=1`。reset 后 `heap_peak_bytes` 等于当前
+  占用，后续退出阶段峰值可继续增长，证明峰值复位与读取语义闭合。日志为
+  `/tmp/respos-rv-m0-sharded-smoke.log`。
+- **LA 30 秒 size-class 证据**：LA64 12 GiB/12 hart、旧 pub 镜像、diagnostic、从冷 snapshot 运行
+  `busybox timeout 30 /bin/bash /glibc/buildstorm_testcode.sh`，日志
+  `/tmp/respos-la-m0-heap-profile.log`。窗口完成 toolchain/minibuild，停止在 untimed tg-xtask，故只用于
+  热点结构而不是正式 BuildStorm 成绩。共 5,588,558 次 alloc、5,415,110 次 dealloc；alloc 调用中
+  `<=16/32/64/128/256 B` 分别约占 `36.06/19.12/11.09/17.23/14.75%`，累计 `98.25%`；这五类占
+  alloc core ticks 约 `96.7%`。`>4096 B` 仅约 `1.13%` 调用，却占请求字节约 `63.7%`。因此下一实验
+  应是现有 buddy 上的有界 per-hart 小对象 cache，而不是替换整个 allocator；大块、异常对齐、split/
+  coalesce 和 OOM 路径继续由现有 bitmap-assisted buddy 负责。
+- **开销门禁**：第一版全局 heap 分桶在 LA 130 秒窗口中，相对相邻 no-feature 样本的两个 dev 阶段
+  和 core 开始时间慢约 17--22%，未达到预设 `<=3%`，因此已否决并改为上述按 hart 汇总。重构后的
+  RV 功能证据有效。随后 LA 12 GiB/12 hart、`TS/NI=-10` 的相邻 70 秒 sharded-perf/no-feature
+  样本均到达相同 23 个 `Compiling` marker，但两个 dev 阶段仍为 `12.89/5.42s` 对
+  `12.24/4.81s`，单样本约慢 5.3%/12.7%，仍未过门槛；日志为
+  `/tmp/respos-la-m0-sharded-cal-{perf,nofeature}.log`。因此进一步引入 1/64 timing sampling；其开销
+  重校准 sampled-perf 的两个 dev 阶段为 `14.22/5.35s`，相邻 no-feature 为 `12.24/4.81s`；两者
+  均到达 23 个 crate，仍高于 3%。该结果只能说明完整 `perf_counters` feature 不适合精细墙钟 A/B，
+  不能把差额全归因于 heap，因为 ext4/fault/scheduler/TLB 等仍逐事件计数，且单次宿主样本有波动。
+  sampled-perf 日志 SHA-256 为 `2258e536...693da`，no-feature 为 `903cb94e...2adbf`。不得用旧全局或
+  未采样 sharded 样本的绝对 heap wait 数评价后续 A/B，也不得把 30 秒分布样本当作性能收益。
+- **Go/No-Go**：A0 设计 **Go**（调用分布证据充分）；A1 仅允许作为默认关闭的独立实验推进，生产
+  路径收益必须用 **关闭 `perf_counters`** 的 before/after A/B 决定。合入/成绩声明仍 **No-Go**，直到
+  专项 allocator 压测、双架构门禁和无 feature 完整 final 通过。具体边界见
+  `buildstorm-smp-plan.md` 的 allocator A0--A2。
+
+## 2026-08-13 LA64 BuildStorm 完整时间线诊断
+
+- **范围与证据**：代码基线 `66853fe` 加当前未提交的性能计数/时间线补丁；LA64 release，
+  `perf_counters`，12 GiB/12 hart，`-snapshot`，QEMU 10.0.2。QEMU 从启动起核验为
+  `NI=-10, CLS=TS`，online mask `0xfff`。串口日志为
+  `/tmp/respos-la-eval-20260813.log`（SHA-256
+  `d2bb6cb00ce628fddfddd73aba448c30053624d8af40d35e55131a2f299bd5c2`），kernel-la 为
+  `11a88ef6f8376e7580bddcc735fa800da406aa9e1364430ce339ef78dc09e5b9`，宿主时间线位于
+  `/tmp/respos-la-eval-20260813-timeline/`。该轮是本机 12 GiB 诊断，不是平台 36 GiB 正式成绩。
+- **正确性与耗时**：CAgent 10 项 pass、脚本 exit 0；BuildStorm toolchain/minibuild 均通过，
+  `BUILDSTORM_COMPILE mode=multi ok=true cores=12 bytes=1714568`，脚本 exit 0。axbuild 报告
+  `1715.30s`，Cargo release 为 `28m24s`。`BUILDSTORM_COMPILE elapsed_s=0.00` 是当前脚本/guest
+  计时字段异常，不能替代 axbuild/Cargo/宿主单调时间。
+- **宿主/guest 交叉校验**：宿主记录 1758.45 秒、10580.95 核秒，平均 CPU `601.7%`，峰值
+  `1202.8%`；低于 `400%/800%` 的时间分别占 `34.9%/68.6%`。guest `task_running_ticks` 折合
+  10443.95 核秒、idle 10192.17 核秒，有效运行率 `50.61%`；宿主与 guest running 核秒相差约
+  1.3%，采样口径相互支持。12 个主要 vCPU 线程均取得约 627--1109 核秒，不存在单个 hart 长期
+  未运行的证据。
+- **调度器结论**：running hart 样本 `0/1/2-3/4-7/8+` 占比为
+  `0.12/20.53/20.16/29.12/30.07%`；ready queue 对应为
+  `95.27/3.61/1.08/0.04/0.00%`。scheduler 锁 3430646 次获取、累计等待 2.97 核秒，平均约
+  0.87 微秒、最大约 1.46 毫秒。当前证据不支持把全局 scheduler 锁或 runnable 未及时派发列为
+  P0；低 CPU 更接近编译任务阶段性并行度不足与其他阻塞/串行路径。
+- **已量化内核成本**：heap alloc/dealloc 共约 1.217e3 核秒，其中锁等待约 919.18 核秒、allocator
+  core 约 290.30 核秒，占 guest running 核时约 11.7%/8.8%/2.8%；7533 万次 alloc 与 7507 万次
+  dealloc 使单全局 heap 锁成为当前最强的已量化候选。frame alloc 149.39 核秒，其中清零 129.33
+  核秒、锁等待（含 dealloc）5.91 核秒；连续帧/批量清零值得做健全性和次级优化，但不是本轮 P0。
+  copy user 约 112.08 核秒。
+- **文件系统候选**：ext4 锁等待/持有约 95.69/160.19 核秒，lower call 约 152.37 核秒；有优化价值，
+  但量级低于 heap。PageCache 最终停在 32762 页（约 128 MiB 上限），全程 587381 次淘汰、约
+  2.18 GiB fill 和 2.40 GiB block read；这支持检查固定容量导致的重复读取，但 hit/miss 为
+  2594099/83916，且 block read/write 计时仅约 27.53/19.27 核秒，扩大容量的墙钟收益仍需 A/B，
+  不能仅凭淘汰数断言。
+- **TLB 待补计时**：remote RFENCE 515482、ASID invalidation 7015484，range shootdown 475191 次、
+  累计范围页数约 49.18 亿；计数仍高，但当前没有 RFENCE 发起到完成的 ticks，不能从次数直接排序
+  到 heap 之前。下一轮应补完成延迟/等待核时，而不是继续只增加事件计数。
+- **测量边界**：上述 `*_ticks` 可能嵌套，禁止直接相加成墙钟分解；该轮使用的是后来因观测扰动而
+  淘汰的全局 heap 原子计数版本，绝对 heap wait/core 数只用于发现候选，正式 A/B 必须用上节的
+  sharded 版本重校准并以无 feature 成绩收口。该 LA 时间线版本尚未逐秒记录宿主
+  swap；启动/结束观察到 swap 使用约从 4.2 GiB 到 5.2 GiB，但不能据此归因。采样器随后已加入
+  `host-system.csv` 的 MemAvailable/swap/major-fault 时间序列和退出后的串口 marker drain，供 RV
+  及下一次 LA 使用。
+
+## 2026-08-13 RV64 BuildStorm 完整时间线诊断与 LA 对照
+
+- **范围与证据**：与上一节相同代码/feature，RV64 release、16 GiB/8 hart、`-snapshot`，QEMU 从
+  启动起为 `NI=-10, CLS=TS`。串口日志 `/tmp/respos-rv-eval-20260813.log`（SHA-256
+  `a11da56bc411c2ee0f563227e9ab58d33939dbabd0fe2c96c4bd59c248c2b88f`），kernel-rv 为
+  `b1fb9cffe42edca9b3d3a0e142129652644a353a6410cdcb3960b12c27528432`，时间线目录为
+  `/tmp/respos-rv-eval-20260813-timeline/`。
+- **正确性与耗时**：CAgent 10 项 pass、exit 0；BuildStorm toolchain/minibuild 通过，最终
+  `ok=true cores=8 bytes=1681000`、exit 0。axbuild `1245.38s`，Cargo release `20m35s`。
+  宿主记录 1289.32 秒、5559.26 核秒，平均/峰值 CPU `431.2%/804.7%`；guest running/idle 为
+  5600.67/4652.42 核秒，有效运行率 `54.62%`。宿主与 guest running 核秒误差小于 1%。
+- **宿主压力边界**：最低 MemAvailable 约 3.70 GiB、最低 SwapFree 约 9.03 GiB；全程 swap-in
+  27542 页（约 108 MiB）、swap-out 205639 页（约 803 MiB）、major fault 增量 29573，且几乎全部
+  发生在 core-to-app 主编译阶段。没有内存耗尽，但存在可测的宿主换页污染；该轮可用于内核热点和
+  跨指标量级，不应把 1245.38 秒当作无宿主干扰的正式成绩。
+- **调度器结论**：running hart `0/1/2-3/4-7/8` 占比
+  `0.19/30.60/25.84/17.61/25.76%`，ready queue `0/1/2-3/4-7/8+` 占比
+  `97.68/2.00/0.30/0.03/0.00%`。scheduler 锁累计等待 1.26 核秒、平均约 0.74 微秒；8 个主要
+  vCPU 线程均运行约 517--1015 核秒。与 LA 一致，不支持优先重构 scheduler；主编译平均约
+  4.52 个宿主核忙，低利用率主要对应编译依赖图/阻塞路径没有持续提供满核工作。
+- **allocator 对照**：RV heap alloc/dealloc 约 7610/7583 万次，总计 177.45 核秒，锁等待 87.08
+  核秒，占 running 核时约 3.17%/1.55%；LA 次数近似，却为 1216.88/919.18 核秒，占
+  11.65%/8.80%。更重要的是累计请求字节 RV 约 10.52 GiB（平均 alloc 148.5 B），LA 约 51.14
+  GiB（平均 728.9 B）。因此全局 heap 是共同高频路径，但 LA 的 P0 同时包含锁竞争和请求尺寸/工作量
+  放大；改 slab 前必须补 size-class 次数、字节和 wait/core ticks，不能把全部差异归因于 buddy 算法。
+- **文件/内存对照**：RV ext4 wait/hold 77.46/111.89 核秒，LA 为 95.69/160.19；两者均有价值但
+  低于 LA heap。两架构 PageCache 都结束在约 32768 页上限；RV 淘汰 433195、fill 1.58 GiB、block
+  read 1.83 GiB，LA 为 587381/2.18/2.40 GiB，固定 128 MiB 容量抖动是共同候选。RV frame alloc
+  94.94 核秒中 clear 93.00，锁等待（含 dealloc）1.36；LA 为 149.39/129.33/5.91，继续支持“批量/
+  连续页和清零优化是次级项”。RV copy-user 约 135.50 核秒，也应列入 RV 专项候选。
+- **RV TLB 当轮计数缺口**：该轮输出 `remote_rfences=227068`，但 shootdown 分类、IPI received 与
+  user trap 分类全为 0，因此这份历史日志不能直接与 LA 对比。上节 M0 已在当前工作树补齐 RV
+  trap/IPI/shootdown 分类和两架构发起到完成等待；新字段已由 8-hart shared-MM 探针验证，但尚无
+  当前版本的 RV/LA 完整 BuildStorm 对照。
+
 ## 2026-08-13 ext4/PageCache E0 当前 HEAD 基线（`51bed0e1`）
 
 - **可复现口径**：代码为 `51bed0e1c598c33eab4bc2da7703534525149ac4`，使用

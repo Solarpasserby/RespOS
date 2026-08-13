@@ -119,11 +119,17 @@ fn allocate_asid() -> SysResult<usize> {
     let current = crate::arch::smp::current_hart_id();
     let remote = crate::arch::smp::online_hart_mask() & !(1 << current);
     if remote != 0 {
-        crate::perf::remote_rfence(1);
+        let started = crate::perf::now_ticks();
         crate::arch::smp::remote_tlb_shootdown(
             remote,
             crate::arch::smp::TlbShootdownRequest::all(),
         );
+        crate::perf::observe_remote_rfence(
+            remote.count_ones() as usize,
+            crate::perf::elapsed_since(started),
+        );
+    } else {
+        crate::perf::remote_rfence_empty_request(1);
     }
 
     let mut allocator = ASID_ALLOCATOR.lock();
@@ -1817,9 +1823,16 @@ impl MemorySet {
             let current = crate::arch::smp::current_hart_id();
             let remote_mask = self.active_hart_mask.load(Ordering::Acquire) & !(1 << current);
             if remote_mask != 0 {
-                crate::perf::remote_rfence(1);
+                crate::perf::tlb_shootdown_all_request(1);
+                let started = crate::perf::now_ticks();
                 crate::arch::sbi::remote_sfence_vma(remote_mask, 0)
                     .expect("SBI RFENCE remote_sfence_vma failed");
+                crate::perf::observe_remote_rfence(
+                    remote_mask.count_ones() as usize,
+                    crate::perf::elapsed_since(started),
+                );
+            } else {
+                crate::perf::remote_rfence_empty_request(1);
             }
         }
         #[cfg(target_arch = "loongarch64")]
@@ -1833,7 +1846,6 @@ impl MemorySet {
             let targets = self.tlb_hart_mask.load(Ordering::Acquire);
             let remote_mask = targets & !(1 << current);
             if remote_mask != 0 {
-                crate::perf::remote_rfence(1);
                 let asid = self.asid.load(Ordering::Acquire);
                 let request = match pending_range {
                     Some((start, end)) => {
@@ -1841,7 +1853,14 @@ impl MemorySet {
                     }
                     None => crate::arch::smp::TlbShootdownRequest::address_space(asid),
                 };
+                let started = crate::perf::now_ticks();
                 crate::arch::smp::remote_tlb_shootdown(remote_mask, request);
+                crate::perf::observe_remote_rfence(
+                    remote_mask.count_ones() as usize,
+                    crate::perf::elapsed_since(started),
+                );
+            } else {
+                crate::perf::remote_rfence_empty_request(1);
             }
             // The write lock excludes scheduler mark/clear transitions. Every
             // inactive resident has now acknowledged the new PTE generation;

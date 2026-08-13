@@ -359,6 +359,7 @@ impl Scheduler {
                         .remove(pos)
                         .expect("ready task position disappeared");
                     self.task_index.remove(&task.tid());
+                    crate::perf::observe_scheduler_ready(self.task_index.len());
                     if self.rt_queues[idx].is_empty() {
                         self.rt_bitmap &= !(1u128 << bit);
                     }
@@ -381,6 +382,7 @@ impl Scheduler {
                         .remove(pos)
                         .expect("ready task position disappeared");
                     self.task_index.remove(&task.tid());
+                    crate::perf::observe_scheduler_ready(self.task_index.len());
                     if self.normal_queues[idx].is_empty() {
                         self.normal_bitmap &= !(1u64 << idx);
                     }
@@ -397,6 +399,7 @@ impl Scheduler {
             .and_then(|pos| self.idle_queue.remove(pos));
         if let Some(task) = &task {
             self.task_index.remove(&task.tid());
+            crate::perf::observe_scheduler_ready(self.task_index.len());
         }
         self.debug_assert_invariants();
         task
@@ -406,6 +409,7 @@ impl Scheduler {
     pub fn remove(&mut self, tid: usize) {
         if let Some(queue) = self.task_index.remove(&tid) {
             self.remove_from_ready_queue(tid, queue);
+            crate::perf::observe_scheduler_ready(self.task_index.len());
         }
         self.blocked_tasks.remove(&tid);
         self.debug_assert_invariants();
@@ -451,6 +455,7 @@ impl Scheduler {
         for tid in removed {
             self.task_index.remove(&tid);
         }
+        crate::perf::observe_scheduler_ready(self.task_index.len());
         self.blocked_tasks.retain(|_, task| task.tgid() != tgid);
         self.debug_assert_invariants();
     }

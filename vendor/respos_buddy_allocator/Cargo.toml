@@ -5,4 +5,7 @@ edition = "2024"
 license = "MIT"
 description = "IRQ-agnostic bitmap-assisted buddy heap used by RespOS"
 
+[features]
+perf_counters = []
+
 [dependencies]

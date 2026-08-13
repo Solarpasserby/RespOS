@@ -10,7 +10,8 @@ completion、ASID op=4 与失效范围传播，并以 LA 12 GiB/12 hart 完整 f
 
 1. 以 `1/3/6/12` 缩放和 TLB/ext4/scheduler 计数决定下一优化，不预设 scheduler 或 ext4 是主因；
 2. 独立评估 Global kernel mapping；范围请求暂以单次 op=4 覆盖，op=5 已因完整 final 内存破坏禁用；
-3. 在资源允许或平台恢复后验证正式 LA `-m 36G -smp 12` 镜像与时限。
+3. 按本文件 A0--A2 独立推进现有 buddy 上的有界 per-hart 小对象 cache；
+4. 在资源允许或平台恢复后验证正式 LA `-m 36G -smp 12` 镜像与时限。
 
 课程评测平台当前暂不可用；平台成绩与正式 36 GiB 结果标记 `待验证`。本地 12 GiB 功能或短窗口不能
 替代平台结论。双线协作时，架构线修改 `MemorySet`、scheduler/processor、trap context 或公共 arch API
@@ -114,6 +115,60 @@ inode identity 或 mmap 时，追加 private-map、shared-MM、frame-reclaim、P
 交付文档同时记录：commit、镜像 hash、QEMU/宿主调度、LTO/features、相同进度、计数前后差异、完整
 wall time 与已运行 probe。性能线不得把“wait 下降”冒充语义正确，Phase 线也不得因文件边界复制一套
 metadata/PageCache 状态；双方共同维护唯一的 inode identity、generation 和 writeback 协议。
+
+## 2026-08-13 allocator 独立优化包（A0--A2）
+
+### 证据与非目标
+
+M0 的 LA 12-hart 30 秒分布显示 558.9 万次 alloc 中 `<=256 B` 占 98.25%，并占 alloc core ticks
+约 96.7%；`>4096 B` 仅占 1.13% 调用却承载 63.7% 请求字节。完整 LA/RV 日志又显示单全局 heap
+在长编译阶段会累计明显 wait。该证据允许研究**小对象 fast path**，但不允许直接复制 arecos 的整套
+buddy-slab 或替换现有 allocator：当前 bitmap-assisted buddy 已解决线性 buddy 搜索，且承担任意
+`Layout`、大块、对齐、split/coalesce、OOM 与完整回收语义。
+
+本包与 ext4 E1/E2、frame 连续分配相互独立，不在同一性能提交中混合。目标是减少 `<=256 B` 的全局
+heap lock 获取和 buddy 元数据操作；非目标包括关闭 coalesce、无限缓存 free object、改变失败行为、
+把 per-hart cache 内存隐瞒出 `/proc` 统计，或为成绩对特定进程/路径开后门。
+
+### A0：测量和所有权设计（当前阶段）
+
+1. sharded + 1/64 timing sampled `perf_counters` 仍未达到 3% 的精细墙钟门槛，因此它只负责确认
+   size-class、工作量和数量级；allocator before/after 的墙钟判断一律关闭该 feature。保存原始串口、
+   commit、命令与相同 marker；若以后需要用 perf 数值比较小收益，应把 heap profile 拆成独立 feature
+   或继续降低其他子系统计数开销，而不是忽略当前校准失败。
+2. cache 只覆盖 buddy 实际 order 对应的 8/16/32/64/128/256-byte class，资格由
+   `max(size.next_power_of_two(), align, size_of::<usize>())` 决定。零尺寸、`>256 B`、高对齐和非法/
+   溢出 Layout 全走现有路径；返回地址继续满足原始 Layout alignment。
+3. 明确两层所有权：cache 中 block 仍由 allocator 独占但不是 live allocation；buddy bitmap 不得同时
+   把它标成 free。跨 hart dealloc 可以进入执行该释放的本地 cache，但每类容量有硬上限，满时按真实
+   order 批量/直接归还 buddy。不得依赖“总在原 hart 释放”。
+4. 将 live requested bytes、buddy-reserved bytes、per-hart cached bytes 分开统计。raw refill/drain API
+   只按 order 转移所有权，不伪造原始 Layout，也不让 `user` 计数下溢；reset/read 不得与 allocator
+   自递归或破坏 IRQ-safe 锁序。
+
+### A1：最小完整实现
+
+1. 在 `IrqSafeHeap` 外层实现固定容量 per-hart magazine；本地中断关闭期间 push/pop，miss/refill 和
+   overflow/drain 才获取现有全局 heap lock。首版不做跨 hart stealing，不引入后台线程。
+2. vendor buddy 提供内部 raw-order allocate/free，公共 `GlobalAlloc` 仍保持完整 Layout/统计语义；
+   refill 部分成功后必须可用，完全失败返回 null，不能 panic 或遗失已经取得的 block。cache drain、
+   shutdown 和测试钩子必须能让所有 block 完整回到 buddy 并最终 coalesce。
+3. 新增 host 单测和 guest probe：每个 class 的填充/耗尽/overflow、混合 alignment、跨 hart free、随机
+   alloc/free、OOM/partial refill、drain 后 free bytes/bitmap/峰值闭合；保留现有 IRQ re-entry 防护。
+4. 先用保守容量和 refill batch（作为可调参数，不写死为工作负载特判），统计 hit/miss/refill/drain、
+   cached peak、全局 lock acquisitions/wait；命中路径不得写跨 hart 共享 cache line。
+
+### A2：性能验收与去留
+
+1. RV/LA 依次运行 feature/no-feature release、allocator 单测、8/12-hart 跨核 probe、shared-MM、
+   frame-reclaim、file/writeback 和 CAgent；任何内存损坏、统计不闭合或长期缓存增长先修正确性。
+2. 固定 LA 30/120 秒相同进度 A/B：先用独立诊断样本确认小类 cache 命中与全局 heap lock 获取下降，
+   再以关闭 `perf_counters` 的生产路径样本判断墙钟；同时检查 heap current/peak、frame 余量、
+   PageCache 和 ext4 工作量无反向放大。完整 final 同样只用 no-feature。
+3. 完整 BuildStorm 墙钟改善不足 5%、跨架构退化超过 3%，或收益只在带计数 feature 时出现，则回退
+   cache，不扩大到完整 slab。通过后再单独评估 `512/1024 B`，不得一开始覆盖大对象。
+4. frame allocator 的连续页 API、批量清零和 VirtIO DMA 是后续 F0--F2；它们不复用 heap magazine
+   所有权模型，也不与 A1 同提交。
 
 ## 目标与边界
 

@@ -114,6 +114,8 @@ unsafe impl Send for FreeList {}
 pub struct Heap<const ORDER: usize> {
     free_list: [FreeList; ORDER],
     user: usize,
+    #[cfg(feature = "perf_counters")]
+    peak_user: usize,
     allocated: usize,
     total: usize,
     heap_start: usize,
@@ -129,6 +131,8 @@ impl<const ORDER: usize> Heap<ORDER> {
         Self {
             free_list: [FreeList::new(); ORDER],
             user: 0,
+            #[cfg(feature = "perf_counters")]
+            peak_user: 0,
             allocated: 0,
             total: 0,
             heap_start: 0,
@@ -255,6 +259,10 @@ impl<const ORDER: usize> Heap<ORDER> {
             }
             let ptr = unsafe { self.pop_free(class).ok_or(())? };
             self.user += layout.size();
+            #[cfg(feature = "perf_counters")]
+            {
+                self.peak_user = self.peak_user.max(self.user);
+            }
             self.allocated += size;
             return NonNull::new(ptr.cast()).ok_or(());
         }
@@ -305,6 +313,16 @@ impl<const ORDER: usize> Heap<ORDER> {
 
     pub fn stats_alloc_user(&self) -> usize {
         self.user
+    }
+
+    #[cfg(feature = "perf_counters")]
+    pub fn stats_peak_user(&self) -> usize {
+        self.peak_user
+    }
+
+    #[cfg(feature = "perf_counters")]
+    pub fn reset_peak_user(&mut self) {
+        self.peak_user = self.user;
     }
 
     pub fn stats_alloc_actual(&self) -> usize {
@@ -401,6 +419,32 @@ mod tests {
         }
         assert_eq!(heap.stats_alloc_user(), 0);
         assert_eq!(heap.stats_alloc_actual(), 0);
+        drop(heap);
+        unsafe { dealloc(backing, backing_layout) };
+    }
+
+    #[cfg(feature = "perf_counters")]
+    #[test]
+    fn peak_user_can_be_rebased_without_changing_live_accounting() {
+        let (mut heap, backing, backing_layout) = new_heap();
+        let first_layout = Layout::from_size_align(24, 8).unwrap();
+        let second_layout = Layout::from_size_align(80, 16).unwrap();
+        let first = heap.alloc(first_layout).unwrap();
+        assert_eq!(heap.stats_peak_user(), 24);
+        heap.reset_peak_user();
+        assert_eq!(heap.stats_alloc_user(), 24);
+        assert_eq!(heap.stats_peak_user(), 24);
+
+        let second = heap.alloc(second_layout).unwrap();
+        assert_eq!(heap.stats_alloc_user(), 104);
+        assert_eq!(heap.stats_peak_user(), 104);
+        heap.dealloc(second, second_layout);
+        assert_eq!(heap.stats_alloc_user(), 24);
+        assert_eq!(heap.stats_peak_user(), 104);
+        heap.reset_peak_user();
+        assert_eq!(heap.stats_peak_user(), 24);
+        heap.dealloc(first, first_layout);
+
         drop(heap);
         unsafe { dealloc(backing, backing_layout) };
     }

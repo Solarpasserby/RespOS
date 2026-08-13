@@ -220,6 +220,7 @@ pub fn run_tasks() -> ! {
             // it exited and removed itself from the task manager.
             let running_started = crate::timer::get_time();
             next_task.begin_cpu_run(current_cpu_id(), running_started);
+            crate::perf::task_running_begin();
             crate::perf::context_switch(1);
             #[cfg(target_arch = "riscv64")]
             crate::perf::local_sfence(1);
@@ -228,6 +229,7 @@ pub fn run_tasks() -> ! {
             }
             let running_finished = crate::timer::get_time();
             next_task.end_cpu_run(current_cpu_id(), running_finished);
+            crate::perf::task_running_end();
             crate::perf::task_running_ticks(running_finished.wrapping_sub(running_started));
             drop(next_task);
             // 任务在无 runnable work 时会恢复本 CPU 的 idle context，继续

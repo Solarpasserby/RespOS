@@ -81,6 +81,7 @@ pub fn enable_timer_interrupt() {
 /// 该函数根据 `CSR` 区分不同异常类型，对不同类型异常做不同处理
 #[unsafe(no_mangle)]
 pub fn trap_handler(cx: &mut TrapContext) {
+    crate::perf::user_trap(1);
     // 设置状态寄存器，使内核可以访问用户数据
     unsafe {
         sstatus::set_sum();
@@ -92,6 +93,7 @@ pub fn trap_handler(cx: &mut TrapContext) {
         Trap::Exception(Exception::UserEnvCall) => {
             let syscall_id = cx.x[17];
             let syscall_args = [cx.x[10], cx.x[11], cx.x[12], cx.x[13], cx.x[14], cx.x[15]];
+            crate::perf::user_syscall_trap(1);
             cx.sepc += 4; // 异常处理完成后直接执行后续指令
             let ret = syscall(syscall_id, syscall_args);
             if ret == Err(Errno::EINTR) && syscall_id == SYSCALL_WAIT4 {
@@ -108,6 +110,7 @@ pub fn trap_handler(cx: &mut TrapContext) {
         | Trap::Exception(Exception::InstructionPageFault)
         | Trap::Exception(Exception::LoadFault)
         | Trap::Exception(Exception::LoadPageFault) => {
+            crate::perf::user_page_fault_trap(1);
             let page_fault_cause = page_fault_cause(scause.cause()).unwrap();
             let result = current_task()
                 .expect("[kernel] current task is None.")
@@ -170,6 +173,8 @@ pub fn trap_handler(cx: &mut TrapContext) {
             exit_and_run_next(-4);
         }
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
+            crate::perf::user_timer_trap(1);
+            crate::perf::sample_concurrency();
             set_next_ti_trigger();
             #[cfg(feature = "debug_traces")]
             {
@@ -199,6 +204,7 @@ pub fn trap_handler(cx: &mut TrapContext) {
             preempt_current_task();
         }
         Trap::Interrupt(Interrupt::SupervisorSoft) => {
+            crate::perf::user_ipi_trap(1);
             crate::arch::smp::acknowledge_ipi();
             crate::timer::rearm_task_timer_request();
         }
@@ -247,6 +253,7 @@ pub fn kernel_trap_handler(cx: &mut TrapContext) {
             panic!("UserEnvCall from kernel!");
         }
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
+            crate::perf::sample_concurrency();
             // SBI timer interrupts remain pending until a later deadline is
             // programmed. Long syscall paths can legitimately cross a tick;
             // acknowledge it by arming the next tick and process expirations.
