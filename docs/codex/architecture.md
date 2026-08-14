@@ -592,21 +592,23 @@ FdTable slot (FdEntry: descriptor flags)
   `read()` 已产生协议专用错误或副作用后再翻译；也不能把 AF_UNIX 规则泛化到 inet。当前 bounded-copy
   实现满足返回值/数据语义，不代表 Linux pipe-buffer zero-copy 所有权模型。
 
-### pwrite 的 append 选位与数据写入共用 open-file 锁
+### pwrite 的 append 选位与数据写入仅在单个 chunk 内共用 open-file 锁
 
-- 状态：Linux `O_APPEND` 单调用语义已实现并完成双架构 SMP 聚焦回归
+- 状态：Linux `O_APPEND` 选位语义已实现；整 syscall 并发原子性已有双架构 expected-fail 反证
 - 适用范围：`pwrite/pwrite64`、普通 `File`、page cache/lower inode EOF、open-file offset
 - 最后验证：2026-08-14
-- 证据：`os/src/{syscall/fs.rs,fs/file.rs}`、`scripts/pwrite_append_probe_linux.c`；RV64/LA64
-  4 GiB/2 hart 的 musl/glibc 16-case pwrite/pwritev 聚焦日志
+- 证据：`os/src/{syscall/fs.rs,fs/file.rs}`、`scripts/pwrite_append_probe_linux.c`、
+  `scripts/pwrite_append_atomic_probe_linux.c` 与 guest `pwrite_append_atomic_probe`；RV64/LA64
+  4 GiB/2 hart 日志
 - 内容：`sys_pwrite64` 保留用户显式 offset 作为非 append 定位，并通过专用
   `FileOp::pwrite_at_offset()` 提交数据。普通 `File` 在持有共享 open-file inner lock 时同时
   读取 `O_APPEND`、从 page cache 或 lower inode 选择 EOF，并完成写入；该路径不更新
   `inner.offset`。普通 `write` 复用同一 locked writer 但在成功后推进 offset。
 - 后续影响：mmap 写回、splice 显式 offset 等非 pwrite 路径必须继续调用普通
   `write_at_offset()`，不得被 open-file `O_APPEND` 改写。当前 syscall 为有界 kernel buffer
-  分块 copy/write；若要证明大写与并发 append 的整个 syscall 原子性，需要单独收紧
-  chunk 提交边界，不能由本轮 LTP 结果推导。
+  分块 copy/write，两个 128 KiB writer 已证明会在 64 KiB chunk 边界交错。修复不得持有 spin lock
+  进入通用 usercopy/fault；必须为整 syscall 建立可阻塞序列化或可回滚 range reservation，并覆盖不同
+  open description、EFAULT/short-write 与 truncate 竞态。
 
 ### 目录脱离 namespace 后，getdents 不得继续返回 open-file 缓存
 

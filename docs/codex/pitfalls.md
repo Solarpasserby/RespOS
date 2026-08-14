@@ -570,6 +570,20 @@
 - 后续影响：稀疏回归不仅要 close/reopen 后读洞，还要覆盖新建文件 ftruncate 后立即 MAP_SHARED，
   并在用户首次写入前检查映射内容全零。
 
+## chunk 级 append 锁不等于整次 pwrite syscall 原子
+
+- 状态：已确认，待修复
+- 适用范围：大于 `IO_CHUNK_SIZE` 的 `pwrite/pwrite64`、`O_APPEND`、并发 writer
+- 最后验证：2026-08-14；release、4 GiB/2 hart
+- 证据：`os/src/syscall/fs.rs::sys_pwrite64()`、`File::pwrite_at_offset()`；Linux/RV64/LA64
+  `pwrite_append_atomic_probe`
+- 内容：每个 64 KiB chunk 都能在 open-file inner lock 下原子选择 EOF 并写入，但 syscall 循环会在
+  chunk 之间释放锁。另一个 writer 因而可把自己的 chunk 插入同一 128 KiB record；默认 RV64 已自然
+  复现，强制让出时双架构稳定 16/16 复现。小写 LTP 或最终长度正确都无法发现 record 内交错。
+- 后续影响：不得直接把 spin lock 扩到 `copy_from_user`、page fault 或 yield 周围；单核竞争会失去
+  进展。修复必须显式定义 syscall 级可睡眠 ownership 或 range reservation 的失败回滚，并测试不同
+  open description、EFAULT、short write、truncate 和文件长度观察者。
+
 ## mmap 与 pwrite 共存时不能维护两份普通文件缓存页
 
 - 状态：已确认并修复专项回归

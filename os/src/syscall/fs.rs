@@ -96,6 +96,7 @@ lazy_static! {
 
 // TODO: write 和 read 借助堆上分配的空间中转数据，有额外开销，须优化
 const IO_CHUNK_SIZE: usize = PAGE_SIZE * 16;
+const PWRITE_APPEND_TEST_YIELD: bool = option_env!("TASK_A_PWRITE_APPEND_TEST_YIELD").is_some();
 
 struct XattrTarget {
     inode: Option<Arc<dyn InodeOp>>,
@@ -511,6 +512,11 @@ pub fn sys_pwrite64(fd: usize, buf: *mut u8, len: usize, offset: isize) -> SysRe
             Err(err) => return if total == 0 { Err(err) } else { Ok(total) },
         };
         total += written;
+        if append && PWRITE_APPEND_TEST_YIELD && total < len {
+            for _ in 0..64 {
+                yield_current_task();
+            }
+        }
         positioned_offset = match positioned_offset.checked_add(written) {
             Some(offset) => offset,
             None => {

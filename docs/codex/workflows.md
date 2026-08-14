@@ -718,6 +718,36 @@ musl/glibc 都必须出现 `SUMMARY: 16 passed, 0 failed`。LTP `pwrite04` 测�
 对 POSIX 文本的已知偏离，覆盖矩阵应显式标记为 Linux ABI 兼容，不宣称为纯 POSIX
 行为。两架构必须顺序运行，因为 build target 会改写共享 Cargo config。
 
+Phase 5 `O_APPEND pwrite` 整 syscall 并发原子性：
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror -O2 \
+  scripts/pwrite_append_atomic_probe_linux.c -o /tmp/pwrite_append_atomic_probe_linux
+/tmp/pwrite_append_atomic_probe_linux
+
+TASK_A_PWRITE_APPEND_ATOMIC_PROBE=1 TASK_A_PWRITE_APPEND_TEST_YIELD=1 \
+  make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-pwrite-append-atomic-forced.log
+TASK_A_PWRITE_APPEND_ATOMIC_PROBE=1 TASK_A_PWRITE_APPEND_TEST_YIELD=1 \
+  make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-pwrite-append-atomic-forced.log
+
+TASK_A_PWRITE_APPEND_ATOMIC_PROBE=1 \
+  make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-pwrite-append-atomic-default.log
+TASK_A_PWRITE_APPEND_ATOMIC_PROBE=1 \
+  make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-pwrite-append-atomic-default.log
+```
+
+Linux 32 轮必须输出 `PWRITE_APPEND_ATOMIC_LINUX PASS`。guest 每轮由共享 open-file description 的
+parent/child 并发写两个 128 KiB record；最终只能是完整 A+B 或 B+A。修复前强制让出构建应输出
+`PWRITE_APPEND_ATOMIC_EXPECTED_FAIL interleaved=16 rounds=16`，它是反证而非通过；默认构建是否自然
+命中受调度影响。强制构建后必须不带 `TASK_A_PWRITE_APPEND_TEST_YIELD` 依次重建两架构以恢复默认
+kernel。实现修复后，强制与默认四次运行都必须输出 `PWRITE_APPEND_ATOMIC PASS`，并复跑上方 16-case
+pwrite/pwritev 簇；还需另补不同 open description、EFAULT/short-write 与 truncate 竞态，不能用持有
+spin lock 跨 usercopy 的方式通过该 probe。
+
 Phase 5 已删除目录 fd 的 `getdents64()` Linux 对照与 LTP：
 
 ```bash

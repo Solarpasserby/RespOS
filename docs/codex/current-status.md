@@ -1,5 +1,27 @@
 # RespOS 当前状态
 
+## 2026-08-14 Phase 5 `O_APPEND pwrite` 整 syscall 原子性基线（基于 `8617f87`）
+
+- **Linux 契约**：新增 `scripts/pwrite_append_atomic_probe_linux.c`，每轮让 parent/child 通过同一
+  `O_APPEND` open-file description 并发提交两个 128 KiB `pwrite(fd, record, 0)`，要求最终文件只能是
+  完整 A-record 后接完整 B-record，或相反，不能在 64 KiB 内部分块边界交错。Linux 32 轮通过并输出
+  `PWRITE_APPEND_ATOMIC_LINUX PASS`。
+- **RespOS 反证**：新增 guest `pwrite_append_atomic_probe`。release 初赛 snapshot、4 GiB/2 hart 的
+  默认 RV64 在 16 轮中交错 15 轮，输出 `PWRITE_APPEND_ATOMIC_EXPECTED_FAIL interleaved=15 rounds=16`；
+  默认 LA64 本次 16 轮未自然命中。以 `TASK_A_PWRITE_APPEND_TEST_YIELD=1` 在每个 64 KiB chunk 后强制
+  让出时，RV64/LA64 均稳定交错 16/16。日志为
+  `/tmp/respos-rv-pwrite-append-atomic-baseline-v2.log`、
+  `/tmp/respos-la-pwrite-append-atomic-baseline.log` 及对应 `default.log`；强制验证后已不带钩子重建
+  两架构，默认 kernel 已恢复。
+- **根因与边界**：`sys_pwrite64()` 为限制 kernel buffer 以 `IO_CHUNK_SIZE=64 KiB` 循环复制/写入；
+  每个 chunk 单独调用 `File::pwrite_at_offset()`，只在该 chunk 内持有 open-file inner lock、重新选择
+  EOF，故另一个 writer 可插入整块。现有锁证明 chunk 级 append 原子，不证明一次大 syscall 原子。
+- **待协商实现**：不能简单让现有 spin lock 跨 `copy_from_user()` 或调度让出持有，否则单核 contention
+  可死锁，lazy/COW fault 也会进入锁内。候选实现需在 inode/open-file 层建立可睡眠的 syscall 级序列化，
+  或设计 append-range prepare/commit/rollback，并明确 EFAULT、short write、并发 truncate、不同 open
+  description 和文件长度可见性。该修改跨 syscall/usercopy/File/PageCache 提交边界，实施前需与用户
+  协商；当前提交只保留可复现门禁，不宣称修复。
+
 ## 2026-08-14 Phase 5 `shmctl01` 恢复审计与 LA64 teardown 阻断（基于 `b78f082`）
 
 - **审计方法**：仅临时取消 `user/oscomp_ltp_list.txt` 中 `shmctl01` 的注释并用
@@ -355,9 +377,9 @@
   `pwrite01`--`pwrite04`、对应 `_64` 变体及 `pwritev01/02/201/202` 的 `_64`/非 `_64`
   共 16 case；两架构 musl/glibc 四组均为 `SUMMARY: 16 passed, 0 failed`，日志为
   `/tmp/respos-{rv,la}-pwrite-phase5.log`。
-- **剩余边界**：本轮关闭 LTP 覆盖的单调用语义并保持既有 pwritev 簇通过；大于
-  `IO_CHUNK_SIZE` 的单 syscall 与并发 append writer 之间仍可在内部 chunk 边界交错，完整
-  Linux write-call atomicity 需要单独并发 probe 和更大的 I/O 提交模型，本轮不宣称已关闭。
+- **剩余边界**：本轮关闭 LTP 覆盖的单调用选位语义并保持既有 pwritev 簇通过；大于
+  `IO_CHUNK_SIZE` 的单 syscall 与并发 append writer 之间会在内部 chunk 边界交错，已由本文件顶部
+  专项稳定反证。完整 Linux write-call atomicity 仍待更大的 I/O 提交模型，本轮不宣称已关闭。
 
 ## 2026-08-14 Linux/POSIX Phase 5 LA64 musl `readlink*()` wrapper 差异（基于 `de7c880`）
 
