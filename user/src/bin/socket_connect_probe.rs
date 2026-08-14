@@ -14,6 +14,7 @@ const SO_ERROR: usize = 4;
 const POLLOUT: i16 = 0x0004;
 const POLLERR: i16 = 0x0008;
 const EINPROGRESS: isize = 115;
+const ECONNABORTED: isize = 103;
 const ECONNREFUSED: i32 = 111;
 
 fn read_so_error(fd: usize) -> i32 {
@@ -105,11 +106,46 @@ fn test_blocking_refused_has_no_pending_error() {
     println!("SOCKET_CONNECT blocking_refused PASS");
 }
 
+fn test_retry_after_refused_error_consumption() {
+    let (reservation, addr) = bound_loopback_socket();
+    assert_eq!(close(reservation as usize), 0);
+
+    let client = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    assert!(client >= 0);
+    assert_eq!(connect(client as usize, &addr), -EINPROGRESS);
+    let revents = wait_connect_ready(client as i32);
+    assert_ne!(revents & POLLERR, 0);
+    assert_eq!(read_so_error(client as usize), ECONNREFUSED);
+
+    let listener = socket(AF_INET, SOCK_STREAM, 0);
+    assert!(listener >= 0);
+    assert_eq!(bind(listener as usize, &addr), 0);
+    assert_eq!(listen(listener as usize, 4), 0);
+
+    assert_eq!(connect(client as usize, &addr), -ECONNABORTED);
+    assert_eq!(connect(client as usize, &addr), -EINPROGRESS);
+    let revents = wait_connect_ready(client as i32);
+    assert_eq!(revents & POLLERR, 0);
+    assert_eq!(read_so_error(client as usize), 0);
+
+    let accepted = accept_unix(listener as usize);
+    assert!(accepted >= 0);
+    assert_eq!(sendto(client as usize, b"r", 0, None), 1);
+    let mut byte = [0u8; 1];
+    assert_eq!(read(accepted as usize, &mut byte), 1);
+    assert_eq!(byte[0], b'r');
+    assert_eq!(close(accepted as usize), 0);
+    assert_eq!(close(client as usize), 0);
+    assert_eq!(close(listener as usize), 0);
+    println!("SOCKET_CONNECT retry_after_refused PASS");
+}
+
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     test_success();
     test_refused_and_error_consumption();
     test_blocking_refused_has_no_pending_error();
+    test_retry_after_refused_error_consumption();
     println!("SOCKET_CONNECT ALL PASS");
     0
 }

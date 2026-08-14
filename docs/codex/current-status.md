@@ -17,23 +17,27 @@
 - **协商点**：该方案会同时改变 task/process owner、wait、process signal、session 查询与 exec 提交，
   应按设计文档五个可回滚步骤逐项实现并逐项提交。获得确认前不以局部特判消除 expected-fail marker。
 
-## 2026-08-14 Linux/POSIX Phase 5 nonblocking connect 与 `SO_ERROR`（当前工作树）
+## 2026-08-14 Linux/POSIX Phase 5 nonblocking connect、`SO_ERROR` 与失败后重连（当前工作树）
 
-- **Linux 契约**：新增 `scripts/socket_connect_probe_linux.c`，确认 loopback TCP 成功和 refused 两条异步
+- **Linux 契约**：`scripts/socket_connect_probe_linux.c` 确认 loopback TCP 成功和 refused 两条异步
   connect 路径。首次 nonblocking connect 返回 `EINPROGRESS`；完成由 poll 的 `POLLOUT` 表示，失败还带
-  `POLLERR`；`SO_ERROR` 返回正 errno 并原子消费，第二次读取为 0。
+  `POLLERR`；`SO_ERROR` 返回正 errno 并原子消费，第二次读取为 0。对同一 fd，消费
+  `ECONNREFUSED` 后首次重连返回 `ECONNABORTED` 并完成旧传输状态复位，下一次重连重新返回
+  `EINPROGRESS`，随后可以成功连接、accept 并传输数据。
 - **状态所有权**：`TcpSocket` 增加显式 `FAILED` 状态和 pending-error 原子槽。协议 poll 把
   `CONNECTING` 提交为 `CONNECTED` 或 `FAILED`，poll/epoll 只观察状态；`getsockopt(SO_ERROR)` 是错误
-  的唯一消费点。失败 socket 在错误消费后的首次重连按 Linux 当前观察返回 `ECONNABORTED` 并重置传输
-  handle；更完整的 retry 序列仍为 `待验证`。
+  的唯一消费点。失败 socket 在错误消费后的首次重连返回 `ECONNABORTED` 并原子替换 smoltcp handle，
+  socket 回到可再次 connect 的 CLOSED 状态；后续尝试复用正常异步 connect 提交点。
 - **双架构证据**：宿主 probe 以 `cc -std=c11 -Wall -Wextra -Werror -O2` 通过。RV64/LA64 release、
   初赛 snapshot、4 GiB/2 hart 的 `TASK_A_SOCKET_CONNECT_PROBE=1` 均输出
-  `SOCKET_CONNECT ALL PASS`；日志为 `/tmp/respos-{rv,la}-socket-connect-v3.log`。成功项还完成一字节
-  双端传输；异步失败项确认消费 `SO_ERROR` 后旧 `POLLERR` 不再出现；阻塞 refused 项确认 errno 已由
-  `connect` 同步返回，之后 `SO_ERROR` 为 0。
+  `SOCKET_CONNECT ALL PASS`；基础日志为 `/tmp/respos-{rv,la}-socket-connect-v3.log`，失败后完整重连
+  日志为 `/tmp/respos-{rv,la}-socket-connect-retry.log`。成功项和重连项都完成一字节双端传输；异步
+  失败项确认消费 `SO_ERROR` 后旧 `POLLERR` 不再出现；阻塞 refused 项确认 errno 已由 `connect` 同步
+  返回，之后 `SO_ERROR` 为 0。扩大 probe 后既有 `socket_phase5_probe` 双架构 2 hart 回归仍通过，日志为
+  `/tmp/respos-{rv,la}-socket-phase5-after-retry.log`。
 - **剩余边界**：当前网络栈以 loopback/smoltcp 为主，本轮只验证 success/refused；真实 route
-  unreachable、SYN timeout、reset 细分 errno、重复 connect 的完整 Linux 序列和 iperf 固定顺序回归尚未
-  验证，不能据此宣布 M1 全部退出。
+  unreachable、SYN timeout、reset 细分 errno 和 iperf 固定顺序回归尚未验证，不能据此宣布 M1 全部
+  退出。
 
 ## 2026-08-14 Linux/POSIX Phase 5 socket message flags（当前工作树）
 

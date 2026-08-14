@@ -405,9 +405,10 @@ TASK_A_SOCKET_CONNECT_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
   LA_PRE_OUTPUT=/tmp/respos-la-socket-connect.log
 ```
 
-以 `SOCKET_CONNECT ALL PASS` 为通过标志。必须同时看到 success 与 refused 两项；失败路径要求
-`POLLOUT|POLLERR`、首次 `SO_ERROR=ECONNREFUSED`、第二次 `SO_ERROR=0`。该 loopback probe 不替代真实
-unreachable/SYN timeout/reset 和 iperf 回归。
+以 `SOCKET_CONNECT ALL PASS` 为通过标志。必须同时看到 success、refused、blocking refused 与
+`retry_after_refused`；异步失败路径要求 `POLLOUT|POLLERR`、首次 `SO_ERROR=ECONNREFUSED`、第二次
+`SO_ERROR=0`，同 fd 重连路径要求随后观察 `ECONNABORTED -> EINPROGRESS -> success` 并实际传输数据。
+该 loopback probe 不替代真实 unreachable/SYN timeout/reset 和 iperf 回归。
 
 Phase 5 mmap EOF/SIGBUS Linux 对照：
 

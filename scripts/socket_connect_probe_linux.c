@@ -173,11 +173,82 @@ static void test_blocking_refused_has_no_pending_error(void)
     close(client);
 }
 
+static void test_retry_after_refused_error_consumption(void)
+{
+    struct sockaddr_in addr;
+    socklen_t addrlen = sizeof(addr);
+    short revents = 0;
+    int reservation = socket(AF_INET, SOCK_STREAM, 0);
+    int listener;
+    int client;
+    int accepted;
+
+    if (reservation < 0)
+        fail("socket(retry port reservation)");
+    loopback_addr(&addr, 0);
+    if (bind(reservation, (struct sockaddr *)&addr, sizeof(addr)) < 0)
+        fail("bind(retry port reservation)");
+    if (getsockname(reservation, (struct sockaddr *)&addr, &addrlen) < 0)
+        fail("getsockname(retry port reservation)");
+    close(reservation);
+
+    client = socket(AF_INET, SOCK_STREAM, 0);
+    if (client < 0)
+        fail("socket(retry client)");
+    make_nonblocking(client);
+    errno = 0;
+    expect(connect(client, (struct sockaddr *)&addr, sizeof(addr)) == -1
+               && errno == EINPROGRESS,
+           "retry setup first connect returns EINPROGRESS");
+    wait_connect_ready(client, &revents);
+    expect((revents & POLLERR) != 0,
+           "retry setup refused connect reports POLLERR");
+    expect(read_so_error(client) == ECONNREFUSED,
+           "retry setup consumes ECONNREFUSED");
+
+    listener = socket(AF_INET, SOCK_STREAM, 0);
+    if (listener < 0)
+        fail("socket(retry listener)");
+    if (bind(listener, (struct sockaddr *)&addr, sizeof(addr)) < 0)
+        fail("bind(retry listener)");
+    if (listen(listener, 4) < 0)
+        fail("listen(retry listener)");
+
+    errno = 0;
+    expect(connect(client, (struct sockaddr *)&addr, sizeof(addr)) == -1
+               && errno == ECONNABORTED,
+           "first connect after consumed failure resets the socket");
+    errno = 0;
+    expect(connect(client, (struct sockaddr *)&addr, sizeof(addr)) == -1
+               && errno == EINPROGRESS,
+           "second connect after reset starts a new attempt");
+    wait_connect_ready(client, &revents);
+    expect((revents & POLLERR) == 0,
+           "retried successful connect has no POLLERR");
+    expect(read_so_error(client) == 0,
+           "retried successful connect has zero SO_ERROR");
+
+    accepted = accept(listener, NULL, NULL);
+    if (accepted < 0)
+        fail("accept(retry)");
+    if (send(client, "r", 1, 0) != 1)
+        fail("send(retry)");
+    {
+        char byte = 0;
+        expect(recv(accepted, &byte, 1, 0) == 1 && byte == 'r',
+               "retried socket transfers data");
+    }
+    close(accepted);
+    close(client);
+    close(listener);
+}
+
 int main(void)
 {
     test_success();
     test_refused_and_error_consumption();
     test_blocking_refused_has_no_pending_error();
+    test_retry_after_refused_error_consumption();
     puts("socket connect Linux probe: PASS");
     return 0;
 }

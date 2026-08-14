@@ -595,9 +595,9 @@ FdTable slot (FdEntry: descriptor flags)
   timeout/EINTR 覆盖成错误。扩展 `MSG_TRUNC/OOB/ERRQUEUE` 时需要先建立 Linux 对照，不能复用流式
   WAITALL 假设到数据报控制面。
 
-### TCP 异步 connect 的完成状态与 pending error 由 socket 持有
+### TCP 异步 connect、pending error 与失败后重置由 socket 持有
 
-- 状态：loopback success/refused 已实现并完成双架构 SMP 专项
+- 状态：loopback success/refused/同 fd 重连已实现并完成双架构 SMP 专项
 - 适用范围：nonblocking `connect`、poll/epoll write/error readiness、`SO_ERROR`
 - 最后验证：2026-08-14
 - 证据：`os/src/net/{tcp.rs,socket.rs}`、`os/src/syscall/net.rs`、
@@ -605,10 +605,12 @@ FdTable slot (FdEntry: descriptor flags)
 - 内容：首次非阻塞 connect 只发起状态转换并返回 `EINPROGRESS`。协议 poll 是
   `CONNECTING -> CONNECTED/FAILED` 的提交点；FAILED 同时发布正 errno 到 socket 的原子 pending-error
   槽，使 poll/epoll 可报告 write/error readiness。`SO_ERROR` 用 swap 读取并消费该槽，不能由 readiness
-  扫描提前清除，也不能在 syscall 层固定伪造 0。
+  扫描提前清除，也不能在 syscall 层固定伪造 0。失败被消费后，同一 fd 的首次重连以
+  `ECONNABORTED` 作为旧 handle 复位提交点；替换 handle、清空端点并回到 CLOSED 后，下一次 connect
+  重新走正常 `EINPROGRESS -> CONNECTED/FAILED` 状态机。
 - 后续影响：新增 timeout/unreachable/reset 映射时必须在同一状态提交点写入精确 errno；poll 只能观察，
-  `SO_ERROR` 才能消费。close/retry 若替换 smoltcp handle，必须保持 handle 唯一所有权并单独验证重复
-  connect 的 Linux 状态序列。
+  `SO_ERROR` 才能消费。close/retry 替换 smoltcp handle 时必须保持唯一所有权；不得跳过
+  `ECONNABORTED` 复位边界或让旧 pending error 污染新连接。
 
 ## 双架构差异
 

@@ -77,7 +77,7 @@ Phase 6 的调度器、allocator、异步 I/O 和细粒度锁重构。
 | 接口簇 | 当前证据 | 初始状态 | 下一交付物 |
 | --- | --- | --- | --- |
 | `SO_RCVTIMEO`/`SO_SNDTIMEO`、`MSG_DONTWAIT` | Linux/RespOS probe 已有；LA64 SMP 50 ms 晚醒约 1 秒 | 阻断 | 归一化 LA64 per-hart 时间域后重跑 |
-| nonblocking `connect`、`poll`、`SO_ERROR` | loopback success/refused 与 error consumption 双架构 2 hart 通过 | 部分闭合 | unreachable/timeout/reset 与 iperf 回归 |
+| nonblocking `connect`、`poll`、`SO_ERROR` | loopback success/refused、error consumption 与同 fd 失败后重连双架构 2 hart 通过 | 部分闭合 | unreachable/timeout/reset 与 iperf 回归 |
 | `MSG_PEEK/WAITALL/NOSIGNAL`、partial I/O | Linux/RespOS probe 含 timeout/EOF/signal 短读，双架构 2 hart 通过 | 已闭合（当前范围） | 完整初赛与网络回归 |
 | `getsid()` | syscall dispatch 缺项，已有 `setsid/getpgid/setpgid` | 已知差异 | session probe 与最小实现 |
 | termios/job control | 当前 tty ioctl 主要只有窗口查询，源码明确未建模 controlling tty | 已知差异 | tty/session/pgrp 状态设计和 probe |
@@ -328,8 +328,9 @@ summary，不能以 QEMU/make 返回 0 代替测试通过。
 
 1. socket timeval timeout 与 `MSG_DONTWAIT` 已完成 Linux/RespOS probe；LA64 SMP 时间域仍阻断验收；
 2. `MSG_PEEK/WAITALL/NOSIGNAL` 与 partial-I/O/EINTR 当前范围已完成双架构专项；
-3. nonblocking connect、poll readiness 和可消费 `SO_ERROR` 的 loopback success/refused 已完成；真实网络
-   timeout/unreachable/reset 与 iperf 回归仍待补；
+3. nonblocking connect、poll readiness、可消费 `SO_ERROR` 以及同 fd
+   `ECONNABORTED -> EINPROGRESS -> success` 重连序列已完成；真实网络 timeout/unreachable/reset 与
+   iperf 回归仍待补；
 4. `getsid` 与 session/pgid Linux 对照已完成，不在该补丁中实现完整 tty；
 5. 重构稳定 process identity，关闭 leader exit/non-leader exec；
 6. 在稳定身份上实现 controlling tty/job control，再推进 process-pending 和 restart classes；
