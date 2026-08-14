@@ -657,6 +657,21 @@ fn path_open_from_base(
 
 /// 根据路径创建文件
 pub fn filename_create(dirfd: isize, path: &str, ty: InodeType, mode: usize) -> SysResult {
+    filename_create_impl(dirfd, path, ty, mode, None)
+}
+
+/// Create a special inode while preserving its device payload through namei.
+pub fn filename_mknod(dirfd: isize, path: &str, ty: InodeType, mode: usize, dev: u32) -> SysResult {
+    filename_create_impl(dirfd, path, ty, mode, Some(dev))
+}
+
+fn filename_create_impl(
+    dirfd: isize,
+    path: &str,
+    ty: InodeType,
+    mode: usize,
+    special_dev: Option<u32>,
+) -> SysResult {
     if path.is_empty() {
         return Err(Errno::ENOENT);
     }
@@ -689,8 +704,16 @@ pub fn filename_create(dirfd: isize, path: &str, ty: InodeType, mode: usize) -> 
             let current_dir_inode = nd.dentry.get_inode();
             let create_mode = created_mode(&nd.dentry, mode, ty)?;
             let (uid, gid) = created_owner(&nd.dentry)?;
-            let inode =
-                current_dir_inode.create(&nd.dentry.current_abs_path(), name.as_str(), ty)?;
+            let inode = if let Some(dev) = special_dev {
+                current_dir_inode.create_special(
+                    &nd.dentry.current_abs_path(),
+                    name.as_str(),
+                    ty,
+                    dev,
+                )?
+            } else {
+                current_dir_inode.create(&nd.dentry.current_abs_path(), name.as_str(), ty)?
+            };
             install_created_inode(&nd.dentry, name.as_str(), inode, create_mode, uid, gid)?;
             Ok(())
         }

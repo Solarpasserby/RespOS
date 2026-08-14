@@ -406,20 +406,20 @@ FdTable slot (FdEntry: descriptor flags)
   publish 顺序；若 lower backend 不能回滚，必须先建立它自己的 transaction，不能恢复忽略 setattr
   错误的做法。
 
-### ext4 命名 FIFO 的类型由 lower inode 持久化，运行态缓冲由 VFS 管理
+### ext4 特殊节点的类型与 device payload 由 lower inode 持久化
 
 - 状态：已实现并由双架构 LTP 验证
-- 适用范围：`mknod(S_IFIFO)`、`mkfifo`、FIFO stat/open/read/write/lseek/fsync
+- 适用范围：`mknod`/`mknodat`、`mkfifo`、特殊节点 stat/xattr；命名 FIFO open/read/write/lseek/fsync
 - 最后验证：2026-08-14
-- 证据：`os/src/fs/{ext4/inode.rs,pipe.rs}`；RV64/LA64 musl/glibc 的
-  `fsync03,lseek02,open06,read03,write04`
-- 内容：ext4 create 必须用 lower `ext4_mknod(EXT4_DE_FIFO)` 写入 FIFO inode type，之后 lookup/stat
-  才能稳定恢复 `InodeType::Fifo`。`sys_openat` 根据这个持久类型把 pathname inode 转为
-  `NamedFifoEnd`；同一路径的运行态 reader/writer 共享 VFS `PipeRingBuffer`，关闭最后一个端点后释放，
-  不把瞬时管道内容写入 ext4。
+- 证据：`os/src/fs/{namei.rs,ext4/inode.rs,pipe.rs}`；`mknod_xattr_probe`；RV64/LA64 musl/glibc 的
+  13-case mknod/xattr 簇及既有五项 FIFO LTP
+- 内容：`sys_mknodat` 将 device payload 经 namei `create_special()` 一直传给 lower inode；ext4 对
+  FIFO、character、block、socket 都用 `ext4_mknod()` 建立真实特殊 inode，并从 raw inode device slot
+  恢复 `KStat.rdev`。`sys_openat` 根据持久的 FIFO 类型将 pathname inode 转为 `NamedFifoEnd`；同一路径
+  的运行态 reader/writer 共享 VFS `PipeRingBuffer`，关闭最后一个端点后释放，不把管道内容写入 ext4。
 - 后续影响：不能用普通文件占位再只改低 12 位 permission 假装特殊 inode；否则 reopen/readdir/stat
-  会继续识别成 regular，并绕过所有 FIFO errno/阻塞语义。字符/块设备仍需先把 `dev` 参数贯穿 create
-  接口后再切换 lower mknod，不能照搬 FIFO 的固定 payload 0。
+  会继续识别成 regular，并绕过类型相关 errno、xattr 限制与 FIFO 阻塞语义。特殊 inode 正确不等于
+  已有对应设备驱动；大 major/high minor 的完整 `dev_t`/`statx` 编解码仍需专项验证。
 
 ### ext4 inode 属性以底层 transaction 成功为发布点
 

@@ -99,18 +99,20 @@
 - 后续影响：完整 tmpfs 是独立实现任务，不能把 ext4 runner 隔离宣称为 `/dev/shm` 已完整兼容。若日志
   再出现 `/dev/shm/LTP_*`，先确认实际 `/tmp` 后端和 runner 入口，再分析具体 syscall。
 
-## requested `InodeType::Fifo` 不等于 ext4 已持久化 FIFO 类型
+## requested 特殊 `InodeType` 不等于 ext4 已持久化特殊 inode
 
-- 状态：已确认并修复 FIFO
-- 适用范围：ext4 create、mknod/mkfifo、命名 FIFO 的 stat/open 与 errno
+- 状态：已确认并修复 FIFO/character/block/socket
+- 适用范围：ext4 create、mknod/mkfifo、特殊节点的 stat/xattr 与命名 FIFO errno
 - 最后验证：2026-08-14
-- 证据：修复前 `fsync03,lseek02,open06,read03,write04` 四环境共同失败；修复后四环境全通过
+- 证据：修复前 FIFO 五项 LTP 及 `setxattr02` character/block/socket 共同失败；修复后双架构
+  musl/glibc 的 FIFO 簇和 13-case mknod/xattr 簇全通过
 - 内容：旧 create 根据 requested type 构造 Rust inode，却用普通文件 `O_CREAT` 写 lower inode；后续
-  lookup 以磁盘 mode 为准，又把对象恢复成 regular。结果不是单个 read/write 分支错误，而是 stat
-  不含 `S_IFIFO`、非阻塞 writer 不报 `ENXIO`、lseek/fsync 不报特殊文件 errno、缓冲区不受 pipe
-  capacity 约束的一整簇症状。
+  lookup 以磁盘 mode 为准，又把对象恢复成 regular。结果不是单个 syscall 分支错误，而是 stat type
+  与 rdev 错误、character/block/socket 接受 `user.*` xattr，以及 FIFO 的 nonblock/lseek/fsync/pipe
+  capacity 语义一起偏离。
 - 后续影响：遇到多个特殊文件 syscall 同时失败，先检查 lower inode mode 与 reopen 后 node_type，
-  不要在每个 syscall 添加 pathname 特判。setattr 只保留/更新权限位时尤其不能用它补救错误的 type。
+  再检查 device payload 是否真正传入 lower inode；不要在 xattr 或各 syscall 层按 pathname/type 打补丁。
+  setattr 只保留/更新权限位时尤其不能用它补救错误的 type。
 
 ## 直接从 `wait4` 返回 EINTR 会绕过 SA_RESTART 并放大成 LTP 任务泄漏
 

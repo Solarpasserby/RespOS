@@ -62,6 +62,7 @@ const TASK_A_NETWORK_ORDER_PROBE: bool = option_env!("TASK_A_NETWORK_ORDER_PROBE
 const TASK_A_GETPEERNAME_PROBE: bool = option_env!("TASK_A_GETPEERNAME_PROBE").is_some();
 const TASK_A_SOCKET_PEERCRED_PROBE: bool = option_env!("TASK_A_SOCKET_PEERCRED_PROBE").is_some();
 const TASK_A_SPLICE_SOCKET_PROBE: bool = option_env!("TASK_A_SPLICE_SOCKET_PROBE").is_some();
+const TASK_A_MKNOD_XATTR_PROBE: bool = option_env!("TASK_A_MKNOD_XATTR_PROBE").is_some();
 const TASK_A_PERF_PROBE: bool = option_env!("TASK_A_PERF_PROBE").is_some();
 
 const RV_MUSL_LOADER: &str = "/lib/ld-musl-riscv64.so.1\0";
@@ -1690,6 +1691,22 @@ fn run_task_a_splice_socket_probe() {
     println!("[testrunner] splice socket probe PASS");
 }
 
+fn run_task_a_mknod_xattr_probe() {
+    let pid = fork();
+    assert!(pid >= 0, "failed to fork mknod_xattr_probe");
+    if pid == 0 {
+        let argv = ["mknod_xattr_probe\0".as_ptr(), core::ptr::null()];
+        let ret = exec("mknod_xattr_probe\0", &argv);
+        println!("[testrunner] exec mknod_xattr_probe failed: {}", ret);
+        exit(-1);
+    }
+
+    let mut status = 0;
+    assert_eq!(waitpid(pid as usize, &mut status), pid);
+    assert_eq!(status, 0, "mknod_xattr_probe failed");
+    println!("[testrunner] mknod xattr probe PASS");
+}
+
 #[cfg(target_arch = "riscv64")]
 #[unsafe(no_mangle)]
 fn main() -> i32 {
@@ -1777,6 +1794,12 @@ fn main() -> i32 {
     if TASK_A_SPLICE_SOCKET_PROBE {
         run_task_a_splice_socket_probe();
         println!("[testrunner] splice socket probe finished, powering off");
+        poweroff();
+        return 0;
+    }
+    if TASK_A_MKNOD_XATTR_PROBE {
+        run_task_a_mknod_xattr_probe();
+        println!("[testrunner] mknod xattr probe finished, powering off");
         poweroff();
         return 0;
     }
@@ -1932,6 +1955,12 @@ fn main() -> i32 {
     if TASK_A_SPLICE_SOCKET_PROBE {
         run_task_a_splice_socket_probe();
         println!("[testrunner] splice socket probe finished, powering off");
+        poweroff();
+        return 0;
+    }
+    if TASK_A_MKNOD_XATTR_PROBE {
+        run_task_a_mknod_xattr_probe();
+        println!("[testrunner] mknod xattr probe finished, powering off");
         poweroff();
         return 0;
     }

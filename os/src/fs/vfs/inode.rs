@@ -77,6 +77,22 @@ pub trait InodeOp: Any + Send + Sync {
 
     fn create(&self, parent_path: &str, name: &str, ty: InodeType) -> SysResult<Arc<dyn InodeOp>>;
 
+    /// Create a special inode whose device payload is part of the on-disk
+    /// identity. Filesystems without a real special-inode representation must
+    /// reject character/block devices instead of creating regular placeholders.
+    fn create_special(
+        &self,
+        parent_path: &str,
+        name: &str,
+        ty: InodeType,
+        _dev: u32,
+    ) -> SysResult<Arc<dyn InodeOp>> {
+        match ty {
+            InodeType::Fifo | InodeType::Socket => self.create(parent_path, name, ty),
+            _ => Err(Errno::EOPNOTSUPP),
+        }
+    }
+
     fn symlink(
         &self,
         _target: &str,

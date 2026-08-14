@@ -1,5 +1,23 @@
 # RespOS 当前状态
 
+## 2026-08-14 Linux/POSIX Phase 5 ext4 特殊 inode 与 xattr（基于 `699a5e2` 的当前工作树）
+
+- **失败边界与根因**：修复前双架构 musl/glibc 的 LTP `setxattr02` 仅通过 regular、directory、
+  symlink 与 FIFO 四项；character、block、socket 三类节点错误接受 `user.*` xattr。`sys_mknodat()`
+  丢弃 `dev`，ext4 又用普通文件 `O_CREAT` 代替这三类 lower inode，导致后续 lookup/stat 将其稳定识别为
+  regular，而不是单纯的 xattr errno 映射错误。
+- **实现边界**：VFS/namei 增加携带 device payload 的 `create_special()` 路径；ext4 对 FIFO、character、
+  block、socket 统一调用 lwext4 `ext4_mknod()`，并从 raw inode device slot 恢复 `KStat.rdev`。普通
+  `create()` 不再允许缺少 device payload 的 character/block placeholder。该变更只保证 namespace inode
+  类型、rdev 与适用的 xattr 限制，不代表 RespOS 已有对应字符/块设备驱动或完整 open/read/write 语义。
+- **专项与回归证据**：新增 `mknod_xattr_probe`，双架构 release、初赛 snapshot、4 GiB/2 hart 均输出
+  `MKNOD_XATTR_PROBE_PASS`，验证 character `rdev=0x103`、block `rdev=0x700`、四类特殊 inode mode 及
+  `user.*` xattr 的 `EPERM`。同配置聚焦 `mknod01`--`mknod09`、`setxattr01/02`、`fsetxattr01`、
+  `getxattr02` 共 13 case；RV64/LA64 的 musl/glibc 四组均为
+  `SUMMARY: 13 passed, 0 failed`。日志为 `/tmp/respos-{rv,la}-mknod-xattr-{phase5,ltp-phase5}.log`。
+- **剩余边界**：当前 probe 覆盖 Linux 常用低位 device 编码；大 major/high minor 的 `dev_t` 编解码及
+  `statx.stx_rdev_*` 尚未专项验证，不能据此宣称任意 device number 已闭合。
+
 ## 2026-08-14 Linux/POSIX Phase 5 ext4 `fallocate()` 预分配审计（基于 `80e8c5a`）
 
 - **契约门禁**：新增 `scripts/fallocate_prealloc_probe_linux.c`，不只复刻 LTP 的返回值检查，还固定

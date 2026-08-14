@@ -15,6 +15,7 @@ const SYSCALL_DUP: usize = 23;
 const SYSCALL_DUP3: usize = 24;
 const SYSCALL_FCNTL: usize = 25;
 const SYSCALL_IOCTL: usize = 29;
+const SYSCALL_MKNODAT: usize = 33;
 const SYSCALL_MKDIRAT: usize = 34;
 const SYSCALL_UNLINKAT: usize = 35;
 const SYSCALL_SYMLINKAT: usize = 36;
@@ -487,6 +488,13 @@ pub fn sys_openat(dirfd: isize, path: &str, flags: usize, mode: usize) -> isize 
     syscall(
         SYSCALL_OPENAT,
         [dirfd as usize, path.as_ptr() as usize, flags, mode, 0, 0],
+    )
+}
+
+pub fn sys_mknodat(dirfd: isize, path: &str, mode: usize, dev: usize) -> isize {
+    syscall(
+        SYSCALL_MKNODAT,
+        [dirfd as usize, path.as_ptr() as usize, mode, dev, 0, 0],
     )
 }
 

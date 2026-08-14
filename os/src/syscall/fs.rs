@@ -9,8 +9,8 @@ use crate::fs::{
     AT_EMPTY_PATH, AT_FDCWD, AT_NO_AUTOMOUNT, AT_SYMLINK_NOFOLLOW, FdEntry, File, FileOp, KStat,
     OpenFlags, POLL_READ, POLL_WRITE, Pipe, PollEvents, SpecialFd, Stat, Statfs64,
     check_dir_search_permission, filename_create, filename_link, filename_link_tmpfile,
-    filename_lookup, filename_lookup_no_follow_final_symlink, filename_rename, filename_symlink,
-    filename_unlink, init_fdset, make_pipe, open_named_fifo, path_open,
+    filename_lookup, filename_lookup_no_follow_final_symlink, filename_mknod, filename_rename,
+    filename_symlink, filename_unlink, init_fdset, make_pipe, open_named_fifo, path_open,
 };
 use crate::mm::{
     VPNRange, VirtAddr, check_user_readable, check_user_writable, copy_cstr_from_user,
@@ -2783,7 +2783,7 @@ pub fn sys_mkdirat(dirfd: isize, path: *const u8, mode: usize) -> SysResult<usiz
     Ok(0)
 }
 
-pub fn sys_mknodat(dirfd: isize, path: *const u8, mode: usize, _dev: usize) -> SysResult<usize> {
+pub fn sys_mknodat(dirfd: isize, path: *const u8, mode: usize, dev: usize) -> SysResult<usize> {
     const S_IFMT: usize = 0o170000;
     const S_IFIFO: usize = 0o010000;
     const S_IFCHR: usize = 0o020000;
@@ -2793,21 +2793,33 @@ pub fn sys_mknodat(dirfd: isize, path: *const u8, mode: usize, _dev: usize) -> S
 
     let path = copy_cstr_from_user(path)?;
     match mode & S_IFMT {
-        S_IFIFO => filename_create(dirfd, path.as_str(), InodeType::Fifo, mode)?,
-        S_IFSOCK => filename_create(dirfd, path.as_str(), InodeType::Socket, mode)?,
+        S_IFIFO => filename_mknod(dirfd, path.as_str(), InodeType::Fifo, mode, dev as u32)?,
+        S_IFSOCK => filename_mknod(dirfd, path.as_str(), InodeType::Socket, mode, dev as u32)?,
         S_IFCHR => {
             let task = current_task().expect("[kernel] current task is None.");
             if task.fsuid() != 0 {
                 return Err(Errno::EPERM);
             }
-            filename_create(dirfd, path.as_str(), InodeType::CharDevice, mode)?
+            filename_mknod(
+                dirfd,
+                path.as_str(),
+                InodeType::CharDevice,
+                mode,
+                dev as u32,
+            )?
         }
         S_IFBLK => {
             let task = current_task().expect("[kernel] current task is None.");
             if task.fsuid() != 0 {
                 return Err(Errno::EPERM);
             }
-            filename_create(dirfd, path.as_str(), InodeType::BlockDevice, mode)?
+            filename_mknod(
+                dirfd,
+                path.as_str(),
+                InodeType::BlockDevice,
+                mode,
+                dev as u32,
+            )?
         }
         0 | S_IFREG => filename_create(dirfd, path.as_str(), InodeType::Regular, mode)?,
         _ => return Err(Errno::EINVAL),

@@ -230,6 +230,7 @@ struct RawInodeMetadata {
     mode: u32,
     uid: u32,
     gid: u32,
+    rdev: u32,
     atime: u32,
     mtime: u32,
     ctime: u32,
@@ -358,6 +359,81 @@ impl Ext4Inode {
         } else {
             Err(Errno::EINVAL)
         }
+    }
+
+    fn create_inode(
+        &self,
+        parent_path: &str,
+        name: &str,
+        ty: InodeType,
+        special_dev: Option<u32>,
+    ) -> SysResult<Arc<dyn InodeOp>> {
+        self.check_type(InodeType::Directory)?;
+        if special_dev.is_none() && matches!(ty, InodeType::CharDevice | InodeType::BlockDevice) {
+            return Err(Errno::EOPNOTSUPP);
+        }
+
+        let started = crate::perf::now_ticks();
+        let path = Self::child_path(parent_path, name);
+        let ext4_ty = Ext4InodeTypes::from(ty);
+        let c_path = CString::new(path.as_str()).map_err(|_| Errno::EINVAL)?;
+        {
+            let guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Namespace);
+            let file = &mut Ext4File::new(parent_path, self.ty.clone());
+            let _lower = guard.profile_lower();
+
+            if file.check_inode_exist(&path, ext4_ty.clone()) {
+                return Err(Errno::EEXIST);
+            }
+
+            let new_file = &mut Ext4File::new(&path, ext4_ty.clone());
+            match ext4_ty {
+                Ext4InodeTypes::EXT4_DE_DIR => {
+                    new_file.dir_mk(&path).map_err(Self::map_lwext4_err)?;
+                }
+                Ext4InodeTypes::EXT4_DE_REG_FILE => {
+                    new_file
+                        .file_open(
+                            &path,
+                            bindings::O_RDWR | bindings::O_CREAT | bindings::O_TRUNC,
+                        )
+                        .map_err(Self::map_lwext4_err)?;
+                    new_file.file_close().map_err(Self::map_lwext4_err)?;
+                }
+                Ext4InodeTypes::EXT4_DE_FIFO
+                | Ext4InodeTypes::EXT4_DE_CHRDEV
+                | Ext4InodeTypes::EXT4_DE_BLKDEV
+                | Ext4InodeTypes::EXT4_DE_SOCK => {
+                    let ret = unsafe {
+                        bindings::ext4_mknod(
+                            c_path.as_ptr(),
+                            ext4_ty.clone() as i32,
+                            special_dev.unwrap_or(0),
+                        )
+                    };
+                    if ret != 0 {
+                        return Err(Self::map_lwext4_err(ret));
+                    }
+                }
+                _ => return Err(Errno::ENOSYS),
+            }
+        }
+        self.namespace_changed();
+
+        let (child_ino, child_ty) = Self::lookup_dirent(parent_path, name)?;
+        let inode = Self::get_or_create(
+            self.fs_id,
+            self.mount_point,
+            self.mount_point_c,
+            child_ino,
+            child_ty,
+        );
+        if let Some(inode) = inode.as_any().downcast_ref::<Ext4Inode>() {
+            inode.init_inode_times();
+        }
+        crate::perf::ext4_create_call(1);
+        crate::perf::ext4_create_ticks(crate::perf::elapsed_since(started));
+        Ok(inode)
     }
 
     fn map_lwext4_err(errno: i32) -> Errno {
@@ -744,12 +820,24 @@ impl Ext4Inode {
 
         let osd2 = unsafe { core::ptr::addr_of!(raw_inode.osd2).read_unaligned() };
         let linux2 = unsafe { osd2.linux2 };
+        let inode_blocks = unsafe { core::ptr::addr_of!(raw_inode.blocks).read_unaligned() };
+        let rdev = if matches!(ty, InodeType::CharDevice | InodeType::BlockDevice) {
+            let legacy = u32::from_le(inode_blocks[0]);
+            if legacy != 0 {
+                legacy
+            } else {
+                u32::from_le(inode_blocks[1])
+            }
+        } else {
+            0
+        };
         let metadata = RawInodeMetadata {
             mode: u16::from_le(raw_inode.mode) as u32,
             uid: u16::from_le(raw_inode.uid) as u32
                 | ((u16::from_le(linux2.uid_high) as u32) << 16),
             gid: u16::from_le(raw_inode.gid) as u32
                 | ((u16::from_le(linux2.gid_high) as u32) << 16),
+            rdev,
             atime: u32::from_le(raw_inode.access_time),
             mtime: u32::from_le(raw_inode.modification_time),
             ctime: u32::from_le(raw_inode.change_inode_time),
@@ -803,7 +891,7 @@ impl InodeOp for Ext4Inode {
             nlink: raw.nlink,
             uid: raw.uid,
             gid: raw.gid,
-            rdev: 0,
+            rdev: raw.rdev as u64,
             mode: raw.mode,
             mode_valid: true,
             blksize: crate::config::BLOCK_SIZE as u32,
@@ -1248,74 +1336,23 @@ impl InodeOp for Ext4Inode {
     }
 
     fn create(&self, parent_path: &str, name: &str, ty: InodeType) -> SysResult<Arc<dyn InodeOp>> {
-        self.check_type(InodeType::Directory)?;
-        let started = crate::perf::now_ticks();
+        self.create_inode(parent_path, name, ty, None)
+    }
 
-        let path = Self::child_path(parent_path, name);
-        let ext4_ty = Ext4InodeTypes::from(ty);
-        let c_path = CString::new(path.as_str()).map_err(|_| Errno::EINVAL)?;
-        {
-            let guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Namespace);
-            let file = &mut Ext4File::new(parent_path, self.ty.clone());
-            let _lower = guard.profile_lower();
-
-            if file.check_inode_exist(&path, ext4_ty.clone()) {
-                return Err(Errno::EEXIST);
-            }
-
-            let new_file = &mut Ext4File::new(&path, ext4_ty.clone());
-
-            match ext4_ty {
-                Ext4InodeTypes::EXT4_DE_DIR => {
-                    new_file.dir_mk(&path).map_err(Self::map_lwext4_err)?;
-                }
-                Ext4InodeTypes::EXT4_DE_REG_FILE => {
-                    new_file
-                        .file_open(
-                            &path,
-                            bindings::O_RDWR | bindings::O_CREAT | bindings::O_TRUNC,
-                        )
-                        .map_err(Self::map_lwext4_err)?;
-                    new_file.file_close().map_err(Self::map_lwext4_err)?;
-                }
-                Ext4InodeTypes::EXT4_DE_FIFO => {
-                    let ret = unsafe {
-                        bindings::ext4_mknod(c_path.as_ptr(), bindings::EXT4_DE_FIFO as i32, 0)
-                    };
-                    if ret != 0 {
-                        return Err(Self::map_lwext4_err(ret));
-                    }
-                }
-                Ext4InodeTypes::EXT4_DE_CHRDEV
-                | Ext4InodeTypes::EXT4_DE_BLKDEV
-                | Ext4InodeTypes::EXT4_DE_SOCK => {
-                    new_file
-                        .file_open(
-                            &path,
-                            bindings::O_RDWR | bindings::O_CREAT | bindings::O_TRUNC,
-                        )
-                        .map_err(Self::map_lwext4_err)?;
-                    new_file.file_close().map_err(Self::map_lwext4_err)?;
-                }
-                _ => return Err(Errno::ENOSYS),
-            }
+    fn create_special(
+        &self,
+        parent_path: &str,
+        name: &str,
+        ty: InodeType,
+        dev: u32,
+    ) -> SysResult<Arc<dyn InodeOp>> {
+        if !matches!(
+            ty,
+            InodeType::Fifo | InodeType::CharDevice | InodeType::BlockDevice | InodeType::Socket
+        ) {
+            return Err(Errno::EINVAL);
         }
-        self.namespace_changed();
-
-        let (child_ino, child_ty) = Self::lookup_dirent(parent_path, name)?;
-        let inode = Self::get_or_create(
-            self.fs_id,
-            self.mount_point,
-            self.mount_point_c,
-            child_ino,
-            child_ty,
-        );
-        if let Some(inode) = inode.as_any().downcast_ref::<Ext4Inode>() {
-            inode.init_inode_times();
-        }
-        crate::perf::ext4_create_call(1);
-        crate::perf::ext4_create_ticks(crate::perf::elapsed_since(started));
-        Ok(inode)
+        self.create_inode(parent_path, name, ty, Some(dev))
     }
 
     fn symlink(&self, target: &str, parent_path: &str, name: &str) -> SysResult<Arc<dyn InodeOp>> {

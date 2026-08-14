@@ -559,6 +559,32 @@ guest 日志中 musl/glibc 都必须出现 `SUMMARY: 2 passed, 0 failed`，`getd
 内部应显示 `EBADF/EINVAL/ENOTDIR/ENOENT` 通过。修改目录 cache 后不能只跑错误项；
 `getdents01` 还要确认普通 `.`/`..` 和文件遍历未回归。
 
+### mknod 特殊 inode 与 xattr 门禁
+
+专项 probe 固定 character/block device payload、四类特殊 inode mode 和 `user.*` xattr 限制；随后用
+同一筛选簇覆盖常规/错误路径。两架构必须顺序运行：
+
+```bash
+TASK_A_MKNOD_XATTR_PROBE=1 make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-mknod-xattr-phase5.log
+TASK_A_MKNOD_XATTR_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-mknod-xattr-phase5.log
+
+TASK_A_LTP_ONLY=1 \
+  LTP_CASE_FILTER=mknod01,mknod02,mknod03,mknod04,mknod05,mknod06,mknod07,mknod08,mknod09,setxattr01,setxattr02,fsetxattr01,getxattr02 \
+  make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-mknod-xattr-ltp-phase5.log
+TASK_A_LTP_ONLY=1 \
+  LTP_CASE_FILTER=mknod01,mknod02,mknod03,mknod04,mknod05,mknod06,mknod07,mknod08,mknod09,setxattr01,setxattr02,fsetxattr01,getxattr02 \
+  make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-mknod-xattr-ltp-phase5.log
+```
+
+专项日志必须包含 `MKNOD_XATTR_PROBE_PASS`；LTP 日志的 musl/glibc 均须为
+`SUMMARY: 13 passed, 0 failed`，且 `setxattr02` 的 regular/directory 成功、symlink `EEXIST`、
+FIFO/character/block/socket `EPERM` 七项全部通过。该门禁不验证字符/块设备驱动功能；大 major/high
+minor 的编码需另加 probe。
+
 ### fallocate 真实预分配门禁
 
 宿主 probe 同时检查逻辑长度、物理块数、零读、原数据和 open-file offset，避免把 LTP 仅检查返回值的

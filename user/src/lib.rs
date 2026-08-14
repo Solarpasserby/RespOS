@@ -334,6 +334,9 @@ pub fn open(path: &str, flags: usize, mode: usize) -> isize {
 pub fn openat(dirfd: isize, path: &str, flags: usize, mode: usize) -> isize {
     sys_openat(dirfd, path, flags, mode)
 }
+pub fn mknodat(dirfd: isize, path: &str, mode: usize, dev: usize) -> isize {
+    sys_mknodat(dirfd, path, mode, dev)
+}
 pub fn fstatat(dirfd: isize, path: &str, stat: &mut Stat, flags: usize) -> isize {
     sys_fstatat(dirfd, path, stat, flags)
 }
