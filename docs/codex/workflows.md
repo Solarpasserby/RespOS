@@ -478,6 +478,30 @@ inet=`ENOTCONN`、错误 pipe 方向=`EBADF` 和 connected AF_UNIX 实际传输�
 出现 `SUMMARY: 7 passed, 0 failed`，且 `splice07` 内部为 `passed 159, failed 0`。修改 FileOp splice
 预检或 AF_UNIX read 状态后还要复跑双架构 2 hart `TASK_A_SOCKET_PHASE5_PROBE=1`。
 
+Phase 5 musl `pathconf()` 调用链镜像审计：
+
+```bash
+debugfs -R 'dump /musl/lib/libc.so /tmp/respos-rv-musl-libc.so' img/sdcard-rv-pre.img
+readelf -Ws /tmp/respos-rv-musl-libc.so | rg ' (f?pathconf)$'
+rust-objdump --disassemble-symbols=pathconf,fpathconf /tmp/respos-rv-musl-libc.so
+
+debugfs -R 'dump /musl/lib/libc.so /tmp/respos-la-musl-libc.so' img/sdcard-la-pre.img
+readelf -Ws /tmp/respos-la-musl-libc.so | rg ' (f?pathconf)$'
+rust-objdump --disassemble-symbols=pathconf,fpathconf /tmp/respos-la-musl-libc.so
+```
+
+该流程只读审计实际 guest libc，不修改 raw image。当前两架构都应看到 8-byte
+`pathconf` 将第一参数改为 `-1` 并跳转 `fpathconf`，而 `fpathconf` 只读常量表；这是
+musl `pathconf02` 的已知差异定位流程，不是通过门禁。只有经协商替换 musl runtime
+后，才应以下列双架构命令验收，并继续跑完整 musl workload：
+
+```bash
+TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=pathconf01,pathconf02 \
+  make run-rv-pre PRE_MEM=4G PRE_SMP=2
+TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=pathconf01,pathconf02 \
+  make run-la-pre PRE_MEM=4G PRE_SMP=2
+```
+
 Phase 5 iperf→iozone 固定顺序门禁：
 
 ```bash

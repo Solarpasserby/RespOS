@@ -1,5 +1,22 @@
 # RespOS 当前状态
 
+## 2026-08-14 Linux/POSIX Phase 5 musl `pathconf()` libc 阻断（基于 `26852ff`）
+
+- **当前现象**：RV64/LA64 完整初赛日志 `rv-output.txt`/`la-output.txt` 中，musl
+  `pathconf02` 的 `ENOTDIR/ENOENT/ENAMETOOLONG/EACCES/ELOOP` 五项都返回常量 8 且
+  `errno=0`，只有非法 `name` 的 `EINVAL` 通过；同一镜像的 glibc 六项全部通过。
+- **所有权证据**：从当前 RV64/LA64 初赛镜像的 `/musl/lib/libc.so` 直接导出并反汇编，
+  两架构的 `pathconf` 都是 8-byte wrapper：将第一个参数改成 `-1` 后跳转
+  `fpathconf`；`fpathconf` 只检查 `name` 范围并读常量表，没有路径解析或 syscall。对应镜像
+  SHA-256 为 RV64 `95973543db6b84a9a5e70f30da466ce292867aff5b689fb14c88dc9406e378b8`、
+  LA64 `1aa79d03cf41e2a80ae4ed43771101c1e67ec8db41c3c20b77792fe6b1b85b50`。
+- **内核边界**：RespOS `sys_statfs()` 已通过 `copy_cstr_from_user()` 和 `filename_lookup()` 解析
+  path，但当前 musl `pathconf()` 根本不调用它，所以内核无法补回已被 libc 丢弃的
+  pathname，也不应为 LTP 增加特判。
+- **决策与剩余交付**：该项状态为 `已知差异`。修复需要建立可复现的 musl 构建并替换
+  两套镜像的 runtime，然后重跑完整 musl 回归；这会影响所有 musl workload，属于待用户确认
+  的较大改动，本轮不修改 libc 或镜像。
+
 ## 2026-08-14 Linux/POSIX Phase 5 AF_UNIX `splice` 错误语义（当前工作树）
 
 - **Linux 契约与修复边界**：`scripts/splice_socket_probe_linux.c` 确认未连接 AF_UNIX stream→pipe 写端
