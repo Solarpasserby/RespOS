@@ -519,6 +519,24 @@ FdTable slot (FdEntry: descriptor flags)
   引用；也不能在 `Drop` 中直接取得 ext4 锁。当前 syscall 安全点把正常运行时的回收窗口限制到下一次
   syscall，但 lwext4 尚无完整 ext4 orphan-list 崩溃恢复，异常断电后的 nlink=0 inode 清理仍待实现。
 
+## 设备与 DMA 模型
+
+### VirtIO descriptor 的虚拟连续不等于物理连续
+
+- 状态：已确认并修复 HAL 边界
+- 适用范围：RV64 virtio-mmio、LA64 virtio-pci、块设备及后续复用同一 HAL 的设备
+- 最后验证：2026-08-14
+- 证据：`os/src/drivers/virtio/mod.rs`；RV64 页尾 `BlkReq` QEMU/GDB 抓取；
+  `/tmp/respos-rv-virtio-bounce.log`
+- 内容：virtio descriptor 只携带一个物理起点和长度，要求整个范围对设备物理连续；Rust slice 只保证
+  虚拟连续。HAL 对 direct map、单页或逐页翻译后确认为相邻物理页的范围直接共享；跨非连续物理页时，
+  在 direct-map kernel heap 建立连续 bounce。`DriverToDevice`/`Both` 在 share 时拷入，
+  `DeviceToDriver`/`Both` 在 unshare 时拷回，active 记录保证设备完成前 allocation 存活；完成后的
+  同尺寸 buffer 可复用，但空闲池同时受 64 项和 1 MiB 总预算约束。
+- 后续影响：新增设备不能绕过 `Hal::share/unshare` 直接把任意栈、页缓存或用户 backing 的首 PA 加长度
+  交给 DMA；若要消除 bounce，应由上层生成 scatter-gather descriptor，或使用有证明的连续 DMA
+  allocation。对结构体做对齐只覆盖某个布局，不构成通用修复。
+
 ## 网络模型
 
 ### smoltcp 回环路径是当前主要实现

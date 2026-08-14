@@ -7,6 +7,9 @@ mod virtio;
 pub use device::*;
 pub use disk::Disk;
 pub use virtio::VirtIoHalImpl;
+#[cfg(feature = "perf_counters")]
+pub(crate) use virtio::reset_bounce_perf;
+pub(crate) use virtio::snapshot_bounce_perf;
 use virtio::*;
 #[cfg(target_arch = "loongarch64")]
 use virtio_drivers::transport::pci::PciTransport;

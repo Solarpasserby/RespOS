@@ -1787,34 +1787,43 @@ impl MemorySet {
     /// local SFENCE.VMA behavior.
     #[cfg(target_arch = "riscv64")]
     fn flush_local_tlb(&self) {
+        let started = crate::perf::now_ticks();
         core::sync::atomic::fence(Ordering::SeqCst);
         sfence();
-        crate::perf::local_sfence(1);
+        crate::perf::observe_local_sfence(crate::perf::elapsed_since(started));
     }
 
     #[cfg(target_arch = "loongarch64")]
     fn flush_local_tlb(&self) {
+        let started = crate::perf::now_ticks();
         core::sync::atomic::fence(Ordering::SeqCst);
         crate::arch::sfence_asid(self.asid.load(Ordering::Acquire));
-        crate::perf::local_sfence(1);
+        crate::perf::observe_local_sfence(crate::perf::elapsed_since(started));
     }
 
     #[cfg(target_arch = "loongarch64")]
     fn flush_local_tlb_all(&self) {
+        let started = crate::perf::now_ticks();
         core::sync::atomic::fence(Ordering::SeqCst);
         sfence();
-        crate::perf::local_sfence(1);
+        crate::perf::observe_local_sfence(crate::perf::elapsed_since(started));
     }
 
     /// Publish a page-table modification and synchronously invalidate every
     /// hart that may cache this address space. Callers serialize this operation
     /// with active/residency transitions through the MemorySet write lock.
     pub fn flush_tlb(&mut self) {
+        crate::perf::tlb_flush_call(1);
         // Freeze the batch before the local flush as well: a frame retired
         // concurrently after this point must wait for the next generation on
         // every hart, including this one.
         #[cfg(target_arch = "loongarch64")]
         let retired = self.page_table.take_retired_data_frames();
+        #[cfg(target_arch = "loongarch64")]
+        if !retired.is_empty() {
+            crate::perf::tlb_flush_retired_batch(1);
+            crate::perf::tlb_flush_retired_frames(retired.len());
+        }
         #[cfg(target_arch = "loongarch64")]
         let pending_range = self.page_table.take_pending_tlb_range();
         self.flush_local_tlb();
@@ -2091,6 +2100,7 @@ impl MemorySet {
         }
         #[cfg(target_arch = "loongarch64")]
         if had_areas {
+            crate::perf::tlb_cow_flush(1);
             self.flush_tlb();
         }
         self.areas.clear();
@@ -2260,6 +2270,17 @@ impl MemorySet {
                 None,
                 0,
             );
+        }
+
+        #[cfg(all(target_arch = "loongarch64", feature = "la_global_kernel"))]
+        {
+            // This is the only point at which the immutable kernel image,
+            // direct map and boot-time MMIO mappings are all present but the
+            // final root has never been activated. Later kernel-stack leaves
+            // stay non-global until a separate update/flush protocol exists.
+            let (global_pairs, skipped_huge) = memory_set.page_table.mark_existing_kernel_global();
+            assert!(global_pairs != 0, "no paired LA kernel leaf was globalized");
+            assert!(skipped_huge != 0, "no LA kernel huge leaf was audited");
         }
 
         // User roots copy kernel root entries by value.  Establish the full
@@ -2860,6 +2881,7 @@ impl MemorySet {
                 let old_data = old_frame.ppn().get_bytes_array();
                 self.areas[area_idx].remap_one_with_data(&mut self.page_table, vpn, old_data)?;
             }
+            crate::perf::tlb_cow_flush(1);
             self.flush_tlb();
             crate::perf::cow_fault(1);
             self.debug_check_invariants();
@@ -2884,6 +2906,7 @@ impl MemorySet {
             } else {
                 crate::perf::anonymous_fault(1);
             }
+            crate::perf::tlb_fresh_map_flush(1);
             self.flush_tlb();
             self.debug_check_invariants();
             return Ok(());

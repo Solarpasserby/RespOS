@@ -9,7 +9,8 @@ completion、ASID op=4 与失效范围传播，并以 LA 12 GiB/12 hart 完整 f
 只保留以下目标：
 
 1. 以 `1/3/6/12` 缩放和 TLB/ext4/scheduler 计数决定下一优化，不预设 scheduler 或 ext4 是主因；
-2. 独立评估 Global kernel mapping；范围请求暂以单次 op=4 覆盖，op=5 已因完整 final 内存破坏禁用；
+2. Global kernel mapping 在更稳定宿主的一对完整 off/on 中改善 `7.32%`，但换页量不一致且用户取消
+   R3，故只恢复为 default-off 正向候选；范围请求继续以单次 op=4 覆盖，op=5 与 huge-global 禁用；
 3. 按本文件 A0--A2 独立推进现有 buddy 上的有界 per-hart 小对象 cache；
 4. 在资源允许或平台恢复后验证正式 LA `-m 36G -smp 12` 镜像与时限。
 
@@ -72,6 +73,35 @@ buffer 语义与 readdir iterator 快照保持不变。短窗口门槛已通过�
 完整 final 随后以 `ok=true` 和脚本退出 0 通过，axbuild `1743.70s`，较相邻 `1773.01s` 基线仅改善
 约 1.65%。按既定门槛，本 E1 收口并保留，但不继续扩大 ext4/PageCache 重构；E0 的 hart 缩放作为
 后续选题证据独立完成，不阻塞本次可归因提交。
+
+2026-08-14 已在提交 `0052fc5` 完成 LA `1/3/6/12` hart、jobs 同步变化的 120 秒冷启动矩阵，原始
+日志/hash/计数见 `current-status.md`。1 hart 只到 `core`，3/6/12 hart 均到 23 个 `Compiling` marker
+和 `ax-posix-api`，且后三点 FS/heap/fault 工作量近似相等。3/6/12 hart 平均只有约
+`1.25/1.34/1.43` 个 hart 运行，ready=0 样本约 `98.3%/98.4%/99.7%`；因此 E0 缩放项闭合，并否决
+优先改 scheduler。ext4 wait 随并发从约 `1.67s` 增至 `3.12s`、最大 wait 约 `0.20--0.24s`，满足
+E2 的“可以审计”门槛，但 hold 约 `18--20s`、工作量不变且没有 runnable backlog，不足以直接批准
+对象级拆锁。下一轮先量化约 60 万次 LA 本地 ASID 失效，区分首次映射与必须完成 frame retirement 的
+变更；ext4 E2 同期仅做 lwext4 共享状态/锁域审计，不在证据不足时改变并发模型。
+
+同日新增计数显示 12 hart 同进度窗口 `608476` 次本地 flush 累计约 `2.599s`，其中 fresh-map
+`555029` 次（`91.2%`），含 retired frame 的批次仅 `6291`。但 software refill 会为缺页填入 invalid
+TLB pair，因此 fresh-map 不能无条件跳过失效；op=5 也继续受完整 final No-Go 约束。该证据把下一实验
+收敛为 default-off Global kernel mapping：仍执行 op=4，只让经成对 G 位审计、所有地址空间完全一致且
+运行期不可修改的 4 KiB kernel leaf 在 ASID flush 后保留；huge leaf 必须另行证明。它与 ext4 E2、
+allocator A1 分开提交和 A/B；未通过 shared-MM/exec/ASID rollover/完整 final 前不得默认启用。
+
+随后 4 KiB-only 实验完成两次 shared-MM 100 轮、Phase3 30 轮和一次 12 GiB/12 hart 完整 final；
+BuildStorm `ok=true`，axbuild `1560.36s`，表面上相对同配置 E1 完整结果 `1743.70s` 改善约 `10.51%`。
+但紧邻、同源码与 Rust 1.86 的 Global-off 完整轮也通过且只有 `1410.58s`，反而比 on 快约 `10.62%`；
+短窗口和完整结果方向冲突，且顺序运行未隔离 host backing-file page cache，因此不把 `10.51%`
+当作 Go 证据。紧邻 on2 又完整通过但为 `1634.28s`；第一组 on--off--on 是
+`1560.36/1410.58/1634.28s`，两次 on 均未胜过 off，性能验收 No-Go。2 MiB huge leaf 的 bit-12
+global 编码在首次高端 RAM
+写入时触发 `PageInvalidStore`，已经删除且由 API 显式拒绝；运行期 kernel-stack leaf 同样不纳入 Global
+域。随后在更稳定宿主以完整时间线复测 off/on，得到 `1530.37/1418.31s`，on 改善约 `7.32%`；但 off
+有约 `64/217 MiB` swap-in/out，on 只有约 `25/0.5 MiB`，且用户取消 R3/off，不能完成包围式归因。
+因此恢复 4 KiB feature 为 default-off 正向候选，不默认启用；保留测量计数与 huge-global 拒绝保护。
+不得用该单对样本批准 huge-global、跳过 op=4 或放松 retired-frame completion。
 
 1. 固定镜像 hash、`mode=diagnostic`、LA 12 GiB/12 hart、`NI=-10/CLS=TS`，记录 30/120 秒窗口；
    同时补 `1/3/6/12` 短窗口，记录相同构建阶段而不是只比较 timeout 时的总计数。
@@ -195,7 +225,8 @@ RV8 跨核/drain 回归仍通过，LA 中窗口明显提前，但完整结果为
 
 最初目标是在不破坏 RV64 CAgent 回归的前提下，使内核真实使用 BuildStorm 所需的多个 CPU，并跑通
 Debian glibc 镜像中的 Rust 工具链与 arceos-helloworld 全量构建；该功能目标现已在 RV64 8 核和
-LA64 12 hart 本地完成，当前转入 LA 性能、Global mapping 评估和正式资源验收。
+LA64 12 hart 本地完成；Global mapping 在稳定宿主单对复测中转为 default-off 正向候选，当前转入 LA
+ext4 E2 审计和正式资源验收。
 
 2026-08-08 比赛官方群更新的决赛参数为 RV64 `-smp 8 -m 16G`、LA64
 `-smp 12 -m 36G`，整轮超时 6250 秒；脚本将 `nproc` 写入 `BUILDSTORM_COMPILE`。公告还说明新镜像

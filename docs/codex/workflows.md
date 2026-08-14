@@ -887,6 +887,12 @@ CPU 百分比由相邻 `/proc/PID[/task/TID]/stat` 的 `utime+stime` 差值除�
 原子 load/add，不额外获取 runqueue 锁。诊断结束必须同时保存 `concurrency_samples`，避免比较不同
 采样总量的绝对桶值。
 
+LA TLB 诊断同时读取 `local_sfence_ticks/max_ticks` 与
+`tlb_flush_calls/fresh_map_flushes/cow_flushes/retired_batches/retired_frames`。ticks 只覆盖本地 fence 与
+INVTLB 指令，不包含随后因 ASID-wide 驱逐产生的 refill 成本；fresh-map 是“页错误确认 PTE 无效并成功
+map 后执行的 flush”次数，不代表可以直接删除失效。LA refill 会填入 invalid TLB pair，故删除前必须
+另有可靠的定点 invalidation 或改变 refill 协议；当前 op=5 已被完整 final 否决，不能凭该比例重启。
+
 评价按四层同时报告：
 
 1. **正确性与进度**：group marker、退出码、`ok=true`、产物大小和相同编译 crate；

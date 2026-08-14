@@ -261,6 +261,7 @@ macro_rules! counters {
                     classes.magazine_overflow_returns.store(0, Ordering::Relaxed);
                     classes.magazine_reclaim_blocks.store(0, Ordering::Relaxed);
                 }
+                crate::drivers::reset_bounce_perf();
             }
         }
     };
@@ -325,6 +326,8 @@ counters!(
     cow_faults,
     context_switches,
     local_sfences,
+    local_sfence_ticks,
+    local_sfence_max_ticks,
     remote_rfences,
     remote_rfence_target_harts,
     remote_rfence_empty_requests,
@@ -342,6 +345,11 @@ counters!(
     tlb_shootdown_range_le256_pages,
     tlb_shootdown_range_gt256_pages,
     tlb_shootdown_invalid_requests,
+    tlb_flush_calls,
+    tlb_fresh_map_flushes,
+    tlb_cow_flushes,
+    tlb_flush_retired_batches,
+    tlb_flush_retired_frames,
     scheduler_ipis,
     ipis_received,
     scheduler_lock_acquisitions,
@@ -538,6 +546,7 @@ increment_functions!(
     (cow_fault, cow_faults),
     (context_switch, context_switches),
     (local_sfence, local_sfences),
+    (local_sfence_ticks, local_sfence_ticks),
     (remote_rfence_empty_request, remote_rfence_empty_requests),
     (full_tlb_invalidation, full_tlb_invalidations),
     (asid_tlb_invalidation, asid_tlb_invalidations),
@@ -552,6 +561,11 @@ increment_functions!(
         tlb_shootdown_invalid_request,
         tlb_shootdown_invalid_requests
     ),
+    (tlb_flush_call, tlb_flush_calls),
+    (tlb_fresh_map_flush, tlb_fresh_map_flushes),
+    (tlb_cow_flush, tlb_cow_flushes),
+    (tlb_flush_retired_batch, tlb_flush_retired_batches),
+    (tlb_flush_retired_frames, tlb_flush_retired_frames),
     (scheduler_ipi, scheduler_ipis),
     (ipi_received, ipis_received),
     (scheduler_lock_acquisition, scheduler_lock_acquisitions),
@@ -750,6 +764,14 @@ pub fn observe_remote_rfence(target_harts: usize, wait_ticks: usize) {
     }
     #[cfg(not(feature = "perf_counters"))]
     let _ = (target_harts, wait_ticks);
+}
+
+#[inline(always)]
+pub fn observe_local_sfence(ticks: usize) {
+    local_sfence(1);
+    local_sfence_ticks(ticks);
+    #[cfg(feature = "perf_counters")]
+    observe_max(&COUNTERS.local_sfence_max_ticks, ticks);
 }
 
 #[inline(always)]
@@ -1031,6 +1053,7 @@ pub fn render() -> String {
         }
     };
     let s = snapshot();
+    let bounce = crate::drivers::snapshot_bounce_perf();
     let class_alloc_calls: usize = heap_classes.alloc_calls.iter().sum();
     let class_dealloc_calls: usize = heap_classes.dealloc_calls.iter().sum();
     let class_alloc_bytes: usize = heap_classes.alloc_bytes.iter().sum();
@@ -1064,6 +1087,22 @@ pub fn render() -> String {
         s.block_read_4k_or_less,
         s.block_read_64k_or_less,
         s.block_read_over_64k
+    );
+    let _ = writeln!(
+        out,
+        "virtio_bounce_calls={} bytes={} copy_to_device_bytes={} copy_from_device_bytes={} allocations={} cache_hits={} share_ticks={} unshare_ticks={} active_peak={} active={} cached_buffers={} cached_bytes={}",
+        bounce.calls,
+        bounce.bytes,
+        bounce.copy_to_device_bytes,
+        bounce.copy_from_device_bytes,
+        bounce.allocations,
+        bounce.cache_hits,
+        bounce.share_ticks,
+        bounce.unshare_ticks,
+        bounce.active_peak,
+        bounce.active,
+        bounce.cached_buffers,
+        bounce.cached_bytes
     );
     let _ = writeln!(
         out,
@@ -1124,6 +1163,17 @@ pub fn render() -> String {
         s.blocking_switches,
         s.task_running_ticks,
         s.idle_ticks
+    );
+    let _ = writeln!(
+        out,
+        "local_sfence_ticks={} local_sfence_max_ticks={} tlb_flush_calls={} tlb_fresh_map_flushes={} tlb_cow_flushes={} tlb_flush_retired_batches={} tlb_flush_retired_frames={}",
+        s.local_sfence_ticks,
+        s.local_sfence_max_ticks,
+        s.tlb_flush_calls,
+        s.tlb_fresh_map_flushes,
+        s.tlb_cow_flushes,
+        s.tlb_flush_retired_batches,
+        s.tlb_flush_retired_frames
     );
     let _ = writeln!(
         out,

@@ -558,6 +558,24 @@
 - 后续影响：不得把 ASID rollover、boot/final root 过渡改为 op=4。启用 Global kernel PTE 前必须
   同时验证成对 G 位与 kernel 映射更新协议。不得把大范围展开为无界的逐页 op=5 循环。
 
+## LoongArch Global kernel mapping 保持 default-off 候选
+
+- 状态：默认不启用；稳定宿主单对复测正向，待独立复现
+- 适用范围：LA kernel leaf、ASID op=4、TLB residency、2 MiB direct map
+- 最后验证：2026-08-14
+- 证据：4 KiB paired-leaf shared-MM/Phase3 专项；12 GiB/12 hart BuildStorm on--off--on 完整日志
+  `/tmp/respos-la-global4k-{full-final,ab-off-full-nohostfwd,ab-on2-full-nohostfwd}.log`
+- 内容：4 KiB 实验只对启动时已有且偶奇页均有效的 kernel leaf 成对设置 G，高端 2 MiB 与运行期
+  kernel stack 保持非 Global；它通过正确性门禁，但完整 axbuild 为
+  `1560.36/1410.58/1634.28s`，两次 on 均未胜过 off。短窗口方向相反且 host backing-file cache/负载
+  未被完全隔离，当时不足以满足稳定 `>=5%` 收益门槛。更稳定宿主的一对完整 off/on 为
+  `1530.37/1418.31s`（约 `7.32%`），但两轮 swap-in/out 约为 `64/217 MiB` 与 `25/0.5 MiB`，且未跑
+  R3/off，不能做完全因果归因。feature、遍历和启用点已恢复但默认关闭；默认 kernel mapping 继续
+  ASID-scoped，op=4/shootdown/frame completion 不变。
+- 后续影响：不得依据单次短窗口或这一对长测默认启用 Global。重新评估必须控制宿主负载和 cache 顺序，再同时验证
+  4 KiB pair、动态 kernel mapping、跨 ASID/跨 hart 以及完整 final；huge leaf 在编码被架构证据和真实
+  高端 RAM 访问独立证明前，仍由 `map_huge_2m()` 显式拒绝 Global。
+
 ## LoongArch 叶 PTE 修改由 PageTable 累积失效范围
 
 - 状态：已采用范围传播，op=5 已否决

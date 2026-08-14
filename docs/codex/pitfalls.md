@@ -155,21 +155,23 @@
   资源猜阶段。官方镜像脚本路径发生变化时，必须先取得新镜像/公告证据，再更新检测标志并完成
   双架构两阶段启动矩阵。
 
-## 平台 Rust 1.86 的 RV64 thin LTO 产物会破坏动态程序执行
+## Rust 版本、LTO 和诊断 feature 会通过栈布局暴露或掩盖 VirtIO 跨页 DMA 错误
 
-- 状态：已确认；通过关闭 submission release LTO 规避
+- 状态：根因已确认并由 selective bounce 修复；RV64 完整 final 已通过
 - 适用范围：`os/cargo/config-{riscv64,loongarch64}.toml`、线上 `make all`、决赛动态 glibc workload
-- 最后验证：2026-08-13
+- 最后验证：2026-08-14
 - 证据：同源码/镜像/QEMU 的 rustc 1.86 thin-LTO、rustc 1.86 no-LTO、rustc 1.89 thin-LTO A/B；
-  RV64 CAgent 与 BuildStorm toolchain/minibuild；LA64 12-hart CAgent 与前置门禁
-- 内容：平台同版 `rustc 1.86.0-nightly (2025-01-17)` 能成功链接 RV64 thin-LTO 内核，但该产物下
-  `simple_llm_server`、mount、rustc/cargo 等动态程序稳定 SIGSEGV。增加无关 `fault_trace` feature
-  或换 Rust 1.89 会改变布局并掩盖问题；不能据此把诊断 feature 当修复。关闭内核 release LTO 后，
-  平台编译器产物恢复双架构 final CAgent 和 BuildStorm 前置门禁。现有证据能确认工具链相关的代码生成/
-  布局敏感问题，但尚未定位到更小的编译器 bug 或源码 UB，细因标记 `待验证`。
+  RV64 CAgent/BuildStorm 前置门禁；QEMU/GDB 的 16 B `BlkReq` 页尾地址和物理内存检查；
+  `/tmp/respos-rv-{kstack-shootdown,virtio-bounce,virtio-bounce-diag}.log`
+- 内容：早期 A/B 中 Rust 1.86 thin-LTO 失败、1.86 no-LTO 或 Rust 1.89 成功，曾被误判为工具链代码生成
+  问题。新复现显示 no-LTO 加 `fault_trace` 也会失败：实际取决于 16 B `BlkReq` 是否落在页尾
+  `...dff8`。旧 HAL 只翻译首虚拟地址，sector 字段落入非连续的下一物理页后，设备读成 sector 0；
+  脚本、动态库或编译器因此收到错误磁盘内容。关闭 LTO 和增加 feature 只是改变栈布局，不能作为修复。
+  当前 HAL 对整个范围验证物理连续性，仅对非连续范围建立并按方向回收 bounce buffer。
 - 后续影响：线上兼容门禁不能止于“Rust 1.86 编译成功”，至少要用该工具链产物启动动态 glibc 程序。
-  在找到更小且可证明的根因前不得重新开启 thin/fat LTO；若为性能恢复 LTO，必须重新完成平台同版
-  编译器的 RV/LA CAgent、BuildStorm toolchain/minibuild 和完整构建，而不能只用较新本机 rustc。
+  `Hal::share()` 不能假设任意 Rust slice 物理连续，也不能只给 `BlkReq` 加对齐来掩盖数据 buffer 的同类
+  风险。当前 `lto=false` 继续作为保守提交配置；若为性能恢复 LTO，必须在 selective bounce 下重新完成
+  平台同版 RV/LA CAgent、BuildStorm toolchain/minibuild 和完整构建，而不能只用较新本机 rustc。
 
 ## VS Code bundled rust-analyzer 必须与镜像 Rust toolchain 匹配
 
@@ -242,6 +244,22 @@
 - 后续影响：不能依据错误 opcode 注释设计 ASID 优化。当前按 ASID/range 请求安全使用 op=4；
   Global kernel mapping 仍须验证 software refill、成对 G 位、ASID 生命周期和跨核 shootdown。
   op=5 已在完整 BuildStorm 中造成 allocator corruption，不能仅凭短专项重新启用。
+
+## LoongArch 4 KiB Global pair 规则不能外推为 huge-leaf bit 位置
+
+- 状态：已确认；当前显式拒绝 huge Global mapping
+- 适用范围：LA 2 MiB direct map、`PageTable::map_huge_2m()`、Global kernel mapping
+- 最后验证：2026-08-14
+- 证据：`os/src/arch/loongarch64/mm/page_table.rs`；`/tmp/respos-la-global-probe.log`
+- 内容：把未经真实访问验证的 `PMD_HGLOBAL=bit 12` 写入 2 MiB 高端 RAM leaf 后，系统在启动后的
+  首次高端内存写立即触发 `PageInvalidStore`，badaddr `0xffffffc090400e70`。4 KiB TLB pair 要求
+  TLBELO0/1 的 G 位同时成立，这不能证明目录 huge leaf 使用同一位或可由软件页表直接编码。4 KiB
+  paired-leaf 实验虽通过正确性门禁，首组 on--off--on 完整性能为
+  `1560.36/1410.58/1634.28s`；更稳定宿主单对复测又为 `1530.37/1418.31s`，但换页量不一致且没有
+  R3。当前只保留默认关闭的 4 KiB 候选；`map_huge_2m()` 收到 `PTEFlags::GLOBAL` 返回 `EINVAL`。
+- 后续影响：不得凭空恢复 bit 12 或把普通 `PTE_G` 搬到任意“空闲”物理地址位。若以后重启 huge
+  Global，必须先以架构手册/硬件页表格式确定编码，再单独覆盖低/高 RAM 读写、DMA、跨 ASID 和完整
+  final；短启动或只访问低内存不足以验收。
 
 ## 启用 ASID 后当前 active mask 不覆盖全部潜在旧 TLB
 

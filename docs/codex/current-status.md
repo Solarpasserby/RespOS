@@ -141,6 +141,168 @@
   `/dev/shm` open，但随后暴露 `waitpid(...)=EINTR` 的独立 LTP blocker，不能计作 shm 修复失败或整体
   LTP 通过。日志为 `/tmp/respos-{rv,la}-shm-ltp.log`；完整初赛仍待用户复跑。
 
+## 2026-08-14 RV64 final SIGBUS：VirtIO 跨非连续物理页 DMA（已修复并完整通过）
+
+- **平台症状**：用户提供的正式 RV64 输出在 CAgent 后读取 BuildStorm/Rust 工具链时出现文件内容损坏，
+  `rustc` 最终以 signal 7/SIGBUS 退出。相同 16 GiB/8 hart、双 virtio-mmio 磁盘和 Rust 1.86 构建在
+  本地可稳定复现 `/glibc/buildstorm_testcode.sh: cannot execute binary file`；这不是单纯超时。
+- **已排除层次**：脚本 inode、extent 到磁盘 sector 的解析与 backing raw image 内容一致；VirtIO used
+  ring 返回 `status=OK`，失败后 overlay 的目标 sector 仍正确。临时强制单 sector I/O、修改 ext4 路径
+  缓存、增加 TLB shootdown 均不能修复，相关试验代码均已撤销。
+- **根因证据**：失败请求的 `BlkReq` 位于虚拟地址页尾 `...dff8`，描述符长度 16 B。前 8 B
+  `type/reserved` 合法地为 0，后 8 B `sector=6320152` 位于下一虚拟页；HAL 旧实现只翻译首地址并假设
+  整段物理连续，设备因而从首物理页后的相邻物理页读到 0，把请求当成 sector 0。随后返回的 boot/code
+  数据被上层解释为脚本或动态库，解释了 `cannot execute binary file`、随机命令和最终 SIGBUS。该错误
+  由栈布局决定，Rust 版本、LTO 或 `fault_trace` 只会改变是否跨页，不是根因。
+- **修复边界**：`VirtIoHalImpl::share()` 现在验证整个虚拟范围的物理连续性。单页、direct map 和真实
+  连续范围继续零拷贝；只有跨到非相邻物理页时才分配 direct-map heap bounce buffer，按
+  `BufferDirection` 拷入，并在 `unshare()` 中对设备输出拷回。已释放的同尺寸 bounce 最多缓存 64 个，
+  且空闲缓存总计不超过 1 MiB，避免固定栈布局下每个块请求重复分配或由大请求长期占住内核堆；实现
+  覆盖请求头、状态、数据和 indirect descriptor，不依赖对 `BlkReq` 做特殊对齐。
+- **针对性验证**：`nightly-2025-01-18`、`fault_trace`、官方 16 GiB/8 hart 双盘参数和 `-snapshot`
+  下，CAgent 10/10 pass，BuildStorm 脚本可执行，toolchain/minibuild 通过，untimed prebuild 31.13 s，
+  timed `arceos-helloworld` 已进入正式 release cargo build；确认越过原稳定故障点后手工终止，不能记为
+  完整 BuildStorm 通过。日志 `/tmp/respos-rv-virtio-bounce.log`。另一轮临时 trace 直接记录 CAgent 与
+  BuildStorm 的 16 B 请求在 `...dff8` 进入 bounce 后继续通过前置门禁，日志
+  `/tmp/respos-rv-virtio-bounce-diag.log`；该临时打印已撤销。无效 shootdown 对照日志
+  `/tmp/respos-rv-kstack-shootdown.log` 仍在同一点失败。RV64/LA64 无 feature release 均用同一
+  Rust 1.86 工具链构建通过。移除诊断后的正式无 feature `kernel-rv`（SHA-256
+  `196ce666...345b36`）再次以相同平台参数运行，CAgent 10/10、BuildStorm toolchain/minibuild 通过后
+  在 untimed prebuild 手工终止；日志 `/tmp/respos-rv-virtio-bounce-final-smoke.log`。
+- **完整 final 验证**：增加 64 项/1 MiB 空闲缓存双预算后的正式无 feature `kernel-rv` SHA-256 为
+  `4606ed12...28b468`，对应 LA 构建产物为 `64dd94aa...70e3f6`；双架构 Rust 1.86 release 均通过。
+  该 RV 候选按官方 16 GiB/8 hart 双盘参数和 `-snapshot` 完整运行：CAgent 10/10、BuildStorm
+  toolchain/minibuild 通过，Cargo release `34m53s`，axbuild `2114.04s`，最终
+  `ok=true cores=8 bytes=1681000`，脚本 exit 0 并正常关机。日志
+  `/tmp/respos-rv-virtio-bounce-full.log`，SHA-256 `0a7c39f0...827a3f`；按日志时间戳整轮约
+  `2200.53s`。全程没有 SIGBUS、脚本损坏、I/O error、kernel panic 或 OOM。
+- **性能边界**：2026-08-11 同为 RV 16 GiB/8 hart、无 feature 的历史 axbuild 为 `1310.01s`，本轮
+  慢 `804.03s`（约 61.38%）；用户近期另一轮体感约 1800s，本轮也慢约 314s。两者都不是同一当前
+  源码/相邻宿主状态的 A/B，因此不能把差值直接归因于修复。随后用当前源码、16 GiB/8 hart、
+  `perf_counters` 和 120 秒 BuildStorm timeout 做短窗口：抓取时累计 30,000 次块读、57,706 次块写，
+  只有 35 个 16 B 范围进入 bounce，共 560 B；首次分配 1 次、缓存命中 34 次、同时活跃峰值 1。
+  已计时的 bounce 分配/查找/复制/回收慢路径 `share_ticks + unshare_ticks = 4,966`，在
+  `clock_hz=10,000,000` 下约 `0.497 ms`，只占该窗口块读写累计 ticks 的约 `0.0048%`。诊断 shell
+  拒绝了测试前的 procfs 重定向清零，因此这些数字还包含启动 I/O 和 timeout 后约 5 秒抓取尾部；这会
+  高估而非低估 bounce 次数/慢路径成本。该计时不包含仍走零拷贝路径的连续性判断以及 direct
+  `unshare` 空表查询，故只能排除“实际 bounce 分配/复制导致数百秒回归”，不能单独证明全部 HAL
+  入口的精确墙钟差。计数内核 SHA-256 `d4924646...c26144`，日志
+  `/tmp/respos-rv-virtio-bounce-120.log`，SHA-256 `6db05abf...001919`。完整运行偏慢更符合宿主/整机
+  吞吐波动，但仍需当前源码无 perf 的相邻 A/B 才能定量归因。不得为追回时间恢复首地址直译，也不得
+  仅靠关闭 LTO 再次掩盖跨页问题。
+
+## 2026-08-14 LA 4 KiB Global kernel mapping（稳定宿主复测为正，仍默认关闭）
+
+- **实验与保守边界**：实验性 `la_global_kernel` feature 只在 final kernel root 第一次激活前遍历共享
+  kernel half。仅当同一 LoongArch TLB pair 的偶/奇 4 KiB leaf 都有效时才同时设置两个 G 位；单边
+  leaf 明确清 G。高端 RAM 的 2 MiB huge direct-map leaf 和初始化后新增的 kernel-stack leaf 仍为
+  ASID-scoped。普通 PTE writer、op=4 本地/远端同步失效、residency mask、retired-frame completion
+  均未绕过；新用户 root 仍复制同一 kernel root entry，因而引用相同的共享下级页表。
+- **被否决的 huge-global 编码**：实验曾按未经实机验证的 `PMD_HGLOBAL=bit 12` 标记 2 MiB leaf，
+  启动后首次高端 RAM 写立即触发 `PageInvalidStore`，ERA `0xffffffc0002f7094`、badaddr
+  `0xffffffc090400e70`。日志 `/tmp/respos-la-global-probe.log`，SHA-256 `c633dccd...6000`。该编码已
+  删除，`map_huge_2m()` 现在显式拒绝 `PTEFlags::GLOBAL`；不得把 4 KiB pair 规则外推到 huge leaf。
+- **正确性门禁**：LA `la_global_kernel + perf_counters` 和无计数 release 均构建通过。4 GiB/12 hart、
+  独立 qcow2 overlay 下连续两次 `smp_shared_mm_probe` 各 100 轮以及 `smp_phase3_probe` 30 轮通过，
+  约 108 万 syscall、850 次真实 remote shootdown、1377 个 retired batch，无 panic/内存破坏；日志
+  `/tmp/respos-la-global4k-probe.log`，SHA-256 `61be9c...c8d1`。随后 RV64 `perf_counters` 已用
+  `nightly-2025-01-18` 成功构建并完成 16 GiB/8 hart 的 120 秒 BuildStorm 计数窗口；RV64/LA64
+  无 feature release 也再次构建通过。双架构构建门禁已经补齐。
+- **计数与短 A/B**：12 hart、120 秒计数窗口的本地 op=4 ticks 从 `259911669` 降到
+  `246472973`（约 `-5.2%`），工作进度仍为 23 个 marker；ext4/heap 波动反向放大，因此不把这一个
+  计数样本解释为 wall 收益。相邻无 perf 冷 overlay 的 off/on 120 秒窗口都到 23 个 marker，两个
+  dev 阶段由 `13.58/5.02s` 降到 `10.29/4.09s`（约 `-18%--24%`）。日志为
+  `/tmp/respos-la-global4k-12h-120.log`、`/tmp/respos-la-global-ab-{off,on}-120.log`，后两者 SHA-256
+  `dbecf5...4015`/`78e07c...c5b`。on 轮一次 Cargo last-use `disk I/O error` 只影响 cache 记账并继续
+  编译，不能把该警告当作内核通过项或性能收益来源。
+- **完整 final 结果**：QEMU 10.0.2、12 GiB/12 hart、无 perf，kernel SHA-256
+  `5d09b91f...62558`，公开 LA root 与临时 final x1 均通过独立 qcow2 overlay 挂载。CAgent 脚本退出
+  0；并发串口把两个逐项输出交织，故不从该日志宣称精确 pass 数。BuildStorm toolchain/minibuild
+  通过，正式 release 为 `25m50s`，axbuild `1560.36s`，产物 `1714568` B、`ok=true cores=12`，脚本
+  退出 0 并正常关机。日志 `/tmp/respos-la-global4k-full-final.log`，SHA-256
+  `bb0106e4...0708`；按日志创建/结束时间计算整轮约 `1603.89s`。相对相同 12 GiB/12 hart、无 perf
+  的 E1 完整结果 `1743.70s`，axbuild 减少 `183.34s`（约 `10.51%`），超过原定 5% 保留门槛；但
+  两轮并非同一时刻的完整相邻 A/B，精确加速比仍会受宿主波动影响。
+- **相邻完整 off 反证**：随后以同一当前源码、Rust 1.86、root/x1 backing、12 GiB/12 hart 和无 perf
+  构建关闭 feature 的内核（SHA-256 `a3475d61...5b2301`），新 qcow2 overlay 下仍完整通过；CAgent 与
+  BuildStorm 脚本均退出 0，产物相同。off 的 release/axbuild 反而只有 `23m19s`/`1410.58s`，比上述
+  on 快 `149.78s`（以 off 为基准约 `10.62%`）。日志
+  `/tmp/respos-la-global4k-ab-off-full-nohostfwd.log`，SHA-256 `fa889962...cc408`，整轮约 `1452.46s`。
+  本轮只因 sandbox 禁止绑定 UDP host port 而移除了不被客体脚本使用的 hostfwd，virtio-net/NAT 与
+  guest 测试路径未变。更关键的未控变量是 host backing-file page cache：先运行者可能承担冷读，后运行者
+  复用热缓存，因此现有 on/off 顺序不能给出精确因果比例。
+- **第一组 on--off--on 的历史判定**：紧邻 on2 使用新 Rust 1.86 on 产物（SHA-256
+  `0b4d4daa...c398`）和同样无
+  hostfwd 配置，CAgent 10 项 pass、BuildStorm `ok=true`，但 release/axbuild 为
+  `27m04s`/`1634.28s`，比中间 off 慢 `223.70s`（以 off 为基准约 `15.86%`）；整轮约
+  `1673.65s`。日志 `/tmp/respos-la-global4k-ab-on2-full-nohostfwd.log`，SHA-256
+  `1f36e356...13c4d`。on--off--on 为 `1560.36/1410.58/1634.28s`，两次 on 均未胜过 off；样本量和
+  host cache/负载不足以证明 feature 必然造成固定幅度退化，当时据此判为性能 No-Go 并回退实验；下述
+  更稳定宿主复测已重新打开候选，但不把旧数字删除或改写。
+- **更稳定宿主的 off→on 复测**：固定 Rust 1.86、QEMU 10.0.2、12 GiB/12 hart、同一 root/x1
+  backing、独立 qcow2 overlay、无 perf/hostfwd，并以 5 秒间隔记录 QEMU/宿主时间线。R1/off 内核
+  SHA-256 `f0c790b5...60fe1c`，CAgent 10/10、BuildStorm `ok=true`，release/axbuild 为
+  `25m20s`/`1530.37s`，整轮约 `1571.67s`；日志 `/tmp/respos-la-clean-r1-off.log`，SHA-256
+  `4cbb0b73...6e8b7`。R2/on 内核 SHA-256 `ce372edc...4cd041`，同样完整通过，release/axbuild 为
+  `23m29s`/`1418.31s`，整轮约 `1455.74s`；日志 `/tmp/respos-la-clean-r2-on.log`，SHA-256
+  `21afaae2...34b6`。on 的 axbuild 减少 `112.06s`（约 `7.32%`），整轮减少约 `115.93s`（约
+  `7.38%`），超过候选门槛。
+- **复测资源边界与当前结论**：R1/off 时间线平均/峰值 QEMU CPU 为 `702.1%/1190.5%`，最低可用内存
+  约 `7.42 GiB`，swap-in/out 分别约 `64/217 MiB`，major fault 增量 `13111`；R2/on 为
+  `657.8%/1191.1%`、最低约 `7.01 GiB`、swap-in/out 约 `25/0.5 MiB`、major fault `7939`。第二轮
+  宿主换页明显更轻，故不能把全部 `7.32%` 归因于 Global；用户决定不跑包围它的 R3/off，本轮只有一对
+  样本。当前判定从 No-Go 调整为 **正向但待复现**：恢复 default-off 的 `la_global_kernel` feature、
+  4 KiB paired-leaf 遍历和启用点，仍不进入默认提交路径。通用 TLB 计数与 `map_huge_2m()` 对未经验证
+  Global 编码的拒绝继续保留；feature 开启时也不跳过 op=4，不改变 shootdown/frame completion，
+  huge/runtime mapping 不纳入 Global 域。
+
+## 2026-08-14 LA `1/3/6/12` hart BuildStorm 缩放诊断（提交 `277ceaa8`）
+
+- **口径与证据**：LA release kernel 只开启 `perf_counters`，kernel SHA-256
+  `e3963e18...16b78`；公开决赛 root image SHA-256 `450682fd...e9ca`，diagnostic x1
+  SHA-256 `4328ad97...d1ea`。QEMU 10.0.2、`-snapshot -m 12G`，分别使用
+  `-smp 1/3/6/12` 与 `CARGO_BUILD_JOBS=1/3/6/12`，每轮从冷 snapshot reset 后运行 120 秒。
+  online mask 依次为 `0x1/0x7/0x3f/0xfff`。串口日志为
+  `/tmp/respos-la-scale-{1h-j1,3h-j3,6h-j6,12h-j12}-120.log`，SHA-256 依次为
+  `9a9e97ab...bfdc`、`4e0a67ea...6590`、`1d2b41c5...401d`、`178e9702...2848`；宿主时间线位于
+  对应 `-timeline` 目录（3 hart 的有效目录后缀为 `-run-timeline`）。1 hart 的宿主时间线包含首次命令
+  包装失败后的 shell 等待，故该点只使用 reset 后 guest 计数，不把整段 host wall/CPU 与其余点比较。
+- **同进度边界**：1 hart 只输出 2 个 `Compiling` marker，停在 `core`，不能和其余点直接比较；3/6/12
+  hart 都输出 23 个 marker，最后均为 `ax-posix-api`。后三点 heap alloc 约
+  `16.425/16.437/16.433 M`、ext4 acquisitions `85187/85470/85526`、PageCache miss
+  `14541/14679/14633`、block read requests `28597/28736/28694`，工作量高度接近，允许比较累计等待和
+  并发结构，但 marker 不能显示正在编译 crate 的内部进度，仍不能外推完整 BuildStorm 加速比。
+- **利用率与调度判读**：由 `task_running_ticks/(running+idle)` 折算，3/6/12 hart 平均实际运行约
+  `1.25/1.34/1.43` 个 hart；`running_harts_1` 占 concurrency samples 约
+  `81.5%/83.6%/82.7%`，`scheduler_ready_0` 占 `98.3%/98.4%/99.7%`。对应宿主 QEMU 全程平均约
+  `127.7%/137.3%/147.2%` CPU。额外 hart 没有形成持续 runnable backlog，因此当前数据否决优先重构
+  runqueue/wakeup；低利用率主要表现为 Cargo/crate 依赖链或阻塞阶段只有约一个任务可运行，而不是 ready
+  任务未被调度。
+- **锁、I/O 与 MM 归因**：3/6/12 hart 的 ext4 wait 为 `1.672/2.755/3.118` 累计 CPU 秒，hold 为
+  `19.714/18.767/18.147` 秒，最大单次 wait 为 `201.0/240.5/221.7 ms`；wait 随 hart 增长且存在长尾，
+  允许进入 E2 C 层共享状态审计，但约 18 秒串行 lower 工作和约 3 秒累计等待不足以解释约 120 秒内的
+  大量 idle，不能直接据此拆 `EXT4_OP_LOCK`。heap lock wait 为 `2.529/6.761/9.530` 秒，说明高 hart
+  contention 存在，但 A1 完整 A/B 已 No-Go，不能重复扩大 magazine。frame alloc lock wait 仍远低于
+  clear/core，PageCache 三点 eviction 约 `77.4--77.8 K`、raced pages 仅 `254/1150/761`，block 工作量
+  也近似恒定，均不支持优先重写 frame allocator 或继续扩大 E1 缓存策略。
+- **TLB 后续测量入口**：同阶段 3/6/12 hart 的 local sfence 约 `614/617/614 K`，remote-empty request 约
+  `603/603/598 K`，而真实 remote RFENCE 仅 `10.5/13.8/16.1 K`。remote wait 为
+  `0.806/1.925/2.549` 秒。为补齐原口径缺失，本轮新增静态门控的 local invalidation timing 以及
+  fresh-map/COW/retired-frame 分类；unmap、COW、mprotect、ASID residency 和 frame completion 行为
+  尚未改变。
+- **local INVTLB 结果**：新 kernel SHA-256 `90aeb4ca...4bc3`，使用两个显式 `/tmp` qcow2 overlay
+  保护原始 root/x1，在 `-m 12G -smp 12`、jobs=12 下运行同一 120 秒窗口；仍到 23 个 marker 和
+  `ax-posix-api`。日志 `/tmp/respos-la-tlb-local-12h-120.log`，SHA-256 `b33b807a...a11c`。
+  `608476` 次 flush 的本地 op=4 累计 `259911669` ticks（100 MHz 下约 `2.599s`），平均约 `4.27us`、
+  最大约 `0.590ms`；其中 fresh-map `555029` 次（`91.2%`）、COW `32539` 次，只有 `6291` 批含 retired
+  frame。显式 invtlb 成本已可量化，ASID-wide 失效造成的 TLB 热项丢失仍未直接计时。
+- **不能直接跳过 fresh-map flush**：LA software refill 在缺失 PGD/PMD 时会构造两个 invalid TLBELO
+  并执行 `tlbfill`，所以无效 PTE→有效 PTE 后当前 faulting hart 确实留有 negative TLB entry；直接跳过
+  本地失效会重复 fault。op=5 又已被完整 final 的内存破坏单变量 A/B 否决。因此本轮只保留测量，不恢复
+  op=5、不省略同步。该证据随后导向上节 4 KiB Global kernel mapping 实验；实验中 op=4 仍完整执行，
+  只让成对、共享且启动后不修改的叶项跨 ASID 保留。稳定宿主的一对 off/on 为正，但因换页差异和缺少
+  R3 仍保持 default-off；huge/runtime mapping 从未纳入 Global 域。
+
 ## 2026-08-13 allocator A1 per-hart 小对象 magazine（当前工作树，默认关闭）
 
 - **实现与边界**：新增独立 `heap_magazine` feature；每 hart 为 8/16/32/64/128/256 B 六类保留固定
@@ -575,12 +737,15 @@
   只验证阶段分派，不代替正式资源下的完整 BuildStorm。显式 Make 入口烟测中，
   LA preliminary 正确进入 `contest_launcher → testrunner` 并跑完 basic-musl/basic-glibc；RV final
   正确进入官方两个脚本。平台 score/rank 仍为 `待验证`。
-- **Rust 1.86 LTO 阻断与修复**：平台同版 rustc 的 RV64 `lto="thin"` 无 feature 内核可编译、启动，
+- **Rust 1.86 LTO 历史 A/B（旧归因已被 2026-08-14 DMA 结论取代）**：平台同版 rustc 的 RV64
+  `lto="thin"` 无 feature 内核可编译、启动，
   但两个冷 `-snapshot` 运行均使 `simple_llm_server`、mount、rustc/cargo 稳定 SIGSEGV，CAgent 0/10，
   BuildStorm toolchain/minibuild 失败；同源码 Rust 1.89 thin-LTO 内核则 CAgent 10/10。Rust 1.86 关闭
   LTO 后，RV64 CAgent 10/10 且 `BUILDSTORM_TOOLCHAIN/MINIBUILD ok`；LA64 12 hart 同样 CAgent 10/10
-  且两个 BuildStorm 前置门禁通过。因此双架构 release config 固定 `lto=false`。完整 BuildStorm 和
-  平台正式资源/计时仍待验证，不能由短回归外推。
+  且两个 BuildStorm 前置门禁通过。当时因此把双架构 release config 固定为 `lto=false`；后续已确认
+  成败来自 LTO/feature 改变栈布局后是否触发 VirtIO 跨非连续物理页 DMA，并非已证明的 Rust 编译器
+  缺陷。`lto=false` 暂保留为提交保守项，但不再视为根因修复；完整 BuildStorm 和平台正式资源/计时
+  仍待验证，不能由短回归外推。
 
 ## 2026-08-13 状态收口与双线推进基线（当前工作树）
 
@@ -631,7 +796,7 @@
 
 | 推进线 | 当前负责人 | 当前任务包 | 本地退出证据 | 平台恢复后的补验 |
 | --- | --- | --- | --- | --- |
-| 架构/性能线 | 学长 | LA 缩放与 Global kernel mapping 评估；保留 range+op=4 安全边界；BuildStorm ext4/PageCache 关键路径 E0/E1；36 GiB 启动 | 双架构顺序构建，LA 12-hart shared-MM/Phase3/ASID churn、FS/写回专项、固定窗口 A/B 与完整 BuildStorm | LA `-m 36G -smp 12` 正式镜像和时限；必要时 RV64 正式回归 |
+| 架构/性能线 | 学长 | LA Global mapping 保持 default-off 正向候选；保留 range+op=4 安全边界；转入 BuildStorm ext4 E2 审计；36 GiB 启动 | 双架构顺序构建，LA 12-hart shared-MM/Phase3/ASID churn、FS/写回专项、固定窗口 A/B 与完整 BuildStorm | LA `-m 36G -smp 12` 正式镜像和时限；必要时 RV64 正式回归 |
 | Phase 线 | 当前维护者 | 继续 Phase 5，并独立维护 POSIX 语义覆盖任务；先收敛与架构代码低耦合的 IPC/network，再做 task/signal、基础 POSIX 缺口；待 TLB/MM 接口稳定后实现 mmap EOF/truncate/SIGBUS | POSIX 覆盖矩阵、Linux 对照 probe、RV64 专项与 SMP 回归、LA/RV 顺序构建；高风险修改补 shared-MM/资源闭环 | 正式镜像的完整 workload、LTP/比赛 runner 与平台计时 |
 
 默认文件边界如下：架构线拥有 `os/src/arch/**` 以及 LA SMP/TLB/ASID 的底层协议；Phase 线拥有

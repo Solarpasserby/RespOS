@@ -11,6 +11,7 @@ perf_counters = ["respos_buddy_allocator/perf_counters"]
 heap_magazine = []
 debug_traces = []
 fault_trace = []
+la_global_kernel = []
 
 [[bin]]
 name = "os"

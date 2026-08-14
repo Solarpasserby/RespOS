@@ -40,7 +40,6 @@ const PTE_PLV_USER: usize = 3 << 2;
 const PTE_MAT_CC: usize = 1 << 4;
 const PTE_G: usize = 1 << 6;
 const PMD_HUGE: usize = 1 << 6;
-const PMD_HGLOBAL: usize = 1 << 12;
 const PTE_P: usize = 1 << 7;
 const PTE_W: usize = 1 << 8;
 const PTE_COW: usize = 1 << 9;
@@ -81,16 +80,61 @@ pub struct PageTable {
 }
 
 impl PageTable {
+    /// Mark the already-built, immutable kernel half as global before its
+    /// first activation. LoongArch 4 KiB TLB entries cover an even/odd pair;
+    /// the entry is global only when both TLBELO G bits are set. Leave an
+    /// unpaired leaf non-global rather than claiming a property the hardware
+    /// will not provide. Runtime mappings such as recycled kernel stacks are
+    /// installed after this pass and deliberately remain ASID-scoped.
+    #[cfg(feature = "la_global_kernel")]
+    pub fn mark_existing_kernel_global(&mut self) -> (usize, usize) {
+        let kernel_pgd = (KERNEL_BASE >> (PAGE_SIZE_BITS + 18)) & 0x1ff;
+        let mut global_pairs = 0;
+        let mut skipped_huge = 0;
+        let root = self.root_ppn.get_pte_array();
+
+        for pgd in &mut root[kernel_pgd..] {
+            if !pgd.is_valid() {
+                continue;
+            }
+            assert!(!pgd.is_huge(), "unexpected 1 GiB LoongArch kernel leaf");
+            let pmds = pgd.ppn().get_pte_array();
+            for pmd in pmds {
+                if !pmd.is_valid() {
+                    continue;
+                }
+                if pmd.is_huge() {
+                    skipped_huge += 1;
+                    continue;
+                }
+
+                let ptes = pmd.ppn().get_pte_array();
+                for pair in ptes.chunks_exact_mut(2) {
+                    if pair[0].is_valid() && pair[1].is_valid() {
+                        pair[0].bits |= PTE_G;
+                        pair[1].bits |= PTE_G;
+                        global_pairs += 1;
+                    } else {
+                        pair[0].bits &= !PTE_G;
+                        pair[1].bits &= !PTE_G;
+                    }
+                }
+            }
+        }
+
+        (global_pairs, skipped_huge)
+    }
+
     /// Install one aligned 2 MiB kernel direct-map entry in the PMD.
     ///
-    /// LoongArch marks a directory leaf with bit 6. Its global bit moves from
-    /// bit 6 to bit 12, which is available because a 2 MiB physical base is
-    /// aligned well beyond that bit.
+    /// Global huge-leaf encoding is deliberately rejected. The previous
+    /// bit-12 assumption faulted immediately when the high-RAM direct map was
+    /// exercised; 4 KiB paired global leaves are evaluated independently.
     pub fn map_huge_2m(&mut self, va: VirtAddr, pa: PhysAddr, flags: PTEFlags) -> SysResult {
         const HUGE_SIZE: usize = 2 * 1024 * 1024;
         let va_raw = usize::from(va);
         let pa_raw = usize::from(pa);
-        if va_raw % HUGE_SIZE != 0 || pa_raw % HUGE_SIZE != 0 {
+        if va_raw % HUGE_SIZE != 0 || pa_raw % HUGE_SIZE != 0 || flags.contains(PTEFlags::GLOBAL) {
             return Err(Errno::EINVAL);
         }
 
@@ -111,9 +155,6 @@ impl PageTable {
         }
         let mut bits = (pa_raw >> PAGE_SIZE_BITS) << 12;
         bits |= flags_to_la64(flags | PTEFlags::VALID | PTEFlags::ACCESSED);
-        if bits & PTE_G != 0 {
-            bits = (bits & !PTE_G) | PMD_HGLOBAL;
-        }
         pmd.bits = bits | PMD_HUGE;
         self.record_tlb_range(VirtPageNum::from(va_raw >> PAGE_SIZE_BITS), 512);
         Ok(())
