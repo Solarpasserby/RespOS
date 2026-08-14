@@ -565,6 +565,10 @@ guest 日志中 musl/glibc 都必须出现 `SUMMARY: 2 passed, 0 failed`，`getd
 同一筛选簇覆盖常规/错误路径。两架构必须顺序运行：
 
 ```bash
+cc -std=c11 -Wall -Wextra -Werror -O2 scripts/mknod_dev_t_probe_linux.c \
+  -o /tmp/mknod_dev_t_probe_linux
+/tmp/mknod_dev_t_probe_linux
+
 TASK_A_MKNOD_XATTR_PROBE=1 make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
   RV_PRE_OUTPUT=/tmp/respos-rv-mknod-xattr-phase5.log
 TASK_A_MKNOD_XATTR_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
@@ -578,12 +582,21 @@ TASK_A_LTP_ONLY=1 \
   LTP_CASE_FILTER=mknod01,mknod02,mknod03,mknod04,mknod05,mknod06,mknod07,mknod08,mknod09,setxattr01,setxattr02,fsetxattr01,getxattr02 \
   make run-la-pre PRE_MEM=4G PRE_SMP=2 \
   LA_PRE_OUTPUT=/tmp/respos-la-mknod-xattr-ltp-phase5.log
+
+TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=mknod01,setxattr02,statx02,statx03 \
+  make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-mknod-devt-ltp-phase5.log
+TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=mknod01,setxattr02,statx02,statx03 \
+  make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-mknod-devt-ltp-phase5.log
 ```
 
-专项日志必须包含 `MKNOD_XATTR_PROBE_PASS`；LTP 日志的 musl/glibc 均须为
+宿主若没有 `CAP_MKNOD`，probe 会打印 runtime skip，但仍验证 libc `dev_t` 编码；真实节点的 high-minor
+stat/statx 对照必须由双架构 guest 专项完成。专项日志必须包含 `MKNOD_XATTR_PROBE_PASS`；完整 LTP
+日志的 musl/glibc 均须为
 `SUMMARY: 13 passed, 0 failed`，且 `setxattr02` 的 regular/directory 成功、symlink `EEXIST`、
-FIFO/character/block/socket `EPERM` 七项全部通过。该门禁不验证字符/块设备驱动功能；大 major/high
-minor 的编码需另加 probe。
+FIFO/character/block/socket `EPERM` 七项全部通过；device/statx 小簇必须为
+`SUMMARY: 4 passed, 0 failed`。该门禁不验证字符/块设备驱动功能。
 
 ### fallocate 真实预分配门禁
 

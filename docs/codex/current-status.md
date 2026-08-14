@@ -1,6 +1,6 @@
 # RespOS 当前状态
 
-## 2026-08-14 Linux/POSIX Phase 5 ext4 特殊 inode 与 xattr（基于 `699a5e2` 的当前工作树）
+## 2026-08-14 Linux/POSIX Phase 5 ext4 特殊 inode、device 编码与 xattr（基于 `087af08` 的当前工作树）
 
 - **失败边界与根因**：修复前双架构 musl/glibc 的 LTP `setxattr02` 仅通过 regular、directory、
   symlink 与 FIFO 四项；character、block、socket 三类节点错误接受 `user.*` xattr。`sys_mknodat()`
@@ -10,13 +10,21 @@
   block、socket 统一调用 lwext4 `ext4_mknod()`，并从 raw inode device slot 恢复 `KStat.rdev`。普通
   `create()` 不再允许缺少 device payload 的 character/block placeholder。该变更只保证 namespace inode
   类型、rdev 与适用的 xattr 限制，不代表 RespOS 已有对应字符/块设备驱动或完整 open/read/write 语义。
-- **专项与回归证据**：新增 `mknod_xattr_probe`，双架构 release、初赛 snapshot、4 GiB/2 hart 均输出
-  `MKNOD_XATTR_PROBE_PASS`，验证 character `rdev=0x103`、block `rdev=0x700`、四类特殊 inode mode 及
-  `user.*` xattr 的 `EPERM`。同配置聚焦 `mknod01`--`mknod09`、`setxattr01/02`、`fsetxattr01`、
+- **device 编码修复**：首轮实现虽由 `stat()` 保存 ext4 的完整 32-bit device encoding，`statx`
+  却只取 minor 的 legacy 低 8 位。当前按 Linux libc `dev_t` 布局统一拆分 major/minor，保留 20-bit
+  minor；`mknod_xattr_probe` 使用 character major `0xabc`、minor `0x54321`，同时验证 raw
+  `st_rdev=0x543abc21` 与 `statx.stx_rdev_*`。宿主 C probe 以 `-Wall -Wextra -Werror` 编译并通过编码
+  检查；当前容器缺少 `CAP_MKNOD`，真实节点检查明确 skip，不把它记作宿主 runtime 通过。
+- **专项与回归证据**：双架构 release、初赛 snapshot、4 GiB/2 hart 的专项均输出
+  `MKNOD_XATTR_PROBE_PASS`，并验证 block `rdev=0x700`、四类特殊 inode mode 及 `user.*` xattr 失败。
+  首轮同配置聚焦 `mknod01`--`mknod09`、`setxattr01/02`、`fsetxattr01`、
   `getxattr02` 共 13 case；RV64/LA64 的 musl/glibc 四组均为
-  `SUMMARY: 13 passed, 0 failed`。日志为 `/tmp/respos-{rv,la}-mknod-xattr-{phase5,ltp-phase5}.log`。
-- **剩余边界**：当前 probe 覆盖 Linux 常用低位 device 编码；大 major/high minor 的 `dev_t` 编解码及
-  `statx.stx_rdev_*` 尚未专项验证，不能据此宣称任意 device number 已闭合。
+  `SUMMARY: 13 passed, 0 failed`；device 编码修复后再聚焦
+  `mknod01,setxattr02,statx02,statx03`，四环境均为 `SUMMARY: 4 passed, 0 failed`。日志为
+  `/tmp/respos-{rv,la}-mknod-{xattr,devt}{,-ltp}-phase5.log`。
+- **剩余边界**：当前关闭 Linux kernel/ext4 的 12-bit major、20-bit minor 编码和 stat/statx 回报；
+  这不代表 RespOS 已有对应字符/块设备驱动或完整 open/read/write 语义，也不承诺超出 kernel
+  32-bit device encoding 的 libc-only 大 major。
 
 ## 2026-08-14 Linux/POSIX Phase 5 ext4 `fallocate()` 预分配审计（基于 `80e8c5a`）
 

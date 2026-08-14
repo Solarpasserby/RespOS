@@ -116,6 +116,7 @@ const SYSCALL_MSYNC: usize = 227;
 const SYSCALL_MPROTECT: usize = 226;
 const SYSCALL_MEMFD_CREATE: usize = 279;
 const SYSCALL_RENAMEAT2: usize = 276;
+const SYSCALL_STATX: usize = 291;
 const SYSCALL_WAIT4: usize = 260;
 const SYSCALL_PRLIMIT64: usize = 261;
 const SYSCALL_COPY_FILE_RANGE: usize = 285;
@@ -209,6 +210,43 @@ pub struct Stat {
     pub st_mtime: TimeSpec,
     pub st_ctime: TimeSpec,
     pub unused: u64,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default)]
+pub struct StatxTimestamp {
+    pub sec: i64,
+    pub nsec: u32,
+    pub _pad: i32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default)]
+pub struct Statx {
+    pub stx_mask: u32,
+    pub stx_blksize: u32,
+    pub stx_attributes: u64,
+    pub stx_nlink: u32,
+    pub stx_uid: u32,
+    pub stx_gid: u32,
+    pub stx_mode: u16,
+    pub _spare0: [u16; 1],
+    pub stx_ino: u64,
+    pub stx_size: u64,
+    pub stx_blocks: u64,
+    pub stx_attributes_mask: u64,
+    pub stx_atime: StatxTimestamp,
+    pub stx_btime: StatxTimestamp,
+    pub stx_ctime: StatxTimestamp,
+    pub stx_mtime: StatxTimestamp,
+    pub stx_rdev_major: u32,
+    pub stx_rdev_minor: u32,
+    pub stx_dev_major: u32,
+    pub stx_dev_minor: u32,
+    pub stx_mnt_id: u64,
+    pub stx_dio_mem_align: u32,
+    pub stx_dio_offset_align: u32,
+    pub _spare3: [u64; 12],
 }
 
 #[repr(C)]
@@ -495,6 +533,20 @@ pub fn sys_mknodat(dirfd: isize, path: &str, mode: usize, dev: usize) -> isize {
     syscall(
         SYSCALL_MKNODAT,
         [dirfd as usize, path.as_ptr() as usize, mode, dev, 0, 0],
+    )
+}
+
+pub fn sys_statx(dirfd: isize, path: &str, flags: usize, mask: u32, statx: &mut Statx) -> isize {
+    syscall(
+        SYSCALL_STATX,
+        [
+            dirfd as usize,
+            path.as_ptr() as usize,
+            flags,
+            mask as usize,
+            statx as *mut _ as usize,
+            0,
+        ],
     )
 }
 

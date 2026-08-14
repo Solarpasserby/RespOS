@@ -70,7 +70,7 @@ fn clear_bss() {
 
 use syscall::*;
 
-pub use syscall::{ITimerSpec, IoVec, RLimit, RUsage, Stat, TimeSpec, TimeVal};
+pub use syscall::{ITimerSpec, IoVec, RLimit, RUsage, Stat, Statx, TimeSpec, TimeVal};
 
 pub const O_RDONLY: usize = 0;
 pub const O_WRONLY: usize = 1 << 0;
@@ -336,6 +336,9 @@ pub fn openat(dirfd: isize, path: &str, flags: usize, mode: usize) -> isize {
 }
 pub fn mknodat(dirfd: isize, path: &str, mode: usize, dev: usize) -> isize {
     sys_mknodat(dirfd, path, mode, dev)
+}
+pub fn statx(dirfd: isize, path: &str, flags: usize, mask: u32, statx: &mut Statx) -> isize {
+    sys_statx(dirfd, path, flags, mask, statx)
 }
 pub fn fstatat(dirfd: isize, path: &str, stat: &mut Stat, flags: usize) -> isize {
     sys_fstatat(dirfd, path, stat, flags)

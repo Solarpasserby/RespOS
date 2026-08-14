@@ -90,15 +90,15 @@
 - 状态：已采用
 - 适用范围：ext4 `mknod`/`mknodat`/`mkfifo`、特殊节点 stat/xattr 与命名 FIFO reopen
 - 最后验证：2026-08-14
-- 证据：`os/src/fs/{namei.rs,ext4/inode.rs}`、lwext4 `ext4_mknod`、`mknod_xattr_probe`；双架构
-  musl/glibc 13-case mknod/xattr 簇及既有五项 FIFO LTP
+- 证据：`os/src/fs/{namei.rs,ext4/inode.rs}`、`os/src/syscall/fs.rs`、lwext4 `ext4_mknod`、
+  `mknod_xattr_probe`；双架构 musl/glibc 13-case mknod/xattr 簇、4-case statx 回归及既有五项 FIFO LTP
 - 内容：FIFO、character、block、socket 的 lower namespace entry 直接以对应 ext4 特殊类型创建；
-  character/block 的 device payload 经 VFS/namei 专用 create 接口传入 lower inode，并由 stat 原样回报。
-  VFS mode/owner commit 只修改权限与所有者，不承担修复 inode type；运行态 FIFO buffer 仍由
-  `open_named_fifo` 管理。
+  character/block 的 Linux kernel 32-bit device payload 经 VFS/namei 专用 create 接口传入 lower inode，
+  由 stat 原样回报，并由 statx 拆分为 12-bit major/20-bit minor。VFS mode/owner commit 只修改权限与
+  所有者，不承担修复 inode type；运行态 FIFO buffer 仍由 `open_named_fifo` 管理。
 - 后续影响：特殊 inode 类型必须在 lower create 时正确，不能依赖内存中的 requested type。新增后端若
   无真实 character/block 表示必须返回 `EOPNOTSUPP`，不得回退到 regular placeholder。该决策不承诺
-  字符/块设备驱动语义；大 major/high minor 的编码仍需单独验证。
+  字符/块设备驱动语义，也不扩展 Linux kernel 32-bit device encoding 的范围。
 
 ## nlink=0 inode 按最后 VFS 引用延迟回收，不按 open File 数猜测
 

@@ -114,6 +114,19 @@
   再检查 device payload 是否真正传入 lower inode；不要在 xattr 或各 syscall 层按 pathname/type 打补丁。
   setattr 只保留/更新权限位时尤其不能用它补救错误的 type。
 
+## `statx` 的 device minor 不能只取 legacy 低 8 位
+
+- 状态：已确认并修复
+- 适用范围：`statx.stx_{rdev,dev}_{major,minor}`、ext4/device fs 的 device number
+- 最后验证：2026-08-14
+- 证据：`scripts/mknod_dev_t_probe_linux.c`、`mknod_xattr_probe`；双架构 2 hart 专项与
+  `mknod01,setxattr02,statx02,statx03` 四环境回归
+- 内容：Linux kernel/ext4 的 32-bit device encoding 为 12-bit major、20-bit minor；低 8 位兼容旧编码，
+  minor 的其余 12 位位于 device value 的高段。直接使用 `rdev & 0xff` 会让 `stat()` 看似正确，
+  `statx()` 却静默截断高 minor，因此普通低 minor 设备和既有 LTP 无法暴露问题。
+- 后续影响：device 编解码必须共用 Linux 布局，probe 至少选择一个 minor 大于 255 的节点并同时比较
+  raw `st_rdev` 和 statx 拆分字段；不得用现有 `/dev/null` 等低 minor 节点宣称完整验证。
+
 ## 直接从 `wait4` 返回 EINTR 会绕过 SA_RESTART 并放大成 LTP 任务泄漏
 
 - 状态：已确认并对 `wait4` 修复

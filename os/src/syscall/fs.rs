@@ -1722,10 +1722,10 @@ impl From<KStat> for Statx {
     fn from(kstat: KStat) -> Self {
         const STATX_BASIC_STATS: u32 = 0x0000_07ff;
         let stat: Stat = kstat.into();
-        let rdev_major = ((stat.st_rdev >> 8) & 0xfff) as u32;
-        let rdev_minor = (stat.st_rdev & 0xff) as u32;
-        let dev_major = ((stat.st_dev >> 8) & 0xfff) as u32;
-        let dev_minor = (stat.st_dev & 0xff) as u32;
+        let rdev_major = linux_dev_major(stat.st_rdev);
+        let rdev_minor = linux_dev_minor(stat.st_rdev);
+        let dev_major = linux_dev_major(stat.st_dev);
+        let dev_minor = linux_dev_minor(stat.st_dev);
         Self {
             stx_mask: STATX_BASIC_STATS,
             stx_blksize: stat.st_blksize,
@@ -1746,6 +1746,17 @@ impl From<KStat> for Statx {
             ..Default::default()
         }
     }
+}
+
+/// Decode the userspace `dev_t` layout used by Linux libc. The low 32 bits are
+/// also the ext4 on-disk device encoding, so this covers high (20-bit) minors
+/// instead of silently keeping only their legacy low byte.
+const fn linux_dev_major(dev: u64) -> u32 {
+    (((dev & 0x0000_0000_000f_ff00) >> 8) | ((dev & 0xffff_f000_0000_0000) >> 32)) as u32
+}
+
+const fn linux_dev_minor(dev: u64) -> u32 {
+    ((dev & 0xff) | ((dev & 0x0000_0fff_fff0_0000) >> 12)) as u32
 }
 
 /// 系统调用 sys-statx

@@ -411,15 +411,16 @@ FdTable slot (FdEntry: descriptor flags)
 - 状态：已实现并由双架构 LTP 验证
 - 适用范围：`mknod`/`mknodat`、`mkfifo`、特殊节点 stat/xattr；命名 FIFO open/read/write/lseek/fsync
 - 最后验证：2026-08-14
-- 证据：`os/src/fs/{namei.rs,ext4/inode.rs,pipe.rs}`；`mknod_xattr_probe`；RV64/LA64 musl/glibc 的
-  13-case mknod/xattr 簇及既有五项 FIFO LTP
+- 证据：`os/src/fs/{namei.rs,ext4/inode.rs,pipe.rs}`、`os/src/syscall/fs.rs`；`mknod_xattr_probe`；
+  RV64/LA64 musl/glibc 的 13-case mknod/xattr 簇、4-case statx 回归及既有五项 FIFO LTP
 - 内容：`sys_mknodat` 将 device payload 经 namei `create_special()` 一直传给 lower inode；ext4 对
   FIFO、character、block、socket 都用 `ext4_mknod()` 建立真实特殊 inode，并从 raw inode device slot
-  恢复 `KStat.rdev`。`sys_openat` 根据持久的 FIFO 类型将 pathname inode 转为 `NamedFifoEnd`；同一路径
-  的运行态 reader/writer 共享 VFS `PipeRingBuffer`，关闭最后一个端点后释放，不把管道内容写入 ext4。
+  恢复 `KStat.rdev`；statx 按 Linux device 布局拆分 12-bit major 与 20-bit minor，不退化到 legacy
+  8-bit minor。`sys_openat` 根据持久的 FIFO 类型将 pathname inode 转为 `NamedFifoEnd`；同一路径的
+  运行态 reader/writer 共享 VFS `PipeRingBuffer`，关闭最后一个端点后释放，不把管道内容写入 ext4。
 - 后续影响：不能用普通文件占位再只改低 12 位 permission 假装特殊 inode；否则 reopen/readdir/stat
   会继续识别成 regular，并绕过类型相关 errno、xattr 限制与 FIFO 阻塞语义。特殊 inode 正确不等于
-  已有对应设备驱动；大 major/high minor 的完整 `dev_t`/`statx` 编解码仍需专项验证。
+  已有对应设备驱动；超出 Linux kernel 32-bit device encoding 的 libc-only device number 不在本范围。
 
 ### ext4 inode 属性以底层 transaction 成功为发布点
 
