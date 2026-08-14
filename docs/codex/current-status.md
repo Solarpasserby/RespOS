@@ -4,9 +4,11 @@
 
 - **修复前门禁**：把既有 `task_phase5_probe` 接入 `TASK_A_TASK_PHASE5_PROBE=1` 自动入口；失败时仍会
   记录 guest status 并安全 poweroff，便于在修复前/后使用同一命令。宿主 Linux probe 三项全通过。
-- **双架构当前反证**：RV64/LA64 release、初赛 snapshot、4 GiB/2 hart 都稳定复现三个差异：leader
+- **双架构当前反证**：RV64/LA64 release、初赛 snapshot、4 GiB/2 hart 都稳定复现四个差异：leader
   原始 `SYS_exit(42)` 错误结束全组并返回 `42 << 8`，worker 未存活；non-leader exec 返回 `EINVAL`
-  并由失败路径返回 `111 << 8`。日志为 `/tmp/respos-{rv,la}-task-phase5-current.log`，均打印
+  并由失败路径返回 `111 << 8`。新增稳定身份项还直接确认父进程过早以 `WNOHANG` 收到 status 42；因
+  worker 已被杀死，TGID 后续 `kill(pid)`、process-directed signal 和 worker PID/TID 不变量均无法进入。
+  最新日志为 `/tmp/respos-{rv,la}-task-phase5-identity-gate.log`，均打印
   `TASK_PHASE5 CURRENT DIFFERENCES CONFIRMED`；这不是通过结果。
 - **拟定方案**：新增 [process-identity-phase5-design.md](./process-identity-phase5-design.md)，规定独立
   `ProcessState/ProcessTable`、最后线程 Zombie、wait copyout 后 Reaped，以及 non-leader exec 的

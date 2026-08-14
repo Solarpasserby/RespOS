@@ -322,20 +322,22 @@ cc -std=c11 -Wall -Wextra -Werror -O2 scripts/task_phase5_probe_linux.c \
 /tmp/task_phase5_probe_linux
 ```
 
-当前 no-feature guest 可运行 `task_phase5_probe`。修复前预期打印三个
+当前 no-feature guest 可运行 `task_phase5_probe`。修复前预期打印四个
 `TASK_PHASE5_EXPECTED_FAIL` 和 `TASK_PHASE5 CURRENT DIFFERENCES CONFIRMED`，并以非零状态退出；这些
 marker 只证明探针捕获了已确认差异，不是通过。完成 task 生命周期修复后，退出门槛是
 `TASK_PHASE5 ALL PASS`，并且不得出现 expected-fail marker。探针分别覆盖 leader 原始 `SYS_exit`
 后 worker 的 `exit_group`、worker 的原始 `SYS_exit`，以及非 leader `execve` 后
-`getpid() == gettid()` 的 identity 接管。
+`getpid() == gettid()` 的 identity 接管。新增稳定身份项还覆盖 leader 原始退出后 `WNOHANG` 不得提前
+收尸、TGID 仍可被 `kill(pid)` 查询、process-directed SIGUSR1 递送给 worker，以及 worker 的
+`getpid()==TGID`/`gettid()!=TGID`。
 
 当前双架构 2 hart 自动入口：
 
 ```bash
 TASK_A_TASK_PHASE5_PROBE=1 make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
-  RV_PRE_OUTPUT=/tmp/respos-rv-task-phase5-current.log
+  RV_PRE_OUTPUT=/tmp/respos-rv-task-phase5-identity-gate.log
 TASK_A_TASK_PHASE5_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
-  LA_PRE_OUTPUT=/tmp/respos-la-task-phase5-current.log
+  LA_PRE_OUTPUT=/tmp/respos-la-task-phase5-identity-gate.log
 ```
 
 修复前入口会在 probe 非零后打印 status 并安全 poweroff；判断必须看 guest marker，不能因宿主 QEMU/make

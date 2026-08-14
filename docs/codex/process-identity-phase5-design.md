@@ -7,8 +7,8 @@
   signal、wait/session/pgrp 与进程级资源回收
 - 当前证据 commit：`75216ffc287908492e6daa8bfe455dc5aac3444a` 加 2026-08-14 当前工作树
 - Linux 对照：`scripts/task_phase5_probe_linux.c` 三项全通过
-- RespOS 反证：RV64/LA64、4 GiB/2 hart 的 `TASK_A_TASK_PHASE5_PROBE=1` 都稳定出现三个
-  `TASK_PHASE5_EXPECTED_FAIL`；日志为 `/tmp/respos-{rv,la}-task-phase5-current.log`
+- RespOS 反证：RV64/LA64、4 GiB/2 hart 的 `TASK_A_TASK_PHASE5_PROBE=1` 都稳定出现四个
+  `TASK_PHASE5_EXPECTED_FAIL`；日志为 `/tmp/respos-{rv,la}-task-phase5-identity-gate.log`
 
 本方案只定义 Phase 5 正确性状态所有权，不进入 Phase 6 的 scheduler/per-CPU 性能重构。
 
@@ -135,7 +135,9 @@ ProcessTable -> parent ProcessState -> child ProcessState -> members snapshot
 
 最低门禁：
 
-- Linux/RespOS `task_phase5_probe` 三项全部 PASS，不得出现 expected-fail marker；
+- Linux/RespOS `task_phase5_probe` 四项全部 PASS，不得出现 expected-fail marker；
+- leader 原始退出后父进程 `WNOHANG` 仍返回 0，TGID `kill(pid)` 可达，process-directed signal 由存活
+  worker 接收，且 worker 观察 `getpid()==TGID`、`gettid()!=TGID`；
 - RV64/LA64 2 hart 与至少一轮 8 hart leader-exit/nonleader-exec 压力；
 - `TASK_A_WAIT4_PROBE`、`TASK_A_SIGNAL_PHASE5_PROBE`、session probe、futex exit/robust/clear-child-tid；
 - exec 失败原子性、两个线程并发 exec、exec-vs-exit_group、leader-exit-vs-kill/wait 的 single-winner；

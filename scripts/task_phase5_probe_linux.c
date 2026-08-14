@@ -28,6 +28,23 @@ struct leader_exit_state {
     atomic_int worker_survived;
 };
 
+struct leader_identity_state {
+    atomic_int worker_ready;
+    atomic_int leader_may_exit;
+    atomic_int worker_survived;
+    atomic_int signal_seen;
+    atomic_int ids_valid;
+    atomic_int process_pid;
+};
+
+static atomic_int identity_signal_seen;
+
+static void identity_signal_handler(int signo)
+{
+    (void)signo;
+    atomic_store_explicit(&identity_signal_seen, 1, memory_order_release);
+}
+
 static int leader_exit_worker(void *opaque)
 {
     struct leader_exit_state *state = opaque;
@@ -92,6 +109,82 @@ static void test_leader_sys_exit_case(int (*worker)(void *), int expected_status
     printf("TASK_PHASE5_LINUX %s PASS\n", label);
 }
 
+static int leader_identity_worker(void *opaque)
+{
+    struct leader_identity_state *state = opaque;
+
+    atomic_store_explicit(&state->worker_ready, 1, memory_order_release);
+    while (atomic_load_explicit(&state->leader_may_exit, memory_order_acquire) == 0)
+        sched_yield();
+
+    /* Let the leader complete SYS_exit before the parent probes the TGID. */
+    for (int i = 0; i < 1000; ++i)
+        sched_yield();
+    atomic_store_explicit(
+        &state->ids_valid,
+        getpid() == atomic_load_explicit(&state->process_pid, memory_order_acquire)
+            && getpid() != (pid_t)syscall(SYS_gettid),
+        memory_order_release);
+    atomic_store_explicit(&state->worker_survived, 1, memory_order_release);
+
+    while (atomic_load_explicit(&identity_signal_seen, memory_order_acquire) == 0)
+        sched_yield();
+    atomic_store_explicit(&state->signal_seen, 1, memory_order_release);
+    syscall(SYS_exit, WORKER_EXIT_STATUS);
+    __builtin_unreachable();
+}
+
+static void test_leader_exit_keeps_process_identity(void)
+{
+    struct leader_identity_state *state =
+        mmap(NULL, sizeof(*state), PROT_READ | PROT_WRITE,
+             MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    assert(state != MAP_FAILED);
+
+    pid_t child = fork();
+    assert(child >= 0);
+    if (child == 0) {
+        struct sigaction action = {0};
+        action.sa_handler = identity_signal_handler;
+        sigemptyset(&action.sa_mask);
+        if (sigaction(SIGUSR1, &action, NULL) < 0)
+            syscall(SYS_exit_group, 124);
+
+        void *stack = mmap(NULL, STACK_SIZE, PROT_READ | PROT_WRITE,
+                           MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK, -1, 0);
+        if (stack == MAP_FAILED)
+            syscall(SYS_exit_group, 125);
+        atomic_store_explicit(&state->process_pid, getpid(), memory_order_release);
+        if (clone(leader_identity_worker, (char *)stack + STACK_SIZE,
+                  CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD,
+                  state) < 0)
+            syscall(SYS_exit_group, 126);
+        while (atomic_load_explicit(&state->worker_ready, memory_order_acquire) == 0)
+            sched_yield();
+        atomic_store_explicit(&state->leader_may_exit, 1, memory_order_release);
+        syscall(SYS_exit, LEADER_EXIT_STATUS);
+        __builtin_unreachable();
+    }
+
+    int status = 0;
+    for (int i = 0;
+         i < 100000
+         && atomic_load_explicit(&state->worker_survived, memory_order_acquire) == 0;
+         ++i) {
+        assert(waitpid(child, &status, WNOHANG) == 0);
+        sched_yield();
+    }
+    assert(atomic_load_explicit(&state->worker_survived, memory_order_acquire) == 1);
+    assert(waitpid(child, &status, WNOHANG) == 0);
+    assert(kill(child, SIGUSR1) == 0);
+    assert(waitpid(child, &status, 0) == child);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == WORKER_EXIT_STATUS);
+    assert(atomic_load_explicit(&state->ids_valid, memory_order_acquire) == 1);
+    assert(atomic_load_explicit(&state->signal_seen, memory_order_acquire) == 1);
+    assert(munmap(state, sizeof(*state)) == 0);
+    puts("TASK_PHASE5_LINUX leader_exit_keeps_process_identity PASS");
+}
+
 struct exec_state {
     const char *self;
 };
@@ -144,6 +237,7 @@ int main(int argc, char **argv)
                               "leader_exit_then_exit_group");
     test_leader_sys_exit_case(leader_exit_worker_raw, WORKER_EXIT_STATUS,
                               "leader_exit_then_worker_exit");
+    test_leader_exit_keeps_process_identity();
     test_nonleader_exec(argv[0]);
     puts("TASK_PHASE5_LINUX ALL PASS");
     return 0;

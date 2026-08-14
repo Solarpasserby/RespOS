@@ -6,7 +6,10 @@ extern crate user_lib;
 
 use core::ptr::null_mut;
 use core::sync::atomic::{AtomicU32, Ordering};
-use user_lib::{exec, exit_group, fork, mmap_raw, time_get, wait4_raw, yield_};
+use user_lib::{
+    SIGUSR1, SignalAction, exec, exit_group, fork, getpid, gettid, kill, mmap_raw, sigaction,
+    time_get, wait4_raw, yield_,
+};
 
 const PAGE_SIZE: usize = 4096;
 const PROT_READ_WRITE: usize = 0x1 | 0x2;
@@ -25,10 +28,25 @@ struct LeaderExitState {
     worker_survived: AtomicU32,
 }
 
+#[repr(C)]
+struct LeaderIdentityState {
+    worker_ready: AtomicU32,
+    leader_may_exit: AtomicU32,
+    worker_survived: AtomicU32,
+    signal_seen: AtomicU32,
+    ids_valid: AtomicU32,
+    process_pid: AtomicU32,
+}
+
 #[repr(align(16))]
 struct ThreadStack([u8; THREAD_STACK_SIZE]);
 
 static mut THREAD_STACK: ThreadStack = ThreadStack([0; THREAD_STACK_SIZE]);
+static IDENTITY_SIGNAL_SEEN: AtomicU32 = AtomicU32::new(0);
+
+fn identity_signal_handler() {
+    IDENTITY_SIGNAL_SEEN.store(1, Ordering::Release);
+}
 
 #[cfg(target_arch = "riscv64")]
 core::arch::global_asm!(
@@ -196,6 +214,125 @@ fn test_leader_sys_exit_case(
     true
 }
 
+extern "C" fn leader_identity_worker(arg: usize) -> i32 {
+    let state = unsafe { &*(arg as *const LeaderIdentityState) };
+    state.worker_ready.store(1, Ordering::Release);
+    while state.leader_may_exit.load(Ordering::Acquire) == 0 {
+        let _ = yield_();
+    }
+
+    for _ in 0..1000 {
+        let _ = yield_();
+    }
+    let process_pid = state.process_pid.load(Ordering::Acquire) as isize;
+    state.ids_valid.store(
+        u32::from(getpid() == process_pid && getpid() != gettid()),
+        Ordering::Release,
+    );
+    state.worker_survived.store(1, Ordering::Release);
+    while IDENTITY_SIGNAL_SEEN.load(Ordering::Acquire) == 0 {
+        let _ = yield_();
+    }
+    state.signal_seen.store(1, Ordering::Release);
+    WORKER_EXIT_STATUS
+}
+
+fn test_leader_exit_keeps_process_identity() -> bool {
+    const WNOHANG: usize = 1;
+    let mapping = mmap_raw(0, PAGE_SIZE, PROT_READ_WRITE, MAP_SHARED_ANONYMOUS, -1, 0);
+    if mapping <= 0 {
+        println!("TASK_PHASE5 leader_identity mmap failed: {}", mapping);
+        return false;
+    }
+    let state = unsafe { &*(mapping as *const LeaderIdentityState) };
+    state.worker_ready.store(0, Ordering::Relaxed);
+    state.leader_may_exit.store(0, Ordering::Relaxed);
+    state.worker_survived.store(0, Ordering::Relaxed);
+    state.signal_seen.store(0, Ordering::Relaxed);
+    state.ids_valid.store(0, Ordering::Relaxed);
+    state.process_pid.store(0, Ordering::Relaxed);
+    IDENTITY_SIGNAL_SEEN.store(0, Ordering::Relaxed);
+
+    let child = fork();
+    if child < 0 {
+        println!("TASK_PHASE5 leader_identity fork failed: {}", child);
+        return false;
+    }
+    if child == 0 {
+        let action = SignalAction {
+            handler: identity_signal_handler as usize,
+            ..SignalAction::default()
+        };
+        if sigaction(SIGUSR1, Some(&action), None) != 0 {
+            let _ = exit_group(124);
+        }
+        state.process_pid.store(getpid() as u32, Ordering::Release);
+        if clone_thread(leader_identity_worker, mapping as usize) <= 0 {
+            let _ = exit_group(125);
+        }
+        while state.worker_ready.load(Ordering::Acquire) == 0 {
+            let _ = yield_();
+        }
+        state.leader_may_exit.store(1, Ordering::Release);
+        user_lib::exit(LEADER_EXIT_STATUS);
+        loop {
+            core::hint::spin_loop();
+        }
+    }
+
+    let mut status = 0;
+    for _ in 0..100_000 {
+        if state.worker_survived.load(Ordering::Acquire) != 0 {
+            break;
+        }
+        let result = wait4_raw(child, &mut status, WNOHANG, null_mut());
+        if result == child {
+            println!(
+                "TASK_PHASE5_EXPECTED_FAIL leader_exit_keeps_process_identity early_status={} survived=0",
+                status
+            );
+            return false;
+        }
+        if result != 0 && result != -4 {
+            println!(
+                "TASK_PHASE5 leader_identity WNOHANG failed: result={} status={}",
+                result, status
+            );
+            return false;
+        }
+        let _ = yield_();
+    }
+    if state.worker_survived.load(Ordering::Acquire) == 0 {
+        println!("TASK_PHASE5_EXPECTED_FAIL leader_exit_keeps_process_identity worker_timeout");
+        return false;
+    }
+    let nohang = wait4_raw(child, &mut status, WNOHANG, null_mut());
+    let signal_result = kill(child as usize, SIGUSR1);
+    let final_status = if nohang == 0 && signal_result == 0 {
+        wait_for_process(child)
+    } else {
+        None
+    };
+    let ok = nohang == 0
+        && signal_result == 0
+        && final_status == Some(WORKER_EXIT_STATUS << 8)
+        && state.ids_valid.load(Ordering::Acquire) == 1
+        && state.signal_seen.load(Ordering::Acquire) == 1;
+    if !ok {
+        println!(
+            "TASK_PHASE5_EXPECTED_FAIL leader_exit_keeps_process_identity nohang={} kill={} final={:?} ids={} signal={}",
+            nohang,
+            signal_result,
+            final_status,
+            state.ids_valid.load(Ordering::Acquire),
+            state.signal_seen.load(Ordering::Acquire)
+        );
+        return false;
+    }
+    println!("TASK_PHASE5 leader_exit_keeps_process_identity PASS");
+    true
+}
+
 extern "C" fn nonleader_exec_worker(_arg: usize) -> i32 {
     let argv = ["task_phase5_exec_target\0".as_ptr(), core::ptr::null()];
     let result = exec("task_phase5_exec_target\0", &argv);
@@ -248,8 +385,9 @@ fn main() -> i32 {
         WORKER_EXIT_STATUS,
         "leader_exit_then_worker_exit",
     );
+    let leader_identity_ok = test_leader_exit_keeps_process_identity();
     let nonleader_exec_ok = test_nonleader_exec();
-    if leader_exit_group_ok && leader_exit_worker_ok && nonleader_exec_ok {
+    if leader_exit_group_ok && leader_exit_worker_ok && leader_identity_ok && nonleader_exec_ok {
         println!("TASK_PHASE5 ALL PASS");
         0
     } else {
