@@ -248,7 +248,8 @@ iozone/wait 停滞。平台不可用只推迟正式镜像验收，不改变本�
 POSIX 覆盖作为 Phase 线的独立任务持续维护，不以 Linux syscall 编号数量作为完成标准。先建立接口
 覆盖矩阵，逐项记录规范选项、libc 实现路径、内核入口、当前语义状态、Linux 对照 probe、RespOS
 结果和双架构验证日期。Phase 5 已包含的 socket、task/signal 和 mmap 项直接引用本节状态，不重复
-设计或重复修复。
+设计或重复修复。具体的任务拆分、唯一推进顺序和单项退出门槛见
+[posix-semantics-execution-plan.md](./posix-semantics-execution-plan.md)。
 
 当前任务包按以下优先级推进：
 

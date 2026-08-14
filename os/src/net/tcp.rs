@@ -25,12 +25,12 @@ use spin::Mutex;
 
 use crate::{
     net::addr::{LOOP_BACK_IP, UNSPECIFIED_ENDPOINT, from_sockaddr_to_ipendpoint, is_unspecified},
-    syscall::{Errno, SysResult, finish_task_timeout, register_task_timeout},
+    syscall::{Errno, SysResult, finish_task_timeout, register_task_timeout_us},
     task::{
         current_task, prepare_current_task_blocked, remove_task, switch_to_next_task,
         yield_current_task,
     },
-    timer::get_timeout_ms,
+    timer::get_timeout_us,
 };
 
 use super::{
@@ -230,11 +230,16 @@ impl TcpSocket {
     }
 
     /// 阻塞循环：poll → 尝试操作 → 成功返回 / EAGAIN 则等待网络事件后重试。
-    fn block_on<F, T>(&self, mut f: F) -> Result<T, Errno>
+    fn block_on<F, T>(
+        &self,
+        per_call_nonblocking: bool,
+        deadline_us: Option<usize>,
+        mut f: F,
+    ) -> Result<T, Errno>
     where
         F: FnMut() -> Result<T, Errno>,
     {
-        if self.is_nonblocking() {
+        if self.is_nonblocking() || per_call_nonblocking {
             f()
         } else {
             let task = current_task().ok_or(Errno::ESRCH)?;
@@ -268,13 +273,20 @@ impl TcpSocket {
                                 }
                                 Err(_) => {}
                             }
+                            if deadline_us.is_some_and(|deadline| get_timeout_us() >= deadline) {
+                                unregister_tcp_waiter(task.tid());
+                                break Err(Errno::EAGAIN);
+                            }
                             // Network progress wakes this task immediately.
                             // Keep the existing short deadline as a fallback
                             // for an idle listener: timer processing in the
                             // current scheduler still relies on a periodic
                             // runnable task while every userspace task sleeps.
-                            let deadline = get_timeout_ms().saturating_add(1);
-                            register_task_timeout(task.tid(), deadline);
+                            let fallback_deadline = get_timeout_us().saturating_add(1000);
+                            let wait_deadline = deadline_us
+                                .map(|deadline| deadline.min(fallback_deadline))
+                                .unwrap_or(fallback_deadline);
+                            register_task_timeout_us(task.tid(), wait_deadline);
                             if prepare_current_task_blocked() {
                                 if task.is_ready()
                                     || task.is_interrupted()
@@ -390,7 +402,11 @@ impl TcpSocket {
     /// 1. CAS CLOSED → CONNECTING
     /// 2. 通过 smoltcp 发送 SYN
     /// 3. `block_on` 等待 smoltcp 状态变为 Established
-    pub fn connect(&self, remote_addr: SocketAddr) -> Result<(), Errno> {
+    pub fn connect(
+        &self,
+        remote_addr: SocketAddr,
+        deadline_us: Option<usize>,
+    ) -> Result<(), Errno> {
         self.update_state(STATE_CLOSED, STATE_CONNECTING, || {
             let handle = unsafe { self.handle.get().read() }
                 .unwrap_or_else(|| socket_set().lock().add(SocketSetWrapper::new_tcp_socket()));
@@ -438,7 +454,7 @@ impl TcpSocket {
         crate::perf::tcp_connect_yield(1);
         yield_current_task();
 
-        self.block_on(|| {
+        self.block_on(false, deadline_us, || {
             let handle = unsafe { self.handle.get().read().unwrap() };
             let PollState { writeable, .. } = self.poll_connect(handle);
             if !writeable {
@@ -447,6 +463,13 @@ impl TcpSocket {
                 Ok(())
             } else {
                 Err(Errno::ECONNREFUSED)
+            }
+        })
+        .map_err(|err| {
+            if err == Errno::EAGAIN && deadline_us.is_some() {
+                Errno::EINPROGRESS
+            } else {
+                err
             }
         })
     }
@@ -513,23 +536,25 @@ impl TcpSocket {
     }
 
     /// 接受一个已完成的入站连接，返回新的已连接 `TcpSocket`。
-    pub fn accept(&self) -> Result<TcpSocket, Errno> {
+    pub fn accept(&self, deadline_us: Option<usize>) -> Result<TcpSocket, Errno> {
         if !self.is_listening() {
             return Err(Errno::EINVAL);
         }
         let local_port = unsafe { self.local_addr.get().read().port };
 
-        self.block_on(|| match LISTEN_TABLE.lock().accept(local_port) {
-            Ok((handle, (local_endpoint, remote_endpoint))) => Ok(TcpSocket::new_connected(
-                handle,
-                local_endpoint,
-                remote_endpoint,
-            )),
-            Err(e) => {
-                if e == Errno::ECONNRESET || e == Errno::ECONNREFUSED {
-                    self.close_all();
+        self.block_on(false, deadline_us, || {
+            match LISTEN_TABLE.lock().accept(local_port) {
+                Ok((handle, (local_endpoint, remote_endpoint))) => Ok(TcpSocket::new_connected(
+                    handle,
+                    local_endpoint,
+                    remote_endpoint,
+                )),
+                Err(e) => {
+                    if e == Errno::ECONNRESET || e == Errno::ECONNREFUSED {
+                        self.close_all();
+                    }
+                    Err(e)
                 }
-                Err(e)
             }
         })
     }
@@ -628,7 +653,12 @@ impl TcpSocket {
     }
 
     /// 从 socket 接收数据。
-    pub fn recv(&self, buf: &mut [u8]) -> Result<usize, Errno> {
+    pub fn recv(
+        &self,
+        buf: &mut [u8],
+        per_call_nonblocking: bool,
+        deadline_us: Option<usize>,
+    ) -> Result<usize, Errno> {
         if self.is_connecting() {
             return Err(Errno::EAGAIN);
         } else if !self.is_connected() {
@@ -637,7 +667,7 @@ impl TcpSocket {
             return Ok(0);
         }
         let handle = unsafe { self.handle.get().read().unwrap() };
-        self.block_on(|| {
+        self.block_on(per_call_nonblocking, deadline_us, || {
             socket_set()
                 .lock()
                 .with_socket_mut::<_, tcp::Socket, _>(handle, |socket| {
@@ -659,7 +689,12 @@ impl TcpSocket {
     }
 
     /// 向 socket 发送数据。
-    pub fn send(&self, buf: &[u8]) -> Result<usize, Errno> {
+    pub fn send(
+        &self,
+        buf: &[u8],
+        per_call_nonblocking: bool,
+        deadline_us: Option<usize>,
+    ) -> Result<usize, Errno> {
         if self.is_connecting() {
             return Err(Errno::EAGAIN);
         } else if !self.is_connected() {
@@ -668,7 +703,7 @@ impl TcpSocket {
             return Err(Errno::EPIPE);
         }
         let handle = unsafe { self.handle.get().read().unwrap() };
-        self.block_on(|| {
+        self.block_on(per_call_nonblocking, deadline_us, || {
             socket_set()
                 .lock()
                 .with_socket_mut::<_, tcp::Socket, _>(handle, |socket| {

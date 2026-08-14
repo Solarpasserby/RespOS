@@ -9,7 +9,8 @@
 
 1. [current-status.md](./current-status.md)：当前提交、已验证结果和正在进行的阻断；
 2. 按分工选择路线：[buildstorm-smp-plan.md](./buildstorm-smp-plan.md) 对应架构线，
-   [linux-posix-refactor-plan.md](./linux-posix-refactor-plan.md) 对应 Phase 线；
+   [linux-posix-refactor-plan.md](./linux-posix-refactor-plan.md) 对应 Phase 线；POSIX 专项的具体执行顺序见
+   [posix-semantics-execution-plan.md](./posix-semantics-execution-plan.md)；
 3. [workflows.md](./workflows.md)：构建、镜像恢复和 QEMU 运行命令；
 4. [architecture.md](./architecture.md)：修改内核前需要遵守的调用链和不变量；
 5. [pitfalls.md](./pitfalls.md)：已知失败模式和排查顺序；

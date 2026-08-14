@@ -16,10 +16,11 @@ use crate::{
     fs::vfs::InodeType,
     fs::{FileOp, KStat, OpenFlags, POLL_HUP, POLL_READ, POLL_WRITE, PollEvents, PollWaiters},
     mutex::SpinLock,
-    syscall::{Errno, SysResult},
+    syscall::{Errno, SysResult, finish_task_timeout, register_task_timeout_us},
     task::{
         current_task, prepare_current_task_blocked, remove_task, switch_to_next_task, wakeup_task,
     },
+    timer::get_timeout_us,
 };
 
 use super::{
@@ -182,7 +183,7 @@ impl UnixSocket {
         self.nonblock.load(Ordering::Acquire)
     }
 
-    fn finish_interruptible_wait(&self) -> SysResult {
+    fn finish_interruptible_wait(&self, deadline_us: Option<usize>) -> SysResult<bool> {
         let task = current_task().ok_or(Errno::ESRCH)?;
         if task.is_ready() {
             // The producer won the race after we published Blocked but before
@@ -192,6 +193,11 @@ impl UnixSocket {
         } else {
             switch_to_next_task();
         }
+        let timed_out = if deadline_us.is_some() {
+            finish_task_timeout(task.tid())
+        } else {
+            false
+        };
         task.check_real_timer();
         if task.check_signal_interrupt() || task.is_interrupted() {
             task.clear_interrupted();
@@ -199,10 +205,15 @@ impl UnixSocket {
             return Err(Errno::EINTR);
         }
         task.set_interruptible(false);
-        Ok(())
+        Ok(timed_out || deadline_us.is_some_and(|deadline| get_timeout_us() >= deadline))
     }
 
-    fn read(&self, buf: &mut [u8]) -> SysResult<usize> {
+    fn read(
+        &self,
+        buf: &mut [u8],
+        per_call_nonblocking: bool,
+        deadline_us: Option<usize>,
+    ) -> SysResult<usize> {
         if buf.is_empty() {
             return Ok(0);
         }
@@ -244,7 +255,10 @@ impl UnixSocket {
             {
                 return Ok(0);
             }
-            if self.is_nonblocking() {
+            if self.is_nonblocking() || per_call_nonblocking {
+                return Err(Errno::EAGAIN);
+            }
+            if deadline_us.is_some_and(|deadline| get_timeout_us() >= deadline) {
                 return Err(Errno::EAGAIN);
             }
             task.set_interruptible(true);
@@ -255,8 +269,14 @@ impl UnixSocket {
                 return Err(Errno::EINTR);
             }
             rx.read_waiters.push_back(task.tid());
+            if let Some(deadline) = deadline_us {
+                register_task_timeout_us(task.tid(), deadline);
+            }
             let should_block = prepare_current_task_blocked();
             if !should_block {
+                if deadline_us.is_some() {
+                    finish_task_timeout(task.tid());
+                }
                 task.set_interruptible(false);
                 rx.read_waiters.retain(|tid| *tid != task.tid());
                 return Err(Errno::ESRCH);
@@ -266,13 +286,20 @@ impl UnixSocket {
             if interrupted {
                 wakeup_task(task.tid());
             }
-            let result = self.finish_interruptible_wait();
+            let result = self.finish_interruptible_wait(deadline_us);
             self.rx.lock().read_waiters.retain(|tid| *tid != task.tid());
-            result?;
+            if result? {
+                return Err(Errno::EAGAIN);
+            }
         }
     }
 
-    fn write(&self, buf: &[u8]) -> SysResult<usize> {
+    fn write(
+        &self,
+        buf: &[u8],
+        per_call_nonblocking: bool,
+        deadline_us: Option<usize>,
+    ) -> SysResult<usize> {
         if buf.is_empty() {
             return Ok(0);
         }
@@ -305,7 +332,10 @@ impl UnixSocket {
                 }
                 return Ok(write_len);
             }
-            if self.is_nonblocking() {
+            if self.is_nonblocking() || per_call_nonblocking {
+                return Err(Errno::EAGAIN);
+            }
+            if deadline_us.is_some_and(|deadline| get_timeout_us() >= deadline) {
                 return Err(Errno::EAGAIN);
             }
             task.set_interruptible(true);
@@ -316,8 +346,14 @@ impl UnixSocket {
                 return Err(Errno::EINTR);
             }
             rx.write_waiters.push_back(task.tid());
+            if let Some(deadline) = deadline_us {
+                register_task_timeout_us(task.tid(), deadline);
+            }
             let should_block = prepare_current_task_blocked();
             if !should_block {
+                if deadline_us.is_some() {
+                    finish_task_timeout(task.tid());
+                }
                 task.set_interruptible(false);
                 rx.write_waiters.retain(|tid| *tid != task.tid());
                 return Err(Errno::ESRCH);
@@ -327,12 +363,14 @@ impl UnixSocket {
             if interrupted {
                 wakeup_task(task.tid());
             }
-            let result = self.finish_interruptible_wait();
+            let result = self.finish_interruptible_wait(deadline_us);
             peer_rx
                 .lock()
                 .write_waiters
                 .retain(|tid| *tid != task.tid());
-            result?;
+            if result? {
+                return Err(Errno::EAGAIN);
+            }
         }
     }
 
@@ -421,7 +459,7 @@ impl UnixSocket {
         Ok(())
     }
 
-    fn accept(&self) -> SysResult<UnixSocket> {
+    fn accept(&self, deadline_us: Option<usize>) -> SysResult<UnixSocket> {
         let listener = self.listener.lock().clone().ok_or(Errno::EINVAL)?;
         let task = current_task().ok_or(Errno::ESRCH)?;
         loop {
@@ -432,6 +470,9 @@ impl UnixSocket {
             if self.is_nonblocking() {
                 return Err(Errno::EAGAIN);
             }
+            if deadline_us.is_some_and(|deadline| get_timeout_us() >= deadline) {
+                return Err(Errno::EAGAIN);
+            }
             task.set_interruptible(true);
             task.check_real_timer();
             if task.check_signal_interrupt() || task.is_interrupted() {
@@ -440,8 +481,14 @@ impl UnixSocket {
                 return Err(Errno::EINTR);
             }
             pending.accept_waiters.push_back(task.tid());
+            if let Some(deadline) = deadline_us {
+                register_task_timeout_us(task.tid(), deadline);
+            }
             let should_block = prepare_current_task_blocked();
             if !should_block {
+                if deadline_us.is_some() {
+                    finish_task_timeout(task.tid());
+                }
                 task.set_interruptible(false);
                 pending.accept_waiters.retain(|tid| *tid != task.tid());
                 return Err(Errno::ESRCH);
@@ -451,13 +498,15 @@ impl UnixSocket {
             if interrupted {
                 wakeup_task(task.tid());
             }
-            let result = self.finish_interruptible_wait();
+            let result = self.finish_interruptible_wait(deadline_us);
             listener
                 .pending
                 .lock()
                 .accept_waiters
                 .retain(|tid| *tid != task.tid());
-            result?;
+            if result? {
+                return Err(Errno::EAGAIN);
+            }
         }
     }
 
@@ -593,10 +642,10 @@ pub struct Socket {
     recv_buf_size: AtomicU64,
     /// SO_RCVTIMEO 值。
     #[allow(dead_code)]
-    recvtimeout: Mutex<Option<crate::timer::TimeSpec>>,
+    recvtimeout_us: Mutex<Option<usize>>,
     /// SO_SNDTIMEO 值。
     #[allow(dead_code)]
-    sendtimeout: Mutex<Option<crate::timer::TimeSpec>>,
+    sendtimeout_us: Mutex<Option<usize>>,
 }
 
 // SAFETY: 单核协作式调度，方法调用在系统调用路径上串行化。
@@ -633,8 +682,8 @@ impl Socket {
             cloexec: AtomicBool::new(false),
             send_buf_size: AtomicU64::new(64 * 1024),
             recv_buf_size: AtomicU64::new(64 * 1024),
-            recvtimeout: Mutex::new(None),
-            sendtimeout: Mutex::new(None),
+            recvtimeout_us: Mutex::new(None),
+            sendtimeout_us: Mutex::new(None),
         })
     }
 
@@ -654,8 +703,8 @@ impl Socket {
             cloexec: AtomicBool::new(false),
             send_buf_size: AtomicU64::new(64 * 1024),
             recv_buf_size: AtomicU64::new(64 * 1024),
-            recvtimeout: Mutex::new(None),
-            sendtimeout: Mutex::new(None),
+            recvtimeout_us: Mutex::new(None),
+            sendtimeout_us: Mutex::new(None),
         };
         Ok((make(left), make(right)))
     }
@@ -706,20 +755,38 @@ impl Socket {
         self.recv_buf_size.load(Ordering::Acquire)
     }
 
-    pub fn set_recv_timeout(&self, timeout: crate::timer::TimeSpec) {
-        *self.recvtimeout.lock() = Some(timeout);
+    pub fn set_recv_timeout_us(&self, timeout_us: Option<usize>) {
+        *self.recvtimeout_us.lock() = timeout_us;
     }
 
-    pub fn recv_timeout(&self) -> Option<crate::timer::TimeSpec> {
-        *self.recvtimeout.lock()
+    pub fn recv_timeout_us(&self) -> Option<usize> {
+        *self.recvtimeout_us.lock()
     }
 
-    pub fn set_send_timeout(&self, timeout: crate::timer::TimeSpec) {
-        *self.sendtimeout.lock() = Some(timeout);
+    pub fn set_send_timeout_us(&self, timeout_us: Option<usize>) {
+        *self.sendtimeout_us.lock() = timeout_us;
     }
 
-    pub fn send_timeout(&self) -> Option<crate::timer::TimeSpec> {
-        *self.sendtimeout.lock()
+    pub fn send_timeout_us(&self) -> Option<usize> {
+        *self.sendtimeout_us.lock()
+    }
+
+    fn recv_deadline_us(&self, per_call_nonblocking: bool) -> Option<usize> {
+        if self.is_nonblocking() || per_call_nonblocking {
+            None
+        } else {
+            self.recv_timeout_us()
+                .map(|timeout| get_timeout_us().saturating_add(timeout))
+        }
+    }
+
+    fn send_deadline_us(&self, per_call_nonblocking: bool) -> Option<usize> {
+        if self.is_nonblocking() || per_call_nonblocking {
+            None
+        } else {
+            self.send_timeout_us()
+                .map(|timeout| get_timeout_us().saturating_add(timeout))
+        }
     }
 
     pub fn set_tcp_nodelay(&self, enabled: bool) -> SysResult {
@@ -827,9 +894,10 @@ impl Socket {
         ) {
             return Err(Errno::EOPNOTSUPP);
         }
+        let deadline_us = self.recv_deadline_us(false);
         match &self.inner {
             SocketInner::Tcp(tcp) => {
-                let new_tcp = tcp.accept()?;
+                let new_tcp = tcp.accept(deadline_us)?;
                 let remote_addr = match new_tcp.remote_addr() {
                     Ok(a) => a,
                     Err(_) => UNSPECIFIED_ENDPOINT,
@@ -843,8 +911,8 @@ impl Socket {
                         cloexec: AtomicBool::new(false),
                         send_buf_size: AtomicU64::new(64 * 1024),
                         recv_buf_size: AtomicU64::new(64 * 1024),
-                        recvtimeout: Mutex::new(None),
-                        sendtimeout: Mutex::new(None),
+                        recvtimeout_us: Mutex::new(None),
+                        sendtimeout_us: Mutex::new(None),
                     },
                     from_ipendpoint_to_socketaddr(remote_addr),
                 ))
@@ -853,13 +921,13 @@ impl Socket {
                 Socket {
                     domain: self.domain.clone(),
                     kind: self.kind,
-                    inner: SocketInner::Unix(unix.accept()?),
+                    inner: SocketInner::Unix(unix.accept(deadline_us)?),
                     nonblock: AtomicBool::new(false),
                     cloexec: AtomicBool::new(false),
                     send_buf_size: AtomicU64::new(64 * 1024),
                     recv_buf_size: AtomicU64::new(64 * 1024),
-                    recvtimeout: Mutex::new(None),
-                    sendtimeout: Mutex::new(None),
+                    recvtimeout_us: Mutex::new(None),
+                    sendtimeout_us: Mutex::new(None),
                 },
                 from_ipendpoint_to_socketaddr(UNSPECIFIED_ENDPOINT),
             )),
@@ -869,8 +937,9 @@ impl Socket {
 
     /// 连接到远程地址。
     pub fn connect(&self, addr: SocketAddr) -> Result<(), Errno> {
+        let deadline_us = self.send_deadline_us(false);
         match &self.inner {
-            SocketInner::Tcp(tcp) => tcp.connect(addr),
+            SocketInner::Tcp(tcp) => tcp.connect(addr, deadline_us),
             SocketInner::Udp(udp) => udp.connect(addr),
             SocketInner::Unix(_) => Err(Errno::ENOENT),
         }
@@ -901,25 +970,46 @@ impl Socket {
     }
 
     /// 向指定地址发送数据（sendto）。
-    pub fn send_to(&self, buf: &[u8], addr: SocketAddr) -> Result<usize, Errno> {
+    pub fn send_to(
+        &self,
+        buf: &[u8],
+        addr: SocketAddr,
+        per_call_nonblocking: bool,
+    ) -> Result<usize, Errno> {
+        let deadline_us = self.send_deadline_us(per_call_nonblocking);
         match &self.inner {
-            SocketInner::Udp(udp) => udp.send_to(buf, addr),
-            SocketInner::Tcp(tcp) => tcp.send(buf),
-            SocketInner::Unix(unix) => unix.write(buf),
+            SocketInner::Udp(udp) => udp.send_to(buf, addr, per_call_nonblocking, deadline_us),
+            SocketInner::Tcp(tcp) => tcp.send(buf, per_call_nonblocking, deadline_us),
+            SocketInner::Unix(unix) => unix.write(buf, per_call_nonblocking, deadline_us),
+        }
+    }
+
+    /// 向已连接的对端发送数据。
+    pub fn send(&self, buf: &[u8], per_call_nonblocking: bool) -> Result<usize, Errno> {
+        let deadline_us = self.send_deadline_us(per_call_nonblocking);
+        match &self.inner {
+            SocketInner::Udp(udp) => udp.send(buf, per_call_nonblocking, deadline_us),
+            SocketInner::Tcp(tcp) => tcp.send(buf, per_call_nonblocking, deadline_us),
+            SocketInner::Unix(unix) => unix.write(buf, per_call_nonblocking, deadline_us),
         }
     }
 
     /// 接收数据并返回发送方地址（recvfrom）。
-    pub fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr), Errno> {
+    pub fn recv_from(
+        &self,
+        buf: &mut [u8],
+        per_call_nonblocking: bool,
+    ) -> Result<(usize, SocketAddr), Errno> {
+        let deadline_us = self.recv_deadline_us(per_call_nonblocking);
         match &self.inner {
-            SocketInner::Udp(udp) => udp.recv_from(buf),
+            SocketInner::Udp(udp) => udp.recv_from(buf, per_call_nonblocking, deadline_us),
             SocketInner::Tcp(tcp) => {
-                let len = tcp.recv(buf)?;
+                let len = tcp.recv(buf, per_call_nonblocking, deadline_us)?;
                 let remote_addr = tcp.remote_addr().unwrap_or(UNSPECIFIED_ENDPOINT);
                 Ok((len, from_ipendpoint_to_socketaddr(remote_addr)))
             }
             SocketInner::Unix(unix) => {
-                let len = unix.read(buf)?;
+                let len = unix.read(buf, per_call_nonblocking, deadline_us)?;
                 Ok((len, from_ipendpoint_to_socketaddr(UNSPECIFIED_ENDPOINT)))
             }
         }
@@ -975,21 +1065,23 @@ impl FileOp for Socket {
     }
 
     fn read<'a>(&'a self, buf: &'a mut [u8]) -> SysResult<usize> {
+        let deadline_us = self.recv_deadline_us(false);
         match &self.inner {
-            SocketInner::Tcp(tcp) => tcp.recv(buf),
+            SocketInner::Tcp(tcp) => tcp.recv(buf, false, deadline_us),
             SocketInner::Udp(udp) => {
-                let (len, _addr) = udp.recv_from(buf)?;
+                let (len, _addr) = udp.recv_from(buf, false, deadline_us)?;
                 Ok(len)
             }
-            SocketInner::Unix(unix) => unix.read(buf),
+            SocketInner::Unix(unix) => unix.read(buf, false, deadline_us),
         }
     }
 
     fn write<'a>(&'a self, buf: &'a [u8]) -> SysResult<usize> {
+        let deadline_us = self.send_deadline_us(false);
         match &self.inner {
-            SocketInner::Tcp(tcp) => tcp.send(buf),
-            SocketInner::Udp(udp) => udp.send(buf),
-            SocketInner::Unix(unix) => unix.write(buf),
+            SocketInner::Tcp(tcp) => tcp.send(buf, false, deadline_us),
+            SocketInner::Udp(udp) => udp.send(buf, false, deadline_us),
+            SocketInner::Unix(unix) => unix.write(buf, false, deadline_us),
         }
     }
 

@@ -22,6 +22,7 @@ use crate::{
     },
     syscall::{Errno, SysResult},
     task::{current_task, yield_current_task},
+    timer::get_timeout_us,
 };
 
 use super::tcp::PollState;
@@ -143,25 +144,43 @@ impl UdpSocket {
     }
 
     /// 向指定地址发送数据报。
-    pub fn send_to(&self, buf: &[u8], remote_addr: SocketAddr) -> Result<usize, Errno> {
-        self.send_impl(buf, from_sockaddr_to_ipendpoint(remote_addr))
+    pub fn send_to(
+        &self,
+        buf: &[u8],
+        remote_addr: SocketAddr,
+        per_call_nonblocking: bool,
+        deadline_us: Option<usize>,
+    ) -> Result<usize, Errno> {
+        self.send_impl(
+            buf,
+            from_sockaddr_to_ipendpoint(remote_addr),
+            per_call_nonblocking,
+            deadline_us,
+        )
     }
 
     /// 接收数据报，同时返回发送方地址。
-    pub fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr), Errno> {
+    pub fn recv_from(
+        &self,
+        buf: &mut [u8],
+        per_call_nonblocking: bool,
+        deadline_us: Option<usize>,
+    ) -> Result<(usize, SocketAddr), Errno> {
         let mut binding = vec![0; 1528];
         let kernel_buf = binding.as_mut_slice();
 
-        self.recv_impl(|socket| match socket.recv_slice(kernel_buf) {
-            Ok((len, meta)) => {
-                let copy_len = core::cmp::min(len, buf.len());
-                buf[..copy_len].copy_from_slice(&kernel_buf[..copy_len]);
-                Ok((copy_len, from_ipendpoint_to_socketaddr(meta.endpoint)))
+        self.recv_impl(per_call_nonblocking, deadline_us, |socket| {
+            match socket.recv_slice(kernel_buf) {
+                Ok((len, meta)) => {
+                    let copy_len = core::cmp::min(len, buf.len());
+                    buf[..copy_len].copy_from_slice(&kernel_buf[..copy_len]);
+                    Ok((copy_len, from_ipendpoint_to_socketaddr(meta.endpoint)))
+                }
+                Err(e) => match e {
+                    udp::RecvError::Exhausted => Err(Errno::EAGAIN),
+                    udp::RecvError::Truncated => Err(Errno::EAGAIN),
+                },
             }
-            Err(e) => match e {
-                udp::RecvError::Exhausted => Err(Errno::EAGAIN),
-                udp::RecvError::Truncated => Err(Errno::EAGAIN),
-            },
         })
     }
 
@@ -186,19 +205,29 @@ impl UdpSocket {
     }
 
     /// 向 connect 时设置的远程地址发送数据。
-    pub fn send(&self, buf: &[u8]) -> Result<usize, Errno> {
+    pub fn send(
+        &self,
+        buf: &[u8],
+        per_call_nonblocking: bool,
+        deadline_us: Option<usize>,
+    ) -> Result<usize, Errno> {
         let remote_endpoint = *self
             .remote_addr
             .read()
             .as_ref()
             .ok_or(Errno::EDESTADDRREQ)?;
-        self.send_impl(buf, remote_endpoint)
+        self.send_impl(buf, remote_endpoint, per_call_nonblocking, deadline_us)
     }
 
     /// 从 connect 时设置的远程地址接收数据。
-    pub fn recv(&self, buf: &mut [u8]) -> Result<usize, Errno> {
+    pub fn recv(
+        &self,
+        buf: &mut [u8],
+        per_call_nonblocking: bool,
+        deadline_us: Option<usize>,
+    ) -> Result<usize, Errno> {
         let remote_endpoint = *self.remote_addr.read().as_ref().ok_or(Errno::ENOTCONN)?;
-        self.recv_impl(|socket| {
+        self.recv_impl(per_call_nonblocking, deadline_us, |socket| {
             let (_, meta) = socket.peek_slice(&mut []).map_err(|e| match e {
                 udp::RecvError::Exhausted => Errno::EAGAIN,
                 udp::RecvError::Truncated => Errno::EAGAIN,
@@ -248,14 +277,19 @@ impl UdpSocket {
 // ——— 私有方法 ———
 impl UdpSocket {
     /// 接收实现：block_on 循环中尝试接收。
-    fn recv_impl<F, T>(&self, mut op: F) -> Result<T, Errno>
+    fn recv_impl<F, T>(
+        &self,
+        per_call_nonblocking: bool,
+        deadline_us: Option<usize>,
+        mut op: F,
+    ) -> Result<T, Errno>
     where
         F: FnMut(&mut udp::Socket) -> Result<T, Errno>,
     {
         if self.local_addr.read().is_none() {
             return Err(Errno::ENOTCONN);
         }
-        self.block_on(|| {
+        self.block_on(per_call_nonblocking, deadline_us, || {
             let handle = unsafe { self.handle.get().read().unwrap() };
             socket_set()
                 .lock()
@@ -272,14 +306,20 @@ impl UdpSocket {
     }
 
     /// 发送实现：block_on 循环中尝试发送。
-    fn send_impl(&self, buf: &[u8], remote_addr: IpEndpoint) -> Result<usize, Errno> {
+    fn send_impl(
+        &self,
+        buf: &[u8],
+        remote_addr: IpEndpoint,
+        per_call_nonblocking: bool,
+        deadline_us: Option<usize>,
+    ) -> Result<usize, Errno> {
         if self.local_addr.read().is_none() {
             self.bind(from_ipendpoint_to_socketaddr(IpEndpoint::new(
                 LOOP_BACK_IP,
                 get_ephemeral_port(),
             )))?;
         }
-        self.block_on(|| {
+        self.block_on(per_call_nonblocking, deadline_us, || {
             let handle = unsafe { self.handle.get().read().unwrap() };
             socket_set()
                 .lock()
@@ -300,11 +340,16 @@ impl UdpSocket {
     }
 
     /// 阻塞循环：poll → 操作 → EAGAIN 则 yield。
-    fn block_on<F, T>(&self, mut f: F) -> Result<T, Errno>
+    fn block_on<F, T>(
+        &self,
+        per_call_nonblocking: bool,
+        deadline_us: Option<usize>,
+        mut f: F,
+    ) -> Result<T, Errno>
     where
         F: FnMut() -> Result<T, Errno>,
     {
-        if self.is_nonblocking() {
+        if self.is_nonblocking() || per_call_nonblocking {
             f()
         } else {
             let task = current_task().ok_or(Errno::ESRCH)?;
@@ -321,6 +366,9 @@ impl UdpSocket {
                     Ok(res) => break Ok(res),
                     Err(e) => {
                         if e == Errno::EAGAIN {
+                            if deadline_us.is_some_and(|deadline| get_timeout_us() >= deadline) {
+                                break Err(Errno::EAGAIN);
+                            }
                             crate::perf::net_yield(1);
                             crate::perf::udp_wait_yield(1);
                             yield_current_task();

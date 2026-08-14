@@ -45,7 +45,9 @@ const TCP_MAXSEG: usize = 2;
 const TCP_INFO: usize = 11;
 const TCP_DEFAULT_MAXSEG: i32 = 1448;
 const MSG_OOB: usize = 0x1;
+const MSG_DONTWAIT: usize = 0x40;
 const MSG_ERRQUEUE: usize = 0x2000;
+const MSG_NOSIGNAL: usize = 0x4000;
 
 const IOV_MAX: usize = 1024;
 
@@ -75,6 +77,13 @@ struct MsgHdr {
 struct MMsgHdr {
     msg_hdr: MsgHdr,
     msg_len: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct SocketTimeval {
+    sec: isize,
+    usec: isize,
 }
 
 #[repr(C)]
@@ -565,23 +574,52 @@ fn read_u32(ptr: usize, len: usize) -> SysResult<u32> {
     Ok(value)
 }
 
-fn read_timespec(ptr: usize, len: usize) -> SysResult<crate::timer::TimeSpec> {
+fn read_socket_timeout_us(ptr: usize, len: usize) -> SysResult<Option<usize>> {
     if ptr == 0 {
         return Err(Errno::EFAULT);
     }
-    if len < core::mem::size_of::<crate::timer::TimeSpec>() {
+    if len < core::mem::size_of::<SocketTimeval>() {
         return Err(Errno::EINVAL);
     }
-    let mut value = crate::timer::TimeSpec::default();
+    let mut value = SocketTimeval::default();
     copy_from_user(
-        &mut value as *mut crate::timer::TimeSpec,
-        ptr as *const crate::timer::TimeSpec,
+        &mut value as *mut SocketTimeval,
+        ptr as *const SocketTimeval,
         1,
     )?;
-    if !value.is_valid_duration() {
+    if value.sec < 0 || value.usec < 0 || value.usec >= 1_000_000 {
         return Err(Errno::EINVAL);
     }
-    Ok(value)
+    let timeout_us = (value.sec as usize)
+        .checked_mul(1_000_000)
+        .and_then(|seconds| seconds.checked_add(value.usec as usize))
+        .ok_or(Errno::EINVAL)?;
+    Ok((timeout_us != 0).then_some(timeout_us))
+}
+
+fn socket_timeval(timeout_us: Option<usize>) -> SocketTimeval {
+    let timeout_us = timeout_us.unwrap_or(0);
+    SocketTimeval {
+        sec: (timeout_us / 1_000_000) as isize,
+        usec: (timeout_us % 1_000_000) as isize,
+    }
+}
+
+fn send_per_call_nonblocking(flags: usize) -> SysResult<bool> {
+    if flags & !(MSG_DONTWAIT | MSG_NOSIGNAL) != 0 {
+        return Err(Errno::EOPNOTSUPP);
+    }
+    Ok(flags & MSG_DONTWAIT != 0)
+}
+
+fn recv_per_call_nonblocking(flags: usize) -> SysResult<bool> {
+    if flags & MSG_OOB != 0 {
+        return Err(Errno::EINVAL);
+    }
+    if flags & !MSG_DONTWAIT != 0 {
+        return Err(Errno::EOPNOTSUPP);
+    }
+    Ok(flags & MSG_DONTWAIT != 0)
 }
 
 fn write_sockopt<T: Copy>(optval: usize, optlen: usize, value: &T) -> SysResult {
@@ -828,18 +866,19 @@ pub fn sys_sendto(
     fd: usize,
     buf: *const u8,
     len: usize,
-    _flags: usize,
+    flags: usize,
     dest_addr: usize,
     addrlen: usize,
 ) -> SysResult<usize> {
+    let per_call_nonblocking = send_per_call_nonblocking(flags)?;
     let mut kernel_buf: Vec<u8> = vec![0; len];
     copy_from_user(kernel_buf.as_mut_ptr(), buf, len)?;
     with_socket(fd, |sock| {
         if dest_addr != 0 {
             let remote = read_sockaddr_for_domain(&sock.domain, dest_addr, addrlen)?;
-            sock.send_to(&kernel_buf, remote)
+            sock.send_to(&kernel_buf, remote, per_call_nonblocking)
         } else {
-            sock.write(&kernel_buf)
+            sock.send(&kernel_buf, per_call_nonblocking)
         }
     })
 }
@@ -848,13 +887,14 @@ pub fn sys_recvfrom(
     fd: usize,
     buf: *mut u8,
     len: usize,
-    _flags: usize,
+    flags: usize,
     src_addr: usize,
     addrlen: usize,
 ) -> SysResult<usize> {
+    let per_call_nonblocking = recv_per_call_nonblocking(flags)?;
     let mut kernel_buf: Vec<u8> = vec![0; len];
     let (n, from_addr, domain) = with_socket(fd, |sock| {
-        let (n, from_addr) = sock.recv_from(&mut kernel_buf)?;
+        let (n, from_addr) = sock.recv_from(&mut kernel_buf, per_call_nonblocking)?;
         Ok((n, from_addr, sock.domain.clone()))
     })?;
     copy_to_user(buf, kernel_buf.as_ptr(), n.min(len))?;
@@ -868,18 +908,16 @@ pub fn sys_sendmsg(fd: usize, msg: usize, flags: usize) -> SysResult<usize> {
 }
 
 fn sys_sendmsg_from_hdr(fd: usize, hdr: &MsgHdr, flags: usize) -> SysResult<usize> {
-    if flags & (MSG_OOB | MSG_ERRQUEUE) != 0 {
-        return Err(Errno::EOPNOTSUPP);
-    }
+    let per_call_nonblocking = send_per_call_nonblocking(flags)?;
     let iovs = read_iovecs(hdr.msg_iov, hdr.msg_iovlen)?;
     let data = collect_iov_bytes(&iovs)?;
     with_socket(fd, |sock| {
         if hdr.msg_name != 0 {
             let remote =
                 read_sockaddr_for_domain(&sock.domain, hdr.msg_name, hdr.msg_namelen as usize)?;
-            sock.send_to(&data, remote)
+            sock.send_to(&data, remote, per_call_nonblocking)
         } else {
-            sock.write(&data)
+            sock.send(&data, per_call_nonblocking)
         }
     })
 }
@@ -895,18 +933,16 @@ fn sys_recvmsg_into_hdr(fd: usize, hdr: &mut MsgHdr, flags: usize) -> SysResult<
     if hdr.msg_namelen as usize > 4096 {
         return Err(Errno::EINVAL);
     }
-    if flags & MSG_OOB != 0 {
-        return Err(Errno::EINVAL);
-    }
     if flags & MSG_ERRQUEUE != 0 {
         return Err(Errno::EAGAIN);
     }
+    let per_call_nonblocking = recv_per_call_nonblocking(flags)?;
     let iovs = read_iovecs(hdr.msg_iov, hdr.msg_iovlen)?;
     let total = iovs.iter().try_fold(0usize, |acc, item| {
         acc.checked_add(item.len).ok_or(Errno::EINVAL)
     })?;
     let mut data = vec![0; total];
-    let (n, from_addr) = with_socket(fd, |sock| sock.recv_from(&mut data))?;
+    let (n, from_addr) = with_socket(fd, |sock| sock.recv_from(&mut data, per_call_nonblocking))?;
     let copied = scatter_iov_bytes(&iovs, &data[..n.min(data.len())])?;
     hdr.msg_namelen = write_sockaddr_value(hdr.msg_name, hdr.msg_namelen as usize, from_addr)?;
     hdr.msg_controllen = 0;
@@ -1023,11 +1059,11 @@ pub fn sys_setsockopt(
             Ok(0)
         }
         (SOL_SOCKET, SO_RCVTIMEO) => {
-            sock.set_recv_timeout(read_timespec(optval, optlen)?);
+            sock.set_recv_timeout_us(read_socket_timeout_us(optval, optlen)?);
             Ok(0)
         }
         (SOL_SOCKET, SO_SNDTIMEO) => {
-            sock.set_send_timeout(read_timespec(optval, optlen)?);
+            sock.set_send_timeout_us(read_socket_timeout_us(optval, optlen)?);
             Ok(0)
         }
         (IPPROTO_TCP, TCP_NODELAY) => {
@@ -1079,10 +1115,10 @@ pub fn sys_getsockopt(
                 write_sockopt(optval, optlen, &size)
             }
             (SOL_SOCKET, SO_RCVTIMEO) => {
-                write_sockopt(optval, optlen, &sock.recv_timeout().unwrap_or_default())
+                write_sockopt(optval, optlen, &socket_timeval(sock.recv_timeout_us()))
             }
             (SOL_SOCKET, SO_SNDTIMEO) => {
-                write_sockopt(optval, optlen, &sock.send_timeout().unwrap_or_default())
+                write_sockopt(optval, optlen, &socket_timeval(sock.send_timeout_us()))
             }
             (IPPROTO_TCP, TCP_NODELAY) => {
                 let value = if sock.tcp_nodelay()? { 1i32 } else { 0i32 };
