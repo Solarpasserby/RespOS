@@ -641,6 +641,14 @@ pub fn accept_unix(fd: usize) -> isize {
     sys_accept(fd, 0, 0)
 }
 
+pub fn accept_unix_addr(fd: usize, addr: &mut SockAddrUn, addrlen: &mut u32) -> isize {
+    sys_accept(
+        fd,
+        addr as *mut SockAddrUn as usize,
+        addrlen as *mut u32 as usize,
+    )
+}
+
 pub fn connect(fd: usize, addr: &SockAddrIn) -> isize {
     sys_connect(
         fd,
@@ -655,6 +663,10 @@ pub fn getsockname(fd: usize, addr: &mut SockAddrIn, addrlen: &mut u32) -> isize
         addr as *mut SockAddrIn as usize,
         addrlen as *mut u32 as usize,
     )
+}
+
+pub fn getsockname_raw(fd: usize, addr: usize, addrlen: usize) -> isize {
+    sys_getsockname(fd, addr, addrlen)
 }
 
 pub fn getpeername_raw(fd: usize, addr: usize, addrlen: usize) -> isize {

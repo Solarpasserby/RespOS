@@ -118,7 +118,7 @@ struct SockAddrIn6 {
 }
 
 struct SockAddrUn {
-    key: String,
+    key: Vec<u8>,
     pathname: Option<String>,
 }
 
@@ -340,11 +340,8 @@ fn read_sockaddr_un(addr: usize, addrlen: usize) -> SysResult<SockAddrUn> {
         return Err(Errno::EINVAL);
     }
     if path_bytes[0] == 0 {
-        let key = core::str::from_utf8(path_bytes)
-            .map(String::from)
-            .map_err(|_| Errno::EINVAL)?;
         return Ok(SockAddrUn {
-            key,
+            key: path_bytes.to_vec(),
             pathname: None,
         });
     }
@@ -357,7 +354,7 @@ fn read_sockaddr_un(addr: usize, addrlen: usize) -> SysResult<SockAddrUn> {
         .map(String::from)
         .map_err(|_| Errno::EINVAL)?;
     Ok(SockAddrUn {
-        key: path.clone(),
+        key: path.as_bytes().to_vec(),
         pathname: Some(path),
     })
 }
@@ -372,26 +369,22 @@ fn create_unix_socket_node(path: &str) -> SysResult {
     })
 }
 
-fn write_sockaddr_un(addr: usize, addrlen_ptr: usize, key: Option<&str>) -> SysResult {
+fn write_sockaddr_un(addr: usize, addrlen_ptr: usize, key: Option<&[u8]>) -> SysResult {
     if addr == 0 {
         return Ok(());
     }
     let user_len = read_sockaddr_output_len(addrlen_ptr)? as usize;
-    let key_bytes = key.unwrap_or("").as_bytes();
-    let actual_len = core::mem::size_of::<u16>() + key_bytes.len().min(SOCKADDR_UN_PATH_LEN);
+    let key_bytes = key.unwrap_or(&[]);
+    let pathname_terminator = usize::from(!key_bytes.is_empty() && key_bytes[0] != 0);
+    let actual_len = core::mem::size_of::<u16>() + key_bytes.len() + pathname_terminator;
+    let mut raw = vec![0u8; actual_len];
+    raw[..core::mem::size_of::<u16>()].copy_from_slice(&AF_UNIX.to_ne_bytes());
+    raw[core::mem::size_of::<u16>()..core::mem::size_of::<u16>() + key_bytes.len()]
+        .copy_from_slice(key_bytes);
     let write_len = core::cmp::min(user_len, actual_len);
     if write_len > 0 {
         check_user_writable(addr as *mut u8, write_len)?;
-        let family = AF_UNIX.to_ne_bytes();
-        let family_len = core::cmp::min(write_len, family.len());
-        copy_to_user(addr as *mut u8, family.as_ptr(), family_len)?;
-        if write_len > family.len() {
-            copy_to_user(
-                (addr + family.len()) as *mut u8,
-                key_bytes.as_ptr(),
-                write_len - family.len(),
-            )?;
-        }
+        copy_to_user(addr as *mut u8, raw.as_ptr(), write_len)?;
     }
     let actual_len_u32 = actual_len as u32;
     copy_to_user(addrlen_ptr as *mut u32, &actual_len_u32 as *const u32, 1)?;
@@ -804,7 +797,7 @@ pub fn sys_bind(socketfd: usize, socketaddr: usize, socketlen: usize) -> SysResu
             if let Some(path) = addr.pathname.as_ref() {
                 create_unix_socket_node(path.as_str())?;
             }
-            sock.bind_unix_path(addr.key.as_str())?;
+            sock.bind_unix_path(addr.key.as_slice())?;
             return Ok(0);
         }
         let addr = read_sockaddr_for_domain(&sock.domain, socketaddr, socketlen)?;
@@ -846,10 +839,15 @@ pub fn sys_accept4(socketfd: usize, addr: usize, addrlen: usize, flags: usize) -
     }
     let fd_flags = new_sock.get_flags();
     let is_unix = new_sock.domain == SocketDomain::AF_UNIX;
+    let unix_peer_key = if is_unix {
+        new_sock.get_peer_unix_key()?
+    } else {
+        None
+    };
     let domain = new_sock.domain.clone();
     let new_fd = task.alloc_fd(FdEntry::new(Arc::new(new_sock), fd_flags))?;
     let write_addr_result = if is_unix {
-        write_sockaddr_un(addr, addrlen, None)
+        write_sockaddr_un(addr, addrlen, unix_peer_key.as_deref())
     } else {
         write_sockaddr_for_domain(&domain, addr, addrlen, remote_addr)
     };
@@ -867,7 +865,7 @@ pub fn sys_connect(socketfd: usize, addr: usize, addrlen: usize) -> SysResult<us
             if let Some(path) = addr.pathname.as_ref() {
                 let _ = filename_lookup(AT_FDCWD, path.as_str(), 0)?;
             }
-            sock.connect_unix_path(addr.key.as_str())?;
+            sock.connect_unix_path(addr.key.as_slice())?;
             return Ok(0);
         }
         let remote = normalize_connect_addr(read_sockaddr_for_domain(&sock.domain, addr, addrlen)?);
@@ -883,7 +881,7 @@ pub fn sys_getsockname(socketfd: usize, addr: usize, addrlen: usize) -> SysResul
     with_socket(socketfd, |sock| {
         if sock.domain == SocketDomain::AF_UNIX {
             let key = sock.get_bound_unix_key()?;
-            write_sockaddr_un(addr, addrlen, Some(key.as_str()))?;
+            write_sockaddr_un(addr, addrlen, key.as_deref())?;
             return Ok(0);
         }
         let bound = sock.get_bound_address()?;
@@ -899,7 +897,8 @@ pub fn sys_getpeername(socketfd: usize, addr: usize, addrlen: usize) -> SysResul
             if addr == 0 {
                 return Err(Errno::EFAULT);
             }
-            write_sockaddr_un(addr, addrlen, None)?;
+            let key = sock.get_peer_unix_key()?;
+            write_sockaddr_un(addr, addrlen, key.as_deref())?;
             return Ok(0);
         }
         let peer = sock.get_remote_addr()?;

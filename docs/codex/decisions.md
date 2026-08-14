@@ -310,6 +310,19 @@
 - 后续影响：不得改回固定 sleep/yield。新增 shutdown、dup-close 或 poll waiter 时必须一起验证 EOF、
   EPIPE、lost wake、EINTR 和 single-winner；唤醒 scheduler 必须在释放 socket data lock 后执行。
 
+## AF_UNIX 地址以 raw bytes 在 connect 提交点快照
+
+- 状态：已采用
+- 适用范围：pathname/abstract bind/listen/connect/accept、`getsockname/getpeername`
+- 最后验证：2026-08-14
+- 证据：`os/src/{net/socket.rs,syscall/net.rs}`、`scripts/getpeername_probe_linux.c`、
+  `user/src/bin/getpeername_probe.rs`；双架构 2 hart 专项与 musl/glibc 地址 LTP 簇
+- 内容：bound/peer address 由各 endpoint 持有 `Option<Vec<u8>>`；前导 NUL 的 abstract 名称是任意字节
+  namespace，不转为 UTF-8。connect 成功提交时同时建立 client peer、待 accept endpoint 的 local/peer
+  快照；accept 只转移 endpoint。地址查询读取快照，不从可被关闭/复用的 listener registry 反查。
+- 后续影响：连接失败必须回滚尚未发布的 peer 快照；dup/fork 继续共享 endpoint 状态。pathname 的
+  终止 NUL 只在 ABI writer 生成，不进入 registry identity；abstract 则不得追加终止 NUL。
+
 ## 只读 MAP_PRIVATE 文件映射共享 PageCache frame
 
 - 状态：已采用，完整 BuildStorm 计时待验证

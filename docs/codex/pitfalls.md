@@ -633,6 +633,18 @@
 - 后续影响：修改 UNIX socket clone/drop/connect/pair 时需一起审查端点引用和 close 状态，不能只修
   阻塞 read 分支，否则 poll 或 write 会继续产生不一致行为。
 
+## AF_UNIX abstract 名称不是 UTF-8 pathname，unnamed 也不是 named peer 的占位值
+
+- 状态：已确认并修复 stream 地址回报
+- 适用范围：AF_UNIX bind/connect/accept、`getsockname/getpeername`、地址截断
+- 最后验证：2026-08-14
+- 证据：`scripts/getpeername_probe_linux.c`、`user/src/bin/getpeername_probe.rs`；双架构 2 hart 专项
+- 内容：abstract namespace 用前导 NUL 加任意字节标识，允许非 UTF-8；pathname identity 不含 ABI
+  输出时的结尾 NUL。若只保存 `String` 或 connected bool，socketpair 会通过，但 named client 的 peer、
+  accepted endpoint 的 local/peer 和 accept 输出都会错误退化为 2-byte unnamed 地址。
+- 后续影响：地址 probe 必须同时绑定 listener/client，检查 client 与 accepted endpoint 双向查询，并用
+  小 buffer 验证“copy 截断但 actual addrlen 不截断”；不能只检查 `sa_family`。
+
 ## UNIX socket 的空读/满写/accept 不能用 yield 轮询
 
 - 状态：已确认并修复专项与真实 Cargo 活性窗口

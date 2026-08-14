@@ -79,7 +79,7 @@ Phase 6 的调度器、allocator、异步 I/O 和细粒度锁重构。
 | `SO_RCVTIMEO`/`SO_SNDTIMEO`、`MSG_DONTWAIT` | Linux/RespOS probe 已有；LA64 SMP 50 ms 晚醒约 1 秒 | 阻断 | 归一化 LA64 per-hart 时间域后重跑 |
 | nonblocking `connect`、`poll`、`SO_ERROR` | loopback success/refused、error consumption 与同 fd 失败后重连双架构 2 hart 通过；LA64 2 hart iperf 在 UDP→TCP 顺序停滞 | 阻断 | 定位 LA64 SMP iperf；补 unreachable/timeout/reset |
 | `MSG_PEEK/WAITALL/NOSIGNAL`、partial I/O | Linux/RespOS probe 含 timeout/EOF/signal 短读，双架构 2 hart 通过 | 已闭合（当前范围） | 完整初赛与网络回归 |
-| `getpeername()` 错误优先级与地址写回 | Linux/RespOS probe 与 musl/glibc `getpeername01` 双架构 2 hart 通过；未命名 socketpair 已回报 | 双架构已验证 | 补 named/abstract AF_UNIX peer、截断长度与关闭态路径 |
+| `getsockname/getpeername/accept` 地址写回 | Linux/RespOS probe 覆盖错误优先级、AF_UNIX unnamed/pathname/非 UTF-8 abstract 双向地址与截断；musl/glibc `getpeername01,getsockname01` 双架构 2 hart 通过 | 双架构已验证（stream 当前范围） | 补 inet 关闭/半关闭、datagram/seqpacket disconnected/autobind 及 pathname alias/rename identity |
 | AF_UNIX `SO_PEERCRED` | socketpair 与 pathname 双向凭据快照、musl/glibc `getsockopt02` 双架构 2 hart 通过 | 双架构已验证 | 补 credential change；`SCM_CREDENTIALS/SO_PASSCRED` 另立子项 |
 | AF_UNIX→pipe `splice` | Linux/RespOS 错误矩阵与 connected transfer probe、musl/glibc `splice01`--`splice07` 双架构 2 hart 通过 | 双架构已验证 | datagram/seqpacket 与 socket 输出方向按需求扩展；不宣称 zero-copy |
 | `getsid()` | syscall dispatch 缺项，已有 `setsid/getpgid/setpgid` | 已知差异 | session probe 与最小实现 |

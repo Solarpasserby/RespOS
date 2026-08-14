@@ -4,7 +4,7 @@
 //! 从而可以通过标准文件描述符接口（read/write/poll）操作。
 //! 内部根据 `SocketKind` 分派到 `TcpSocket` 或 `UdpSocket`。
 
-use alloc::{collections::VecDeque, string::String, sync::Arc, vec::Vec};
+use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
 use core::{
     net::SocketAddr,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
@@ -34,7 +34,7 @@ const UNIX_SOCKET_BUFFER_LIMIT: usize = 64 * 1024;
 const UNIX_LISTEN_QUEUE_LIMIT: usize = 128;
 
 lazy_static! {
-    static ref UNIX_LISTENERS: Mutex<Vec<(String, Arc<UnixListener>)>> = Mutex::new(Vec::new());
+    static ref UNIX_LISTENERS: Mutex<Vec<(Vec<u8>, Arc<UnixListener>)>> = Mutex::new(Vec::new());
 }
 
 // ——— 类型枚举 ———
@@ -84,7 +84,8 @@ struct UnixSocket {
     write_shutdown: Arc<AtomicBool>,
     peer_read_shutdown: SpinLock<Option<Arc<AtomicBool>>>,
     peer_write_shutdown: SpinLock<Option<Arc<AtomicBool>>>,
-    bound_key: Mutex<Option<String>>,
+    bound_key: Mutex<Option<Vec<u8>>>,
+    peer_key: Mutex<Option<Vec<u8>>>,
     listener: SpinLock<Option<Arc<UnixListener>>>,
     nonblock: AtomicBool,
 }
@@ -160,6 +161,7 @@ impl UnixSocket {
             peer_read_shutdown: SpinLock::new(None),
             peer_write_shutdown: SpinLock::new(None),
             bound_key: Mutex::new(None),
+            peer_key: Mutex::new(None),
             listener: SpinLock::new(None),
             nonblock: AtomicBool::new(false),
         }
@@ -185,12 +187,12 @@ impl UnixSocket {
         self.nonblock.store(nonblock, Ordering::Release);
     }
 
-    fn bind_path(&self, key: &str) -> SysResult {
+    fn bind_path(&self, key: &[u8]) -> SysResult {
         let mut bound_key = self.bound_key.lock();
         if bound_key.is_some() {
             return Err(Errno::EINVAL);
         }
-        *bound_key = Some(String::from(key));
+        *bound_key = Some(key.to_vec());
         Ok(())
     }
 
@@ -462,19 +464,23 @@ impl UnixSocket {
         Ok(())
     }
 
-    fn connect_path(&self, key: &str) -> SysResult {
+    fn connect_path(&self, key: &[u8]) -> SysResult {
         if self.peer_rx.lock().is_some() {
             return Err(Errno::EISCONN);
         }
         let connector_credentials = current_unix_credentials()?;
+        let connector_key = self.bound_key.lock().clone();
         let listener = UNIX_LISTENERS
             .lock()
             .iter()
-            .find(|(item_key, _)| item_key == key)
+            .find(|(item_key, _)| item_key.as_slice() == key)
             .map(|(_, listener)| listener.clone())
             .ok_or(Errno::ECONNREFUSED)?;
 
         let server = UnixSocket::new();
+        *server.bound_key.lock() = Some(key.to_vec());
+        *server.peer_key.lock() = connector_key;
+        *self.peer_key.lock() = Some(key.to_vec());
         *server.peer_rx.lock() = Some(self.rx.clone());
         *self.peer_rx.lock() = Some(server.rx.clone());
         *server.peer_closed.lock() = Some(self.closed.clone());
@@ -493,6 +499,7 @@ impl UnixSocket {
             *self.peer_read_shutdown.lock() = None;
             *self.peer_write_shutdown.lock() = None;
             *self.peer_credentials.lock() = None;
+            *self.peer_key.lock() = None;
             return Err(Errno::EAGAIN);
         }
         pending.sockets.push_back(server);
@@ -556,8 +563,12 @@ impl UnixSocket {
         }
     }
 
-    fn bound_key(&self) -> Option<String> {
+    fn bound_key(&self) -> Option<Vec<u8>> {
         self.bound_key.lock().clone()
+    }
+
+    fn peer_key(&self) -> Option<Vec<u8>> {
+        self.peer_key.lock().clone()
     }
 
     fn is_connected(&self) -> bool {
@@ -895,9 +906,17 @@ impl Socket {
         }
     }
 
-    pub fn get_bound_unix_key(&self) -> SysResult<String> {
+    pub fn get_bound_unix_key(&self) -> SysResult<Option<Vec<u8>>> {
         match &self.inner {
-            SocketInner::Unix(unix) => unix.bound_key().ok_or(Errno::EINVAL),
+            SocketInner::Unix(unix) => Ok(unix.bound_key()),
+            SocketInner::Tcp(_) | SocketInner::Udp(_) => Err(Errno::EAFNOSUPPORT),
+        }
+    }
+
+    pub fn get_peer_unix_key(&self) -> SysResult<Option<Vec<u8>>> {
+        match &self.inner {
+            SocketInner::Unix(unix) if unix.is_connected() => Ok(unix.peer_key()),
+            SocketInner::Unix(_) => Err(Errno::ENOTCONN),
             SocketInner::Tcp(_) | SocketInner::Udp(_) => Err(Errno::EAFNOSUPPORT),
         }
     }
@@ -938,9 +957,9 @@ impl Socket {
         }
     }
 
-    pub fn bind_unix_path(&self, path: &str) -> SysResult {
+    pub fn bind_unix_path(&self, key: &[u8]) -> SysResult {
         match &self.inner {
-            SocketInner::Unix(unix) => unix.bind_path(path),
+            SocketInner::Unix(unix) => unix.bind_path(key),
             SocketInner::Tcp(_) | SocketInner::Udp(_) => Err(Errno::EAFNOSUPPORT),
         }
     }
@@ -1026,7 +1045,7 @@ impl Socket {
         }
     }
 
-    pub fn connect_unix_path(&self, key: &str) -> SysResult {
+    pub fn connect_unix_path(&self, key: &[u8]) -> SysResult {
         match &self.inner {
             SocketInner::Unix(unix) => unix.connect_path(key),
             SocketInner::Tcp(_) | SocketInner::Udp(_) => Err(Errno::EAFNOSUPPORT),

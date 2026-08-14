@@ -145,7 +145,7 @@
   process identity 仍由独立 Phase 5 task 方案负责。`SCM_CREDENTIALS/SO_PASSCRED`、user namespace 与
   credential change 后的完整 Linux 矩阵未实现，不能由 `SO_PEERCRED` 通过推导。
 
-## 2026-08-14 Linux/POSIX Phase 5 `getpeername` 错误优先级（当前工作树）
+## 2026-08-14 Linux/POSIX Phase 5 AF_UNIX 地址回报与 `getpeername` 错误优先级（基于 `90bb5a5` 的当前工作树）
 
 - **Linux 契约与修复边界**：`scripts/getpeername_probe_linux.c` 和 LTP `getpeername01` 固定七类错误
   向量，并额外确认未连接 inet socket 即使带非法 `addrlen` 也先返回 `ENOTCONN`。RespOS 现在先解析 fd
@@ -153,16 +153,23 @@
   `sizeof(sa_family_t)` 的未命名 peer 地址。连接成立后，地址 writer 校验 `addrlen` 指针、负值/过大
   长度和实际写入范围，因此 LTP 的 connected socketpair 分支得到 `EINVAL/EFAULT`，且校验失败不产生
   部分写回。
+- **named 地址所有权**：扩展后的 Linux probe 确认，pathname 和 abstract listener/client 都绑定时，
+  client 的 peer 与 accepted socket 的 local 地址是 listener 地址，`accept()` 输出和 accepted socket
+  的 peer 地址是 connector 地址；4-byte buffer 只截断 copy，`addrlen` 仍回报完整长度。abstract 名称
+  是含前导 NUL 的任意字节串，不要求 UTF-8，pathname 输出则包含结尾 NUL。修复前 RV64 把应为
+  25-byte 的 pathname peer 回报成 2-byte unnamed；当前 `UnixSocket` 在 connect 提交时分别快照 local/
+  peer raw address，accept 只转移快照，地址查询不再从全局 listener registry 反推。
 - **双架构证据**：宿主 probe 以 `cc -std=c11 -Wall -Wextra -Werror -O2` 通过。RV64/LA64 release、
   初赛 snapshot、4 GiB/2 hart 的 `TASK_A_GETPEERNAME_PROBE=1` 均输出
-  `GETPEERNAME ALL PASS`，日志为 `/tmp/respos-{rv,la}-getpeername-phase5.log`。同配置聚焦
-  `LTP_CASE_FILTER=getpeername01` 后，musl/glibc 在两架构均为 `passed 7, failed 0` 和
-  `SUMMARY: 1 passed, 0 failed`，日志为 `/tmp/respos-{rv,la}-getpeername-ltp.log`；既有
+  `GETPEERNAME ALL PASS`，日志为 `/tmp/respos-{rv,la}-getpeername-named-phase5.log`。同配置聚焦
+  `LTP_CASE_FILTER=getpeername01,getsockname01` 后，musl/glibc 在两架构均为
+  `SUMMARY: 2 passed, 0 failed`，日志为 `/tmp/respos-{rv,la}-unix-address-ltp-phase5.log`；既有
   `TASK_A_SOCKET_PHASE5_PROBE=1` 双架构 2 hart 回归也全通过，日志为
-  `/tmp/respos-{rv,la}-socket-phase5-after-getpeername.log`。
-- **剩余边界**：本轮关闭的是 LTP 覆盖的错误优先级和未命名 socketpair peer，不代表
-  `getsockname/getpeername` 全契约完成；AF_UNIX pathname/abstract peer 的成功回报、截断长度和已关闭/
-  半关闭 inet socket 仍需单独 Linux 对照。
+  `/tmp/respos-{rv,la}-socket-phase5-after-unix-address.log`。
+- **剩余边界**：本轮关闭未命名、pathname/abstract AF_UNIX stream 的双方地址和截断长度，不代表
+  所有 socket address 契约完成；已关闭/半关闭 inet socket、datagram/seqpacket 的 disconnected 与
+  autobind 地址，以及 pathname socket 经 rename/symlink alias 后的 inode-identity connect 仍需单独
+  Linux 对照。
 
 ## 2026-08-14 Linux/POSIX Phase 5 iperf→iozone 固定顺序 SMP 门禁（当前工作树）
 

@@ -417,20 +417,24 @@ cc -std=c11 -Wall -Wextra -Werror -O2 scripts/getpeername_probe_linux.c \
   -o /tmp/getpeername_probe_linux
 /tmp/getpeername_probe_linux
 TASK_A_GETPEERNAME_PROBE=1 make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
-  RV_PRE_OUTPUT=/tmp/respos-rv-getpeername-phase5.log
+  RV_PRE_OUTPUT=/tmp/respos-rv-getpeername-named-phase5.log
 TASK_A_GETPEERNAME_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
-  LA_PRE_OUTPUT=/tmp/respos-la-getpeername-phase5.log
-TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=getpeername01 make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
-  RV_PRE_OUTPUT=/tmp/respos-rv-getpeername-ltp.log
-TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=getpeername01 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
-  LA_PRE_OUTPUT=/tmp/respos-la-getpeername-ltp.log
+  LA_PRE_OUTPUT=/tmp/respos-la-getpeername-named-phase5.log
+TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=getpeername01,getsockname01 \
+  make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-unix-address-ltp-phase5.log
+TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=getpeername01,getsockname01 \
+  make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-unix-address-ltp-phase5.log
 ```
 
-专项以 `GETPEERNAME ALL PASS` 为标志；LTP 的 musl/glibc 都必须出现 `passed 7, failed 0` 和
-`SUMMARY: 1 passed, 0 failed`。LTP 七个向量覆盖 `EBADF/ENOTSOCK/ENOTCONN`、connected socketpair
+专项以 `GETPEERNAME ALL PASS` 为标志；除原错误向量和 unnamed socketpair 外，还必须覆盖双方都绑定的
+pathname/含非 UTF-8 字节 abstract 地址、accept/client/accepted 的双向 local/peer 和小 buffer 截断。
+LTP 的 musl/glibc 都必须出现 `SUMMARY: 2 passed, 0 failed`。`getpeername01` 七个向量覆盖
+`EBADF/ENOTSOCK/ENOTCONN`、connected socketpair
 上的负长度 `EINVAL` 以及坏 sockaddr、空/坏 addrlen 指针的 `EFAULT`；自有 probe 还确认未连接 inet
-带非法长度仍优先 `ENOTCONN`，以及未命名 socketpair 成功回报 `AF_UNIX`。修改地址写回后还要复跑
-2 hart `TASK_A_SOCKET_PHASE5_PROBE=1`；本组不覆盖 named/abstract AF_UNIX peer 地址。
+带非法长度仍优先 `ENOTCONN`。修改地址快照或 writer 后还要双架构复跑 2 hart
+`TASK_A_SOCKET_PHASE5_PROBE=1`。
 
 Phase 5 AF_UNIX `SO_PEERCRED` Linux 对照、guest 专项与聚焦 LTP：
 
