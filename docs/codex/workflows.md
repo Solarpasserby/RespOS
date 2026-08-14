@@ -344,6 +344,23 @@ TASK_A_TASK_PHASE5_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
 返回 0 就误判通过。修复后两份日志都必须出现 `TASK_PHASE5 ALL PASS`，且不得出现
 `TASK_PHASE5_EXPECTED_FAIL` 或 `CURRENT DIFFERENCES CONFIRMED`。
 
+Phase 5 `CLONE_VFORK|CLONE_VM` 共享可见性：
+
+```bash
+TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=clone05 \
+  make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-clone05-phase5.log
+TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=clone05 \
+  make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-clone05-phase5.log
+```
+
+两架构必须顺序运行。musl/glibc 都应出现 `child_exited passed` 和
+`SUMMARY: 1 passed, 0 failed`；该 case 同时要求 parent 等到 child 退出和 child 对共享用户变量的
+写入可见，但不覆盖 child exec 后的 MM handle 脱离。修改 `share_user_vm()`、exec MM handle 或 vfork
+wakeup 后，还要至少跑一个真实的 vfork/exec command workload；短门禁可用 final CAgent，并明确区分
+CAgent 完成与随后 BuildStorm 是否被诊断 timeout。
+
 Phase 5 session/`getsid` Linux 对照：
 
 ```bash

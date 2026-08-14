@@ -514,18 +514,21 @@ FdTable slot (FdEntry: descriptor flags)
 - 后续影响：诊断解释器地址附近的 store fault 时必须同时计算 SP、栈 VMA 与 guard 距离；扩大栈窗口
   时不能退回 eager 分配全部页面。
 
-### vfork 父任务必须先登记 blocked 再发布子任务
+### vfork 共享旧 MM，且父任务必须先登记 blocked 再发布子任务
 
-- 状态：已实现，完整 BuildStorm 仍待验证
-- 适用范围：RV64 SMP `CLONE_VFORK`、posix_spawn、Rust Command/cargo
-- 最后验证：2026-08-06；RV64 release、8 核受控 trace
-- 证据：`os/src/syscall/process.rs::sys_clone()`；
-  `/tmp/respos-buildstorm-cloneflags.log`、`/tmp/respos-buildstorm-exittrace.log`
-- 内容：vfork parent 的 blocked registration 是 wakeup 协议的一部分，必须发生在 child 加入全局
+- 状态：已实现，双架构 clone/vfork 与 RV64 command/minibuild 已验证
+- 适用范围：RV64/LA64 SMP `CLONE_VFORK`、posix_spawn、Rust Command/cargo
+- 最后验证：2026-08-14；RV64/LA64 release、4 GiB/2 hart
+- 证据：`os/src/syscall/process.rs::sys_clone()`、`os/src/task/task.rs::{clone_,install_exec_image}`；
+  `/tmp/respos-{rv,la}-clone05-vfork-mm-fix.log`、`/tmp/respos-rv-vfork-cagent-regression.log`
+- 内容：带 `CLONE_VM` 的 vfork child 与 parent 共享旧 `MemorySet`，所以 child 在 exec/exit 前的用户
+  内存写入对 parent 可见。每个 task 持有可替换的 MM handle；child exec 安装新 handle，不覆盖 parent
+  仍持有的旧 MM。vfork parent 的 blocked registration 是 wakeup 协议的一部分，必须发生在 child 加入全局
   ready queue 之前。发布后 child 可在任意 CPU 立即 exec；exec/exit 的一次性 wake 此时必能从
   blocked 表取回 parent。父任务登记后再发布 child，随后直接切到 idle/下一任务。
-- 后续影响：任何“发布对象后再登记 waiter”的一次性事件都要审计同类 lost-wakeup 窗口；单核
-  测试因 child 无法提前运行，不能覆盖该顺序错误。
+- 后续影响：不得再次以“避免 exec 覆盖 parent”为由让 vfork 忽略 `CLONE_VM`；应维护 per-task handle
+  替换边界。任何“发布对象后再登记 waiter”的一次性事件都要审计 lost-wakeup 窗口；单核测试因
+  child 无法提前运行，不能覆盖该顺序错误。
 
 ### path、dentry、inode 与 mount 各有身份
 

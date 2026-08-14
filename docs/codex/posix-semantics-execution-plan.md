@@ -82,9 +82,10 @@ Phase 6 的调度器、allocator、异步 I/O 和细粒度锁重构。
 | `getsockname/getpeername/accept` 地址写回 | Linux/RespOS probe 覆盖错误优先级、AF_UNIX unnamed/pathname/非 UTF-8 abstract 双向地址与截断；musl/glibc `getpeername01,getsockname01` 双架构 2 hart 通过 | 双架构已验证（stream 当前范围） | 补 inet 关闭/半关闭、datagram/seqpacket disconnected/autobind 及 pathname alias/rename identity |
 | AF_UNIX `SO_PEERCRED` | socketpair 与 pathname 双向凭据快照、musl/glibc `getsockopt02` 双架构 2 hart 通过 | 双架构已验证 | 补 credential change；`SCM_CREDENTIALS/SO_PASSCRED` 另立子项 |
 | AF_UNIX→pipe `splice` | Linux/RespOS 错误矩阵与 connected transfer probe、musl/glibc `splice01`--`splice07` 双架构 2 hart 通过 | 双架构已验证 | datagram/seqpacket 与 socket 输出方向按需求扩展；不宣称 zero-copy |
-| `getsid()` | syscall dispatch 缺项，已有 `setsid/getpgid/setpgid` | 已知差异 | session probe 与最小实现 |
+| `getsid()` | Linux/RespOS session probe 与 PID 1 基础身份双架构 2 hart 通过 | 双架构已验证（无 controlling tty） | 与完整 job control 一起扩展跨 exec/session 关系 |
 | termios/job control | 当前 tty ioctl 主要只有窗口查询，源码明确未建模 controlling tty | 已知差异 | tty/session/pgrp 状态设计和 probe |
 | leader `exit`、non-leader `exec` | `task_phase5_probe` 有三项 expected failure | 已知差异 | leader identity 与 de-thread 实现 |
+| `CLONE_VFORK|CLONE_VM` | `clone05` 双架构双 libc 通过；额外 vfork01/02 与 RV64 CAgent/minibuild 回归通过 | 双架构已验证（当前范围） | 完整 BuildStorm、posix_spawn file-actions/失败回报 |
 | process-pending、`SA_NOCLDWAIT`、通用 restart | signal 首轮只闭合查询/exec；restart 仅覆盖 `wait4` | 已知差异 | 分主题 signal probe，不做全局一刀切 restart |
 | futex absolute timeout / precise wake | RV64 bitset/wake 与 LA64 wake 双 libc 通过；LA64 首组 musl monotonic wait 在 secondary 上线窗口稳定延迟约 0.87 s，后续 realtime/glibc 正常 | 已知差异 | 待确认：审计 LA64 secondary 启动与跨 hart 时间/调度，不放宽 timeout 阈值 |
 | mmap EOF/truncate/SIGBUS | Linux oracle 全通过；RV64/LA64 4 GiB/2 hart 均稳定复现相同七项 expected failure | 已知差异 | resident provenance、动态 EOF、truncate invalidation、fault 分类 |

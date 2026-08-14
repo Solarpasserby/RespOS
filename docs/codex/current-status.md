@@ -1,5 +1,28 @@
 # RespOS 当前状态
 
+## 2026-08-14 Linux/POSIX Phase 5 `CLONE_VFORK|CLONE_VM` 可见性（基于 `e39cdd9` 的当前工作树）
+
+- **失败契约与根因**：LTP 20240524 `clone05` 要求 vfork child 在共享地址空间把全局
+  `child_exited` 置 1，且 parent 必须等 child 退出后才从 `clone()` 返回。修复前 RV64/LA64 的
+  musl/glibc 都正确等待约 0.16 秒（LA64 每次冷启动的首组 musl 另受 secondary 上线影响约 1 秒），
+  但都读回 0。`CloneFlags::share_user_vm()` 仍保留 2026-06 的临时规避：非线程 vfork 即使带
+  `CLONE_VM` 也复制地址空间，因此 child 写入对 parent 不可见。
+- **实现**：删除该过期例外，所有 `CLONE_VM` 都共享同一内层 `MemorySet`。2026-08-08 已落地的
+  per-task 可替换 MM handle 使这一恢复安全：child exec 只替换自己的 handle，parent 继续持有旧 MM；
+  child exit 的回收路径也会检测线程组外的共享 owner，不提前回收旧地址空间。既有 vfork parent
+  blocked-before-publish 与 exec/exit 一次性唤醒协议保持不变。
+- **双架构门禁**：release 初赛 snapshot、4 GiB/2 hart 的 `clone05` 在 RV64/LA64、musl/glibc
+  四组均从 `0 passed, 1 failed` 变为 `1 passed, 0 failed`；基线日志为
+  `/tmp/respos-{rv,la}-clone05-phase5.log`，修复日志为
+  `/tmp/respos-{rv,la}-clone05-vfork-mm-fix.log`。临时纳入但未保留在正式 695 清单的
+  `vfork01/vfork02` 也在四组环境各为 `2 passed, 0 failed`，日志
+  `/tmp/respos-{rv,la}-vfork-extra-phase5.log`。
+- **exec 回归边界**：RV64 final snapshot、4 GiB/2 hart 的 CAgent 十项全通过；随后
+  `BUILDSTORM_TOOLCHAIN ok`、`BUILDSTORM_MINIBUILD ok`，说明 command/process 创建路径未观察到 parent
+  MM 被 child 新映像覆盖的回归；精确隔离边界仍以 per-task handle 源码所有权为证据。90 秒诊断窗口在
+  正式 timed BuildStorm 编译期间主动结束，故不记录 BuildStorm 完成或性能结论；日志
+  `/tmp/respos-rv-vfork-cagent-regression.log`。
+
 ## 2026-08-14 Linux/POSIX Phase 5 mmap EOF/truncate/SIGBUS 基线（基于 `fcd68d5` 的当前工作树）
 
 - **可复现入口**：`testrunner` 新增 `TASK_A_MMAP_PHASE5_PROBE=1`，会单独执行已有的

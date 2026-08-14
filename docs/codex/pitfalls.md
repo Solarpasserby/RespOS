@@ -751,11 +751,15 @@
   `blocking_and_run_next()` 而不建立子到父的唤醒边，会使父任务错误地等到子命令退出；普通 exit
   的 SIGCHLD 唤醒会掩盖这个错误，造成 `popen` 很慢而 `pclose` 几乎立即返回。SMP 下还有更窄的
   窗口：若先发布 child、后把 parent 加入 blocked 表，child 可先 exec 并把一次性 wake 丢掉。
+  另一个独立陷阱是为了避免 child exec 覆盖 parent 而让非线程 vfork 忽略 `CLONE_VM`：这会保留等待
+  顺序，却使 child 在 exit 前的用户内存写入对 parent 不可见，LTP `clone05` 因此稳定读回 0。当前
+  per-task 可替换 MM handle 已解决 exec 隔离，不能恢复该过期例外。
   cargo/rustfmt 曾表现为捕获输出不返回，但最新 trace 已确认顺序修复后 parent 正常恢复且 rustfmt
   完成退出，仍有独立的 pipe 引用未释放问题；两者不能混作同一个根因。
 - 后续影响：vfork 同步必须是一次性且只限该 clone 关系；exec 仅在新映像状态完整后释放，退出路径
   也必须释放以覆盖 exec 失败。父 waiter 必须先登记，child 才能进入 ready queue；不要以普通
-  SIGCHLD、yield 或单核通过代替该协议。
+  SIGCHLD、yield 或单核通过代替该协议。共享可见性与 parent wakeup 是两条独立门禁，分别以
+  `clone05` 和 vfork/exec command workload 验证。
 
 ## QEMU 10.0.2 LoongArch `LDPTE` 会截掉 PTE 的 NR/NX 高位
 

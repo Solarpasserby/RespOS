@@ -624,6 +624,23 @@
 - 后续影响：实现非 leader exec 时只保留调用线程自身 pending set，不能合并或继承被终止 sibling 的
   thread-directed pending signals；后续引入独立 process-pending queue 时须分别处理两类所有权。
 
+## `CLONE_VM` 决定 vfork 的共享 MM，exec 通过 per-task handle 脱离
+
+- 状态：已采用
+- 适用范围：`clone(CLONE_VM|CLONE_VFORK)`、libc `vfork`/`posix_spawn`、exec 与共享 MM 回收
+- 最后验证：2026-08-14
+- 证据：`os/src/task/task.rs::{clone_,install_exec_image}`；RV64/LA64 双 libc `clone05`、额外
+  `vfork01/vfork02` 与 RV64 final CAgent/minibuild
+- 决策：只要 flags 含 `CLONE_VM`，child 就与 parent 共享旧 `MemorySet`，`CLONE_VFORK` 不构成例外。
+  每个 task 持有自己的可替换 handle；成功 exec 给调用者安装新 handle，parent 保留旧 MM。child
+  exec/exit 仍通过独立一次性 vfork completion 唤醒已预先登记 blocked 的 parent。
+- 原因：复制 MM 虽能避免早期实现的 exec 覆盖，却违反 child exec/exit 前的共享写可见性；LTP
+  `clone05` 会稳定观察到该差异。可替换 handle 已把“共享旧映像”和“exec 私有新映像”分开，无需
+  继续保留过期规避。
+- 后续影响：MM 回收必须检测线程组外的共享 owner；不得在 child exec 前原地覆盖共享 `MemorySet`，
+  也不得把 parent wakeup 与共享可见性混成单一测试结论。non-leader exec 重构必须保持这一 handle
+  所有权边界。
+
 ## LoongArch shootdown 使用每目标 hart 的 generation 槽
 
 - 状态：已采用
