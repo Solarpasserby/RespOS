@@ -91,6 +91,7 @@ Phase 6 的调度器、allocator、异步 I/O 和细粒度锁重构。
 | musl `pathconf()` pathname 错误 | 当前 RV64/LA64 镜像的 musl 反汇编证实 `pathconf` 丢弃 path；musl `pathconf02` 五项失败而 glibc 全通过 | 已知差异 | 待确认：可复现 musl 构建/镜像替换与完整 musl 回归 |
 | LA64 musl `readlink*()` 零长度 | musl 1.2.5 wrapper 把 size 0 转成内部 size 1 调用；内核已对真实 size 0 返回 `EINVAL`，RV64 musl 1.2.0 与两架构 glibc 通过 | 已知差异 | 待确认：是否修改 musl runtime；不在内核特判 size 1 |
 | RV64 musl `epoll_create()` invalid size | musl 1.2.0 丢弃 size 后调用合法 `epoll_create1(0)`；LA64 musl 1.2.5 与两架构 glibc 的 `epoll_create02` 通过 | 已知差异 | 待确认：与其他 musl 差异统一更新 runtime；不得拒绝合法 `epoll_create1(0)` |
+| musl `recvmmsg()` bad message vector | 两架构 musl 在 syscall 前规范化 mmsghdr 两个 size 字段并对 guard vector SIGSEGV；两架构 glibc 两种 time ABI 的 10 项错误矩阵通过 | 已知差异 | 待确认：纳入 musl runtime 处理；内核不拦截 syscall 前 store |
 | `pwrite()` + `O_APPEND` | Linux baseline 与双架构 musl/glibc 16-case pwrite/pwritev 簇通过；显式记录为 Linux 偏离 POSIX 的兼容选择 | 双架构已验证 | 补大写/并发 append syscall 原子性 probe |
 | 已删除目录 fd 的 `getdents64()` | Linux probe 覆盖未读/已缓存目录流；双架构 musl/glibc `getdents01/02` 通过 | 双架构已验证 | 自定义内存目录若支持 unlink，下沉通用 detached 状态 |
 | `chroot()` pathname/permission/privilege 错误优先级 | Linux probe 固定 `EACCES/ENOENT` 先于 `EPERM`；双架构 musl/glibc `chroot01`--`chroot04` 通过 | 双架构已验证（当前权限模型） | capability/user/mount namespace 按需求另立状态模型 |

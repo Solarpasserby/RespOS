@@ -30,10 +30,10 @@
 
 - 状态：已确认；当前 musl runtime 替换待协商
 - 适用范围：libc 组合接口、镜像内 musl/glibc 差异、LTP
-  `pathconf02/readlink03/readlinkat02/epoll_create02`
+  `pathconf02/readlink03/readlinkat02/epoll_create02/recvmmsg01`
 - 最后验证：2026-08-14
 - 证据：当前 RV64/LA64 初赛镜像 `/musl/lib/libc.so` 的
-  `pathconf/fpathconf/readlink/readlinkat/epoll_create` 符号反汇编；
+  `pathconf/fpathconf/readlink/readlinkat/epoll_create/recvmmsg` 符号反汇编；
   对应 musl/glibc LTP 日志
 - 内容：当前镜像的 musl `pathconf(path, name)` 不访问 `path`，而是传
   `fpathconf(-1, name)` 后返回常量表。因此 `ENOTDIR/ENOENT/ENAMETOOLONG/EACCES/ELOOP`
@@ -46,6 +46,10 @@
   `epoll_create1(0)`；LA64 musl 1.2.5 已在 wrapper 中拒绝 `size <= 0`。现代 RV64/LA64
   没有 legacy `epoll_create` syscall，内核若为修 LTP 而拒绝 flags 0，会同时破坏所有合法
   `epoll_create1(0)` 调用。
+- 内容：两架构 musl 的 `recvmmsg` wrapper 会在 syscall 前遍历 `msgvec`，清零每项
+  `msg_iovlen/msg_controllen` 的高 32 位以适配 kernel ABI；对 LTP 的 guard/bad vector，
+  这些用户态 store 先产生 SIGSEGV，内核没有机会返回 `EFAULT`。
+  同一内核上的 glibc 两种 time ABI 错误矩阵全过，不能把 wrapper fault 归到 kernel uaccess。
 - 后续影响：遇到只在一种 libc 复现的接口差异时，先从实际测试镜像导出 libc，
   确认参数是否到达 syscall，再决定内核所有者。不得特判 LTP runner；替换整套 libc
   必须单独协商并跑完整相关 workload。

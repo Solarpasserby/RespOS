@@ -1,5 +1,23 @@
 # RespOS 当前状态
 
+## 2026-08-14 Linux/POSIX Phase 5 musl `recvmmsg()` bad-vector wrapper 阻断（基于 `659eeb9`）
+
+- **当前差异**：release 初赛镜像、4 GiB/2 hart 聚焦 `recvmmsg01`；RV64/LA64 musl 都在第一项
+  `EBADF` 通过后，于 bad message-vector 项被 `SIGSEGV` 终止，case 为
+  `SUMMARY: 0 passed, 1 failed`。两架构 glibc 的 libc-time 与 old-kernel-time 两种 variant 共
+  10 个 `EBADF/EFAULT/EINVAL` 断言全部通过，case 为 `SUMMARY: 1 passed, 0 failed`。日志为
+  `/tmp/respos-{rv,la}-recvmmsg-errors-phase5.log`。
+- **libc 调用链**：实际 RV64 musl 1.2.0 与 LA64 musl 1.2.5 的 `recvmmsg` wrapper 都在发起
+  syscall 前按 `vlen` 遍历 `msgvec`，向每个 64-byte `mmsghdr` 的 offset 28/44 写零；
+  这两个位置是 libc 64-bit `msg_iovlen/msg_controllen` 的高 32 位，用于适配 kernel ABI。LTP 的
+  第二项刻意传 guard/bad address，因此 fault 发生在用户态预写，尚未进入内核 `sys_recvmmsg()`。
+- **内核边界**：同一内核下 glibc 对 bad message vector 精确得到 `EFAULT`，并且 timeout 的负秒、
+  溢出纳秒与 bad address 在两种 ABI 下均通过，证明当前错误路径可以处理真正到达 syscall 的输入。
+  内核无法拦截 libc syscall 前的用户态 store，也不得用 signal handler 或测试二进制特判掩盖。
+- **当前状态**：该项记为 musl/LTP wrapper `已知差异`，纳入待协商的统一 musl runtime 处理；本轮
+  不改 runtime，也不从这份错误矩阵推导 `recvmmsg` 的阻塞 deadline、partial result 或 LA64 跨 hart
+  timeout 已闭合。
+
 ## 2026-08-14 Linux/POSIX Phase 5 RV64 musl `epoll_create()` wrapper 差异（基于 `2958fa5`）
 
 - **当前差异**：release 初赛镜像、4 GiB/2 hart 聚焦 `epoll_create02`；RV64 musl 的 libc variant

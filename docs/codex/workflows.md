@@ -539,6 +539,26 @@ variant 失败；LA64 musl 1.2.5 应先判断 `size <= 0` 并返回 `EINVAL`，�
 raw syscall variant 在两架构均因没有 legacy `__NR_epoll_create` 而 `TCONF`。不得修改内核
 `sys_epoll_create1()` 去拒绝 flags 0；该值是现代 ABI 的合法无 flag 调用。
 
+musl `recvmmsg()` bad-vector 调用链审计与错误矩阵：
+
+```bash
+rust-objdump --disassemble-symbols=recvmmsg /tmp/respos-rv-musl-libc.so
+rust-objdump --disassemble-symbols=recvmmsg /tmp/respos-la-musl-libc.so
+
+TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=recvmmsg01 \
+  make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-recvmmsg-errors-phase5.log
+TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=recvmmsg01 \
+  make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-recvmmsg-errors-phase5.log
+```
+
+两份 musl 反汇编都应显示 syscall 前以 64-byte stride 遍历 `msgvec`，并向 offset 28/44 写零，
+即规范化 `msg_iovlen/msg_controllen` 的高 32 位；因此 LTP bad-vector 项在 wrapper 内 SIGSEGV，
+只能记为 libc/LTP 阻断。两架构 glibc 应各自让
+libc-time 与 old-kernel-time 两种 variant 共 10 项全部通过，确认真正进入内核的
+`EBADF/EFAULT/EINVAL` 错误矩阵。该命令不验证阻塞 deadline、partial result 或 LA64 跨 hart timeout。
+
 Phase 5 `pwrite()` + `O_APPEND` Linux 对照与 pwrite/pwritev 簇：
 
 ```bash
