@@ -516,6 +516,29 @@ musl 1.2.0 则直接发起 `readlinkat` syscall。内核 `sys_readlinkat()` 已�
 返回 `EINVAL`，不得为让 LA64 musl `readlink03/readlinkat02` 通过而拒绝所有 size 1
 的合法截断读。
 
+Phase 5 `pwrite()` + `O_APPEND` Linux 对照与 pwrite/pwritev 簇：
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror -O2 scripts/pwrite_append_probe_linux.c \
+  -o /tmp/pwrite_append_probe_linux
+/tmp/pwrite_append_probe_linux
+
+TASK_A_LTP_ONLY=1 \
+  LTP_CASE_FILTER=pwrite01,pwrite01_64,pwrite02,pwrite02_64,pwrite03,pwrite03_64,pwrite04,pwrite04_64,pwritev01,pwritev01_64,pwritev02,pwritev02_64,pwritev201,pwritev201_64,pwritev202,pwritev202_64 \
+  make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-pwrite-phase5.log
+TASK_A_LTP_ONLY=1 \
+  LTP_CASE_FILTER=pwrite01,pwrite01_64,pwrite02,pwrite02_64,pwrite03,pwrite03_64,pwrite04,pwrite04_64,pwritev01,pwritev01_64,pwritev02,pwritev02_64,pwritev201,pwritev201_64,pwritev202,pwritev202_64 \
+  make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-pwrite-phase5.log
+```
+
+宿主 probe 必须证明 append 写到旧 EOF、显式 offset 未覆盖原文件、payload 位于追加区，
+且 open-file offset 不变；清除 `O_APPEND` 后仍要保持普通定位覆盖。两份 guest 日志中
+musl/glibc 都必须出现 `SUMMARY: 16 passed, 0 failed`。LTP `pwrite04` 测的是 Linux
+对 POSIX 文本的已知偏离，覆盖矩阵应显式标记为 Linux ABI 兼容，不宣称为纯 POSIX
+行为。两架构必须顺序运行，因为 build target 会改写共享 Cargo config。
+
 Phase 5 iperf→iozone 固定顺序门禁：
 
 ```bash

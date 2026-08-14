@@ -65,6 +65,11 @@ pub trait FileOp: Any + Send + Sync {
     fn write_at_offset(&self, _offset: usize, _buf: &[u8]) -> SysResult<usize> {
         Err(Errno::ESPIPE)
     }
+    /// Linux pwrite path: O_APPEND selects EOF without modifying the shared
+    /// open-file offset. Other positioned kernel writers ignore O_APPEND.
+    fn pwrite_at_offset(&self, offset: usize, buf: &[u8]) -> SysResult<usize> {
+        self.write_at_offset(offset, buf)
+    }
     /// 检查文件对象是否支持偏移移动。
     fn can_seek(&self) -> SysResult;
     // 移动文件偏移
@@ -600,6 +605,75 @@ impl File {
         }
     }
 
+    fn write_locked(&self, inner: &mut FileInner, offset: usize, buf: &[u8]) -> SysResult<usize> {
+        if !buf.is_empty() && inner.path.mnt.is_readonly() {
+            return Err(Errno::EROFS);
+        }
+        let visible_path = inner.path.abs_path();
+        let path = self.storage_path(&visible_path);
+        let old_size = if let Some(ref pc) = inner.page_cache {
+            pc.len()
+        } else {
+            self.inode.stat(&path)?.size
+        };
+        if !buf.is_empty() {
+            let requested_end = offset.checked_add(buf.len()).ok_or(Errno::EINVAL)?;
+            check_mount_file_growth(&inner.path, old_size, requested_end)?;
+        }
+        if let Some(pc) = inner.page_cache.clone() {
+            let lower = inner.write_back.then_some((&self.inode, path.as_str()));
+            let n = pc.write_at(offset, buf, lower)?;
+            let end = offset.checked_add(n).ok_or(Errno::EINVAL)?;
+            if end > pc.len() {
+                pc.resize(end);
+            }
+            if inner.write_back && n != 0 {
+                let force = inner
+                    .flags
+                    .intersects(OpenFlags::O_DSYNC | OpenFlags::O_SYNC);
+                let now = Self::now_timespec();
+                Self::update_cached_write_times(inner, now);
+                let time_result = self.inode.note_data_write(path.as_str(), now);
+                register_dirty_owner(
+                    pc.clone(),
+                    self.inode.clone(),
+                    inner.path.mnt.fs.clone(),
+                    path.as_str(),
+                );
+                time_result?;
+                self.flush_page_cache_if_needed(&pc, &path, force)?;
+                if force {
+                    inner.path.mnt.fs.sync()?;
+                }
+            }
+            Ok(n)
+        } else {
+            let n = self.inode.write_at(&path, offset, buf)?;
+            if n != 0 {
+                if let Some((dev, ino)) = self.shared_page_identity {
+                    crate::mm::update_shared_file_pages(dev, ino, offset, &buf[..n]);
+                }
+            }
+            Ok(n)
+        }
+    }
+
+    pub fn pwrite_at_offset(&self, offset: usize, buf: &[u8]) -> SysResult<usize> {
+        let mut inner = self.inner.lock();
+        let write_offset = if inner.flags.contains(OpenFlags::O_APPEND) {
+            let visible_path = inner.path.abs_path();
+            let path = self.storage_path(&visible_path);
+            if let Some(ref pc) = inner.page_cache {
+                pc.len()
+            } else {
+                self.inode.stat(&path)?.size
+            }
+        } else {
+            offset
+        };
+        self.write_locked(&mut inner, write_offset, buf)
+    }
+
     fn touch_atime_if_needed(
         &self,
         path: &Arc<Path>,
@@ -708,9 +782,6 @@ impl FileOp for File {
 
     fn write<'a>(&'a self, buf: &'a [u8]) -> SysResult<usize> {
         let mut inner = self.inner.lock();
-        if !buf.is_empty() && inner.path.mnt.is_readonly() {
-            return Err(Errno::EROFS);
-        }
         let visible_path = inner.path.abs_path();
         let path = self.storage_path(&visible_path);
         if inner.flags.contains(OpenFlags::O_APPEND) {
@@ -723,51 +794,7 @@ impl FileOp for File {
         }
 
         let offset = inner.offset;
-        let old_size = if let Some(ref pc) = inner.page_cache {
-            pc.len()
-        } else {
-            self.inode.stat(&path)?.size
-        };
-        if !buf.is_empty() {
-            let requested_end = offset.checked_add(buf.len()).ok_or(Errno::EINVAL)?;
-            check_mount_file_growth(&inner.path, old_size, requested_end)?;
-        }
-        let n = if let Some(pc) = inner.page_cache.clone() {
-            let lower = inner.write_back.then_some((&self.inode, path.as_str()));
-            let n = pc.write_at(offset, buf, lower)?;
-            let end = offset.checked_add(n).ok_or(Errno::EINVAL)?;
-            if end > pc.len() {
-                pc.resize(end);
-            }
-            if inner.write_back && n != 0 {
-                let force = inner
-                    .flags
-                    .intersects(OpenFlags::O_DSYNC | OpenFlags::O_SYNC);
-                let now = Self::now_timespec();
-                Self::update_cached_write_times(&mut inner, now);
-                let time_result = self.inode.note_data_write(path.as_str(), now);
-                register_dirty_owner(
-                    pc.clone(),
-                    self.inode.clone(),
-                    inner.path.mnt.fs.clone(),
-                    path.as_str(),
-                );
-                time_result?;
-                self.flush_page_cache_if_needed(&pc, &path, force)?;
-                if force {
-                    inner.path.mnt.fs.sync()?;
-                }
-            }
-            n
-        } else {
-            let n = self.inode.write_at(&path, offset, buf)?;
-            if n != 0 {
-                if let Some((dev, ino)) = self.shared_page_identity {
-                    crate::mm::update_shared_file_pages(dev, ino, offset, &buf[..n]);
-                }
-            }
-            n
-        };
+        let n = self.write_locked(&mut inner, offset, buf)?;
         inner.offset += n;
         Ok(n)
     }
@@ -778,6 +805,10 @@ impl FileOp for File {
 
     fn write_at_offset(&self, offset: usize, buf: &[u8]) -> SysResult<usize> {
         File::write_at_offset(self, offset, buf)
+    }
+
+    fn pwrite_at_offset(&self, offset: usize, buf: &[u8]) -> SysResult<usize> {
+        File::pwrite_at_offset(self, offset, buf)
     }
 
     fn seek(&self, offset: isize) -> SysResult<usize> {

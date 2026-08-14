@@ -90,6 +90,7 @@ Phase 6 的调度器、allocator、异步 I/O 和细粒度锁重构。
 | realtime/纳秒/atime、user/system CPU time | Phase 1 与 CPU clock 文档保留明确边界 | 待验证 | 跨重启时间 probe 与 clock/accounting 子项 |
 | musl `pathconf()` pathname 错误 | 当前 RV64/LA64 镜像的 musl 反汇编证实 `pathconf` 丢弃 path；musl `pathconf02` 五项失败而 glibc 全通过 | 已知差异 | 待确认：可复现 musl 构建/镜像替换与完整 musl 回归 |
 | LA64 musl `readlink*()` 零长度 | musl 1.2.5 wrapper 把 size 0 转成内部 size 1 调用；内核已对真实 size 0 返回 `EINVAL`，RV64 musl 1.2.0 与两架构 glibc 通过 | 已知差异 | 待确认：是否修改 musl runtime；不在内核特判 size 1 |
+| `pwrite()` + `O_APPEND` | Linux baseline 与双架构 musl/glibc 16-case pwrite/pwritev 簇通过；显式记录为 Linux 偏离 POSIX 的兼容选择 | 双架构已验证 | 补大写/并发 append syscall 原子性 probe |
 | `pthread_*`/named sem/shm/AIO/`posix_spawn` | 尚无完整 libc 组合矩阵 | 待验证 | musl/glibc 同源 probe 簇 |
 | message queue、`mlockall`、XSI IPC | 需求尚无证据 | 可选扩展 | 需求触发记录；默认不实现 |
 

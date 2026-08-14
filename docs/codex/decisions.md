@@ -3,6 +3,19 @@
 这里只收录能解释当前代码形态或避免重复踩坑的决策。日期是当前证据最后核验时间，不一定是
 最初提出时间。
 
+## pwrite 在 O_APPEND 下选择 Linux ABI，不伪装成纯 POSIX 行为
+
+- 状态：已采用
+- 适用范围：`pwrite/pwrite64`、`O_APPEND`、LTP `pwrite04/pwrite04_64`
+- 最后验证：2026-08-14
+- 证据：`scripts/pwrite_append_probe_linux.c`、双架构 musl/glibc pwrite/pwritev 聚焦日志
+- 决策：RespOS 在 `O_APPEND` 下与 Linux 一致，让 `pwrite` 写到当前 EOF 而不修改
+  open-file offset。不采用 POSIX 文本中 `O_APPEND` 不影响 `pwrite` 显式 offset 的行为。
+- 原因：当前项目以 Linux syscall ABI、实际 musl/glibc workload 和 LTP 为可执行契约；
+  Linux 偏离是 LTP 明确测试的平台行为，继续保留纯 POSIX 选位会让四个目标环境都失败。
+- 后续影响：覆盖矩阵必须把这一项标记为 Linux 兼容选择，不得将它宣称为严格
+  POSIX 一致。mmap/splice 等内核定位写不经 pwrite ABI，不得继承该 append 规则。
+
 ## PID/TID 0 保留给 ABI 特殊语义，首个用户任务使用 PID 1
 
 - 状态：已采用，当前工作树待提交

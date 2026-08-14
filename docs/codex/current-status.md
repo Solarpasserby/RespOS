@@ -1,5 +1,23 @@
 # RespOS 当前状态
 
+## 2026-08-14 Linux/POSIX Phase 5 `pwrite()` + `O_APPEND`（当前工作树）
+
+- **目标契约**：Linux 在 open-file status 含 `O_APPEND` 时让 `pwrite()` 忽略显式 offset 并写到
+  EOF，但仍不修改共享 open-file offset；这是 Linux 对 POSIX “`pwrite` 不受 `O_APPEND`
+  影响”的已知偏离。`scripts/pwrite_append_probe_linux.c` 固定了 append 位置、payload、文件长度
+  和 open-file offset 不变四条边界，宿主以 `-Wall -Wextra -Werror` 通过。
+- **状态所有权**：`FileOp` 增加只供 pwrite syscall 使用的 `pwrite_at_offset()`。普通
+  `File` 在同一 open-file inner lock 下读取 `O_APPEND`、选择当前 page-cache/lower-inode
+  EOF 并完成写入，不推进 `inner.offset`。普通 `write()` 复用同一 locked writer 并仍推进
+  offset；mmap/splice 等内核定位写继续使用 `write_at_offset()`，不被 `O_APPEND` 意外改写。
+- **双架构证据**：RV64/LA64 release、初赛 snapshot、4 GiB/2 hart 聚焦运行
+  `pwrite01`--`pwrite04`、对应 `_64` 变体及 `pwritev01/02/201/202` 的 `_64`/非 `_64`
+  共 16 case；两架构 musl/glibc 四组均为 `SUMMARY: 16 passed, 0 failed`，日志为
+  `/tmp/respos-{rv,la}-pwrite-phase5.log`。
+- **剩余边界**：本轮关闭 LTP 覆盖的单调用语义并保持既有 pwritev 簇通过；大于
+  `IO_CHUNK_SIZE` 的单 syscall 与并发 append writer 之间仍可在内部 chunk 边界交错，完整
+  Linux write-call atomicity 需要单独并发 probe 和更大的 I/O 提交模型，本轮不宣称已关闭。
+
 ## 2026-08-14 Linux/POSIX Phase 5 LA64 musl `readlink*()` wrapper 差异（基于 `de7c880`）
 
 - **失败边界**：完整初赛日志中只有 LA64 musl 的 `readlink03/readlinkat02` 零长度项失败，

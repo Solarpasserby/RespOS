@@ -482,6 +482,8 @@ pub fn sys_pwrite64(fd: usize, buf: *mut u8, len: usize, offset: isize) -> SysRe
     }
     file.can_seek()?;
 
+    let file_flags = file.get_flags();
+    let append = file_flags.contains(OpenFlags::O_APPEND);
     let mut kbuf = alloc::vec![0u8; len.min(IO_CHUNK_SIZE)];
     let mut total = 0usize;
     let mut positioned_offset = offset as usize;
@@ -489,8 +491,12 @@ pub fn sys_pwrite64(fd: usize, buf: *mut u8, len: usize, offset: isize) -> SysRe
         let requested = (len - total).min(kbuf.len());
         let chunk_len = match limit_regular_file_write(
             &file,
-            OpenFlags::empty(),
-            Some(positioned_offset),
+            file_flags,
+            if append {
+                None
+            } else {
+                Some(positioned_offset)
+            },
             requested,
         ) {
             Ok(0) => break,
@@ -500,7 +506,7 @@ pub fn sys_pwrite64(fd: usize, buf: *mut u8, len: usize, offset: isize) -> SysRe
         if let Err(err) = copy_from_user(kbuf.as_mut_ptr(), unsafe { buf.add(total) }, chunk_len) {
             return if total == 0 { Err(err) } else { Ok(total) };
         }
-        let written = match file.write_at_offset(positioned_offset, &kbuf[..chunk_len]) {
+        let written = match file.pwrite_at_offset(positioned_offset, &kbuf[..chunk_len]) {
             Ok(written) => written,
             Err(err) => return if total == 0 { Err(err) } else { Ok(total) },
         };
