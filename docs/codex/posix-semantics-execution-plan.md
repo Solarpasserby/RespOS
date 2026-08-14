@@ -86,6 +86,7 @@ Phase 6 的调度器、allocator、异步 I/O 和细粒度锁重构。
 | termios/job control | 当前 tty ioctl 主要只有窗口查询，源码明确未建模 controlling tty | 已知差异 | tty/session/pgrp 状态设计和 probe |
 | leader `exit`、non-leader `exec` | `task_phase5_probe` 有三项 expected failure | 已知差异 | leader identity 与 de-thread 实现 |
 | process-pending、`SA_NOCLDWAIT`、通用 restart | signal 首轮只闭合查询/exec；restart 仅覆盖 `wait4` | 已知差异 | 分主题 signal probe，不做全局一刀切 restart |
+| futex absolute timeout / precise wake | RV64 bitset/wake 与 LA64 wake 双 libc 通过；LA64 首组 musl monotonic wait 在 secondary 上线窗口稳定延迟约 0.87 s，后续 realtime/glibc 正常 | 已知差异 | 待确认：审计 LA64 secondary 启动与跨 hart 时间/调度，不放宽 timeout 阈值 |
 | mmap EOF/truncate/SIGBUS | `mmap_phase5_probe` 有七项 expected failure | 已知差异 | resident provenance、truncate invalidation、fault 分类 |
 | `mmap/mprotect(PROT_NONE)` | LA64 software-present/hardware-invalid PTE；`mmap05` 与临时过滤的 `mprotect04` 双 libc 通过，RV64 回归通过 | 双架构已验证（当前范围） | 补 mprotect 失败原子性/并发 user-copy；旧 LA 模拟器上的 NR/NX 其他组合单列验证 |
 | realtime/纳秒/atime、user/system CPU time | Phase 1 与 CPU clock 文档保留明确边界 | 待验证 | 跨重启时间 probe 与 clock/accounting 子项 |

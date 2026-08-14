@@ -1,5 +1,20 @@
 # RespOS 当前状态
 
+## 2026-08-14 Linux/POSIX Phase 5 futex bitset/wake 清账与 LA64 冷启动阻断（基于 `b7cb356`）
+
+- **已关闭项**：release 初赛 snapshot、4 GiB/2 hart 聚焦
+  `futex_wait_bitset01,futex_wake03`；RV64 的 musl/glibc 两 case 均通过，其中 absolute
+  monotonic/realtime wait 约 100 ms，wake 依次精确唤醒 1--10 个 child 后返回 0。LA64 的
+  `futex_wake03` 两套 libc 也全部 11 项通过。日志为 `/tmp/respos-{rv,la}-futex-ltp-phase5.log`。
+- **LA64 稳定差异**：LA64 musl 是每次启动的第一组。其首个 absolute monotonic wait 两轮分别耗时
+  约 859 ms 和 872 ms，超过 LTP 的 200 ms 上限，且两轮都在等待期间打印 secondary hart online；
+  同一 case 随后的 realtime wait 约 100 ms。接着运行的 glibc monotonic/realtime 均约 100 ms。
+  第二轮日志为 `/tmp/respos-la-futex-wait-bitset-rerun-phase5.log`。
+- **边界判断**：当前证据说明 futex bitset 的 absolute timeout 解析、`ETIMEDOUT` 与正常 steady-state
+  路径可用，旧完整日志中的 RV realtime 早醒和 RV wake 首项未 reap 也未在当前 HEAD 复现；但不能把
+  LA64 musl 首组失败归咎于 libc，因为 syscall 确实阻塞约 0.87 s。现象与 secondary 启动窗口强相关，
+  归入待协商的 LA64 跨 hart 时间/启动调度审计；本轮不放宽测试、不伪造 deadline，也不修改架构时钟。
+
 ## 2026-08-14 Linux/POSIX Phase 5 `getcwd04` rename 竞态清账（基于 `8e2336a`）
 
 - **历史结果纠正**：`rv-output.txt`/`la-output.txt` 中两架构 musl/glibc 的 `getcwd04` 都以
