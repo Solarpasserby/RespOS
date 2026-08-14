@@ -1,5 +1,21 @@
 # RespOS 当前状态
 
+## 2026-08-14 Linux/POSIX Phase 5 RV64 musl `epoll_create()` wrapper 差异（基于 `2958fa5`）
+
+- **当前差异**：release 初赛镜像、4 GiB/2 hart 聚焦 `epoll_create02`；RV64 musl 的 libc variant
+  对 `size=0/-1` 都错误返回新 fd，case 为 `SUMMARY: 0 passed, 1 failed`；RV64 glibc 与 LA64
+  musl/glibc 均为 `SUMMARY: 1 passed, 0 failed`。两架构的 raw `__NR_epoll_create` variant 因没有
+  legacy syscall 编号而 `TCONF`，不是内核返回值失败。日志为
+  `/tmp/respos-{rv,la}-epoll-create-phase5.log`。
+- **libc 调用链**：实际镜像中 RV64 musl 1.2.0 的 `epoll_create` 无条件执行 `a0=0` 后跳到
+  `epoll_create1`，完全丢弃原 `size`；LA64 musl 1.2.5 则先判断 `size <= 0` 并在用户态返回
+  `EINVAL`，正数才调用 `epoll_create1(0)`。两份 libc 已导出并以符号反汇编核对。
+- **内核边界**：现代 RV64/LA64 ABI 只暴露 `epoll_create1(flags)`，其中 `flags=0` 是合法请求；
+  `sys_epoll_create1()` 无法判断这个 0 来自合法直接调用，还是旧 musl 丢弃后的 invalid size。
+  因此不得在内核拒绝 `epoll_create1(0)` 或按调用者二进制特判。
+- **当前状态**：该项记为 RV64 musl runtime `已知差异`，与现有 `pathconf/readlink` 一起等待协商
+  可复现的 libc 更新与镜像替换；本轮不修改 runtime，也不把 LA64/两组 glibc 的通过扩大成双架构闭合。
+
 ## 2026-08-14 Linux/POSIX Phase 5 `chroot()` 权限错误优先级（基于 `cd765fe` 的当前工作树）
 
 - **Linux 契约**：新增 `scripts/chroot_permission_probe_linux.c`，以非特权进程确认 pathname

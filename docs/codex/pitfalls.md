@@ -29,11 +29,12 @@
 ## libc 在用户态丢弃接口参数时，内核无法补回 POSIX 错误语义
 
 - 状态：已确认；当前 musl runtime 替换待协商
-- 适用范围：libc 组合接口、镜像内 musl/glibc 差异、LTP `pathconf02/readlink03/readlinkat02`
+- 适用范围：libc 组合接口、镜像内 musl/glibc 差异、LTP
+  `pathconf02/readlink03/readlinkat02/epoll_create02`
 - 最后验证：2026-08-14
 - 证据：当前 RV64/LA64 初赛镜像 `/musl/lib/libc.so` 的
-  `pathconf/fpathconf/readlink/readlinkat` 符号反汇编；
-  `rv-output.txt`/`la-output.txt` 中 musl/glibc `pathconf02/readlink03/readlinkat02` 对照
+  `pathconf/fpathconf/readlink/readlinkat/epoll_create` 符号反汇编；
+  对应 musl/glibc LTP 日志
 - 内容：当前镜像的 musl `pathconf(path, name)` 不访问 `path`，而是传
   `fpathconf(-1, name)` 后返回常量表。因此 `ENOTDIR/ENOENT/ENAMETOOLONG/EACCES/ELOOP`
   不可能由内核 namei 返回；即使修改 `statfs` 或路径解析也不会影响这条调用链。
@@ -41,6 +42,10 @@
   转换成内部 1-byte 缓冲区调用，使内核只能看到合法的截断读。内核既不能恢复原始
   `bufsiz==0`，也不能把所有 size 1 请求改为 `EINVAL`。RV64 musl 1.2.0 直接传参，所以
   同一内核上只有 LA64 musl 失败。
+- 内容：RV64 musl 1.2.0 的 `epoll_create(size)` 无条件清零参数后调用合法的
+  `epoll_create1(0)`；LA64 musl 1.2.5 已在 wrapper 中拒绝 `size <= 0`。现代 RV64/LA64
+  没有 legacy `epoll_create` syscall，内核若为修 LTP 而拒绝 flags 0，会同时破坏所有合法
+  `epoll_create1(0)` 调用。
 - 后续影响：遇到只在一种 libc 复现的接口差异时，先从实际测试镜像导出 libc，
   确认参数是否到达 syscall，再决定内核所有者。不得特判 LTP runner；替换整套 libc
   必须单独协商并跑完整相关 workload。

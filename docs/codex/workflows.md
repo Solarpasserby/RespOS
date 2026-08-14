@@ -520,6 +520,25 @@ musl 1.2.0 则直接发起 `readlinkat` syscall。内核 `sys_readlinkat()` 已�
 返回 `EINVAL`，不得为让 LA64 musl `readlink03/readlinkat02` 通过而拒绝所有 size 1
 的合法截断读。
 
+RV64 musl `epoll_create()` invalid-size 差异使用同一份镜像导出物审计：
+
+```bash
+rust-objdump --disassemble-symbols=epoll_create /tmp/respos-rv-musl-libc.so
+rust-objdump --disassemble-symbols=epoll_create /tmp/respos-la-musl-libc.so
+
+TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=epoll_create02 \
+  make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-epoll-create-phase5.log
+TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=epoll_create02 \
+  make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-epoll-create-phase5.log
+```
+
+RV64 musl 1.2.0 应显示清零 `a0` 后直接跳到 `epoll_create1`，其 `epoll_create02` libc
+variant 失败；LA64 musl 1.2.5 应先判断 `size <= 0` 并返回 `EINVAL`，与两架构 glibc 一样通过。
+raw syscall variant 在两架构均因没有 legacy `__NR_epoll_create` 而 `TCONF`。不得修改内核
+`sys_epoll_create1()` 去拒绝 flags 0；该值是现代 ABI 的合法无 flag 调用。
+
 Phase 5 `pwrite()` + `O_APPEND` Linux 对照与 pwrite/pwritev 簇：
 
 ```bash
