@@ -502,6 +502,20 @@ TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=pathconf01,pathconf02 \
   make run-la-pre PRE_MEM=4G PRE_SMP=2
 ```
 
+LA64 musl `readlink*()` 零长度差异可复用上述导出的 libc 继续审计：
+
+```bash
+strings -a /tmp/respos-la-musl-libc.so | rg '^1\.[0-9]+\.[0-9]+$'
+rust-objdump --disassemble-symbols=readlink,readlinkat /tmp/respos-la-musl-libc.so
+strings -a /tmp/respos-rv-musl-libc.so | rg '^1\.[0-9]+\.[0-9]+$'
+rust-objdump --disassemble-symbols=readlink,readlinkat /tmp/respos-rv-musl-libc.so
+```
+
+当前 LA64 musl 1.2.5 应显示零长度分支把 buffer 换成栈地址、size 改为 1；RV64
+musl 1.2.0 则直接发起 `readlinkat` syscall。内核 `sys_readlinkat()` 已对实际传入的 size 0
+返回 `EINVAL`，不得为让 LA64 musl `readlink03/readlinkat02` 通过而拒绝所有 size 1
+的合法截断读。
+
 Phase 5 iperf→iozone 固定顺序门禁：
 
 ```bash

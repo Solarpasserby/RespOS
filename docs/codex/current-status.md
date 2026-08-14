@@ -1,5 +1,21 @@
 # RespOS 当前状态
 
+## 2026-08-14 Linux/POSIX Phase 5 LA64 musl `readlink*()` wrapper 差异（基于 `de7c880`）
+
+- **失败边界**：完整初赛日志中只有 LA64 musl 的 `readlink03/readlinkat02` 零长度项失败，
+  这两项分别调用 `readlink(symlink, buf, 0)` 与 `readlinkat(dirfd, symlink, buf, 0)`；RV64
+  musl 与两架构 glibc 均得到 LTP 要求的 `EINVAL`。其他 pathname/type/fd/fault 错误项已通过。
+- **libc 调用链**：当前 LA64 `/musl/lib/libc.so` 是 musl 1.2.5；`readlink` 和
+  `readlinkat` 在 `bufsiz==0` 时都把用户 buffer 替换为 1-byte 栈缓冲区，把 size 改为 1 再执行
+  syscall，并在 symlink 非空时把成功短读归一成 0。RV64 镜像是 musl 1.2.0，其 wrapper
+  直接传递零长度，因而没有该差异。
+- **内核边界**：RespOS `sys_readlinkat()` 在路径解析与 copyout 之前已对真实
+  `bufsize==0` 返回 `EINVAL`；当 LA64 musl 传入有效栈地址和 size 1 时，内核无法区分这是
+  wrapper 的零长度代理还是应用真正请求的 1-byte 截断读。修改内核会破坏合法短读。
+- **当前状态**：该项记为 libc/LTP `已知差异`，不记为内核失败。若要让 LA64 musl
+  这两个 LTP 项通过，需要打补丁或替换 musl runtime 后跑完整 musl 回归，与
+  `pathconf()` 一样属于待用户确认的较大改动。
+
 ## 2026-08-14 Linux/POSIX Phase 5 musl `pathconf()` libc 阻断（基于 `26852ff`）
 
 - **当前现象**：RV64/LA64 完整初赛日志 `rv-output.txt`/`la-output.txt` 中，musl
