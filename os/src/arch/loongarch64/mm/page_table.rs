@@ -17,6 +17,7 @@
 //   bit 6: G (Global)
 //   bit 7: P (software present)
 //   bit 8: W (software writable)
+//   bit 10: PROTNONE (software-present leaf with no hardware access)
 //   bit 61: NR (No Read)
 //   bit 62: NX (No Execute)
 //   bit 63: RPLV
@@ -43,6 +44,7 @@ const PMD_HUGE: usize = 1 << 6;
 const PTE_P: usize = 1 << 7;
 const PTE_W: usize = 1 << 8;
 const PTE_COW: usize = 1 << 9;
+const PTE_PROTNONE: usize = 1 << 10;
 const PTE_NR: usize = 1usize << 61;
 const PTE_NX: usize = 1usize << 62;
 const PTE_PPN_MASK: usize = ((1usize << PPN_WIDTH) - 1) << 12;
@@ -492,7 +494,9 @@ impl From<MapPermission> for PTEFlags {
 /// 将通用 PTEFlags 转换为 LoongArch PTE bits。
 fn flags_to_la64(flags: PTEFlags) -> usize {
     let mut la64: usize = 0;
-    if flags.contains(PTEFlags::VALID) {
+    let prot_none = flags.contains(PTEFlags::USER)
+        && !flags.intersects(PTEFlags::READ | PTEFlags::WRITE | PTEFlags::EXECUTE);
+    if flags.contains(PTEFlags::VALID) && !prot_none {
         la64 |= PTE_V;
     }
     if flags.contains(PTEFlags::DIRTY) || flags.contains(PTEFlags::WRITE) {
@@ -507,6 +511,12 @@ fn flags_to_la64(flags: PTEFlags) -> usize {
     }
     if flags.contains(PTEFlags::VALID) {
         la64 |= PTE_P;
+    }
+    if flags.contains(PTEFlags::VALID) && prot_none {
+        // QEMU 10.0.2 masks NR/NX out while executing LDPTE. Keep the leaf
+        // software-present but hardware-invalid so PROT_NONE remains
+        // inaccessible there as well as on hardware/newer emulators.
+        la64 |= PTE_PROTNONE;
     }
     if flags.contains(PTEFlags::WRITE) {
         la64 |= PTE_W;
@@ -526,7 +536,7 @@ fn flags_to_la64(flags: PTEFlags) -> usize {
 /// 将 LoongArch PTE bits 转换为通用 PTEFlags。
 fn flags_from_la64(bits: usize) -> PTEFlags {
     let mut flags = PTEFlags::empty();
-    if bits & PTE_V != 0 {
+    if bits & (PTE_V | PTE_PROTNONE) != 0 {
         flags |= PTEFlags::VALID;
     }
     if bits & PTE_W != 0 {
@@ -579,7 +589,10 @@ impl PageTableEntry {
     }
 
     pub fn is_valid(&self) -> bool {
-        self.bits & PTE_V != 0
+        // Callers use is_valid() as the resident/software-present predicate.
+        // PROT_NONE leaves deliberately clear hardware V but must still be
+        // found by mprotect(), munmap(), and fork().
+        self.bits & (PTE_V | PTE_PROTNONE) != 0
     }
 
     fn is_huge(&self) -> bool {

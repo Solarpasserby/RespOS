@@ -187,6 +187,21 @@
   PTE 带 USER；VMA/PTE 权限相容；私有 COW 页不同时可写；shared mapping 不进入私有 COW。
 - 后续影响：debug 启动自检失败应视为结构性错误，不能通过关闭断言完成验收。
 
+### LA64 `PROT_NONE` 叶子区分软件 present 与硬件 valid
+
+- 状态：已实现并通过双架构聚焦回归
+- 适用范围：LA64 用户 `mmap(PROT_NONE)`、`mprotect(PROT_NONE)`、fault、fork、munmap
+- 最后验证：2026-08-14
+- 证据：`os/src/arch/loongarch64/mm/page_table.rs`；LA64 `mmap05`/`mprotect04` 与 RV64
+  `mmap05,mprotect05` release、4 GiB/2 hart 日志，详见 `current-status.md`
+- 内容：普通 LA64 resident leaf 同时具有硬件 `V` 与 bit 7 software-present；用户 `PROT_NONE`
+  leaf 保留 PPN、software-present 和 bit 10 `PROTNONE`，但清硬件 `V`。页表 API 的
+  `PageTableEntry::is_valid()` 是软件 resident/present 谓词，而 refill 只认硬件 `V`。因此权限 fault
+  不会被误判为 lazy 未分配，mprotect 可在原 PPN 上恢复权限，fork/munmap 也不会遗失 resident frame。
+- 后续影响：新增叶子状态时必须明确“软件是否拥有映射”和“硬件能否访问”两个维度；不能用硬件
+  `V=0` 单独判断 lazy hole，也不能把 `PROTNONE` 用到中间页表项。其他无读/无执行组合仍由 NR/NX
+  表达，是否需要针对旧模拟器增加更强隔离必须由独立契约和测试决定。
+
 ### RV64 `MemorySet` active CPU 与 shootdown
 
 - 状态：已实现，目标 QEMU/OpenSBI 专项压力已通过

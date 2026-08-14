@@ -757,6 +757,23 @@
   也必须释放以覆盖 exec 失败。父 waiter 必须先登记，child 才能进入 ready queue；不要以普通
   SIGCHLD、yield 或单核通过代替该协议。
 
+## QEMU 10.0.2 LoongArch `LDPTE` 会截掉 PTE 的 NR/NX 高位
+
+- 状态：已确认并为 `PROT_NONE` 增加兼容表示
+- 适用范围：QEMU 10.0.2 TCG、LA64 软件 TLB refill、PTE bit 61 NR/bit 62 NX
+- 最后验证：2026-08-14；release、4 GiB/2 hart
+- 证据：[QEMU v10.0.2 `helper_ldpte()`](https://github.com/qemu/qemu/blob/v10.0.2/target/loongarch/tcg/tlb_helper.c#L535-L590)；
+  [当前 QEMU 主线 `loongarch_sanitize_hw_pte()`](https://github.com/qemu/qemu/blob/master/target/loongarch/tcg/tlb_helper.c#L653-L664)；
+  `os/src/arch/loongarch64/mm/page_table.rs`；修复前后 LA64
+  `mmap05` 日志见 `current-status.md`
+- 内容：v10.0.2 从 guest 页表读出 leaf 后对整个值执行 `& TARGET_PHYS_MASK`，bit 61/62 在写入
+  TLBRELO 前已消失；CPU 虽声明支持 read-inhibit，TLB 中实际没有 NR，所以 `PROT_NONE` 可被读取。
+  当前 QEMU 主线已只对 PPN 部分施加物理地址宽度掩码，并保留硬件定义的 NR/NX/RPLV。RespOS 的
+  位号没有错误，反复交换 NR/NX 或在 trap 层伪造信号都不能解决旧 refill 的截位。
+- 后续影响：必须先区分 guest PTE 写入值与最终 TLB entry，再诊断权限失效；`PROT_NONE` 使用硬件
+  `V=0` 加 software-present/PROTNONE 避开该问题。execute-only/write-only 等仍依赖 NR/NX 的组合
+  不应在 QEMU 10.0.2 上未经专项测试就宣称最小权限严格生效；升级模拟器也不能替代目标比赛环境回归。
+
 ## lazy VMA 销毁不能按虚拟跨度逐页扫描
 
 - 状态：回收复杂度已修复，完整 BuildStorm 仍待验证

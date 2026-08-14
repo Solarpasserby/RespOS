@@ -1,5 +1,27 @@
 # RespOS 当前状态
 
+## 2026-08-14 Linux/POSIX Phase 5 LA64 `PROT_NONE`（基于 `7619764` 的当前工作树）
+
+- **失败边界**：release 初赛 snapshot、4 GiB/2 hart 聚焦 `mmap05`；修复前 RV64 的
+  musl/glibc 均收到预期 `SIGSEGV`，LA64 的 musl/glibc 却都能从 `PROT_NONE` 文件映射读到原字节，
+  因而分别为 `SUMMARY: 1 passed, 0 failed` 与 `SUMMARY: 0 passed, 1 failed`。基线日志为
+  `/tmp/respos-{rv,la}-mmap05-phase5.log`。
+- **根因与表示**：LA64 PTE 的 `NR=61`、`NX=62` 位号正确；本地 QEMU 10.0.2 的软件 refill
+  `helper_ldpte()` 却把读出的整个 PTE 与 `TARGET_PHYS_MASK` 相与，导致高位 inhibit 标记在进入 TLB
+  前丢失。当前只对用户 `PROT_NONE` 叶子清硬件 `V`，同时保留 bit 10 `PROTNONE` 与 bit 7 software
+  present；`PageTableEntry::is_valid()` 表示 resident/software-present，因此 `mprotect()`、`munmap()`、
+  `fork()` 与 debug invariant 仍能找到该页，而硬件访问稳定触发 page-invalid fault。普通 R/W/X 页、
+  页表目录项和 RV64 后端不变。
+- **验证证据**：修复后 LA64 聚焦 `mmap05` 的 musl/glibc 均为
+  `SUMMARY: 1 passed, 0 failed`，日志 `/tmp/respos-la-mmap05-protnone-fix.log`；临时仅把 LTP
+  `mprotect04` 加入构建过滤后，两套 libc 的 `RW -> PROT_NONE` SIGSEGV 与后续 `PROT_EXEC` 恢复两项
+  均 `TPASS`，日志 `/tmp/respos-la-mprotect04-protnone-fix.log`，默认 LTP 清单随后恢复原样。既有
+  `mprotect05` 在 LA64 双 libc 通过；RV64 回归 `mmap05,mprotect05` 双 libc 各
+  `SUMMARY: 2 passed, 0 failed`，日志 `/tmp/respos-rv-protnone-regression.log`。
+- **剩余边界**：本轮只关闭 `PROT_NONE` 的 mmap/mprotect 可观察权限及恢复路径；mmap EOF/truncate/
+  `SIGBUS`、mprotect 失败原子性与并发 user-copy、LA64 QEMU 10.0.2 上单独依赖 NX/NR 的 execute-only/
+  write-only 最小权限仍需各自验证，不能由本轮结果外推为 MM Phase 5 全闭合。
+
 ## 2026-08-14 Linux/POSIX Phase 5 musl `recvmmsg()` bad-vector wrapper 阻断（基于 `659eeb9`）
 
 - **当前差异**：release 初赛镜像、4 GiB/2 hart 聚焦 `recvmmsg01`；RV64/LA64 musl 都在第一项
