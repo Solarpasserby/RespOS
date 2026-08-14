@@ -307,6 +307,8 @@ counters!(
     ext4_lookup_ticks,
     ext4_readdir_calls,
     ext4_readdir_ticks,
+    ext4_readdir_dirent_type_known,
+    ext4_readdir_dirent_type_unknown,
     ext4_create_calls,
     ext4_create_ticks,
     ext4_write_calls,
@@ -528,6 +530,14 @@ increment_functions!(
     (ext4_lookup_ticks, ext4_lookup_ticks),
     (ext4_readdir_call, ext4_readdir_calls),
     (ext4_readdir_ticks, ext4_readdir_ticks),
+    (
+        ext4_readdir_dirent_type_known,
+        ext4_readdir_dirent_type_known
+    ),
+    (
+        ext4_readdir_dirent_type_unknown,
+        ext4_readdir_dirent_type_unknown
+    ),
     (ext4_create_call, ext4_create_calls),
     (ext4_create_ticks, ext4_create_ticks),
     (ext4_write_call, ext4_write_calls),
@@ -1322,7 +1332,7 @@ pub fn render() -> String {
     );
     let _ = writeln!(
         out,
-        "ext4_ops_stat_calls={} stat_ticks={} stat_cache_hits={} stat_cache_misses={} stat_cache_refills={} stat_cache_uncacheable={} stat_cache_invalidations={} lookup_calls={} lookup_ticks={} readdir_calls={} readdir_ticks={} create_calls={} create_ticks={} write_calls={} write_ticks={}",
+        "ext4_ops_stat_calls={} stat_ticks={} stat_cache_hits={} stat_cache_misses={} stat_cache_refills={} stat_cache_uncacheable={} stat_cache_invalidations={} lookup_calls={} lookup_ticks={} readdir_calls={} readdir_ticks={} readdir_dirent_type_known={} readdir_dirent_type_unknown={} create_calls={} create_ticks={} write_calls={} write_ticks={}",
         s.ext4_stat_calls,
         s.ext4_stat_ticks,
         s.ext4_stat_cache_hits,
@@ -1334,6 +1344,8 @@ pub fn render() -> String {
         s.ext4_lookup_ticks,
         s.ext4_readdir_calls,
         s.ext4_readdir_ticks,
+        s.ext4_readdir_dirent_type_known,
+        s.ext4_readdir_dirent_type_unknown,
         s.ext4_create_calls,
         s.ext4_create_ticks,
         s.ext4_write_calls,

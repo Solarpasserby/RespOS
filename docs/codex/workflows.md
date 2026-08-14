@@ -655,9 +655,13 @@ inode/dirent 快路径后至少运行：
 /> frame_reclaim_probe
 ```
 
+`fs_namespace_probe` 还必须输出 `FS_NAMESPACE_DIRENT_TYPE_PASS`，其真实 `getdents64` 解析需确认
+目录、普通文件和相对 symlink 分别为 `DT_DIR/DT_REG/DT_LNK`。计数内核同时检查
+`ext4_readdir_dirent_type_known/unknown`：当前公开 RV/LA 镜像的 BuildStorm 短窗口应以 known 为主，
+但 UNKNOWN 必须继续走 child pathname mode 回退，不能把 `unknown=0` 当作删除兼容路径的依据。
 stat 输出需核对 size/inode/mode/uid/gid；最终还需覆盖 symlink size、uid/gid 高位、超过 4 GiB size 和
-LTP stat/fstatat。固定窗口比较必须同时报告阶段进度，不能因优化版在同一时间内执行了更多调用而只比较
-累计 ticks。
+LTP stat/fstatat。固定窗口比较必须同时报告阶段进度；若进度不同，优先报告每次 readdir/lower call 的
+归一化 ticks，并补一个操作计数相同的目录遍历 A/B，不能因优化版执行了更多或更少工作只比较累计值。
 
 当 stat/lookup 降低后，继续查看 `ext4_lock_*_by_class`。class 只用于分析，所有 class 仍必须串行于
 同一把 `EXT4_OP_LOCK`；不能据此拆成多把锁。若 attributes 占主要 hold，同时对照每类 acquisitions：

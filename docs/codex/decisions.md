@@ -123,6 +123,23 @@
   stat/namei ABI 回归。新增修改 inode 元数据的路径必须同时失效快照，不得为命中率容忍陈旧
   size/mode/owner/time/nlink。
 
+## ext4 readdir 优先使用已验证的目录项类型，只为 UNKNOWN 重走 child path
+
+- 状态：已采用，完整 BuildStorm final 待验证
+- 适用范围：ext4 `getdents64`、Cargo 大目录遍历、lwext4 dirent ABI
+- 最后验证：2026-08-14
+- 证据：`os/src/fs/ext4/inode.rs`、`os/src/perf.rs`、
+  `user/src/bin/fs_namespace_probe.rs`；RV64 同工作量目录遍历 A/B、RV64/LA64 120 秒窗口和无 feature
+  专项门禁
+- 内容：lwext4 在读取目录项时已经按 superblock `FILETYPE` feature 解析 inode type。已知的
+  regular/directory/symlink 等类型直接转换为 VFS `InodeType`，不再对每项调用 pathname-based
+  `ext4_mode_get`；只有 `EXT4_DE_UNKNOWN` 才保留原 child path 回退。`.`/`..` 不引入额外 alias
+  解析，统一 ext4 锁、iterator 和 offset 语义均不改变。
+- 后续影响：不得假设所有 ext4 镜像都有 FILETYPE，也不能把 UNKNOWN 强行猜成 regular；新增类型或
+  修改 dirent FFI ABI 时必须保留回退并用真实 `getdents64` 验证 `DT_DIR/DT_REG/DT_LNK`。目录项类型是
+  on-disk dirent 自带信息，不等同于批准目录内容缓存；后者仍需 generation、rename/unlink 和并发
+  iterator 的独立一致性设计。
+
 ## lwext4 元数据 block cache 使用 4096 个 filesystem blocks
 
 - 状态：已采用，完整 BuildStorm 计时待验证

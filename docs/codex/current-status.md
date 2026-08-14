@@ -141,6 +141,39 @@
   `/dev/shm` open，但随后暴露 `waitpid(...)=EINTR` 的独立 LTP blocker，不能计作 shm 修复失败或整体
   LTP 通过。日志为 `/tmp/respos-{rv,la}-shm-ltp.log`；完整初赛仍待用户复跑。
 
+## 2026-08-14 P0：ext4 readdir 复用目录项类型（双架构专项通过，完整 final 待验证）
+
+- **实现与语义边界**：`Ext4Inode::readdir()` 现在直接使用 lwext4 已解析的 ext4 directory entry
+  file type 生成 `d_type`；只有后端返回 `EXT4_DE_UNKNOWN` 时才回退到原有 child pathname
+  `ext4_mode_get`。`.`/`..` 的 UNKNOWN 行为保持原样，所有 lwext4 C 入口仍持同一
+  `EXT4_OP_LOCK`，没有目录内容缓存、BuildStorm 路径特判或锁域拆分。该回退覆盖未启用 ext4
+  `FILETYPE` feature 的合法文件系统，不能为了命中率删除。
+- **可观测性与专项门禁**：`perf_counters` 新增 `ext4_readdir_dirent_type_known/unknown`；
+  `fs_namespace_probe` 通过真实 `getdents64` 解析验证目录、普通文件和相对符号链接分别返回
+  `DT_DIR/DT_REG/DT_LNK`，输出 `FS_NAMESPACE_DIRENT_TYPE_PASS`。RV64 无 feature 还通过 namespace
+  race 1200 轮、metadata、Phase4、BuildStorm file/private-map、shared-MM 100 轮和 frame-reclaim；
+  LA64 通过 d_type、namespace、metadata 与 BuildStorm file。日志
+  `/tmp/respos-rv-readdir-p0-probes.log`（SHA-256 `dbabb92d...87b0`）和
+  `/tmp/respos-la-readdir-p0-probes.log`（`dc94e71a...0078`）。Rust 1.86 的 RV64/LA64、
+  `perf_counters`/无 feature release 组合均构建通过；按线上准确入口 `make all` 收尾重建的正式无
+  feature `kernel-rv/kernel-la` SHA-256 分别为 `759b418b...53a3`/`ccd368be...1424`。
+- **同工作量 RV A/B**：同一 4 GiB/8 hart、相同 root/x1 snapshot 对 `/work/tgoskits` 执行 BusyBox
+  `find -type f`。两轮都因镜像中两个不可表示路径报告 status 1，但 FS/block 操作计数完全相同，故可
+  比较共同完成的目录遍历。旧内核到候选的 wall 为 `36.75 -> 35.77s`（`-2.67%`），lower readdir
+  calls `47294 -> 31672`（`-33.03%`）、readdir ticks `60875932 -> 11461818`（`-81.17%`）、
+  ext4 readdir hold `60807713 -> 11386903`（`-81.27%`）；heap alloc calls/bytes 分别下降
+  `5.03%/9.38%`。候选返回 `22042` 个 known、`0` 个 unknown；lower calls 精确等于
+  `known + 3 * readdir_calls`，剩余三次是每轮 open/end/close。日志
+  `/tmp/respos-rv-readdir-p0-micro-{baseline,candidate}.log`，SHA-256 分别为
+  `ded8cd5f...97cd`/`62ca53a4...6cb`。
+- **BuildStorm 短窗口**：RV64 16 GiB/8 hart 的单次 readdir 平均从约 `3.833ms` 降至 `0.199ms`
+  （`-94.8%`），LA64 12 GiB/12 hart 从约 `1.758ms` 降至 `0.277ms`（`-84.2%`）；候选分别记录
+  `9501/9509` 个 known 和 `0/0` 个 unknown。日志
+  `/tmp/respos-rv-readdir-p0-120.log`（SHA-256 `c1a4ab0c...ad33`）和
+  `/tmp/respos-la-readdir-p0-12h-120.log`（`264ce543...2b3`）。两组候选在 120 秒内的编译进度都少于
+  各自历史基线，宿主状态没有形成相邻、同进度 A/B，因此这些归一化 ticks 只能证明 P0 热点消除，
+  不能宣称完整 BuildStorm wall 加速。完整无 feature final 与平台时限结果仍标记 `待验证`。
+
 ## 2026-08-14 RV64 final SIGBUS：VirtIO 跨非连续物理页 DMA（已修复并完整通过）
 
 - **平台症状**：用户提供的正式 RV64 输出在 CAgent 后读取 BuildStorm/Rust 工具链时出现文件内容损坏，

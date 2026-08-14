@@ -1193,9 +1193,19 @@ impl InodeOp for Ext4Inode {
             }
             let name_len = dirent.name_length as usize;
             let name = core::str::from_utf8(&dirent.name[..name_len]).map_err(|_| Errno::EINVAL)?;
-            let ty = if name == "." || name == ".." {
-                InodeType::from(Ext4InodeTypes::from(dirent.inode_type as usize))
+            let dirent_ty = Ext4InodeTypes::from(dirent.inode_type as usize);
+            let ty = if dirent_ty != Ext4InodeTypes::EXT4_DE_UNKNOWN {
+                crate::perf::ext4_readdir_dirent_type_known(1);
+                InodeType::from(dirent_ty)
+            } else if name == "." || name == ".." {
+                // DT_UNKNOWN is a valid result when the filesystem does not
+                // store file types in directory entries.  Preserve it for the
+                // synthetic self/parent entries rather than constructing an
+                // alias-sensitive fallback path for `..`.
+                crate::perf::ext4_readdir_dirent_type_unknown(1);
+                InodeType::Unknown
             } else {
+                crate::perf::ext4_readdir_dirent_type_unknown(1);
                 let child_path = Self::child_path(path, name);
                 let Some(ty) = Self::inode_mode_type(&child_path) else {
                     continue;

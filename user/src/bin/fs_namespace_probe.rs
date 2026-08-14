@@ -5,13 +5,15 @@
 extern crate user_lib;
 
 use user_lib::{
-    O_CREATE, O_RDONLY, O_RDWR, O_TRUNC, SEEK_SET, Stat, chdir, close, exit, fork, fstat, link,
-    lseek, mkdir, open, pipe, read, rename, rmdir, stat, unlink, waitpid, write, yield_,
+    O_CREATE, O_RDONLY, O_RDWR, O_TRUNC, SEEK_SET, Stat, chdir, close, exit, fork, fstat,
+    getdents64, link, lseek, mkdir, open, pipe, read, rename, rmdir, stat, symlink, unlink,
+    waitpid, write, yield_,
 };
 
 const DIR_A: &str = "/respos-ns-a\0";
 const DIR_B: &str = "/respos-ns-b\0";
 const SOURCE: &str = "/respos-ns-a/source\0";
+const TYPE_LINK: &str = "/respos-ns-a/type-link\0";
 const ALIAS: &str = "/respos-ns-a/alias\0";
 const MOVED: &str = "/respos-ns-b/moved\0";
 const REPLACE_SRC: &str = "/respos-ns-a/replace-src\0";
@@ -27,6 +29,48 @@ const DIR_REPLACE_DST: &str = "/respos-ns-a/dir-replace-dst\0";
 const CWD_HOLD: &str = "/respos-ns-cwd-hold\0";
 const CWD_REUSE: &str = "/respos-ns-cwd-reuse\0";
 const DOT: &str = ".\0";
+const DIRENT64_HEADER_SIZE: usize = 19;
+const DT_DIR: u8 = 0o4;
+const DT_REG: u8 = 0o10;
+const DT_LNK: u8 = 0o12;
+
+fn assert_dirent_type(dir_path: &str, name: &[u8], expected: u8) {
+    let fd = open(dir_path, O_RDONLY, 0);
+    assert!(fd >= 0, "open directory failed: {} ret={}", dir_path, fd);
+    let fd = fd as usize;
+    let mut buf = [0u8; 1024];
+    let mut found = false;
+
+    loop {
+        let size = getdents64(fd, &mut buf);
+        assert!(size >= 0, "getdents64 failed: {} ret={}", dir_path, size);
+        if size == 0 {
+            break;
+        }
+        let size = size as usize;
+        let mut offset = 0;
+        while offset + DIRENT64_HEADER_SIZE <= size {
+            let reclen = u16::from_le_bytes([buf[offset + 16], buf[offset + 17]]) as usize;
+            assert!(
+                reclen >= DIRENT64_HEADER_SIZE && offset + reclen <= size,
+                "invalid dirent record"
+            );
+            let name_start = offset + DIRENT64_HEADER_SIZE;
+            let name_len = buf[name_start..offset + reclen]
+                .iter()
+                .position(|byte| *byte == 0)
+                .unwrap_or(offset + reclen - name_start);
+            if &buf[name_start..name_start + name_len] == name {
+                assert_eq!(buf[offset + 18], expected, "unexpected d_type");
+                found = true;
+            }
+            offset += reclen;
+        }
+        assert_eq!(offset, size, "truncated dirent record");
+    }
+    assert_eq!(close(fd), 0);
+    assert!(found, "directory entry not found: {}", dir_path);
+}
 
 fn path_stat(path: &str) -> Stat {
     let mut value = Stat::default();
@@ -53,6 +97,7 @@ fn cleanup() {
         CHILD_OLD,
         CHILD_NEW,
         SOURCE,
+        TYPE_LINK,
         ALIAS,
         MOVED,
         REPLACE_SRC,
@@ -79,6 +124,11 @@ fn main() -> i32 {
     assert_eq!(mkdir(DIR_B, 0o755), 0);
 
     let source_fd = create(SOURCE, b"source");
+    assert_eq!(symlink("source\0", TYPE_LINK), 0);
+    assert_dirent_type("/\0", b"respos-ns-a", DT_DIR);
+    assert_dirent_type(DIR_A, b"source", DT_REG);
+    assert_dirent_type(DIR_A, b"type-link", DT_LNK);
+    println!("FS_NAMESPACE_DIRENT_TYPE_PASS");
     let source_ino = fd_stat(source_fd).st_ino;
     assert_eq!(close(source_fd), 0);
     let reopened = open(SOURCE, O_RDONLY, 0);

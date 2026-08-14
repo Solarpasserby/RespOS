@@ -13,6 +13,8 @@ completion、ASID op=4 与失效范围传播，并以 LA 12 GiB/12 hart 完整 f
    R3，故只恢复为 default-off 正向候选；范围请求继续以单次 op=4 覆盖，op=5 与 huge-global 禁用；
 3. 按本文件 A0--A2 独立推进现有 buddy 上的有界 per-hart 小对象 cache；
 4. 在资源允许或平台恢复后验证正式 LA `-m 36G -smp 12` 镜像与时限。
+5. 当前 P0 已在 RV64/LA64 完成 ext4 readdir dirent-type 快路：已知类型不再逐项重走 child path，
+   UNKNOWN 回退和统一 ext4 锁保持不变；双架构专项与短窗口通过，完整 final/平台时限仍待验证。
 
 课程评测平台当前暂不可用；平台成绩与正式 36 GiB 结果标记 `待验证`。本地 12 GiB 功能或短窗口不能
 替代平台结论。双线协作时，架构线修改 `MemorySet`、scheduler/processor、trap context 或公共 arch API
@@ -74,7 +76,7 @@ buffer 语义与 readdir iterator 快照保持不变。短窗口门槛已通过�
 约 1.65%。按既定门槛，本 E1 收口并保留，但不继续扩大 ext4/PageCache 重构；E0 的 hart 缩放作为
 后续选题证据独立完成，不阻塞本次可归因提交。
 
-2026-08-14 已在提交 `0052fc5` 完成 LA `1/3/6/12` hart、jobs 同步变化的 120 秒冷启动矩阵，原始
+2026-08-14 已在提交 `277ceaa8` 完成 LA `1/3/6/12` hart、jobs 同步变化的 120 秒冷启动矩阵，原始
 日志/hash/计数见 `current-status.md`。1 hart 只到 `core`，3/6/12 hart 均到 23 个 `Compiling` marker
 和 `ax-posix-api`，且后三点 FS/heap/fault 工作量近似相等。3/6/12 hart 平均只有约
 `1.25/1.34/1.43` 个 hart 运行，ready=0 样本约 `98.3%/98.4%/99.7%`；因此 E0 缩放项闭合，并否决
@@ -160,7 +162,7 @@ buddy-slab 或替换现有 allocator：当前 bitmap-assisted buddy 已解决线
 heap lock 获取和 buddy 元数据操作；非目标包括关闭 coalesce、无限缓存 free object、改变失败行为、
 把 per-hart cache 内存隐瞒出 `/proc` 统计，或为成绩对特定进程/路径开后门。
 
-### A0：测量和所有权设计（已完成，提交 `f569f84`）
+### A0：测量和所有权设计（已完成，提交 `c6d13766`）
 
 1. sharded + 1/64 timing sampled `perf_counters` 仍未达到 3% 的精细墙钟门槛，因此它只负责确认
    size-class、工作量和数量级；allocator before/after 的墙钟判断一律关闭该 feature。保存原始串口、

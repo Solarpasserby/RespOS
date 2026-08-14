@@ -411,17 +411,20 @@
 - 后续影响：性能优化按计数占比排序。若未来做 prepared pages，必须先固定/验证所有 user span，再允许
   file offset 或外部设备产生副作用，并覆盖 EFAULT、跨页 COW、short I/O 与并发地址空间修改。
 
-## 一个 stat 不能为每个字段重新遍历一次完整路径
+## stat 和已知类型的 dirent 不能为每个结果重新遍历完整路径
 
 - 状态：已确认并修复专项性能窗口
-- 适用范围：lwext4 `stat` 字段读取、directory lookup、Cargo 深路径元数据负载
-- 最后验证：2026-08-10；RV64 8 核固定 120 秒 Cargo 窗口
+- 适用范围：lwext4 `stat` 字段读取、directory lookup/readdir、Cargo 深路径元数据负载
+- 最后验证：2026-08-14；RV64 同工作量目录遍历 A/B 与 RV64/LA64 120 秒窗口
 - 证据：优化前 stat/lookup 占约 84% ext4 lock hold；raw-inode/dirent 优化后 tg-xtask 约
   `2m15--2m19s -> 1m34s`
 - 内容：即使 metadata block 已缓存，`ext4_mode_get`、owner/time getters 每次仍执行 pathname walk，
   同一 stat 连续调用六次会把瓶颈从 I/O 变为锁内 CPU。Rust 通过 FFI 逐项扫描父目录同样昂贵，即便
   不再二次查 mode，仍显著慢于让 lwext4 内部按 child path/目录索引完成查找。一次 raw inode 快照既
-  减少遍历，也保证各字段来自同一时刻。
+  减少遍历，也保证各字段来自同一时刻。readdir 也不能忽略 lwext4 已从 on-disk dirent 解析的 file
+  type，再对每个结果调用 `ext4_mode_get`：同工作量 RV A/B 中该做法多出 15622 次 lower call，删除
+  后 readdir hold ticks 下降约 81%。但未启用 ext4 FILETYPE 的合法文件系统会返回 UNKNOWN，必须只在
+  该情形回退原 child pathname 查询。
 - 后续影响：看到 block I/O 已很低但 ext4 hold 仍高时，应按操作和调用数归一，不能继续只调 cache。
   优化不得直接读取未对齐 packed 字段引用；需按值读取并做 endian/high-bit 处理，同时保留 UNKNOWN
   dirent fallback。跨 syscall 缓存 raw inode 时，read/atime、write、truncate、chmod/chown、link/unlink、
