@@ -218,6 +218,20 @@
 
 ## task、scheduler 与 futex
 
+### 用户 PID/TID 从 1 开始，0 只表示 ABI 选择值
+
+- 状态：当前工作树已实现并通过双架构 session/task/signal 专项
+- 适用范围：initproc、fork/clone、session/process group、signal、wait
+- 最后验证：2026-08-14
+- 证据：`os/src/task/tid.rs`、`os/src/syscall/process.rs`、`session_phase5_probe`；RV64/LA64 2-hart
+  session、wait4、signal Phase 5 回归
+- 内容：首个用户 task 是 PID/TID 1，初始 PGID/SID 同为 1。数值 0 不分配给用户 task，只在
+  `wait/kill/setpgid/getsid/sched_*` 等 ABI 中表示“当前进程、当前进程组或特殊选择”。fork 创建的新
+  process 继承父 PGID/SID，只有 `setsid()` 成功才以自身 PID 同时建立新 session 和 process group。
+- 后续影响：新增 pid lookup 不得把 selector 0 当作 `TASK_MANAGER` 中的真实用户 task；PID 1 的
+  reparent/init 角色与普通正 PID 身份必须同时保留。non-leader exec 后稳定 process identity 仍须在
+  Phase 5 单独重构，不能用本不变量宣称 task 生命周期已经闭合。
+
 ### 调度状态只有一个所有者提交
 
 - 状态：已确认
@@ -566,6 +580,35 @@ FdTable slot (FdEntry: descriptor flags)
   场景的定时器推进语义。
 - 后续影响：不能只改成固定 sleep 或只改成 yield；新等待路径必须保留“登记后复查”
   的丢失唤醒防护，并同时回归 TCP 双端交互与空闲 listener 旁的 sleep/timeout。
+
+### socket 单次接收 flag 共享一个绝对 deadline 和短 I/O 规则
+
+- 状态：已实现并完成双架构 SMP 专项
+- 适用范围：`recvfrom/recvmsg/recvmmsg`、AF_UNIX/TCP/UDP、`MSG_PEEK/MSG_WAITALL`
+- 最后验证：2026-08-14
+- 证据：`os/src/{syscall/net.rs,net/socket.rs,net/tcp.rs,net/udp.rs}`、
+  `scripts/socket_flags_probe_linux.c`、`user/src/bin/socket_flags_probe.rs`；RV64/LA64 4 GiB/2 hart 日志
+- 内容：syscall 层只解析 flags 和用户缓冲区，socket 层在一次调用开始时生成绝对 recv deadline。
+  流式 WAITALL 可以多次消费分片，但每次重试沿用同一 deadline；timeout、EOF 或 EINTR 前已经消费的
+  字节以短读返回。PEEK 从协议/Unix 接收队列复制而不推进队列；UDP WAITALL 不跨数据报聚合。
+- 后续影响：不得在 WAITALL 分片循环中按 SO_RCVTIMEO 重新生成 deadline，也不得在部分数据之后把
+  timeout/EINTR 覆盖成错误。扩展 `MSG_TRUNC/OOB/ERRQUEUE` 时需要先建立 Linux 对照，不能复用流式
+  WAITALL 假设到数据报控制面。
+
+### TCP 异步 connect 的完成状态与 pending error 由 socket 持有
+
+- 状态：loopback success/refused 已实现并完成双架构 SMP 专项
+- 适用范围：nonblocking `connect`、poll/epoll write/error readiness、`SO_ERROR`
+- 最后验证：2026-08-14
+- 证据：`os/src/net/{tcp.rs,socket.rs}`、`os/src/syscall/net.rs`、
+  `scripts/socket_connect_probe_linux.c`、`user/src/bin/socket_connect_probe.rs`
+- 内容：首次非阻塞 connect 只发起状态转换并返回 `EINPROGRESS`。协议 poll 是
+  `CONNECTING -> CONNECTED/FAILED` 的提交点；FAILED 同时发布正 errno 到 socket 的原子 pending-error
+  槽，使 poll/epoll 可报告 write/error readiness。`SO_ERROR` 用 swap 读取并消费该槽，不能由 readiness
+  扫描提前清除，也不能在 syscall 层固定伪造 0。
+- 后续影响：新增 timeout/unreachable/reset 映射时必须在同一状态提交点写入精确 errno；poll 只能观察，
+  `SO_ERROR` 才能消费。close/retry 若替换 smoltcp handle，必须保持 handle 唯一所有权并单独验证重复
+  connect 的 Linux 状态序列。
 
 ## 双架构差异
 

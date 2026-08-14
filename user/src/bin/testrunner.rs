@@ -51,6 +51,13 @@ const TASK_A_FUTEX_EXIT_PROBE: bool = option_env!("TASK_A_FUTEX_EXIT_PROBE").is_
 const TASK_A_FUTEX_CMP_REQUEUE_PROBE: bool =
     option_env!("TASK_A_FUTEX_CMP_REQUEUE_PROBE").is_some();
 const TASK_A_CLOCK_PROBE: bool = option_env!("TASK_A_CLOCK_PROBE").is_some();
+const TASK_A_SOCKET_TIMEOUT_PROBE: bool = option_env!("TASK_A_SOCKET_TIMEOUT_PROBE").is_some();
+const TASK_A_SESSION_PROBE: bool = option_env!("TASK_A_SESSION_PROBE").is_some();
+const TASK_A_TASK_PHASE5_PROBE: bool = option_env!("TASK_A_TASK_PHASE5_PROBE").is_some();
+const TASK_A_SIGNAL_PHASE5_PROBE: bool = option_env!("TASK_A_SIGNAL_PHASE5_PROBE").is_some();
+const TASK_A_SOCKET_PHASE5_PROBE: bool = option_env!("TASK_A_SOCKET_PHASE5_PROBE").is_some();
+const TASK_A_SOCKET_FLAGS_PROBE: bool = option_env!("TASK_A_SOCKET_FLAGS_PROBE").is_some();
+const TASK_A_SOCKET_CONNECT_PROBE: bool = option_env!("TASK_A_SOCKET_CONNECT_PROBE").is_some();
 const TASK_A_PERF_PROBE: bool = option_env!("TASK_A_PERF_PROBE").is_some();
 
 const RV_MUSL_LOADER: &str = "/lib/ld-musl-riscv64.so.1\0";
@@ -1508,6 +1515,122 @@ fn run_task_a_clock_probe() {
     }
 }
 
+fn run_task_a_socket_timeout_probe() {
+    let pid = fork();
+    assert!(pid >= 0, "failed to fork socket_timeout_probe");
+    if pid == 0 {
+        let argv = ["socket_timeout_probe\0".as_ptr(), core::ptr::null()];
+        let ret = exec("socket_timeout_probe\0", &argv);
+        println!("[testrunner] exec socket_timeout_probe failed: {}", ret);
+        exit(-1);
+    }
+
+    let mut status = 0;
+    assert_eq!(waitpid(pid as usize, &mut status), pid);
+    assert_eq!(status, 0, "socket_timeout_probe failed");
+    println!("[testrunner] socket timeout probe PASS");
+}
+
+fn run_task_a_session_probe() {
+    let pid = fork();
+    assert!(pid >= 0, "failed to fork session_phase5_probe");
+    if pid == 0 {
+        let argv = ["session_phase5_probe\0".as_ptr(), core::ptr::null()];
+        let ret = exec("session_phase5_probe\0", &argv);
+        println!("[testrunner] exec session_phase5_probe failed: {}", ret);
+        exit(-1);
+    }
+
+    let mut status = 0;
+    assert_eq!(waitpid(pid as usize, &mut status), pid);
+    assert_eq!(status, 0, "session_phase5_probe failed");
+    println!("[testrunner] session Phase 5 probe PASS");
+}
+
+fn run_task_a_task_phase5_probe() -> i32 {
+    let pid = fork();
+    assert!(pid >= 0, "failed to fork task_phase5_probe");
+    if pid == 0 {
+        let argv = ["task_phase5_probe\0".as_ptr(), core::ptr::null()];
+        let ret = exec("task_phase5_probe\0", &argv);
+        println!("[testrunner] exec task_phase5_probe failed: {}", ret);
+        exit(-1);
+    }
+
+    let mut status = 0;
+    assert_eq!(waitpid(pid as usize, &mut status), pid);
+    if status == 0 {
+        println!("[testrunner] task Phase 5 probe PASS");
+    } else {
+        println!("[testrunner] task Phase 5 probe failed: status={}", status);
+    }
+    status
+}
+
+fn run_task_a_signal_phase5_probe() {
+    let pid = fork();
+    assert!(pid >= 0, "failed to fork signal_phase5_probe");
+    if pid == 0 {
+        let argv = ["signal_phase5_probe\0".as_ptr(), core::ptr::null()];
+        let ret = exec("signal_phase5_probe\0", &argv);
+        println!("[testrunner] exec signal_phase5_probe failed: {}", ret);
+        exit(-1);
+    }
+
+    let mut status = 0;
+    assert_eq!(waitpid(pid as usize, &mut status), pid);
+    assert_eq!(status, 0, "signal_phase5_probe failed");
+    println!("[testrunner] signal Phase 5 probe PASS");
+}
+
+fn run_task_a_socket_phase5_probe() {
+    let pid = fork();
+    assert!(pid >= 0, "failed to fork socket_phase5_probe");
+    if pid == 0 {
+        let argv = ["socket_phase5_probe\0".as_ptr(), core::ptr::null()];
+        let ret = exec("socket_phase5_probe\0", &argv);
+        println!("[testrunner] exec socket_phase5_probe failed: {}", ret);
+        exit(-1);
+    }
+
+    let mut status = 0;
+    assert_eq!(waitpid(pid as usize, &mut status), pid);
+    assert_eq!(status, 0, "socket_phase5_probe failed");
+    println!("[testrunner] socket Phase 5 probe PASS");
+}
+
+fn run_task_a_socket_flags_probe() {
+    let pid = fork();
+    assert!(pid >= 0, "failed to fork socket_flags_probe");
+    if pid == 0 {
+        let argv = ["socket_flags_probe\0".as_ptr(), core::ptr::null()];
+        let ret = exec("socket_flags_probe\0", &argv);
+        println!("[testrunner] exec socket_flags_probe failed: {}", ret);
+        exit(-1);
+    }
+
+    let mut status = 0;
+    assert_eq!(waitpid(pid as usize, &mut status), pid);
+    assert_eq!(status, 0, "socket_flags_probe failed");
+    println!("[testrunner] socket flags probe PASS");
+}
+
+fn run_task_a_socket_connect_probe() {
+    let pid = fork();
+    assert!(pid >= 0, "failed to fork socket_connect_probe");
+    if pid == 0 {
+        let argv = ["socket_connect_probe\0".as_ptr(), core::ptr::null()];
+        let ret = exec("socket_connect_probe\0", &argv);
+        println!("[testrunner] exec socket_connect_probe failed: {}", ret);
+        exit(-1);
+    }
+
+    let mut status = 0;
+    assert_eq!(waitpid(pid as usize, &mut status), pid);
+    assert_eq!(status, 0, "socket_connect_probe failed");
+    println!("[testrunner] socket connect probe PASS");
+}
+
 #[cfg(target_arch = "riscv64")]
 #[unsafe(no_mangle)]
 fn main() -> i32 {
@@ -1529,6 +1652,48 @@ fn main() -> i32 {
     if TASK_A_CLOCK_PROBE {
         run_task_a_clock_probe();
         println!("[testrunner] task-a clock probe finished, powering off");
+        poweroff();
+        return 0;
+    }
+    if TASK_A_SOCKET_TIMEOUT_PROBE {
+        run_task_a_socket_timeout_probe();
+        println!("[testrunner] socket timeout probe finished, powering off");
+        poweroff();
+        return 0;
+    }
+    if TASK_A_SESSION_PROBE {
+        run_task_a_session_probe();
+        println!("[testrunner] session Phase 5 probe finished, powering off");
+        poweroff();
+        return 0;
+    }
+    if TASK_A_TASK_PHASE5_PROBE {
+        let status = run_task_a_task_phase5_probe();
+        println!("[testrunner] task Phase 5 probe finished, powering off");
+        poweroff();
+        return if status == 0 { 0 } else { 1 };
+    }
+    if TASK_A_SIGNAL_PHASE5_PROBE {
+        run_task_a_signal_phase5_probe();
+        println!("[testrunner] signal Phase 5 probe finished, powering off");
+        poweroff();
+        return 0;
+    }
+    if TASK_A_SOCKET_PHASE5_PROBE {
+        run_task_a_socket_phase5_probe();
+        println!("[testrunner] socket Phase 5 probe finished, powering off");
+        poweroff();
+        return 0;
+    }
+    if TASK_A_SOCKET_FLAGS_PROBE {
+        run_task_a_socket_flags_probe();
+        println!("[testrunner] socket flags probe finished, powering off");
+        poweroff();
+        return 0;
+    }
+    if TASK_A_SOCKET_CONNECT_PROBE {
+        run_task_a_socket_connect_probe();
+        println!("[testrunner] socket connect probe finished, powering off");
         poweroff();
         return 0;
     }
@@ -1618,6 +1783,48 @@ fn main() -> i32 {
     if TASK_A_CLOCK_PROBE {
         run_task_a_clock_probe();
         println!("[testrunner] task-a clock probe finished, powering off");
+        poweroff();
+        return 0;
+    }
+    if TASK_A_SOCKET_TIMEOUT_PROBE {
+        run_task_a_socket_timeout_probe();
+        println!("[testrunner] socket timeout probe finished, powering off");
+        poweroff();
+        return 0;
+    }
+    if TASK_A_SESSION_PROBE {
+        run_task_a_session_probe();
+        println!("[testrunner] session Phase 5 probe finished, powering off");
+        poweroff();
+        return 0;
+    }
+    if TASK_A_TASK_PHASE5_PROBE {
+        let status = run_task_a_task_phase5_probe();
+        println!("[testrunner] task Phase 5 probe finished, powering off");
+        poweroff();
+        return if status == 0 { 0 } else { 1 };
+    }
+    if TASK_A_SIGNAL_PHASE5_PROBE {
+        run_task_a_signal_phase5_probe();
+        println!("[testrunner] signal Phase 5 probe finished, powering off");
+        poweroff();
+        return 0;
+    }
+    if TASK_A_SOCKET_PHASE5_PROBE {
+        run_task_a_socket_phase5_probe();
+        println!("[testrunner] socket Phase 5 probe finished, powering off");
+        poweroff();
+        return 0;
+    }
+    if TASK_A_SOCKET_FLAGS_PROBE {
+        run_task_a_socket_flags_probe();
+        println!("[testrunner] socket flags probe finished, powering off");
+        poweroff();
+        return 0;
+    }
+    if TASK_A_SOCKET_CONNECT_PROBE {
+        run_task_a_socket_connect_probe();
+        println!("[testrunner] socket connect probe finished, powering off");
         poweroff();
         return 0;
     }

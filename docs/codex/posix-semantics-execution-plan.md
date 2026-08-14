@@ -76,9 +76,9 @@ Phase 6 的调度器、allocator、异步 I/O 和细粒度锁重构。
 
 | 接口簇 | 当前证据 | 初始状态 | 下一交付物 |
 | --- | --- | --- | --- |
-| `SO_RCVTIMEO`/`SO_SNDTIMEO`、`MSG_DONTWAIT` | 工作区已有 Linux probe 和未验收实现 | 实现中 | RespOS 对称 probe、双架构专项 |
-| nonblocking `connect`、`poll`、`SO_ERROR` | `SO_ERROR` 当前固定回报 0；Phase 5 已列为缺口 | 已知差异 | connect 状态机 probe 与 pending-error 模型 |
-| `MSG_PEEK/WAITALL/NOSIGNAL`、partial I/O | Phase 5 清单已列出，当前支持边界未闭合 | 待验证 | 每个 flag 的 Linux/RespOS 矩阵 |
+| `SO_RCVTIMEO`/`SO_SNDTIMEO`、`MSG_DONTWAIT` | Linux/RespOS probe 已有；LA64 SMP 50 ms 晚醒约 1 秒 | 阻断 | 归一化 LA64 per-hart 时间域后重跑 |
+| nonblocking `connect`、`poll`、`SO_ERROR` | loopback success/refused 与 error consumption 双架构 2 hart 通过 | 部分闭合 | unreachable/timeout/reset 与 iperf 回归 |
+| `MSG_PEEK/WAITALL/NOSIGNAL`、partial I/O | Linux/RespOS probe 含 timeout/EOF/signal 短读，双架构 2 hart 通过 | 已闭合（当前范围） | 完整初赛与网络回归 |
 | `getsid()` | syscall dispatch 缺项，已有 `setsid/getpgid/setpgid` | 已知差异 | session probe 与最小实现 |
 | termios/job control | 当前 tty ioctl 主要只有窗口查询，源码明确未建模 controlling tty | 已知差异 | tty/session/pgrp 状态设计和 probe |
 | leader `exit`、non-leader `exec` | `task_phase5_probe` 有三项 expected failure | 已知差异 | leader identity 与 de-thread 实现 |
@@ -175,6 +175,10 @@ control。进程身份必须从“某个永远存活的 leader TCB”中解耦�
 父子关系、wait status、pgid/sid、process-directed signal 和共享资源回收都引用该身份。非 leader exec
 只保留调用线程的 thread-directed pending，按既有协议清理 sibling 的 robust futex 和
 `clear_child_tid`，最后原子安装新映像。
+
+当前拟定的唯一所有权模型、de-thread 提交顺序、锁序与验证拆分见
+[process-identity-phase5-design.md](./process-identity-phase5-design.md)。该设计当前为 `待确认`；不得以
+保留退出 leader TCB 的 tombstone 作为最终实现。
 
 退出门槛是现有 `task_phase5_probe` 从三个 expected failure 变为 `TASK_PHASE5 ALL PASS`，并追加
 2/8 hart 的 exit/exec/wait/资源回收压力。
@@ -322,10 +326,11 @@ summary，不能以 QEMU/make 返回 0 代替测试通过。
 
 近期按以下补丁序列推进，后一项不得顺手混入前一项：
 
-1. 完成 socket timeval timeout 与 `MSG_DONTWAIT`，补 RespOS 对称 probe 并验收当前工作区修改；
-2. 单独实现 `MSG_PEEK/WAITALL/NOSIGNAL` 与 partial-I/O/EINTR 规则；
-3. 单独实现 nonblocking connect、poll readiness 和可消费的 `SO_ERROR`；
-4. 增加 `getsid` 与 session/pgid Linux 对照，不在该补丁中实现完整 tty；
+1. socket timeval timeout 与 `MSG_DONTWAIT` 已完成 Linux/RespOS probe；LA64 SMP 时间域仍阻断验收；
+2. `MSG_PEEK/WAITALL/NOSIGNAL` 与 partial-I/O/EINTR 当前范围已完成双架构专项；
+3. nonblocking connect、poll readiness 和可消费 `SO_ERROR` 的 loopback success/refused 已完成；真实网络
+   timeout/unreachable/reset 与 iperf 回归仍待补；
+4. `getsid` 与 session/pgid Linux 对照已完成，不在该补丁中实现完整 tty；
 5. 重构稳定 process identity，关闭 leader exit/non-leader exec；
 6. 在稳定身份上实现 controlling tty/job control，再推进 process-pending 和 restart classes；
 7. 按 M3 的 resident provenance 方案关闭 mmap 七项差异；

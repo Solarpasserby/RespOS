@@ -329,6 +329,84 @@ marker 只证明探针捕获了已确认差异，不是通过。完成 task 生�
 后 worker 的 `exit_group`、worker 的原始 `SYS_exit`，以及非 leader `execve` 后
 `getpid() == gettid()` 的 identity 接管。
 
+当前双架构 2 hart 自动入口：
+
+```bash
+TASK_A_TASK_PHASE5_PROBE=1 make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-task-phase5-current.log
+TASK_A_TASK_PHASE5_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-task-phase5-current.log
+```
+
+修复前入口会在 probe 非零后打印 status 并安全 poweroff；判断必须看 guest marker，不能因宿主 QEMU/make
+返回 0 就误判通过。修复后两份日志都必须出现 `TASK_PHASE5 ALL PASS`，且不得出现
+`TASK_PHASE5_EXPECTED_FAIL` 或 `CURRENT DIFFERENCES CONFIRMED`。
+
+Phase 5 session/`getsid` Linux 对照：
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror -O2 scripts/session_phase5_probe_linux.c \
+  -o /tmp/session_phase5_probe_linux
+/tmp/session_phase5_probe_linux
+```
+
+双架构 no-feature、2 hart 自动 guest 专项：
+
+```bash
+TASK_A_SESSION_PROBE=1 make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-session-phase5.log
+TASK_A_SESSION_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-session-phase5.log
+```
+
+以 `SESSION_PHASE5_RESPOS ALL PASS` 为通过标志。该 probe 覆盖 query/error、子进程新建 session 后的
+父进程查询和 pgrp leader 的 `EPERM`；不覆盖 controlling tty/job control。
+
+Phase 5 socket timeout Linux 对照及 guest 专项：
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror -O2 scripts/socket_timeout_probe_linux.c \
+  -o /tmp/socket_timeout_probe_linux
+/tmp/socket_timeout_probe_linux
+TASK_A_SOCKET_TIMEOUT_PROBE=1 make run-rv-pre PRE_MEM=4G PRE_SMP=2
+TASK_A_SOCKET_TIMEOUT_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2
+```
+
+除 `SOCKET_TIMEOUT_RESPOS ALL PASS` 外，还必须检查 50 ms timeout 没有明显早醒或晚醒。2026-08-14
+LA64 2 hart 存在约 1 秒晚醒，故当前命令预期暴露未闭合阻断；不能只跑单核或固定 hart0 关闭任务。
+
+Phase 5 socket message flags Linux 对照及 guest 专项：
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror -O2 scripts/socket_flags_probe_linux.c \
+  -o /tmp/socket_flags_probe_linux
+/tmp/socket_flags_probe_linux
+TASK_A_SOCKET_FLAGS_PROBE=1 make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-socket-flags.log
+TASK_A_SOCKET_FLAGS_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-socket-flags.log
+```
+
+以 `SOCKET_FLAGS ALL PASS` 为通过标志；probe 覆盖 PEEK 不消费、WAITALL 跨分片等待、timeout/EOF
+短读，以及 NOSIGNAL 对 SIGPIPE 的精确抑制。修改 AF_UNIX 等待或 socket flag 解析后，还要以相同 2 hart
+配置复跑 `TASK_A_SOCKET_PHASE5_PROBE=1`，不能只看新 probe。
+
+Phase 5 nonblocking connect/`SO_ERROR` Linux 对照及 guest 专项：
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror -O2 scripts/socket_connect_probe_linux.c \
+  -o /tmp/socket_connect_probe_linux
+/tmp/socket_connect_probe_linux
+TASK_A_SOCKET_CONNECT_PROBE=1 make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-socket-connect.log
+TASK_A_SOCKET_CONNECT_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-socket-connect.log
+```
+
+以 `SOCKET_CONNECT ALL PASS` 为通过标志。必须同时看到 success 与 refused 两项；失败路径要求
+`POLLOUT|POLLERR`、首次 `SO_ERROR=ECONNREFUSED`、第二次 `SO_ERROR=0`。该 loopback probe 不替代真实
+unreachable/SYN timeout/reset 和 iperf 回归。
+
 Phase 5 mmap EOF/SIGBUS Linux 对照：
 
 ```bash

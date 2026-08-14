@@ -5,6 +5,7 @@ use crate::{
     fs::{FdEntry, FileOp, OpenFlags, filename_create, filename_lookup, vfs::InodeType},
     mm::{check_user_readable, check_user_writable, copy_from_user, copy_to_user},
     net::socket::{self, SOCK_CLOEXEC, SOCK_NONBLOCK, Socket, SocketDomain, SocketKind},
+    signal::{SiField, Sig, SigInfo},
     task::current_task,
 };
 
@@ -45,7 +46,9 @@ const TCP_MAXSEG: usize = 2;
 const TCP_INFO: usize = 11;
 const TCP_DEFAULT_MAXSEG: i32 = 1448;
 const MSG_OOB: usize = 0x1;
+const MSG_PEEK: usize = 0x2;
 const MSG_DONTWAIT: usize = 0x40;
+const MSG_WAITALL: usize = 0x100;
 const MSG_ERRQUEUE: usize = 0x2000;
 const MSG_NOSIGNAL: usize = 0x4000;
 
@@ -605,21 +608,50 @@ fn socket_timeval(timeout_us: Option<usize>) -> SocketTimeval {
     }
 }
 
-fn send_per_call_nonblocking(flags: usize) -> SysResult<bool> {
+#[derive(Clone, Copy)]
+struct SendFlags {
+    nonblocking: bool,
+    no_signal: bool,
+}
+
+#[derive(Clone, Copy)]
+struct RecvFlags {
+    nonblocking: bool,
+    peek: bool,
+    waitall: bool,
+}
+
+fn parse_send_flags(flags: usize) -> SysResult<SendFlags> {
     if flags & !(MSG_DONTWAIT | MSG_NOSIGNAL) != 0 {
         return Err(Errno::EOPNOTSUPP);
     }
-    Ok(flags & MSG_DONTWAIT != 0)
+    Ok(SendFlags {
+        nonblocking: flags & MSG_DONTWAIT != 0,
+        no_signal: flags & MSG_NOSIGNAL != 0,
+    })
 }
 
-fn recv_per_call_nonblocking(flags: usize) -> SysResult<bool> {
+fn parse_recv_flags(flags: usize) -> SysResult<RecvFlags> {
     if flags & MSG_OOB != 0 {
         return Err(Errno::EINVAL);
     }
-    if flags & !MSG_DONTWAIT != 0 {
+    if flags & !(MSG_DONTWAIT | MSG_PEEK | MSG_WAITALL) != 0 {
         return Err(Errno::EOPNOTSUPP);
     }
-    Ok(flags & MSG_DONTWAIT != 0)
+    Ok(RecvFlags {
+        nonblocking: flags & MSG_DONTWAIT != 0,
+        peek: flags & MSG_PEEK != 0,
+        waitall: flags & MSG_WAITALL != 0,
+    })
+}
+
+fn finish_socket_send(result: SysResult<usize>, no_signal: bool) -> SysResult<usize> {
+    if matches!(result, Err(Errno::EPIPE)) && !no_signal {
+        let task = current_task().ok_or(Errno::ESRCH)?;
+        let siginfo = SigInfo::new(Sig::SIGPIPE.raw(), SigInfo::KERNEL, SiField::None);
+        task.receive_siginfo(siginfo, false);
+    }
+    result
 }
 
 fn write_sockopt<T: Copy>(optval: usize, optlen: usize, value: &T) -> SysResult {
@@ -870,17 +902,18 @@ pub fn sys_sendto(
     dest_addr: usize,
     addrlen: usize,
 ) -> SysResult<usize> {
-    let per_call_nonblocking = send_per_call_nonblocking(flags)?;
+    let flags = parse_send_flags(flags)?;
     let mut kernel_buf: Vec<u8> = vec![0; len];
     copy_from_user(kernel_buf.as_mut_ptr(), buf, len)?;
-    with_socket(fd, |sock| {
+    let result = with_socket(fd, |sock| {
         if dest_addr != 0 {
             let remote = read_sockaddr_for_domain(&sock.domain, dest_addr, addrlen)?;
-            sock.send_to(&kernel_buf, remote, per_call_nonblocking)
+            sock.send_to(&kernel_buf, remote, flags.nonblocking)
         } else {
-            sock.send(&kernel_buf, per_call_nonblocking)
+            sock.send(&kernel_buf, flags.nonblocking)
         }
-    })
+    });
+    finish_socket_send(result, flags.no_signal)
 }
 
 pub fn sys_recvfrom(
@@ -891,10 +924,15 @@ pub fn sys_recvfrom(
     src_addr: usize,
     addrlen: usize,
 ) -> SysResult<usize> {
-    let per_call_nonblocking = recv_per_call_nonblocking(flags)?;
+    let flags = parse_recv_flags(flags)?;
     let mut kernel_buf: Vec<u8> = vec![0; len];
     let (n, from_addr, domain) = with_socket(fd, |sock| {
-        let (n, from_addr) = sock.recv_from(&mut kernel_buf, per_call_nonblocking)?;
+        let (n, from_addr) = sock.recv_from(
+            &mut kernel_buf,
+            flags.nonblocking,
+            flags.peek,
+            flags.waitall,
+        )?;
         Ok((n, from_addr, sock.domain.clone()))
     })?;
     copy_to_user(buf, kernel_buf.as_ptr(), n.min(len))?;
@@ -908,18 +946,19 @@ pub fn sys_sendmsg(fd: usize, msg: usize, flags: usize) -> SysResult<usize> {
 }
 
 fn sys_sendmsg_from_hdr(fd: usize, hdr: &MsgHdr, flags: usize) -> SysResult<usize> {
-    let per_call_nonblocking = send_per_call_nonblocking(flags)?;
+    let flags = parse_send_flags(flags)?;
     let iovs = read_iovecs(hdr.msg_iov, hdr.msg_iovlen)?;
     let data = collect_iov_bytes(&iovs)?;
-    with_socket(fd, |sock| {
+    let result = with_socket(fd, |sock| {
         if hdr.msg_name != 0 {
             let remote =
                 read_sockaddr_for_domain(&sock.domain, hdr.msg_name, hdr.msg_namelen as usize)?;
-            sock.send_to(&data, remote, per_call_nonblocking)
+            sock.send_to(&data, remote, flags.nonblocking)
         } else {
-            sock.send(&data, per_call_nonblocking)
+            sock.send(&data, flags.nonblocking)
         }
-    })
+    });
+    finish_socket_send(result, flags.no_signal)
 }
 
 pub fn sys_recvmsg(fd: usize, msg: usize, flags: usize) -> SysResult<usize> {
@@ -936,13 +975,15 @@ fn sys_recvmsg_into_hdr(fd: usize, hdr: &mut MsgHdr, flags: usize) -> SysResult<
     if flags & MSG_ERRQUEUE != 0 {
         return Err(Errno::EAGAIN);
     }
-    let per_call_nonblocking = recv_per_call_nonblocking(flags)?;
+    let flags = parse_recv_flags(flags)?;
     let iovs = read_iovecs(hdr.msg_iov, hdr.msg_iovlen)?;
     let total = iovs.iter().try_fold(0usize, |acc, item| {
         acc.checked_add(item.len).ok_or(Errno::EINVAL)
     })?;
     let mut data = vec![0; total];
-    let (n, from_addr) = with_socket(fd, |sock| sock.recv_from(&mut data, per_call_nonblocking))?;
+    let (n, from_addr) = with_socket(fd, |sock| {
+        sock.recv_from(&mut data, flags.nonblocking, flags.peek, flags.waitall)
+    })?;
     let copied = scatter_iov_bytes(&iovs, &data[..n.min(data.len())])?;
     hdr.msg_namelen = write_sockaddr_value(hdr.msg_name, hdr.msg_namelen as usize, from_addr)?;
     hdr.msg_controllen = 0;
@@ -1100,7 +1141,7 @@ pub fn sys_getsockopt(
     with_socket(fd, |sock| {
         match (level, optname) {
             (SOL_SOCKET, SO_TYPE) => write_sockopt(optval, optlen, &sock.socket_type_value()),
-            (SOL_SOCKET, SO_ERROR) => write_sockopt(optval, optlen, &0i32),
+            (SOL_SOCKET, SO_ERROR) => write_sockopt(optval, optlen, &sock.take_socket_error()),
             (
                 SOL_SOCKET,
                 SO_OOBINLINE | SO_DONTROUTE | SO_BROADCAST | SO_KEEPALIVE | SO_REUSEPORT,

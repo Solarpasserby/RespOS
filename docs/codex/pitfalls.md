@@ -1,5 +1,21 @@
 # RespOS 已确认易错点
 
+## LA64 SMP 不能直接跨 hart 比较未归一化的 `rdtime.d` deadline
+
+- 状态：可观察差异与 affinity A/B 已确认；归一化实现待协商
+- 适用范围：LA64 SMP socket/nanosleep/futex/poll timeout、用户 monotonic time、CPU accounting
+- 最后验证：2026-08-14
+- 证据：50 ms `socket_timeout_probe` 在 LA64 单核和固定 hart0 通过，2 hart/固定 hart1 稳定约
+  979--981 ms；`/tmp/respos-la-socket-timeout-{smp1,smp2-r2,hart0,hart1}.log`
+- 内容：当前 task 以本 hart 的 `rdtime.d` 换算绝对微秒 deadline，timer-service hart 直接读取同一数值
+  编程和扫描。QEMU LA64 各 hart 的可观察时间域存在约 1 秒偏移时，从非服务 hart 发布的 50 ms
+  deadline 会在服务 hart 看来位于约 1 秒以后。单核通过、放宽超时上界或把任务固定到 hart0 都不能
+  证明 SMP timeout 正确。
+- 后续影响：应在 secondary boot 建立 per-hart offset 并统一到一个全局单调时间域，同时让本地硬件
+  timer 按相对 tick 编程。修复必须重跑跨 hart timeout、迁移 clock、CPU accounting 和双架构门禁；
+  不得用 affinity、1 秒轮询或扩大容差作为正式修复。精确 offset 校准协议完成前，根因实现细节保持
+  `待验证`。
+
 ## 100 Hz 扫描会把亚 10 ms timeout 量化到下一 tick
 
 - 状态：已确认并对 task/futex deadline 修复

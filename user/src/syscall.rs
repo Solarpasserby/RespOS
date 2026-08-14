@@ -67,6 +67,10 @@ const SYSCALL_SCHED_GETAFFINITY: usize = 123;
 const SYSCALL_SCHED_YIELD: usize = 124;
 const SYSCALL_SETPRIORITY: usize = 140;
 const SYSCALL_TIMES: usize = 153;
+const SYSCALL_SETPGID: usize = 154;
+const SYSCALL_GETPGID: usize = 155;
+const SYSCALL_GETSID: usize = 156;
+const SYSCALL_SETSID: usize = 157;
 const SYSCALL_UNAME: usize = 160;
 const SYSCALL_GETRUSAGE: usize = 165;
 const SYSCALL_KILL: usize = 129;
@@ -94,8 +98,11 @@ const SYSCALL_BIND: usize = 200;
 const SYSCALL_LISTEN: usize = 201;
 const SYSCALL_ACCEPT: usize = 202;
 const SYSCALL_CONNECT: usize = 203;
+const SYSCALL_GETSOCKNAME: usize = 204;
 const SYSCALL_SENDTO: usize = 206;
 const SYSCALL_RECVFROM: usize = 207;
+const SYSCALL_SETSOCKOPT: usize = 208;
+const SYSCALL_GETSOCKOPT: usize = 209;
 const SYSCALL_SHUTDOWN: usize = 210;
 const SYSCALL_BRK: usize = 214;
 const SYSCALL_MUNMAP: usize = 215;
@@ -1016,6 +1023,22 @@ pub fn sys_times(tms: &mut Tms) -> isize {
     syscall(SYSCALL_TIMES, [tms as *mut _ as usize, 0, 0, 0, 0, 0])
 }
 
+pub fn sys_setpgid(pid: isize, pgid: isize) -> isize {
+    syscall(SYSCALL_SETPGID, [pid as usize, pgid as usize, 0, 0, 0, 0])
+}
+
+pub fn sys_getpgid(pid: isize) -> isize {
+    syscall(SYSCALL_GETPGID, [pid as usize, 0, 0, 0, 0, 0])
+}
+
+pub fn sys_getsid(pid: isize) -> isize {
+    syscall(SYSCALL_GETSID, [pid as usize, 0, 0, 0, 0, 0])
+}
+
+pub fn sys_setsid() -> isize {
+    syscall(SYSCALL_SETSID, [0, 0, 0, 0, 0, 0])
+}
+
 pub fn sys_uname(buf: &mut UtsName) -> isize {
     syscall(SYSCALL_UNAME, [buf as *mut _ as usize, 0, 0, 0, 0, 0])
 }
@@ -1071,6 +1094,10 @@ pub fn sys_connect(fd: usize, addr: usize, addrlen: usize) -> isize {
     syscall(SYSCALL_CONNECT, [fd, addr, addrlen, 0, 0, 0])
 }
 
+pub fn sys_getsockname(fd: usize, addr: usize, addrlen: usize) -> isize {
+    syscall(SYSCALL_GETSOCKNAME, [fd, addr, addrlen, 0, 0, 0])
+}
+
 pub fn sys_shutdown(fd: usize, how: usize) -> isize {
     syscall(SYSCALL_SHUTDOWN, [fd, how, 0, 0, 0, 0])
 }
@@ -1121,6 +1148,26 @@ pub fn sys_recvfrom(
         SYSCALL_RECVFROM,
         [fd, buf as usize, len, flags, addr, addrlen],
     )
+}
+
+pub fn sys_setsockopt(
+    fd: usize,
+    level: usize,
+    optname: usize,
+    optval: usize,
+    optlen: usize,
+) -> isize {
+    syscall(SYSCALL_SETSOCKOPT, [fd, level, optname, optval, optlen, 0])
+}
+
+pub fn sys_getsockopt(
+    fd: usize,
+    level: usize,
+    optname: usize,
+    optval: usize,
+    optlen: usize,
+) -> isize {
+    syscall(SYSCALL_GETSOCKOPT, [fd, level, optname, optval, optlen, 0])
 }
 
 pub fn sys_brk(addr: usize) -> isize {

@@ -3,6 +3,44 @@
 这里只收录能解释当前代码形态或避免重复踩坑的决策。日期是当前证据最后核验时间，不一定是
 最初提出时间。
 
+## PID/TID 0 保留给 ABI 特殊语义，首个用户任务使用 PID 1
+
+- 状态：已采用，当前工作树待提交
+- 适用范围：task id allocator、initproc、session/process group、signal、wait
+- 最后验证：2026-08-14
+- 决策：`TidAllocator` 从 1 开始分配；initproc 的 TGID/PGID/SID 均为 1。syscall 参数 0 继续由各 ABI
+  解释为当前进程、当前进程组或特殊 selector，不对应一个真实用户 TCB。
+- 原因：从 0 分配会让整个初始进程树继承 SID/PGID 0，`getsid()` 暴露非正 session id，子进程的
+  `setsid()`/process-group leader 关系也失去 Linux/POSIX 含义。只让 `getsid` 接受 0 返回值会隐藏基础
+  身份错误。
+- 后续影响：代码不得依赖 initproc tid 为 0；新增 pid lookup 要显式处理 selector 0。该决策不解决
+  leader 单独 exit 或 non-leader exec，后两者仍需要稳定的 process/thread-group identity。
+
+## socket send 的 EPIPE 与 SIGPIPE 在 syscall flag 层统一收口
+
+- 状态：已采用，当前工作树待提交
+- 适用范围：`sendto/sendmsg/sendmmsg`、AF_UNIX/TCP、`MSG_NOSIGNAL`
+- 最后验证：2026-08-14
+- 证据：`os/src/syscall/net.rs`、`scripts/socket_flags_probe_linux.c`、
+  `user/src/bin/socket_flags_probe.rs`；RV64/LA64 4 GiB/2 hart 专项
+- 决策：底层 socket 只报告 `EPIPE`；syscall flag 解析层统一决定是否向当前 task 投递 `SIGPIPE`。
+  未设置 `MSG_NOSIGNAL` 时保持 Linux 的 `EPIPE + SIGPIPE`，设置后只返回 `EPIPE`。`write(2)` 继续由
+  通用 fs syscall 路径负责同一信号语义，不把 signal policy 下沉到传输实现。
+- 后续影响：新增 `send/sendmsg` 变体必须复用同一完成路径；不能因为调用最终返回短计数就遗漏后续
+  message 的同步 SIGPIPE，也不能让 UDP/其他非 EPIPE 错误误触发该信号。
+
+## `SO_ERROR` 消费 socket-owned pending error，poll 只观察
+
+- 状态：已采用，当前工作树待提交
+- 适用范围：TCP asynchronous connect、poll/epoll、getsockopt
+- 最后验证：2026-08-14
+- 证据：`os/src/net/{tcp.rs,socket.rs}`、`os/src/syscall/net.rs`；Linux/RespOS socket connect probes
+- 决策：异步错误和连接状态保存在 `TcpSocket`，由协议推进路径一起提交；poll/epoll 报告 readiness 但
+  不改变 error，`getsockopt(SO_ERROR)` 以原子 swap 返回并消费。syscall 层不从当前协议状态临时推断
+  errno，也不继续固定返回 0。
+- 后续影响：同一错误必须在多次 readiness scan 后仍可读取一次，消费后 `POLLERR` 不应由旧槽继续产生。
+  添加真实网络 timeout/unreachable 时扩充错误映射，不能再增加第二套 syscall-local error owner。
+
 ## `make all` 固定为线上自动识别提交入口，本地阶段使用显式目标
 
 - 状态：已采用

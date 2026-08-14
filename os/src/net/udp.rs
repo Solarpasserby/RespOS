@@ -165,12 +165,20 @@ impl UdpSocket {
         buf: &mut [u8],
         per_call_nonblocking: bool,
         deadline_us: Option<usize>,
+        peek: bool,
     ) -> Result<(usize, SocketAddr), Errno> {
         let mut binding = vec![0; 1528];
         let kernel_buf = binding.as_mut_slice();
 
         self.recv_impl(per_call_nonblocking, deadline_us, |socket| {
-            match socket.recv_slice(kernel_buf) {
+            let result = if peek {
+                socket
+                    .peek_slice(kernel_buf)
+                    .map(|(len, meta)| (len, *meta))
+            } else {
+                socket.recv_slice(kernel_buf)
+            };
+            match result {
                 Ok((len, meta)) => {
                     let copy_len = core::cmp::min(len, buf.len());
                     buf[..copy_len].copy_from_slice(&kernel_buf[..copy_len]);

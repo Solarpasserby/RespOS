@@ -37,7 +37,10 @@ struct TidAllocator {
 impl TidAllocator {
     pub fn new() -> Self {
         TidAllocator {
-            current: 0,
+            // Linux reserves PID/TID 0 for kernel-side process-group and
+            // scheduler semantics. The first userspace task is PID 1, which
+            // also gives the initial session and process group valid leaders.
+            current: 1,
             recycled: Vec::new(),
         }
     }

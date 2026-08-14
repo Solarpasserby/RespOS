@@ -213,6 +213,8 @@ impl UnixSocket {
         buf: &mut [u8],
         per_call_nonblocking: bool,
         deadline_us: Option<usize>,
+        peek: bool,
+        waitall: bool,
     ) -> SysResult<usize> {
         if buf.is_empty() {
             return Ok(0);
@@ -227,16 +229,25 @@ impl UnixSocket {
             .clone()
             .ok_or(Errno::ENOTCONN)?;
         let task = current_task().ok_or(Errno::ESRCH)?;
+        let waitall = waitall && !per_call_nonblocking && !self.is_nonblocking();
         loop {
             let mut rx = self.rx.lock();
-            if !rx.data.is_empty() {
-                let mut read_len = 0;
-                for byte in buf {
-                    let Some(value) = rx.data.pop_front() else {
-                        break;
-                    };
-                    *byte = value;
-                    read_len += 1;
+            let peer_eof = self.read_shutdown.load(Ordering::Acquire)
+                || peer_closed.load(Ordering::Acquire)
+                || peer_write_shutdown.load(Ordering::Acquire);
+            let timed_out = deadline_us.is_some_and(|deadline| get_timeout_us() >= deadline);
+            if !rx.data.is_empty()
+                && (!waitall || rx.data.len() >= buf.len() || peer_eof || timed_out)
+            {
+                let read_len = rx.data.len().min(buf.len());
+                if peek {
+                    for (out, value) in buf.iter_mut().zip(rx.data.iter()).take(read_len) {
+                        *out = *value;
+                    }
+                    return Ok(read_len);
+                }
+                for out in buf.iter_mut().take(read_len) {
+                    *out = rx.data.pop_front().expect("read length checked");
                 }
                 let wake_writer = rx.write_waiters.pop_front();
                 let poll_waiters = rx.poll_waiters.clone();
@@ -249,16 +260,13 @@ impl UnixSocket {
             }
             // A stream socket reports EOF once the last reference to the peer
             // endpoint is closed and all bytes already sent have been drained.
-            if self.read_shutdown.load(Ordering::Acquire)
-                || peer_closed.load(Ordering::Acquire)
-                || peer_write_shutdown.load(Ordering::Acquire)
-            {
+            if peer_eof {
                 return Ok(0);
             }
             if self.is_nonblocking() || per_call_nonblocking {
                 return Err(Errno::EAGAIN);
             }
-            if deadline_us.is_some_and(|deadline| get_timeout_us() >= deadline) {
+            if timed_out {
                 return Err(Errno::EAGAIN);
             }
             task.set_interruptible(true);
@@ -266,6 +274,10 @@ impl UnixSocket {
             if task.check_signal_interrupt() || task.is_interrupted() {
                 task.clear_interrupted();
                 task.set_interruptible(false);
+                if !rx.data.is_empty() {
+                    drop(rx);
+                    return self.read(buf, true, None, peek, false);
+                }
                 return Err(Errno::EINTR);
             }
             rx.read_waiters.push_back(task.tid());
@@ -288,8 +300,15 @@ impl UnixSocket {
             }
             let result = self.finish_interruptible_wait(deadline_us);
             self.rx.lock().read_waiters.retain(|tid| *tid != task.tid());
-            if result? {
-                return Err(Errno::EAGAIN);
+            match result {
+                Ok(false) => {}
+                Ok(true) => return self.read(buf, true, None, peek, false),
+                Err(err) => {
+                    return match self.read(buf, true, None, peek, false) {
+                        Ok(len) => Ok(len),
+                        Err(_) => Err(err),
+                    };
+                }
             }
         }
     }
@@ -771,6 +790,13 @@ impl Socket {
         *self.sendtimeout_us.lock()
     }
 
+    pub fn take_socket_error(&self) -> i32 {
+        match &self.inner {
+            SocketInner::Tcp(tcp) => tcp.take_error(),
+            SocketInner::Udp(_) | SocketInner::Unix(_) => 0,
+        }
+    }
+
     fn recv_deadline_us(&self, per_call_nonblocking: bool) -> Option<usize> {
         if self.is_nonblocking() || per_call_nonblocking {
             None
@@ -999,17 +1025,19 @@ impl Socket {
         &self,
         buf: &mut [u8],
         per_call_nonblocking: bool,
+        peek: bool,
+        waitall: bool,
     ) -> Result<(usize, SocketAddr), Errno> {
         let deadline_us = self.recv_deadline_us(per_call_nonblocking);
         match &self.inner {
-            SocketInner::Udp(udp) => udp.recv_from(buf, per_call_nonblocking, deadline_us),
+            SocketInner::Udp(udp) => udp.recv_from(buf, per_call_nonblocking, deadline_us, peek),
             SocketInner::Tcp(tcp) => {
-                let len = tcp.recv(buf, per_call_nonblocking, deadline_us)?;
+                let len = tcp.recv(buf, per_call_nonblocking, deadline_us, peek, waitall)?;
                 let remote_addr = tcp.remote_addr().unwrap_or(UNSPECIFIED_ENDPOINT);
                 Ok((len, from_ipendpoint_to_socketaddr(remote_addr)))
             }
             SocketInner::Unix(unix) => {
-                let len = unix.read(buf, per_call_nonblocking, deadline_us)?;
+                let len = unix.read(buf, per_call_nonblocking, deadline_us, peek, waitall)?;
                 Ok((len, from_ipendpoint_to_socketaddr(UNSPECIFIED_ENDPOINT)))
             }
         }
@@ -1067,12 +1095,12 @@ impl FileOp for Socket {
     fn read<'a>(&'a self, buf: &'a mut [u8]) -> SysResult<usize> {
         let deadline_us = self.recv_deadline_us(false);
         match &self.inner {
-            SocketInner::Tcp(tcp) => tcp.recv(buf, false, deadline_us),
+            SocketInner::Tcp(tcp) => tcp.recv(buf, false, deadline_us, false, false),
             SocketInner::Udp(udp) => {
-                let (len, _addr) = udp.recv_from(buf, false, deadline_us)?;
+                let (len, _addr) = udp.recv_from(buf, false, deadline_us, false)?;
                 Ok(len)
             }
-            SocketInner::Unix(unix) => unix.read(buf, false, deadline_us),
+            SocketInner::Unix(unix) => unix.read(buf, false, deadline_us, false, false),
         }
     }
 
@@ -1099,6 +1127,13 @@ impl FileOp for Socket {
         match &self.inner {
             SocketInner::Unix(unix) => unix.poll_hup(),
             SocketInner::Tcp(_) | SocketInner::Udp(_) => false,
+        }
+    }
+
+    fn poll_error(&self) -> bool {
+        match &self.inner {
+            SocketInner::Tcp(tcp) => tcp.has_pending_error(),
+            SocketInner::Udp(_) | SocketInner::Unix(_) => false,
         }
     }
 

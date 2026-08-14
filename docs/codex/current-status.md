@@ -1,5 +1,90 @@
 # RespOS 当前状态
 
+## 2026-08-14 Linux/POSIX Phase 5 task 生命周期修复前门禁与方案（当前工作树）
+
+- **修复前门禁**：把既有 `task_phase5_probe` 接入 `TASK_A_TASK_PHASE5_PROBE=1` 自动入口；失败时仍会
+  记录 guest status 并安全 poweroff，便于在修复前/后使用同一命令。宿主 Linux probe 三项全通过。
+- **双架构当前反证**：RV64/LA64 release、初赛 snapshot、4 GiB/2 hart 都稳定复现三个差异：leader
+  原始 `SYS_exit(42)` 错误结束全组并返回 `42 << 8`，worker 未存活；non-leader exec 返回 `EINVAL`
+  并由失败路径返回 `111 << 8`。日志为 `/tmp/respos-{rv,la}-task-phase5-current.log`，均打印
+  `TASK_PHASE5 CURRENT DIFFERENCES CONFIRMED`；这不是通过结果。
+- **拟定方案**：新增 [process-identity-phase5-design.md](./process-identity-phase5-design.md)，规定独立
+  `ProcessState/ProcessTable`、最后线程 Zombie、wait copyout 后 Reaped，以及 non-leader exec 的
+  sibling quiescence 和 TID 接管顺序。方案状态为 `待确认`；未采用保留 exited leader TCB 的 tombstone
+  兼容方案，也尚未修改 task 生命周期实现。
+- **协商点**：该方案会同时改变 task/process owner、wait、process signal、session 查询与 exec 提交，
+  应按设计文档五个可回滚步骤逐项实现并逐项提交。获得确认前不以局部特判消除 expected-fail marker。
+
+## 2026-08-14 Linux/POSIX Phase 5 nonblocking connect 与 `SO_ERROR`（当前工作树）
+
+- **Linux 契约**：新增 `scripts/socket_connect_probe_linux.c`，确认 loopback TCP 成功和 refused 两条异步
+  connect 路径。首次 nonblocking connect 返回 `EINPROGRESS`；完成由 poll 的 `POLLOUT` 表示，失败还带
+  `POLLERR`；`SO_ERROR` 返回正 errno 并原子消费，第二次读取为 0。
+- **状态所有权**：`TcpSocket` 增加显式 `FAILED` 状态和 pending-error 原子槽。协议 poll 把
+  `CONNECTING` 提交为 `CONNECTED` 或 `FAILED`，poll/epoll 只观察状态；`getsockopt(SO_ERROR)` 是错误
+  的唯一消费点。失败 socket 在错误消费后的首次重连按 Linux 当前观察返回 `ECONNABORTED` 并重置传输
+  handle；更完整的 retry 序列仍为 `待验证`。
+- **双架构证据**：宿主 probe 以 `cc -std=c11 -Wall -Wextra -Werror -O2` 通过。RV64/LA64 release、
+  初赛 snapshot、4 GiB/2 hart 的 `TASK_A_SOCKET_CONNECT_PROBE=1` 均输出
+  `SOCKET_CONNECT ALL PASS`；日志为 `/tmp/respos-{rv,la}-socket-connect-v3.log`。成功项还完成一字节
+  双端传输；异步失败项确认消费 `SO_ERROR` 后旧 `POLLERR` 不再出现；阻塞 refused 项确认 errno 已由
+  `connect` 同步返回，之后 `SO_ERROR` 为 0。
+- **剩余边界**：当前网络栈以 loopback/smoltcp 为主，本轮只验证 success/refused；真实 route
+  unreachable、SYN timeout、reset 细分 errno、重复 connect 的完整 Linux 序列和 iperf 固定顺序回归尚未
+  验证，不能据此宣布 M1 全部退出。
+
+## 2026-08-14 Linux/POSIX Phase 5 socket message flags（当前工作树）
+
+- **Linux 契约**：新增 `scripts/socket_flags_probe_linux.c`，用宿主 Linux 固定四条边界：
+  `MSG_PEEK` 不消费数据；阻塞流 `MSG_WAITALL` 跨分片等待；timeout/EOF/信号发生在已有部分数据之后时
+  返回短读；断链 send 返回 `EPIPE`，且仅 `MSG_NOSIGNAL` 抑制同步 `SIGPIPE`。
+- **实现边界**：`sendto/sendmsg/sendmmsg` 统一解析 `MSG_DONTWAIT|MSG_NOSIGNAL` 并在未抑制的 `EPIPE`
+  上投递 `SIGPIPE`；`recvfrom/recvmsg/recvmmsg` 接入 `MSG_PEEK|MSG_WAITALL`。AF_UNIX、TCP 的 WAITALL
+  使用一次 syscall 的固定绝对 deadline，错误或 EOF 后保留已收部分；AF_UNIX/TCP/UDP 的 PEEK 均不推进
+  接收队列。数据报上的 WAITALL 按 Linux 语义不跨数据报聚合。本轮不实现 `MSG_OOB/ERRQUEUE`。
+- **验证证据**：宿主 probe 以 `cc -std=c11 -Wall -Wextra -Werror -O2` 通过。RV64/LA64 release、
+  初赛 snapshot、4 GiB/2 hart 的 `TASK_A_SOCKET_FLAGS_PROBE=1` 均输出 `SOCKET_FLAGS ALL PASS`，日志为
+  `/tmp/respos-{rv,la}-socket-flags-v2.log`。既有 `TASK_A_SOCKET_PHASE5_PROBE=1` 同配置双架构回归全通过，
+  日志为 `/tmp/respos-{rv,la}-socket-phase5-after-flags.log`。
+- **剩余边界**：LA64 2 hart 的 timeout 时长仍受未归一化 `rdtime.d` 阻断，本专项只证明 timeout 后短读
+  返回值正确，不能据此关闭下一节的 SMP 时钟问题。完整初赛/LTP 尚未在本轮改动后复跑。
+
+## 2026-08-14 Linux/POSIX Phase 5 `getsid` 与初始 PID 语义（当前工作树）
+
+- **Linux 契约与实现**：新增 `scripts/session_phase5_probe_linux.c`，确认 `getsid(0)`/按 pid 查询、
+  不存在或负 pid 的 `ESRCH`、子进程 `setsid()` 后父进程跨 session 查询，以及 process-group leader
+  调用 `setsid()` 的 `EPERM`。RespOS 增加 syscall 156 和对称 `session_phase5_probe`；syscall 只查询
+  现有 task/session 状态，不在查询路径引入 controlling-tty 假模型。
+- **初始身份修正**：probe 首轮发现 init/testrunner 的 PID、PGID、SID 均为 0。当前将首个用户 TID/PID
+  改为 1，使 PID 0 只保留为 syscall 的“当前进程/当前进程组”等选择值；fork 子进程继承合法 session/
+  pgrp，之后才能按 Linux 契约成功 `setsid()`。non-leader exec/de-thread 仍是独立 Phase 5 边界，本轮
+  没有改变 leader TCB 所有权模型。
+- **双架构证据**：宿主 Linux probe 以 `cc -std=c11 -Wall -Wextra -Werror -O2` 全通过。RV64/LA64
+  release、初赛 snapshot、4 GiB/2 hart 的 `TASK_A_SESSION_PROBE=1` 均输出
+  `SESSION_PHASE5_RESPOS ALL PASS`；日志为 `/tmp/respos-rv-session-phase5-v2.log` 与
+  `/tmp/respos-la-session-phase5.log`。PID 起点变化后的 `TASK_A_WAIT4_PROBE=1`、
+  `TASK_A_SIGNAL_PHASE5_PROBE=1` 和 `TASK_A_SOCKET_PHASE5_PROBE=1` 也在两架构 2 hart 全通过，
+  对应日志为 `/tmp/respos-{rv,la}-pid1-{wait4,signal-phase5}.log` 与
+  `/tmp/respos-{rv,la}-socket-phase5-regression.log`。
+- **边界**：完整初赛/LTP 尚未复跑；本轮只关闭 `getsid` 与 PID 0 基础模型，不能据此宣称 termios/
+  controlling tty/job control 已完成。
+
+## 2026-08-14 Linux/POSIX Phase 5 socket timeout 验收阻断（基于 `75216ff` 加当前 probe）
+
+- **已完成部分**：`scripts/socket_timeout_probe_linux.c` 在宿主通过，覆盖 `SO_RCVTIMEO/SO_SNDTIMEO`
+  的 timeval round-trip、零 timeout、`MSG_DONTWAIT`、recv timeout 和 send 满缓冲 timeout。新增对称
+  `socket_timeout_probe` 与 `TASK_A_SOCKET_TIMEOUT_PROBE` 自动入口。RV64 release、4 GiB/2 hart 和
+  LA64 release、4 GiB/1 hart 均输出三项 PASS 与 `SOCKET_TIMEOUT_RESPOS ALL PASS`；日志为
+  `/tmp/respos-rv-socket-timeout.log` 和 `/tmp/respos-la-socket-timeout-smp1.log`。
+- **LA64 SMP 反证**：LA64 4 GiB/2 hart 连续两轮都在 50 ms recv timeout 上约 979--981 ms 才返回，
+  日志为 `/tmp/respos-la-socket-timeout.log` 与 `/tmp/respos-la-socket-timeout-smp2-r2.log`。临时 affinity
+  A/B 中固定 hart0 全通过，固定 hart1 稳定复现约 979 ms；日志为
+  `/tmp/respos-la-socket-timeout-hart{0,1}.log`，临时 affinity 代码已撤销。
+- **当前判断与边界**：A/B 表明跨 hart 使用未归一化 `rdtime.d` 绝对 deadline 是首要根因候选；当前
+  timer-service hart 直接消费其他 hart 生成的 deadline，约 1 秒的时间域偏移会变成同量级晚醒。精确
+  raw-counter offset 与归一化实现仍为 `待验证`，在完成 secondary boot 校准/统一单调时间域并重跑
+  双架构专项前，socket timeout 状态保持“RV64/LA64 单核已验证，LA64 SMP 未通过”，不得关闭 M1.1。
+
 ## 2026-08-14 初赛 ext4 命名 FIFO 修复（当前工作树）
 
 - **根因与修复边界**：`mknod/mkfifo` 请求的 FIFO 在 ext4 lower create 中误走普通文件

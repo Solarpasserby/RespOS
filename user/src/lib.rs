@@ -436,6 +436,18 @@ pub fn time_get() -> isize {
         err => err,
     }
 }
+pub fn setpgid(pid: isize, pgid: isize) -> isize {
+    sys_setpgid(pid, pgid)
+}
+pub fn getpgid(pid: isize) -> isize {
+    sys_getpgid(pid)
+}
+pub fn getsid(pid: isize) -> isize {
+    sys_getsid(pid)
+}
+pub fn setsid() -> isize {
+    sys_setsid()
+}
 pub fn nanosleep(req: &TimeSpec, rem: &mut TimeSpec) -> isize {
     // TimeSpec and the legacy syscall helper's TimeVal have the same two-word
     // ABI layout; pass nanoseconds in the second field as Linux expects.
@@ -621,6 +633,14 @@ pub fn connect(fd: usize, addr: &SockAddrIn) -> isize {
     )
 }
 
+pub fn getsockname(fd: usize, addr: &mut SockAddrIn, addrlen: &mut u32) -> isize {
+    sys_getsockname(
+        fd,
+        addr as *mut SockAddrIn as usize,
+        addrlen as *mut u32 as usize,
+    )
+}
+
 pub fn connect_unix(fd: usize, addr: &SockAddrUn, addrlen: usize) -> isize {
     sys_connect(fd, addr as *const SockAddrUn as usize, addrlen)
 }
@@ -669,6 +689,42 @@ pub fn recvfrom(
         flags,
         addr_ptr,
         addrlen_ptr,
+    )
+}
+
+pub fn setsockopt_raw<T>(fd: usize, level: usize, optname: usize, value: &T) -> isize {
+    sys_setsockopt(
+        fd,
+        level,
+        optname,
+        value as *const T as usize,
+        core::mem::size_of::<T>(),
+    )
+}
+
+pub fn setsockopt_with_len<T>(
+    fd: usize,
+    level: usize,
+    optname: usize,
+    value: &T,
+    optlen: usize,
+) -> isize {
+    sys_setsockopt(fd, level, optname, value as *const T as usize, optlen)
+}
+
+pub fn getsockopt_raw<T>(
+    fd: usize,
+    level: usize,
+    optname: usize,
+    value: &mut T,
+    optlen: &mut u32,
+) -> isize {
+    sys_getsockopt(
+        fd,
+        level,
+        optname,
+        value as *mut T as usize,
+        optlen as *mut u32 as usize,
     )
 }
 

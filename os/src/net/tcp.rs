@@ -14,7 +14,7 @@
 use core::{
     cell::UnsafeCell,
     net::SocketAddr,
-    sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicIsize, AtomicU8, AtomicU64, Ordering},
 };
 use smoltcp::{
     iface::SocketHandle,
@@ -64,6 +64,8 @@ pub struct TcpSocket {
     /// 用户态 shutdown(SHUT_RD/SHUT_WR) 的半关闭状态。
     recv_shutdown: AtomicBool,
     send_shutdown: AtomicBool,
+    /// 异步 connect 完成后由 SO_ERROR 读取并消费的正 errno；0 表示无 pending error。
+    pending_error: AtomicIsize,
     /// TCP keepalive 参数。
     tcp_keepidle: AtomicU64,
     tcp_keepintvl: AtomicU64,
@@ -76,6 +78,7 @@ const STATE_BUSY: u8 = 1;
 const STATE_CONNECTED: u8 = 2;
 const STATE_CONNECTING: u8 = 3;
 const STATE_LISTENING: u8 = 4;
+const STATE_FAILED: u8 = 5;
 
 const SHUT_RD: usize = 0;
 const SHUT_WR: usize = 1;
@@ -179,15 +182,18 @@ impl TcpSocket {
                 State::SynSent => false,
                 State::Established => {
                     self.reset_shutdown_flags();
+                    self.pending_error.store(0, Ordering::Release);
                     self.set_state(STATE_CONNECTED);
                     true
                 }
                 _ => {
+                    self.pending_error
+                        .store(Errno::ECONNREFUSED.code(), Ordering::Release);
                     unsafe {
                         self.local_addr.get().write(UNSPECIFIED_ENDPOINT);
                         self.remote_addr.get().write(UNSPECIFIED_ENDPOINT);
                     }
-                    self.set_state(STATE_CLOSED);
+                    self.set_state(STATE_FAILED);
                     true
                 }
             });
@@ -195,6 +201,29 @@ impl TcpSocket {
             readable: false,
             writeable: writable,
         }
+    }
+
+    fn reset_failed_connect(&self) -> Result<(), Errno> {
+        self.state
+            .compare_exchange(
+                STATE_FAILED,
+                STATE_BUSY,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map_err(|_| Errno::EALREADY)?;
+        if let Some(handle) = unsafe { self.handle.get().read() } {
+            socket_set().lock().remove(handle);
+        }
+        let handle = socket_set().lock().add(SocketSetWrapper::new_tcp_socket());
+        unsafe {
+            self.handle.get().write(Some(handle));
+            self.local_addr.get().write(UNSPECIFIED_ENDPOINT);
+            self.remote_addr.get().write(UNSPECIFIED_ENDPOINT);
+        }
+        self.pending_error.store(0, Ordering::Release);
+        self.set_state(STATE_CLOSED);
+        Ok(())
     }
 
     /// 检查已连接 socket 的可读写状态。
@@ -334,6 +363,7 @@ impl TcpSocket {
             reuse_addr: AtomicBool::new(false),
             recv_shutdown: AtomicBool::new(false),
             send_shutdown: AtomicBool::new(false),
+            pending_error: AtomicIsize::new(0),
             tcp_keepidle: AtomicU64::new(0),
             tcp_keepintvl: AtomicU64::new(0),
             tcp_keepcnt: AtomicU64::new(0),
@@ -355,6 +385,7 @@ impl TcpSocket {
             reuse_addr: AtomicBool::new(false),
             recv_shutdown: AtomicBool::new(false),
             send_shutdown: AtomicBool::new(false),
+            pending_error: AtomicIsize::new(0),
             tcp_keepidle: AtomicU64::new(0),
             tcp_keepintvl: AtomicU64::new(0),
             tcp_keepcnt: AtomicU64::new(0),
@@ -407,6 +438,32 @@ impl TcpSocket {
         remote_addr: SocketAddr,
         deadline_us: Option<usize>,
     ) -> Result<(), Errno> {
+        match self.get_state() {
+            STATE_CONNECTING => {
+                poll_interfaces();
+                let handle = unsafe { self.handle.get().read().ok_or(Errno::ENOTCONN)? };
+                self.poll_connect(handle);
+                return match self.get_state() {
+                    STATE_CONNECTING => Err(Errno::EALREADY),
+                    STATE_CONNECTED => Err(Errno::EISCONN),
+                    STATE_FAILED => Err(Errno::ECONNREFUSED),
+                    _ => Err(Errno::EALREADY),
+                };
+            }
+            STATE_CONNECTED | STATE_LISTENING => return Err(Errno::EISCONN),
+            STATE_FAILED => {
+                let error = self.pending_error.load(Ordering::Acquire);
+                if error != 0 {
+                    return Err(Errno::ECONNREFUSED);
+                }
+                self.reset_failed_connect()?;
+                return Err(Errno::ECONNABORTED);
+            }
+            STATE_BUSY => return Err(Errno::EALREADY),
+            STATE_CLOSED => {}
+            _ => return Err(Errno::EINVAL),
+        }
+
         self.update_state(STATE_CLOSED, STATE_CONNECTING, || {
             let handle = unsafe { self.handle.get().read() }
                 .unwrap_or_else(|| socket_set().lock().add(SocketSetWrapper::new_tcp_socket()));
@@ -454,24 +511,31 @@ impl TcpSocket {
         crate::perf::tcp_connect_yield(1);
         yield_current_task();
 
-        self.block_on(false, deadline_us, || {
-            let handle = unsafe { self.handle.get().read().unwrap() };
-            let PollState { writeable, .. } = self.poll_connect(handle);
-            if !writeable {
-                Err(Errno::EAGAIN)
-            } else if self.get_state() == STATE_CONNECTED {
-                Ok(())
-            } else {
-                Err(Errno::ECONNREFUSED)
-            }
-        })
-        .map_err(|err| {
-            if err == Errno::EAGAIN && deadline_us.is_some() {
-                Errno::EINPROGRESS
-            } else {
-                err
-            }
-        })
+        let result = self
+            .block_on(false, deadline_us, || {
+                let handle = unsafe { self.handle.get().read().unwrap() };
+                let PollState { writeable, .. } = self.poll_connect(handle);
+                if !writeable {
+                    Err(Errno::EAGAIN)
+                } else if self.get_state() == STATE_CONNECTED {
+                    Ok(())
+                } else {
+                    Err(Errno::ECONNREFUSED)
+                }
+            })
+            .map_err(|err| {
+                if err == Errno::EAGAIN && deadline_us.is_some() {
+                    Errno::EINPROGRESS
+                } else {
+                    err
+                }
+            });
+        if result.is_err() {
+            // Blocking connect reports the failure directly; there is no
+            // asynchronous error left for SO_ERROR to consume.
+            self.pending_error.store(0, Ordering::Release);
+        }
+        result
     }
 
     /// 绑定本地地址和端口。
@@ -653,12 +717,17 @@ impl TcpSocket {
     }
 
     /// 从 socket 接收数据。
-    pub fn recv(
+    fn recv_once(
         &self,
         buf: &mut [u8],
         per_call_nonblocking: bool,
         deadline_us: Option<usize>,
+        peek: bool,
+        peek_min_len: usize,
     ) -> Result<usize, Errno> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
         if self.is_connecting() {
             return Err(Errno::EAGAIN);
         } else if !self.is_connected() {
@@ -672,7 +741,15 @@ impl TcpSocket {
                 .lock()
                 .with_socket_mut::<_, tcp::Socket, _>(handle, |socket| {
                     if socket.recv_queue() > 0 {
-                        let len = socket.recv_slice(buf).map_err(|e| match e {
+                        if peek && socket.recv_queue() < peek_min_len && socket.may_recv() {
+                            return Err(Errno::EAGAIN);
+                        }
+                        let result = if peek {
+                            socket.peek_slice(buf)
+                        } else {
+                            socket.recv_slice(buf)
+                        };
+                        let len = result.map_err(|e| match e {
                             RecvError::Finished => Errno::ECONNRESET,
                             RecvError::InvalidState => Errno::ENOTCONN,
                         })?;
@@ -686,6 +763,45 @@ impl TcpSocket {
                     }
                 })
         })
+    }
+
+    /// 从 TCP 字节流接收数据，并实现 MSG_PEEK / MSG_WAITALL 的流语义。
+    pub fn recv(
+        &self,
+        buf: &mut [u8],
+        per_call_nonblocking: bool,
+        deadline_us: Option<usize>,
+        peek: bool,
+        waitall: bool,
+    ) -> Result<usize, Errno> {
+        let waitall = waitall && !per_call_nonblocking && !self.is_nonblocking();
+        if !waitall {
+            return self.recv_once(buf, per_call_nonblocking, deadline_us, peek, 1);
+        }
+
+        if peek {
+            let result = self.recv_once(buf, false, deadline_us, true, buf.len());
+            return match result {
+                Err(err @ (Errno::EAGAIN | Errno::EINTR)) => {
+                    match self.recv_once(buf, true, None, true, 1) {
+                        Ok(len) if len > 0 => Ok(len),
+                        _ => Err(err),
+                    }
+                }
+                other => other,
+            };
+        }
+
+        let mut total = 0usize;
+        while total < buf.len() {
+            match self.recv_once(&mut buf[total..], false, deadline_us, false, 1) {
+                Ok(0) => break,
+                Ok(len) => total += len,
+                Err(_) if total > 0 => break,
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(total)
     }
 
     /// 向 socket 发送数据。
@@ -732,11 +848,36 @@ impl TcpSocket {
                 self.poll_connect(handle)
             }
             STATE_CONNECTED => self.poll_stream(isread),
+            STATE_FAILED => PollState {
+                readable: false,
+                writeable: true,
+            },
             _ => PollState {
                 writeable: false,
                 readable: false,
             },
         }
+    }
+
+    /// 返回并消费异步 connect 的 pending error，供 SO_ERROR 使用。
+    pub fn take_error(&self) -> i32 {
+        if self.is_connecting() {
+            poll_interfaces();
+            if let Some(handle) = unsafe { self.handle.get().read() } {
+                self.poll_connect(handle);
+            }
+        }
+        self.pending_error.swap(0, Ordering::AcqRel) as i32
+    }
+
+    pub fn has_pending_error(&self) -> bool {
+        if self.is_connecting() {
+            poll_interfaces();
+            if let Some(handle) = unsafe { self.handle.get().read() } {
+                self.poll_connect(handle);
+            }
+        }
+        self.pending_error.load(Ordering::Acquire) != 0
     }
 
     /// 设置 Nagle 算法开关。

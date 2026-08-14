@@ -804,6 +804,20 @@ pub fn sys_getpgid(pid: usize) -> SysResult<usize> {
     Ok(target.pgid())
 }
 
+/// Return the session id of the process selected by `pid`.
+///
+/// A zero pid selects the caller. Linux permits querying a process in another
+/// session; existence is the only lookup condition at this ABI layer.
+pub fn sys_getsid(pid: usize) -> SysResult<usize> {
+    let current_thread = current_task().expect("[kernel] current task is None.");
+    let target = if pid == 0 {
+        process_leader(&current_thread)
+    } else {
+        process_leader(&TASK_MANAGER.get(pid).ok_or(Errno::ESRCH)?)
+    };
+    Ok(target.sid())
+}
+
 /// 系统调用 sys-setsid
 ///
 /// 当前内核还没有完整建模 session/controlling terminal；这里保留 Linux 的关键可见语义：
