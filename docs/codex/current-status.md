@@ -1,5 +1,20 @@
 # RespOS 当前状态
 
+## 2026-08-14 Linux/POSIX Phase 5 mmap EOF/truncate/SIGBUS 基线（基于 `fcd68d5` 的当前工作树）
+
+- **可复现入口**：`testrunner` 新增 `TASK_A_MMAP_PHASE5_PROBE=1`，会单独执行已有的
+  `mmap_phase5_probe`、回报子进程状态并安全关机。宿主 Linux oracle 以
+  `-std=c11 -Wall -Wextra -Werror -O2` 编译运行，shared、private、private COW/truncate 三组均
+  `PASS`，最终输出 `MMAP_PHASE5_LINUX ALL PASS`。
+- **双架构当前基线**：release 初赛 snapshot、4 GiB/2 hart 下，RV64 与 LA64 都稳定报告同一七项
+  `MMAP_PHASE5_EXPECTED_FAIL`：shared/private 的初始整页越过 EOF 与 truncate 后 resident 整页越过
+  EOF 未触发 `SIGBUS`；private 的 truncate 部分页尾未清零、映射后文件增长不可见；private COW
+  所在整页被 truncate 后未触发 `SIGBUS`。日志为
+  `/tmp/respos-{rv,la}-mmap-phase5-baseline.log`。
+- **边界判断**：两架构失败集合完全一致，当前归类为统一的 file-backed resident provenance、动态 EOF
+  与 truncate invalidation 缺口，而非架构页表特例。该项会改变 VMA/PTE/frame 生命周期、truncate 后
+  shootdown 和 fault 分类；本轮只固定诊断入口与证据，未修改内核语义，按用户确认后再实施 M3 方案。
+
 ## 2026-08-14 Linux/POSIX Phase 5 futex bitset/wake 清账与 LA64 冷启动阻断（基于 `b7cb356`）
 
 - **已关闭项**：release 初赛 snapshot、4 GiB/2 hart 聚焦

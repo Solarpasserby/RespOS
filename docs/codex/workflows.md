@@ -702,14 +702,21 @@ Phase 5 mmap EOF/SIGBUS Linux 对照：
 cc -std=c11 -Wall -Wextra -Werror -O2 scripts/mmap_phase5_probe_linux.c \
   -o /tmp/mmap_phase5_probe_linux
 /tmp/mmap_phase5_probe_linux
+
+TASK_A_MMAP_PHASE5_PROBE=1 make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-mmap-phase5.log
+TASK_A_MMAP_PHASE5_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-mmap-phase5.log
 ```
 
-当前 no-feature guest 可运行 `mmap_phase5_probe`。修复前预期打印 shared/private 的
+两架构命令必须顺序运行，因为 build target 会改写共享 Cargo config。当前 no-feature guest 可通过
+上述 `testrunner` 入口运行 `mmap_phase5_probe`。修复前预期打印 shared/private 的
 `MMAP_PHASE5_EXPECTED_FAIL` 和 `MMAP_PHASE5 CURRENT DIFFERENCES CONFIRMED`，并以非零状态退出；它们
 覆盖初始 EOF 整页 SIGBUS、truncate 后 resident PTE 失效、未 COW EOF 部分页清零、已 COW private
 部分页保留匿名字节，以及 mmap 后动态扩容。完成 MM 修复后必须同时出现 `MMAP_PHASE5 shared PASS`、
 `MMAP_PHASE5 private PASS`、`MMAP_PHASE5 private_cow_truncate PASS` 与
-`MMAP_PHASE5 ALL PASS`，并复跑 `buildstorm_file_probe` 的 mmap 扩容/写回竞态。
+`MMAP_PHASE5 ALL PASS`，并复跑 `buildstorm_file_probe` 的 mmap 扩容/写回竞态。宿主 `make`/QEMU
+管线即使在 guest probe 非零后仍可能返回 0，因此必须以 guest marker 判定，不能只看宿主退出状态。
 
 Phase 5 signal ABI 对照：
 
