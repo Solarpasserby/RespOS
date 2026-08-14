@@ -690,6 +690,34 @@ make build-la LA_USER_FEATURES= LA_KERNEL_FEATURES=
 报告 calls、bytes、ticks。仅观察到 syscall 使用 bounce buffer 不构成零拷贝依据，prepared user pages
 还需覆盖 EFAULT-before-side-effect、lazy/COW、short I/O、共享 offset 和并发 munmap。
 
+allocator magazine 实验使用独立 `heap_magazine` feature；当前 A2 完整 A/B 未过门槛，必须默认关闭。
+诊断路径和生产 A/B
+必须分开构建：
+
+```bash
+# 路径、命中和 cache 上限诊断
+make build-la LA_USER_FEATURES= LA_KERNEL_FEATURES='heap_magazine perf_counters'
+
+# 墙钟候选；不要带 perf_counters
+make build-la LA_USER_FEATURES= LA_KERNEL_FEATURES=heap_magazine
+
+# 相邻 baseline；当前默认即关闭 magazine
+make build-la LA_USER_FEATURES= LA_KERNEL_FEATURES=
+```
+
+带 `heap_magazine perf_counters` 时可向 `/proc/respos_perf` 写入 `drain_heap_magazines`。它按固定
+`magazine -> buddy` 锁序归还所有 hart 的 cached block，并把块数累加到 `reclaim_blocks`；命令返回后
+当前 syscall 的析构可能再次缓存少量对象，所以验收看 `reclaim_blocks > 0`、cache 明显下降、后续跨核
+probe 正常和最终 coalesce 单测，不要求 proc read 后 cached bytes 永远为零。magazine 模式的
+`heap_peak_exact=0`：`heap_peak_bytes` 只能作非精确诊断；cached peak upper bound 是各 hart 峰值之和。
+正式 A/B 一律关闭 `perf_counters`，并同时记录 marker、Cargo 自报阶段时间、宿主优先级与日志 hash。
+完整对照还必须固定 guest memory、hart 数、根盘/辅助盘 hash 和 `-snapshot`；8 GiB 结果不能直接与
+12 GiB 历史轮计算加速比。记录宿主 `MemAvailable`、`pswpin/pswpout`、major fault 和 QEMU 核秒；空串口、
+启动包装器未 exec 到 QEMU 或持续宿主换页的样本作废。至少比较 Cargo release、axbuild、自报产物字节和
+完整成功 marker，不能只看早期 dev 时间或 `Compiling` 行数。当前 8 GiB/12 hart 的严格完整参考为：
+关闭 magazine `1281.89s`，旧三原子 A1 `1335.45s`，记账并入本地锁后的 A1 `1318.37s`；后两者均未过
+`>=5%` 收益门槛。若继续 A3，在 owner-hart drain/OOM 协议闭合前不得移除最后的 magazine mutex。
+
 修改 AF_UNIX wait/wakeup 后，先运行 `unix_socket_block_probe`，并在 perf kernel 下确认
 `unix_yields=0 scheduler_yields=0` 且存在 `blocking_switches`；再跑真实 Cargo timeout 窗口确认 IPC 活性。
 专项至少传输超过 `UNIX_SOCKET_BUFFER_LIMIT` 的数据，才能覆盖满写 backpressure，不能只测一条短消息。

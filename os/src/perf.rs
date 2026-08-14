@@ -35,6 +35,12 @@ struct HeapClassCounters {
     alloc_timing_samples: AtomicUsize,
     dealloc_timing_samples: AtomicUsize,
     timing_sequence: AtomicUsize,
+    magazine_hits: AtomicUsize,
+    magazine_misses: AtomicUsize,
+    magazine_cached_frees: AtomicUsize,
+    magazine_refill_blocks: AtomicUsize,
+    magazine_overflow_returns: AtomicUsize,
+    magazine_reclaim_blocks: AtomicUsize,
 }
 
 #[cfg(feature = "perf_counters")]
@@ -56,6 +62,12 @@ static HEAP_CLASSES: [HeapClassCounters; crate::arch::smp::MAX_HARTS] = [const {
         alloc_timing_samples: AtomicUsize::new(0),
         dealloc_timing_samples: AtomicUsize::new(0),
         timing_sequence: AtomicUsize::new(0),
+        magazine_hits: AtomicUsize::new(0),
+        magazine_misses: AtomicUsize::new(0),
+        magazine_cached_frees: AtomicUsize::new(0),
+        magazine_refill_blocks: AtomicUsize::new(0),
+        magazine_overflow_returns: AtomicUsize::new(0),
+        magazine_reclaim_blocks: AtomicUsize::new(0),
     }
 };
     crate::arch::smp::MAX_HARTS];
@@ -77,6 +89,12 @@ struct HeapClassSnapshot {
     high_alignment_allocs: usize,
     alloc_timing_samples: usize,
     dealloc_timing_samples: usize,
+    magazine_hits: usize,
+    magazine_misses: usize,
+    magazine_cached_frees: usize,
+    magazine_refill_blocks: usize,
+    magazine_overflow_returns: usize,
+    magazine_reclaim_blocks: usize,
 }
 
 #[inline(always)]
@@ -164,6 +182,15 @@ fn heap_class_snapshot() -> HeapClassSnapshot {
             snapshot.alloc_timing_samples += classes.alloc_timing_samples.load(Ordering::Relaxed);
             snapshot.dealloc_timing_samples +=
                 classes.dealloc_timing_samples.load(Ordering::Relaxed);
+            snapshot.magazine_hits += classes.magazine_hits.load(Ordering::Relaxed);
+            snapshot.magazine_misses += classes.magazine_misses.load(Ordering::Relaxed);
+            snapshot.magazine_cached_frees += classes.magazine_cached_frees.load(Ordering::Relaxed);
+            snapshot.magazine_refill_blocks +=
+                classes.magazine_refill_blocks.load(Ordering::Relaxed);
+            snapshot.magazine_overflow_returns +=
+                classes.magazine_overflow_returns.load(Ordering::Relaxed);
+            snapshot.magazine_reclaim_blocks +=
+                classes.magazine_reclaim_blocks.load(Ordering::Relaxed);
         }
         snapshot
     }
@@ -227,6 +254,12 @@ macro_rules! counters {
                     classes.alloc_timing_samples.store(0, Ordering::Relaxed);
                     classes.dealloc_timing_samples.store(0, Ordering::Relaxed);
                     classes.timing_sequence.store(0, Ordering::Relaxed);
+                    classes.magazine_hits.store(0, Ordering::Relaxed);
+                    classes.magazine_misses.store(0, Ordering::Relaxed);
+                    classes.magazine_cached_frees.store(0, Ordering::Relaxed);
+                    classes.magazine_refill_blocks.store(0, Ordering::Relaxed);
+                    classes.magazine_overflow_returns.store(0, Ordering::Relaxed);
+                    classes.magazine_reclaim_blocks.store(0, Ordering::Relaxed);
                 }
             }
         }
@@ -977,12 +1010,22 @@ pub fn render() -> String {
     // Capture class counters before constructing the output String: formatting
     // itself allocates and must not become part of the reported workload.
     let heap_classes = heap_class_snapshot();
-    let (heap_current_bytes, heap_peak_bytes) = {
+    let (heap_current_bytes, heap_peak_bytes, heap_peak_exact) = {
         #[cfg(feature = "perf_counters")]
         {
             crate::mm::heap_perf_usage()
         }
         #[cfg(not(feature = "perf_counters"))]
+        {
+            (0, 0, true)
+        }
+    };
+    let (magazine_cached_bytes, magazine_cached_peak_bytes) = {
+        #[cfg(feature = "heap_magazine")]
+        {
+            crate::mm::heap_magazine_usage()
+        }
+        #[cfg(not(feature = "heap_magazine"))]
         {
             (0, 0)
         }
@@ -1267,6 +1310,14 @@ pub fn render() -> String {
     );
     let _ = writeln!(
         out,
+        "heap_peak_exact={} heap_magazine_enabled={} heap_magazine_cached_bytes={} heap_magazine_cached_peak_upper_bound_bytes={}",
+        usize::from(heap_peak_exact),
+        usize::from(cfg!(feature = "heap_magazine")),
+        magazine_cached_bytes,
+        magazine_cached_peak_bytes
+    );
+    let _ = writeln!(
+        out,
         "dentry_cache_hits={} dentry_cache_misses={} dentry_cache_evictions={}",
         s.dentry_cache_hits, s.dentry_cache_misses, s.dentry_cache_evictions
     );
@@ -1286,6 +1337,16 @@ pub fn render() -> String {
         HEAP_TIMING_SAMPLE_RATE,
         heap_classes.alloc_timing_samples,
         heap_classes.dealloc_timing_samples
+    );
+    let _ = writeln!(
+        out,
+        "heap_magazine_hits={} misses={} cached_frees={} refill_blocks={} overflow_returns={} reclaim_blocks={}",
+        heap_classes.magazine_hits,
+        heap_classes.magazine_misses,
+        heap_classes.magazine_cached_frees,
+        heap_classes.magazine_refill_blocks,
+        heap_classes.magazine_overflow_returns,
+        heap_classes.magazine_reclaim_blocks
     );
     let _ = writeln!(
         out,
@@ -1398,6 +1459,29 @@ pub fn heap_timing_start() -> usize {
 pub fn heap_timing_checkpoint(start: usize) -> usize {
     if start == 0 { 0 } else { now_ticks() }
 }
+
+macro_rules! heap_magazine_increment_functions {
+    ($(($fn_name:ident, $field:ident)),+ $(,)?) => {
+        $(
+            #[inline(always)]
+            pub fn $fn_name(value: usize) {
+                #[cfg(feature = "perf_counters")]
+                current_heap_classes().$field.fetch_add(value, Ordering::Relaxed);
+                #[cfg(not(feature = "perf_counters"))]
+                let _ = value;
+            }
+        )+
+    };
+}
+
+heap_magazine_increment_functions!(
+    (heap_magazine_hit, magazine_hits),
+    (heap_magazine_miss, magazine_misses),
+    (heap_magazine_cached_free, magazine_cached_frees),
+    (heap_magazine_refill_blocks, magazine_refill_blocks),
+    (heap_magazine_overflow_return, magazine_overflow_returns),
+    (heap_magazine_reclaim_blocks, magazine_reclaim_blocks),
+);
 
 #[inline(always)]
 pub fn elapsed_since(start: usize) -> usize {

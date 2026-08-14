@@ -8,6 +8,7 @@ rust-version = "1.85"
 log = []
 verbose_boot = []
 perf_counters = ["respos_buddy_allocator/perf_counters"]
+heap_magazine = []
 debug_traces = []
 fault_trace = []
 

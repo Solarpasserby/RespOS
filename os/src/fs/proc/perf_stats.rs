@@ -47,6 +47,12 @@ impl InodeOp for PerfStatsInode {
             crate::fs::page_cache::arm_writeback_fault();
             return Ok(buf.len());
         }
+        #[cfg(all(feature = "heap_magazine", feature = "perf_counters"))]
+        if command.trim() == "drain_heap_magazines" {
+            let reclaimed = crate::mm::drain_heap_magazines();
+            crate::perf::heap_magazine_reclaim_blocks(reclaimed);
+            return Ok(buf.len());
+        }
         if command.trim() != "reset" {
             return Err(Errno::EINVAL);
         }

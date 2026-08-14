@@ -130,7 +130,7 @@ buddy-slab 或替换现有 allocator：当前 bitmap-assisted buddy 已解决线
 heap lock 获取和 buddy 元数据操作；非目标包括关闭 coalesce、无限缓存 free object、改变失败行为、
 把 per-hart cache 内存隐瞒出 `/proc` 统计，或为成绩对特定进程/路径开后门。
 
-### A0：测量和所有权设计（当前阶段）
+### A0：测量和所有权设计（已完成，提交 `f569f84`）
 
 1. sharded + 1/64 timing sampled `perf_counters` 仍未达到 3% 的精细墙钟门槛，因此它只负责确认
    size-class、工作量和数量级；allocator before/after 的墙钟判断一律关闭该 feature。保存原始串口、
@@ -146,7 +146,7 @@ heap lock 获取和 buddy 元数据操作；非目标包括关闭 coalesce、无
    只按 order 转移所有权，不伪造原始 Layout，也不让 `user` 计数下溢；reset/read 不得与 allocator
    自递归或破坏 IRQ-safe 锁序。
 
-### A1：最小完整实现
+### A1：最小完整实现（当前工作树已完成实现与短窗口门禁）
 
 1. 在 `IrqSafeHeap` 外层实现固定容量 per-hart magazine；本地中断关闭期间 push/pop，miss/refill 和
    overflow/drain 才获取现有全局 heap lock。首版不做跨 hart stealing，不引入后台线程。
@@ -157,6 +157,14 @@ heap lock 获取和 buddy 元数据操作；非目标包括关闭 coalesce、无
    alloc/free、OOM/partial refill、drain 后 free bytes/bitmap/峰值闭合；保留现有 IRQ re-entry 防护。
 4. 先用保守容量和 refill batch（作为可调参数，不写死为工作负载特判），统计 hit/miss/refill/drain、
    cached peak、全局 lock acquisitions/wait；命中路径不得写跨 hart 共享 cache line。
+
+当前实现使用独立且默认关闭的 `heap_magazine` feature，容量 64、refill batch 16。host 随机/所有权/OOM/
+coalesce 单测、Rust 1.86 双架构构建、RV8 跨核 probe 与显式 drain 已通过；LA 30 秒计数样本的 eligible
+命中率约 99.76%。旧实现每次 hit/free 除 magazine mutex 外还更新 cached/live 两个原子；同配置完整
+8 GiB/12 hart A/B 为 `1335.45s` 对 baseline `1281.89s`，慢 `4.18%`。将记账并入同一 magazine 锁后，
+RV8 跨核/drain 回归仍通过，LA 中窗口明显提前，但完整结果为 `1318.37s`，仍慢 `2.85%`。因此当前
+实现/参数的性能验收仍为 **No-Go**，feature 保持默认关闭。早先 12 GiB 2366.80 秒仅到 78 marker 的
+未完成轮与随后成功样本冲突，归类为原因 `待验证` 的异常放大，不再单独用作 cache 稳定退化的证据。
 
 ### A2：性能验收与去留
 
@@ -169,6 +177,19 @@ heap lock 获取和 buddy 元数据操作；非目标包括关闭 coalesce、无
    cache，不扩大到完整 slab。通过后再单独评估 `512/1024 B`，不得一开始覆盖大对象。
 4. frame allocator 的连续页 API、批量清零和 VirtIO DMA 是后续 F0--F2；它们不复用 heap magazine
    所有权模型，也不与 A1 同提交。
+
+### A3：owner-hart 无原子快路径（候选，尚未实现）
+
+1. 当前唯一剩余的普通 hit 原子是 per-hart magazine mutex。不得直接换成 `UnsafeCell`，因为 OOM drain、
+   proc 统计和 owner hart push/pop 会并发访问同一 state。
+2. 先核对两架构现有 IPI/安全点能力；候选协议由请求 hart 发布 drain epoch，各 online owner hart 在本地
+   中断上下文或明确安全点把自己的 cache 转移回 buddy/转交队列，并确认完成。必须定义 offline hart、
+   嵌套中断、部分完成、超时和 OOM retry，保持跨 hart free 与 `magazine -> buddy` 所有权不变。
+3. 若协议本身仍要求每次 alloc/free 检查共享原子，则先用反汇编与 host microbenchmark 证明它比 mutex
+   便宜；不能用更复杂但同样高频的原子替换当前锁。若无法做到普通路径无共享/原子访问，则停止 A3，
+   保留默认 buddy，而不是牺牲 OOM 健全性。
+4. 验收重跑 A1 全部门禁，并增加并发 drain 与 alloc/free、hart 不响应/离线、反复 OOM drain、统计读取
+   并发测试；LA 无 perf 相邻完整 A/B 必须改善至少 5%，RV 不得退化超过 3%，否则回退 cache 实验。
 
 ## 目标与边界
 

@@ -76,6 +76,53 @@
 - 后续影响：不能在 wait 内核循环里简单忽略信号，因为 handler 必须先执行；应在 signal frame 中保存
   重执行上下文。分析大量 LTP TBROK 时同时看 `SA_RESTART`、task health 和跨 case 输出串台。
 
+## per-hart allocator cache 不能假设原 hart 释放，也不能反转 cache/buddy 锁序
+
+- 状态：已确认并由 A1 实现/测试约束
+- 适用范围：`heap_magazine`、raw-order allocator API、跨 hart free、OOM recovery、heap proc 统计
+- 最后验证：2026-08-13
+- 证据：allocator 全小类/跨 owner/随机/OOM/coalesce host 单测；RV64 8-hart shared-MM、frame reclaim、
+  显式 drain 后再次 shared-MM；LA64 30 秒 BuildStorm magazine 计数
+- 内容：任务可以迁移，分配与释放不保证发生在同一 hart；cache 中 block 仍由 allocator 独占，不能
+  同时出现在 buddy free bitmap。正常 miss/overflow 持本地 magazine 后才持 buddy，因此全 hart OOM
+  drain 若先持 buddy 再等待某个 magazine 会形成 ABBA 死锁。当前所有路径统一为 `magazine -> buddy`，
+  跨 hart free 进入执行释放的 hart；live requested、buddy reserved 和 cached bytes 分开记账。为避免
+  命中路径更新共享 peak，magazine 模式显式输出 `heap_peak_exact=0`。
+- 后续影响：不得把 owner hart 编入对象头、关闭 coalesce、让 cache 无界增长，或用伪造 Layout 调用普通
+  dealloc。修改容量/refill/order 后必须重跑所有权随机测试、OOM drain/retry、最终大块 coalesce、双架构
+  构建与跨核 probe；正式收益只看关闭 `perf_counters` 的 A/B。
+
+## BuildStorm 前段 allocator 短窗口不能代表主 release 阶段
+
+- 状态：已确认；当前 A1 magazine 完整收益仍为 No-Go
+- 适用范围：allocator/锁/TLB/FS 等改变不同编译阶段成本的 BuildStorm A/B
+- 最后验证：2026-08-13，8 GiB/12 hart 相邻完整 A/B 与记账降本完整复测
+- 证据：LA 70 秒两对、120 秒一对无 perf A/B；8 GiB/12 hart 完整 off/旧 A1/降本 A1 时间线；一轮
+  12 GiB 2366 秒未完成异常样本
+- 内容：旧 A1 在 70/120 秒前段把 dev 阶段改善约 5--11%，但同配置完整 8 GiB A/B 中 axbuild 为
+  `1335.45s` 对 baseline `1281.89s`，反而慢 `4.18%`。把每 hit/free 的 live/cached 两次原子并入本地
+  magazine 锁后，中窗口到 34/35 marker 比 baseline 提前约 267/87 秒，但完整 axbuild `1318.37s`
+  仍比 `1281.89s` 慢 `2.85%`。编译依赖图在不同阶段只提供约 1、3、8 或 12 个 runnable rustc，marker
+  会长时间不变；短窗口或某个 checkpoint 的方向不能替代完整结果。
+- 后续影响：短窗口只作候选筛选；影响高频基础设施的修改在完整测试前必须建立覆盖主 release 稳态的
+  中窗口或阶段 checkpoint。完整轮已经显著落后且进度不足时可终止并标为反证，但不得把未完成轮写成
+  最终墙钟成绩。没有相同内存、镜像、feature、宿主换页状态的完整相邻 A/B 时，不得因前段改善或历史
+  不同配置数字默认启用 feature。
+
+## per-hart 不等于无同步：远端回收要求保留 owner 协议
+
+- 状态：已确认当前锁边界；无锁 owner-hart drain 方案待实现
+- 适用范围：per-hart heap magazine、OOM recovery、proc heap 统计、跨 hart free
+- 最后验证：2026-08-13
+- 证据：LA 无 perf 热路径反汇编；8 GiB 完整 off/旧 A1/记账降本 A/B；RV64 8-hart drain 回归
+- 内容：旧 A1 的本地 cache hit 仍执行 magazine mutex、cached bytes 和 live bytes 共三次 LA 原子；
+  将后两者并入同一锁后，完整退化由 `4.18%` 收窄到 `2.85%`，但唯一的 mutex 原子仍在。不能据此把
+  state 直接改成 `UnsafeCell`：OOM drain 和统计读取可能从另一 hart 访问，和 owner hart 的 push/pop
+  并发会产生数据竞争、丢块或重复释放。仅关闭远端 drain 也会让被 cache 保留的可用内存造成伪 OOM。
+- 后续影响：若做 A3，无原子普通路径必须让每个 owner hart 在 IPI 或明确安全点自行转移其 cache，并
+  有同步完成/离线 hart/中断嵌套协议；失败后仍需 drain 后重试，且继续覆盖跨 hart free、最终 coalesce、
+  双架构和完整 A/B。在该协议闭合前保留当前 mutex 和默认关闭 feature。
+
 ## 高频性能计数器本身会把共享 cache line 变成伪热点
 
 - 状态：已确认并修复 heap 计数结构；LA 重校准待验证

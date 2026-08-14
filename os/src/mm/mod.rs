@@ -37,18 +37,27 @@ pub fn free_frame_count() -> usize {
 }
 
 pub fn heap_allocated() -> usize {
-    heap_allocator::HEAP_ALLOCATOR.lock().stats_alloc_user()
+    heap_allocator::HEAP_ALLOCATOR.stats_alloc_user()
 }
 
 #[cfg(feature = "perf_counters")]
-pub fn heap_perf_usage() -> (usize, usize) {
-    let heap = heap_allocator::HEAP_ALLOCATOR.lock();
-    (heap.stats_alloc_user(), heap.stats_peak_user())
+pub fn heap_perf_usage() -> (usize, usize, bool) {
+    heap_allocator::HEAP_ALLOCATOR.perf_usage()
 }
 
 #[cfg(feature = "perf_counters")]
 pub fn reset_heap_perf_peak() {
-    heap_allocator::HEAP_ALLOCATOR.lock().reset_peak_user();
+    heap_allocator::HEAP_ALLOCATOR.reset_perf_peak();
+}
+
+#[cfg(feature = "heap_magazine")]
+pub fn heap_magazine_usage() -> (usize, usize) {
+    heap_allocator::HEAP_ALLOCATOR.magazine_usage()
+}
+
+#[cfg(all(feature = "heap_magazine", feature = "perf_counters"))]
+pub fn drain_heap_magazines() -> usize {
+    heap_allocator::HEAP_ALLOCATOR.drain_magazines()
 }
 
 pub fn try_free_frame_count() -> Option<usize> {
@@ -56,11 +65,7 @@ pub fn try_free_frame_count() -> Option<usize> {
 }
 
 pub fn try_heap_allocated() -> Option<usize> {
-    Some(
-        heap_allocator::HEAP_ALLOCATOR
-            .try_lock()?
-            .stats_alloc_user(),
-    )
+    heap_allocator::HEAP_ALLOCATOR.try_stats_alloc_user()
 }
 
 /// 初始化内存管理，启用虚拟地址

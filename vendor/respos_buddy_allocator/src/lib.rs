@@ -17,6 +17,17 @@ use core::mem::size_of;
 use core::ptr::{self, NonNull};
 
 const DOUBLE_LINK_ORDER: usize = 4;
+pub const MIN_ORDER: usize = size_of::<usize>().trailing_zeros() as usize;
+
+/// Return the buddy order needed to serve `layout`.
+///
+/// The returned block size is at least one machine word, the requested
+/// alignment, and the next power of two covering the requested size.
+pub fn layout_order(layout: Layout) -> Option<usize> {
+    let requested = layout.size().max(1).checked_next_power_of_two()?;
+    let size = max(requested, max(layout.align(), size_of::<usize>()));
+    Some(size.trailing_zeros() as usize)
+}
 
 /// Number of machine words required by the membership bitmap.
 pub const fn bitmap_words(heap_size: usize, order: usize) -> usize {
@@ -110,6 +121,60 @@ impl FreeList {
 }
 
 unsafe impl Send for FreeList {}
+
+/// Intrusive LIFO storage for allocator-owned blocks.
+///
+/// Capacity and refill/drain policy deliberately live in the caller. A block
+/// in this structure remains reserved from the buddy allocator and stores its
+/// next pointer in the first machine word.
+pub struct Magazine<const CLASSES: usize> {
+    heads: [*mut usize; CLASSES],
+    lengths: [usize; CLASSES],
+}
+
+impl<const CLASSES: usize> Magazine<CLASSES> {
+    pub const fn new() -> Self {
+        Self {
+            heads: [ptr::null_mut(); CLASSES],
+            lengths: [0; CLASSES],
+        }
+    }
+
+    pub fn len(&self, class: usize) -> usize {
+        self.lengths[class]
+    }
+
+    /// Insert an allocator-owned block into one class.
+    ///
+    /// # Safety
+    ///
+    /// The block must be at least one machine word, suitably aligned, uniquely
+    /// owned, and remain reserved from its backing allocator while cached.
+    pub unsafe fn push(&mut self, class: usize, ptr: NonNull<u8>) {
+        let slot = ptr.as_ptr().cast::<usize>();
+        unsafe { slot.write(self.heads[class] as usize) };
+        self.heads[class] = slot;
+        self.lengths[class] += 1;
+    }
+
+    pub fn pop(&mut self, class: usize) -> Option<NonNull<u8>> {
+        let slot = self.heads[class];
+        if slot.is_null() {
+            return None;
+        }
+        self.heads[class] = unsafe { slot.read() as *mut usize };
+        self.lengths[class] -= 1;
+        NonNull::new(slot.cast())
+    }
+
+    pub fn drain_class(&mut self, class: usize, mut return_block: impl FnMut(NonNull<u8>)) {
+        while let Some(block) = self.pop(class) {
+            return_block(block);
+        }
+    }
+}
+
+unsafe impl<const CLASSES: usize> Send for Magazine<CLASSES> {}
 
 pub struct Heap<const ORDER: usize> {
     free_list: [FreeList; ORDER],
@@ -236,13 +301,11 @@ impl<const ORDER: usize> Heap<ORDER> {
         removed
     }
 
-    pub fn alloc(&mut self, layout: Layout) -> Result<NonNull<u8>, ()> {
-        let size = max(
-            layout.size().next_power_of_two(),
-            max(layout.align(), size_of::<usize>()),
-        );
-        let class = size.trailing_zeros() as usize;
-        if class >= ORDER {
+    /// Reserve one block of exactly `1 << class` bytes without changing the
+    /// caller-requested-byte accounting. This is the ownership-transfer API
+    /// used by bounded caches layered above the buddy allocator.
+    pub fn alloc_order(&mut self, class: usize) -> Result<NonNull<u8>, ()> {
+        if class < MIN_ORDER || class >= ORDER {
             return Err(());
         }
         for source_class in class..ORDER {
@@ -258,26 +321,24 @@ impl<const ORDER: usize> Heap<ORDER> {
                 }
             }
             let ptr = unsafe { self.pop_free(class).ok_or(())? };
-            self.user += layout.size();
-            #[cfg(feature = "perf_counters")]
-            {
-                self.peak_user = self.peak_user.max(self.user);
-            }
-            self.allocated += size;
+            self.allocated += 1usize << class;
             return NonNull::new(ptr.cast()).ok_or(());
         }
         Err(())
     }
 
-    pub fn dealloc(&mut self, ptr: NonNull<u8>, layout: Layout) {
-        let size = max(
-            layout.size().next_power_of_two(),
-            max(layout.align(), size_of::<usize>()),
-        );
-        let mut class = size.trailing_zeros() as usize;
+    /// Return a block previously obtained from `alloc_order` to the buddy.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must denote a currently reserved block of exactly `1 << class`
+    /// bytes from this heap. It must not be returned twice or used afterwards.
+    pub unsafe fn dealloc_order(&mut self, ptr: NonNull<u8>, mut class: usize) {
+        assert!(class >= MIN_ORDER && class < ORDER);
+        let size = 1usize << class;
         let mut current = ptr.as_ptr() as usize;
-        assert!(class < ORDER);
         assert!(current >= self.heap_start && current + size <= self.heap_end);
+        assert_eq!(current & (size - 1), 0, "buddy block is misaligned");
         unsafe { self.push_free(class, current as *mut usize) };
 
         while class + 1 < ORDER {
@@ -307,8 +368,24 @@ impl<const ORDER: usize> Heap<ORDER> {
             unsafe { self.push_free(class, current as *mut usize) };
         }
 
-        self.user -= layout.size();
         self.allocated -= size;
+    }
+
+    pub fn alloc(&mut self, layout: Layout) -> Result<NonNull<u8>, ()> {
+        let class = layout_order(layout).ok_or(())?;
+        let ptr = self.alloc_order(class)?;
+        self.user += layout.size();
+        #[cfg(feature = "perf_counters")]
+        {
+            self.peak_user = self.peak_user.max(self.user);
+        }
+        Ok(ptr)
+    }
+
+    pub fn dealloc(&mut self, ptr: NonNull<u8>, layout: Layout) {
+        let class = layout_order(layout).expect("valid allocated layout must have a buddy order");
+        self.user -= layout.size();
+        unsafe { self.dealloc_order(ptr, class) };
     }
 
     pub fn stats_alloc_user(&self) -> usize {
@@ -336,7 +413,7 @@ impl<const ORDER: usize> Heap<ORDER> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Heap, bitmap_words};
+    use super::{Heap, MIN_ORDER, Magazine, bitmap_words, layout_order};
     use core::alloc::Layout;
     use std::alloc::{alloc_zeroed, dealloc};
     use std::boxed::Box;
@@ -416,6 +493,224 @@ mod tests {
         }
         for (ptr, layout) in live.drain(..).rev() {
             heap.dealloc(ptr, layout);
+        }
+        assert_eq!(heap.stats_alloc_user(), 0);
+        assert_eq!(heap.stats_alloc_actual(), 0);
+        drop(heap);
+        unsafe { dealloc(backing, backing_layout) };
+    }
+
+    #[test]
+    fn raw_order_transfer_preserves_user_accounting_and_coalesces() {
+        let (mut heap, backing, backing_layout) = new_heap();
+        let order = layout_order(Layout::from_size_align(17, 8).unwrap()).unwrap();
+        assert_eq!(order, 5);
+        let mut blocks = Vec::new();
+        for _ in 0..128 {
+            let ptr = heap.alloc_order(order).unwrap();
+            assert_eq!(ptr.as_ptr() as usize % (1usize << order), 0);
+            blocks.push(ptr);
+        }
+        assert_eq!(heap.stats_alloc_user(), 0);
+        assert_eq!(heap.stats_alloc_actual(), 128 * (1usize << order));
+
+        for ptr in blocks.drain(..).rev() {
+            unsafe { heap.dealloc_order(ptr, order) };
+        }
+        assert_eq!(heap.stats_alloc_user(), 0);
+        assert_eq!(heap.stats_alloc_actual(), 0);
+
+        let large = Layout::from_size_align(HEAP_SIZE / 2, HEAP_SIZE / 2).unwrap();
+        let ptr = heap.alloc(large).expect("raw blocks must fully coalesce");
+        heap.dealloc(ptr, large);
+        drop(heap);
+        unsafe { dealloc(backing, backing_layout) };
+    }
+
+    #[test]
+    fn invalid_raw_orders_fail_without_changing_accounting() {
+        let (mut heap, backing, backing_layout) = new_heap();
+        assert!(heap.alloc_order(0).is_err());
+        assert!(heap.alloc_order(ORDER).is_err());
+        assert_eq!(heap.stats_alloc_user(), 0);
+        assert_eq!(heap.stats_alloc_actual(), 0);
+        drop(heap);
+        unsafe { dealloc(backing, backing_layout) };
+    }
+
+    #[test]
+    fn magazine_is_bounded_by_its_caller_and_preserves_lifo_ownership() {
+        let (mut heap, backing, backing_layout) = new_heap();
+        let order = 5;
+        let mut magazine = Magazine::<2>::new();
+        let first = heap.alloc_order(order).unwrap();
+        let second = heap.alloc_order(order).unwrap();
+        unsafe {
+            magazine.push(0, first);
+            magazine.push(0, second);
+        }
+        assert_eq!(magazine.len(0), 2);
+        let mut drained = Vec::new();
+        magazine.drain_class(0, |block| drained.push(block));
+        assert_eq!(drained, [second, first]);
+        assert_eq!(magazine.len(0), 0);
+        for block in drained {
+            unsafe { heap.dealloc_order(block, order) };
+        }
+        assert_eq!(heap.stats_alloc_actual(), 0);
+        drop(heap);
+        unsafe { dealloc(backing, backing_layout) };
+    }
+
+    #[test]
+    fn magazines_cover_all_small_orders_cross_owner_and_fully_coalesce() {
+        const CLASSES: usize = 6;
+        const CAPACITY: usize = 8;
+        let (mut heap, backing, backing_layout) = new_heap();
+        let mut source = Magazine::<CLASSES>::new();
+        let mut remote = Magazine::<CLASSES>::new();
+
+        for class in 0..CLASSES {
+            let order = MIN_ORDER + class;
+            for _ in 0..CAPACITY {
+                let block = heap.alloc_order(order).unwrap();
+                unsafe { source.push(class, block) };
+            }
+
+            // The caller enforces the hard capacity and returns overflow to
+            // the authoritative buddy allocator.
+            let overflow = heap.alloc_order(order).unwrap();
+            unsafe { heap.dealloc_order(overflow, order) };
+
+            // Popping on one simulated hart and freeing into another covers
+            // the ownership transfer used by cross-hart deallocation.
+            while let Some(block) = source.pop(class) {
+                unsafe { remote.push(class, block) };
+            }
+            assert_eq!(source.len(class), 0);
+            assert_eq!(remote.len(class), CAPACITY);
+            remote.drain_class(class, |block| unsafe { heap.dealloc_order(block, order) });
+        }
+
+        assert_eq!(heap.stats_alloc_user(), 0);
+        assert_eq!(heap.stats_alloc_actual(), 0);
+        let large = Layout::from_size_align(HEAP_SIZE / 2, HEAP_SIZE / 2).unwrap();
+        let ptr = heap.alloc(large).expect("drained magazines must coalesce");
+        heap.dealloc(ptr, large);
+        drop(heap);
+        unsafe { dealloc(backing, backing_layout) };
+    }
+
+    #[test]
+    fn raw_orders_preserve_mixed_layout_alignment() {
+        let (mut heap, backing, backing_layout) = new_heap();
+        let sizes = [1, 7, 8, 9, 17, 33, 129, 256];
+        let alignments = [1, 8, 16, 32, 64, 128, 256];
+        for size in sizes {
+            for align in alignments {
+                let layout = Layout::from_size_align(size, align).unwrap();
+                let order = layout_order(layout).unwrap();
+                let block = heap.alloc_order(order).unwrap();
+                assert_eq!(block.as_ptr() as usize % align, 0);
+                unsafe { heap.dealloc_order(block, order) };
+            }
+        }
+        assert_eq!(heap.stats_alloc_actual(), 0);
+        drop(heap);
+        unsafe { dealloc(backing, backing_layout) };
+    }
+
+    #[test]
+    fn partial_refill_oom_drain_and_retry_preserve_every_block() {
+        let (mut heap, backing, backing_layout) = new_heap();
+        let mut large = Vec::new();
+        for _ in 0..(HEAP_SIZE / 256 - 1) {
+            large.push(heap.alloc_order(8).unwrap());
+        }
+
+        // Exactly two minimum-order blocks remain after these reservations.
+        let mut blockers = Vec::new();
+        for _ in 0..30 {
+            blockers.push(heap.alloc_order(MIN_ORDER).unwrap());
+        }
+        let live = heap.alloc_order(MIN_ORDER).unwrap();
+        let mut magazine = Magazine::<1>::new();
+        let cached = heap.alloc_order(MIN_ORDER).unwrap();
+        unsafe { magazine.push(0, cached) };
+        assert!(heap.alloc_order(MIN_ORDER).is_err());
+
+        // This mirrors the production OOM recovery: drain caches, then retry
+        // once. The retry must observe the returned block immediately.
+        magazine.drain_class(0, |block| unsafe { heap.dealloc_order(block, MIN_ORDER) });
+        let retried = heap
+            .alloc_order(MIN_ORDER)
+            .expect("drained block must satisfy retry");
+
+        unsafe {
+            heap.dealloc_order(retried, MIN_ORDER);
+            heap.dealloc_order(live, MIN_ORDER);
+        }
+        for block in blockers {
+            unsafe { heap.dealloc_order(block, MIN_ORDER) };
+        }
+        for block in large {
+            unsafe { heap.dealloc_order(block, 8) };
+        }
+        assert_eq!(heap.stats_alloc_actual(), 0);
+
+        let whole = Layout::from_size_align(HEAP_SIZE / 2, HEAP_SIZE / 2).unwrap();
+        let ptr = heap
+            .alloc(whole)
+            .expect("OOM recovery must not fragment heap");
+        heap.dealloc(ptr, whole);
+        drop(heap);
+        unsafe { dealloc(backing, backing_layout) };
+    }
+
+    #[test]
+    fn randomized_magazine_transfers_do_not_duplicate_or_lose_blocks() {
+        const CLASSES: usize = 6;
+        const CAPACITY: usize = 16;
+        let (mut heap, backing, backing_layout) = new_heap();
+        let mut magazines = [Magazine::<CLASSES>::new(), Magazine::<CLASSES>::new()];
+        let mut live = Vec::new();
+        let mut state = 0x9e37_79b9_7f4a_7c15usize;
+
+        for _ in 0..20_000 {
+            state ^= state << 7;
+            state ^= state >> 9;
+            state ^= state << 8;
+            if live.is_empty() || state & 1 == 0 {
+                let order = MIN_ORDER + (state >> 1) % CLASSES;
+                let hart = (state >> 8) & 1;
+                let class = order - MIN_ORDER;
+                let block = magazines[hart]
+                    .pop(class)
+                    .or_else(|| heap.alloc_order(order).ok());
+                if let Some(block) = block {
+                    live.push((block, order));
+                }
+            } else {
+                let index = (state >> 16) % live.len();
+                let (block, order) = live.swap_remove(index);
+                let hart = (state >> 24) & 1;
+                let class = order - MIN_ORDER;
+                if magazines[hart].len(class) < CAPACITY {
+                    unsafe { magazines[hart].push(class, block) };
+                } else {
+                    unsafe { heap.dealloc_order(block, order) };
+                }
+            }
+        }
+
+        for (block, order) in live {
+            unsafe { heap.dealloc_order(block, order) };
+        }
+        for magazine in &mut magazines {
+            for class in 0..CLASSES {
+                let order = MIN_ORDER + class;
+                magazine.drain_class(class, |block| unsafe { heap.dealloc_order(block, order) });
+            }
         }
         assert_eq!(heap.stats_alloc_user(), 0);
         assert_eq!(heap.stats_alloc_actual(), 0);

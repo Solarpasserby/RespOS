@@ -141,7 +141,61 @@
   `/dev/shm` open，但随后暴露 `waitpid(...)=EINTR` 的独立 LTP blocker，不能计作 shm 修复失败或整体
   LTP 通过。日志为 `/tmp/respos-{rv,la}-shm-ltp.log`；完整初赛仍待用户复跑。
 
-## 2026-08-13 BuildStorm M0 测量闭环与 allocator A0 入口（当前工作树）
+## 2026-08-13 allocator A1 per-hart 小对象 magazine（当前工作树，默认关闭）
+
+- **实现与边界**：新增独立 `heap_magazine` feature；每 hart 为 8/16/32/64/128/256 B 六类保留固定
+  64 项 intrusive LIFO，miss 最多批量 refill 16 项。普通命中/释放只持本 hart magazine 锁并关闭本地
+  中断；大于 256 B、异常 alignment、buddy split/coalesce、失败与 OOM 仍由原 bitmap-assisted buddy
+  负责。跨 hart free 进入执行释放的 hart，不依赖原分配 hart。全局回收严格使用
+  `magazine -> buddy` 锁序；OOM 会先释放所有 hart cache，再重试一次，不能关闭 coalesce 或改变失败语义。
+- **统计语义**：live requested bytes、buddy reserved bytes 与 cached bytes 分开记账；raw-order API 不修改
+  user bytes。live/cached/peak 分片已并入同一个本地 magazine 锁保护的普通字段，避免每次 hit/free 额外
+  执行两个 LA 原子；跨 hart free 允许单 hart 的 dealloc 大于 alloc，因此读取时必须先分别汇总全局
+  alloc/dealloc，再做饱和相减，不能逐 hart 相减。统计快照先逐 hart 取值并释放锁、再读 buddy，保持
+  `magazine -> buddy` 锁序；统计、peak reset 与显式 drain 自身也持有 IRQ guard，避免 syscall 上下文
+  被中断侧 allocator 重入同 hart magazine。开启 magazine 时 `heap_peak_exact=0`；`heap_current_bytes` 仍由 fallback
+  buddy live bytes 加各 hart alloc/dealloc 全局差额得到，
+  `heap_magazine_cached_peak_upper_bound_bytes` 是各 hart 局部峰值之和，不是同一时刻的精确全局峰值。
+  诊断组合 `heap_magazine perf_counters` 额外接受 `drain_heap_magazines`，仅用于安全回收测试。
+- **host 与双架构门禁**：allocator 无计数 9/9、带计数 10/10 单测通过，覆盖全部小类、容量溢出、
+  模拟跨 hart 转移、混合 alignment、部分 refill/OOM/drain/retry、两万次随机操作及最终大块 coalesce。
+  比赛同版默认 `nightly-2025-01-18`（Rust 1.86）下，RV/LA 的 feature 开/关 release 均构建通过。
+  记账降本后 RV64 4 GiB/8 hart 运行 shared-MM 100 轮、64 MiB frame reclaim、显式 drain 293 块、再运行
+  shared-MM 100 轮均通过；两次 `match_totals=1`，日志
+  `/tmp/respos-rv-a1-accounting-regression.log`。LA 无 perf 反汇编确认普通 hit 只剩 magazine mutex 的一次
+  原子获取，原先 cached/live 两次原子更新已经消失。补齐辅助入口 IRQ guard 后，RV64 proc read、显式
+  drain 127 块及 shared-MM 100 轮再次通过，日志 `/tmp/respos-rv-a1-irq-stats-regression.log`。
+- **LA 计数证据**：12 GiB/12 hart、30 秒窗口共 7,430,314 次 alloc；magazine hit/miss 为
+  7,309,569/17,495，eligible 分配命中率约 99.76%，refill 262,425 块、overflow return 111,326 块，
+  cache 当前 171,232 B、各 hart peak 上界 291,480 B，低于理论硬上限 387,072 B。heap 分桶
+  `match_totals=1`，free frames 约 301 万，无 panic；日志 `/tmp/respos-la-a1-magazine-profile.log`，
+  SHA-256 `1cb5c8d8...968d0`。该 feature 组合只证明路径和数量级，不用于小幅墙钟结论。
+- **LA 无 perf A/B**：12 GiB/12 hart、`TS/NI=-10`、冷 snapshot 的两对相邻 70 秒 off/on 均到达
+  23 个 `Compiling` marker。off 两轮 dev 阶段为 `13.37/5.06s`、`13.04/5.12s`，on 为
+  `12.22/4.71s`、`11.39/4.47s`；两类中位数约改善 10.6%/9.8%。另一个相邻 120 秒样本仍为相同
+  23 个 marker，off/on 是 `11.61/4.52s` 对 `10.89/4.27s`，约改善 6.2%/5.5%；日志
+  `/tmp/respos-la-a1-120s-{off,on}.log`，SHA-256 为 `bc9f031f...ba60`/`aaa41e7a...472d`。
+  固定窗口只确认前段 Cargo 收益，主 release 编译未产生更细进度差，不能外推完整成绩。
+- **完整 LA 隔离**：早先 12 GiB/12 hart、无 perf 的旧 A1 在 2366.80 秒主动终止且仅到 78 个 marker；
+  但随后 8 GiB/12 hart 的 `heap_magazine + perf_counters` 完整运行以 Cargo `23m24s`、axbuild
+  `1414.71s` 成功，约 7493 万次 heap alloc，fault/block/PageCache 等工作量与旧完整 perf 基线同量级，
+  排除了跳过工作、稳定活锁或必现内存破坏。再以同一 8 GiB/12 hart、同镜像、无 perf 相邻运行旧 A1
+  与关闭 magazine：两者均成功且产物同为 1714568 B，axbuild 分别为 `1335.45s` 与 `1281.89s`，旧 A1
+  反而慢 `53.56s`（`4.18%`）。因此 2366 秒轮保留为原因 `待验证` 的异常放大样本，不能作为稳定退化
+  的单独因果证据；严格 No-Go 依据改为上述同配置完整 A/B。日志分别为
+  `/tmp/respos-la-a1-{1000s-mag-perf,isolate-8g-noperf,isolate-8g-off}.log`。
+- **记账降本结果**：把 live/cached 记账并入 magazine 锁后，8 GiB/12 hart 无 perf 中窗口到 34/35 个
+  marker 约为 `496/737s`，相邻 baseline 约 `763/824s`，证明删除两次原子的阶段收益真实存在；但新的
+  完整轮 Cargo `21m48s`、axbuild `1318.37s`，相对同配置 baseline `21m11s`、`1281.89s` 仍慢
+  `36.48s`（`2.85%`）。新完整轮成功、产物 1714568 B，宿主只换入 866 页且无换出；日志
+  `/tmp/respos-la-a1-local-accounting-full.log`（SHA-256 `ebd35fd7...ed5148`），kernel-la SHA-256
+  `975293de...e3cd`，时间线 `/tmp/respos-la-a1-local-accounting-full-timeline/`。
+- **当前结论**：A1 所有权、OOM 回收和统计实现可以保留为默认关闭的实验代码，但完整收益仍未达到
+  `>=5%` 门槛，性能验收 **No-Go**；不得默认启用，也不得扩大到 512/1024 B。剩余普通 hit 上仍有一次
+  per-hart mutex 原子获取。若推进 A3，必须设计由 owner hart 在 IPI/安全点自行 drain 的同步协议后才可
+  消除该锁；在没有同步和 OOM 回收证明前，不得把 per-hart state 改成无锁 `UnsafeCell`。
+
+## 2026-08-13 BuildStorm M0 测量闭环与 allocator A0 入口（提交 `c6d13766`）
 
 - **实现范围**：`perf_counters` 新增 heap effective-size 分桶（`max(size, align)`，上界
   16/32/64/128/256/512/1024/2048/4096/>4096）、LA/RV user trap 分类、RV IPI，以及两架构 remote
