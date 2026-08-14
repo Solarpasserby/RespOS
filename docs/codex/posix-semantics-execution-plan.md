@@ -92,6 +92,7 @@ Phase 6 的调度器、allocator、异步 I/O 和细粒度锁重构。
 | LA64 musl `readlink*()` 零长度 | musl 1.2.5 wrapper 把 size 0 转成内部 size 1 调用；内核已对真实 size 0 返回 `EINVAL`，RV64 musl 1.2.0 与两架构 glibc 通过 | 已知差异 | 待确认：是否修改 musl runtime；不在内核特判 size 1 |
 | `pwrite()` + `O_APPEND` | Linux baseline 与双架构 musl/glibc 16-case pwrite/pwritev 簇通过；显式记录为 Linux 偏离 POSIX 的兼容选择 | 双架构已验证 | 补大写/并发 append syscall 原子性 probe |
 | 已删除目录 fd 的 `getdents64()` | Linux probe 覆盖未读/已缓存目录流；双架构 musl/glibc `getdents01/02` 通过 | 双架构已验证 | 自定义内存目录若支持 unlink，下沉通用 detached 状态 |
+| `chroot()` pathname/permission/privilege 错误优先级 | Linux probe 固定 `EACCES/ENOENT` 先于 `EPERM`；双架构 musl/glibc `chroot01`--`chroot04` 通过 | 双架构已验证（当前权限模型） | capability/user/mount namespace 按需求另立状态模型 |
 | ext4 特殊 inode、`mknod` device payload 与 xattr 限制 | 双架构 probe 验证四类 inode mode、12-bit major/20-bit minor 的 stat/statx 回报与 xattr 限制；musl/glibc 13-case mknod/xattr 及 4-case statx 簇通过 | 双架构已验证（当前范围） | 设备驱动 open/read/write 语义按需求另立子项；不扩展 kernel 32-bit device encoding |
 | ext4 `fallocate()` default/`KEEP_SIZE` | Linux 物理预留 probe 通过；双架构 musl/glibc `fallocate03` 八项均返回 `EOPNOTSUPP` | 已知差异 | 待确认：为 lwext4 unwritten extent 增加事务化预分配入口；禁止稀疏扩容伪装 |
 | `pthread_*`/named sem/shm/AIO/`posix_spawn` | 尚无完整 libc 组合矩阵 | 待验证 | musl/glibc 同源 probe 簇 |

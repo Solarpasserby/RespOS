@@ -580,6 +580,19 @@ FdTable slot (FdEntry: descriptor flags)
   unlinkable 目录后端都必须提供同等的 detached 状态。该检查不能改成按 pathname 重新
   lookup，否则 rename 或 open-after-unlink 会把 inode identity 退化为路径猜测。
 
+### chroot 在路径与 search permission 验证后检查 privilege，最后提交 root
+
+- 状态：已采用并完成双架构 SMP 聚焦回归
+- 适用范围：`sys_chroot`、namei、目录 search permission、task root
+- 最后验证：2026-08-14
+- 证据：`os/src/syscall/fs.rs`、`scripts/chroot_permission_probe_linux.c`；RV64/LA64 4 GiB/2 hart
+  的 musl/glibc `chroot01`--`chroot04`
+- 内容：调用顺序固定为复制用户 pathname、namei lookup、目录类型与 search permission 检查、
+  privilege 检查，最后才以 `task.set_root()` 提交。这样无效指针、路径解析、类型和访问错误不会被
+  非特权 `EPERM` 遮蔽，任一步失败也不会改变 task root。
+- 后续影响：新增 capability 或 namespace 模型时只能替换 privilege predicate，不能把它提前到
+  pathname 观察之前；并发 namespace 可见性若另行实现，仍必须保持 root 在全部检查成功后单点提交。
+
 ## 设备与 DMA 模型
 
 ### VirtIO descriptor 的虚拟连续不等于物理连续

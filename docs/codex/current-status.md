@@ -1,5 +1,22 @@
 # RespOS 当前状态
 
+## 2026-08-14 Linux/POSIX Phase 5 `chroot()` 权限错误优先级（基于 `cd765fe` 的当前工作树）
+
+- **Linux 契约**：新增 `scripts/chroot_permission_probe_linux.c`，以非特权进程确认 pathname
+  lookup 与目录 search permission 先于 `CAP_SYS_CHROOT` 检查：不可搜索目录返回 `EACCES`、
+  不存在路径返回 `ENOENT`，只有可访问目录才返回 `EPERM`。宿主 probe 以
+  `-Wall -Wextra -Werror` 编译并输出 `CHROOT_PERMISSION_LINUX_PASS`。
+- **根因与修复**：原 `sys_chroot()` 在复制用户路径前就检查 `euid`，因此把 `EFAULT`、路径解析错误、
+  `ENOTDIR` 和 `EACCES` 全部遮蔽成 `EPERM`。当前顺序改为 copy path → lookup → directory/type 与
+  search permission → privilege → commit root；所有检查通过前不修改 task root。
+- **双架构证据**：修复前 RV64/LA64、musl/glibc 聚焦 `chroot01`--`chroot04` 均为
+  `SUMMARY: 3 passed, 1 failed`，`chroot04` 期望 `EACCES` 而得到 `EPERM`。修复后同一 release、
+  初赛 snapshot、4 GiB/2 hart 配置四组均为 `SUMMARY: 4 passed, 0 failed`，日志为
+  `/tmp/respos-{rv,la}-chroot-phase5.log`；基线日志为
+  `/tmp/respos-{rv,la}-chroot-phase5-baseline.log`。
+- **剩余边界**：本轮只关闭现有单 task pathname/权限与失败原子性；mount namespace、并发 root/cwd
+  可见性、capability/user namespace 仍未建模，不能由本轮 euid=0 门槛推导为已支持。
+
 ## 2026-08-14 Linux/POSIX Phase 5 ext4 特殊 inode、device 编码与 xattr（基于 `087af08` 的当前工作树）
 
 - **失败边界与根因**：修复前双架构 musl/glibc 的 LTP `setxattr02` 仅通过 regular、directory、

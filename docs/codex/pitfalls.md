@@ -1,5 +1,18 @@
 # RespOS 已确认易错点
 
+## chroot 先检查 privilege 会把 pathname 与目录权限错误遮蔽为 EPERM
+
+- 状态：已确认并修复
+- 适用范围：`sys_chroot`、用户指针复制、namei、目录 search permission
+- 最后验证：2026-08-14
+- 证据：`scripts/chroot_permission_probe_linux.c`；修复前后双架构 musl/glibc
+  `chroot01`--`chroot04` 聚焦日志
+- 内容：把 `euid != 0` 放在 syscall 开头看似能快速拒绝非特权调用，却会让 invalid pointer、missing
+  path、non-directory 和不可搜索目录都提前返回 `EPERM`。Linux 对这些调用先观察 pathname 与目录
+  search error；只有目标可访问时才返回 privilege error。
+- 后续影响：涉及 pathname 和 privilege 的 syscall 不能凭“权限失败更安全”统一提前判权；应先用
+  Linux probe 固定错误优先级，并确保状态修改仍放在所有可能失败的检查之后。
+
 ## open-file 目录项缓存不能证明目录仍在 namespace
 
 - 状态：已确认并对 ext4 修复

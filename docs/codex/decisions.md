@@ -3,6 +3,19 @@
 这里只收录能解释当前代码形态或避免重复踩坑的决策。日期是当前证据最后核验时间，不一定是
 最初提出时间。
 
+## chroot 采用 Linux 的 pathname/permission 优先错误顺序
+
+- 状态：已采用
+- 适用范围：`chroot()`、pathname lookup、目录 search permission、privilege 检查
+- 最后验证：2026-08-14
+- 证据：`scripts/chroot_permission_probe_linux.c`、双架构 musl/glibc `chroot01`--`chroot04`
+- 决策：即使调用者没有 chroot privilege，也先复制并解析 pathname，验证目标是可搜索目录；只有
+  路径侧检查全部通过后才返回 `EPERM`，并在最后提交新 root。
+- 原因：Linux 的可执行契约会优先暴露 `EFAULT/ENOENT/ENOTDIR/EACCES`，LTP `chroot03/04` 依赖该
+  顺序；privilege-first 会丢失用户可观察的错误优先级，也妨碍验证失败原子性。
+- 后续影响：未来若引入 `CAP_SYS_CHROOT`、user namespace 或 mount namespace，能力判定可以扩展，
+  但不得提前遮蔽 pathname 与目录 search 错误。
+
 ## pwrite 在 O_APPEND 下选择 Linux ABI，不伪装成纯 POSIX 行为
 
 - 状态：已采用

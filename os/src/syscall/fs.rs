@@ -2963,15 +2963,15 @@ pub fn sys_chdir(path: *const u8) -> SysResult<usize> {
 
 pub fn sys_chroot(path: *const u8) -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
-    if task.euid() != 0 {
-        return Err(Errno::EPERM);
-    }
     let path = copy_cstr_from_user(path)?;
     let resolved = filename_lookup(AT_FDCWD, path.as_str(), 0)?;
     if resolved.dentry.get_inode().node_type() != InodeType::Directory {
         return Err(Errno::ENOTDIR);
     }
     check_dir_search_permission(&resolved.dentry)?;
+    if task.euid() != 0 {
+        return Err(Errno::EPERM);
+    }
     task.set_root(resolved);
     Ok(0)
 }

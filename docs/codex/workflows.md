@@ -563,6 +563,25 @@ guest 日志中 musl/glibc 都必须出现 `SUMMARY: 2 passed, 0 failed`，`getd
 内部应显示 `EBADF/EINVAL/ENOTDIR/ENOENT` 通过。修改目录 cache 后不能只跑错误项；
 `getdents01` 还要确认普通 `.`/`..` 和文件遍历未回归。
 
+Phase 5 `chroot()` pathname/permission/privilege 错误优先级：
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror -O2 scripts/chroot_permission_probe_linux.c \
+  -o /tmp/chroot_permission_probe_linux
+/tmp/chroot_permission_probe_linux
+
+TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=chroot01,chroot02,chroot03,chroot04 \
+  make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-chroot-phase5.log
+TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=chroot01,chroot02,chroot03,chroot04 \
+  make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-chroot-phase5.log
+```
+
+宿主 probe 应输出 `CHROOT_PERMISSION_LINUX_PASS`，证明不可搜索目录和 missing path 分别返回
+`EACCES/ENOENT`，只有可访问目录返回 `EPERM`。两份 guest 日志的 musl/glibc 均必须出现
+`SUMMARY: 4 passed, 0 failed`，其中 `chroot04` 明确显示 `EACCES`。两架构必须顺序运行。
+
 ### mknod 特殊 inode 与 xattr 门禁
 
 专项 probe 固定 character/block device payload、四类特殊 inode mode 和 `user.*` xattr 限制；随后用
