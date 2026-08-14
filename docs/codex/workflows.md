@@ -395,7 +395,18 @@ TASK_A_SYSV_SHM_FUTEX_PROBE=1 \
 Linux 必须输出 `SYSV_SHM_FUTEX_LINUX PASS`。修复前 guest 会输出
 `SYSV_SHM_FUTEX_EXPECTED_FAIL wake=0`：第二 attach 已读到 sentinel，但 attach-specific futex key 使
 child timeout；该 marker 是反证，不是通过。修复后两架构都必须输出 `SYSV_SHM_FUTEX PASS`，且 runner
-输出 `SysV SHM futex probe PASS`。两架构仍须顺序运行。
+输出 `SysV SHM futex probe PASS`。修改 shared futex key 后还要以相同 4 GiB/2 hart 配置顺序运行：
+
+```bash
+TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=futex_wait01,futex_wake03 \
+  make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-sysv-shm-futex-regression.log
+TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=futex_wait01,futex_wake03 \
+  make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-sysv-shm-futex-regression.log
+```
+
+musl/glibc 都必须为 `SUMMARY: 2 passed, 0 failed`。两架构仍须顺序运行。
 
 Phase 5 session/`getsid` Linux 对照：
 

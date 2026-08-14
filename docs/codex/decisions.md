@@ -653,8 +653,24 @@
 - 原因：当前 Linux 已从 64 KiB 改为 page size，当前 glibc 也恢复 generic 定义；同一 syscall 没有
   libc header 版本信息，无法同时满足旧 glibc 与 musl 的冲突期望。内核特判只会制造不可维护的
   非 Linux ABI。
-- 后续影响：该 LTP 单项通过需更新 glibc runtime/test image。SysV segment 跨 attach 的共享 frame
-  identity、`IPC_RMID` 最后 detach 与并发回收仍需独立实现和验证，不能由 rounding 决策代替。
+- 后续影响：该 LTP 单项通过需更新 glibc runtime/test image。SysV segment 跨 attach 的共享
+  frame/futex identity 已由独立 probe 闭合；`IPC_RMID` 最后 detach 与并发回收仍需独立验证，不能由
+  rounding 决策代替。
+
+## SysV SHM futex key 使用共享 frame 身份，attach id 只管理 detach
+
+- 状态：已采用
+- 适用范围：同一 SysV segment 的重复/跨进程 `shmat`、shared futex、`shmdt`
+- 最后验证：2026-08-14
+- 证据：`os/src/mm/memory_set.rs::shared_futex_key()`；Linux oracle、RV64/LA64 2-hart
+  `sysv_shm_futex_probe`；双架构 musl/glibc `futex_wait01,futex_wake03`
+- 决策：SysV SHM 页上的 shared futex 以 resident shared frame 的 PPN 作为 owner，并保留页内 offset；
+  每次 `shmat` 唯一的 attach id 仅用于标识一次映射并让 `shmdt` 拆除其全部 VMA 分片。
+- 原因：同一 segment 的各 attach 共享同一个 `Arc<FrameTracker>`，但映射实例 id 按设计不同。用后者
+  作为同步 identity 会让不同虚拟地址错误地进入不同 futex 队列；frame 身份直接表达当前实际共享的
+  backing page，且无需新增全局 segment-to-futex 索引。
+- 后续影响：VMA 切分/合并不得丢失 detach 所需 attach id，futex 路径也不得退回映射实例 identity。
+  `IPC_RMID` 最后 detach、并发 attach/detach、异常退出与 frame 复用压力仍须独立验证。
 
 ## LoongArch shootdown 使用每目标 hart 的 generation 槽
 

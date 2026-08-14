@@ -773,7 +773,21 @@
   glibc 期望向下多舍入 60 KiB。syscall flags 不携带 libc 的 header 版本，内核无法无歧义兼容两种
   rounding。
 - 后续影响：不得按进程名、ELF/libc 或地址尾数猜测 `SHMLBA`，也不得全局改成 64 KiB 让当前 musl
-  回归。应更新 runtime/test image；SysV SHM 的跨 attach 共享身份仍作为独立内核语义推进。
+  回归。应更新 runtime/test image；SysV SHM 的跨 attach 共享身份由独立内核语义和 probe 验证。
+
+## 映射实例 identity 不能作为 shared futex backing identity
+
+- 状态：已确认并修复
+- 适用范围：SysV SHM 重复/跨进程 `shmat`、不同虚拟地址上的 shared futex
+- 最后验证：2026-08-14；release、4 GiB/2 hart
+- 证据：`os/src/mm/memory_set.rs::shared_futex_key()`；Linux、RV64、LA64
+  `sysv_shm_futex_probe`
+- 内容：每次 attach 唯一的 id 适合把 VMA 分片归入一次 `shmdt`，却不代表共享 backing。用它构造
+  futex owner 时，同一 segment 的两个地址即使共享数据 frame 也会进入不同队列，表现为 sentinel
+  可见但 wake 返回 0。同步 identity 必须来自两侧共同持有的 frame/backing，并另用页内 offset 区分
+  futex 字。
+- 后续影响：设计共享映射元数据时应分别列出“映射生命周期 identity”和“共享内容 identity”；至少用
+  不同虚拟地址的跨进程 wait/wake 验证，不能以数据读写可见性替代 futex 证明。
 
 ## QEMU 10.0.2 LoongArch `LDPTE` 会截掉 PTE 的 NR/NX 高位
 

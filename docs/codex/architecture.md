@@ -359,18 +359,21 @@
 
 - 状态：部分实现；普通 wait 待收敛
 - 适用范围：futex wait/wake/requeue
-- 最后验证：2026-08-10
+- 最后验证：2026-08-14
 - 证据：`os/src/task/futex/wait.rs::{futex_wait_common,futex_wait_timed_common,futex_requeue_common}`、
-  `os/src/mm/mod.rs::read_user_u32_nofault`、Git `3aa1fb5`
+  `os/src/mm/mod.rs::read_user_u32_nofault`、`os/src/mm/memory_set.rs::shared_futex_key()`、Git
+  `3aa1fb5`；RV64/LA64 `sysv_shm_futex_probe` 与 `futex_wait01,futex_wake03`
 - 内容：`FUTEX_CMP_REQUEUE` 已在队列锁外预先确认用户页可读，锁内只做固定 4 字节 no-fault
   PTE 读取，使比较与 waiter 迁移处于同一临界区。普通和定时 `FUTEX_WAIT` 当前仍在持有
   `FUTEX_QUEUES` 时调用通用 `copy_from_user` 复核用户值，lazy/COW 页可能进入补页路径。
   wait completion 已区分 Pending/Woken/TimedOut/Interrupted，并保持单赢家。共享 futex key 对
-  shared file 和已有共享 frame 使用 backing 身份，但 System V shm 当前使用每次 `shmat` 独立分配的
-  attach id；两个进程分别 attach 同一段时，key 不能保证相同。
+  shared file 使用 backing 身份；System V shm 使用 resident shared frame 的 PPN 与页内 offset，因此
+  同一 segment 的不同 attach 地址会聚合到同一队列。每次 `shmat` 独立分配的 attach id 只负责
+  `shmdt` 映射分组，不再参与同步身份。
 - 后续影响：普通 wait 应复用“锁外预触页、锁内 no-fault 复核”的模式；在完成前不能宣称
-  futex queue lock 内已全面禁止通用用户拷贝或潜在 frame 分配。System V shm 的 futex key 应改用
-  segment/frame 的稳定共享身份，并增加独立 `shmat` 的跨进程 futex probe。
+  futex queue lock 内已全面禁止通用用户拷贝或潜在 frame 分配。System V shm 后续仍需验证
+  `IPC_RMID` 最后 detach、并发回收与 frame 复用压力，不能把跨 attach wait/wake 通过解释为生命周期
+  全部闭合。
 
 ## FS、VFS 与 fd 模型
 

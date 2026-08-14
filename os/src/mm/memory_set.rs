@@ -2811,10 +2811,15 @@ impl MemorySet {
             });
         }
 
-        if let Some(attach_id) = area.shm_attach_id {
+        if area.shm_attach_id.is_some() {
+            let frame = area.data_frames.get(&vpn).ok_or(Errno::EFAULT)?;
             return Ok(SharedFutexKey {
-                owner: attach_id ^ 0x7368_6d66_7574_6578usize,
-                page_index: page_offset / PAGE_SIZE,
+                // Every shmat of the same SysV segment maps the same frame
+                // Arc, while attach_id is intentionally unique per mapping.
+                // Key by the resident frame so different virtual addresses
+                // converge on one shared futex queue.
+                owner: usize::from(frame.ppn()) ^ 0x7368_6d66_7574_6578usize,
+                page_index: 0,
                 offset,
             });
         }

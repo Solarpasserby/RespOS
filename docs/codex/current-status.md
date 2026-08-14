@@ -1,18 +1,28 @@
 # RespOS 当前状态
 
-## 2026-08-14 Linux/POSIX Phase 5 SysV SHM 跨 attach futex 基线（基于 `a2257b6` 的当前工作树）
+## 2026-08-14 Linux/POSIX Phase 5 SysV SHM 跨 attach futex 闭合（基于 `806eb5a` 的当前工作树）
 
 - **新增门禁**：`scripts/sysv_shm_futex_probe_linux.c` 与 guest `sysv_shm_futex_probe` 建立同一 SysV
   segment 的两个不同 attach 地址；child 从第二地址读 parent sentinel，随后在该地址执行 shared
   `FUTEX_WAIT`，parent 从第一地址执行 `FUTEX_WAKE`。Linux oracle 以
   `-std=c11 -Wall -Wextra -Werror -O2` 编译运行并输出 `SYSV_SHM_FUTEX_LINUX PASS`。
-- **双架构反证**：release 初赛 snapshot、4 GiB/2 hart 下，RV64/LA64 都确认第二 attach 能读到
+- **修复前反证**：release 初赛 snapshot、4 GiB/2 hart 下，RV64/LA64 都确认第二 attach 能读到
   sentinel，但 parent wake 始终返回 0，child 两秒后返回 `ETIMEDOUT`，最终输出
   `SYSV_SHM_FUTEX_EXPECTED_FAIL wake=0 child_status=256`。日志为
   `/tmp/respos-{rv,la}-sysv-shm-futex-baseline.log`。
-- **根因边界**：`ShmSegment` 已持有稳定的共享 `Arc<FrameTracker>`，所以不是数据页复制问题；
+- **根因与实现**：`ShmSegment` 已持有稳定的共享 `Arc<FrameTracker>`，所以不是数据页复制问题；
   `MemorySet::shared_futex_key()` 却以每次 `shmat` 新分配的 `attach_id` 作为 owner，同一 segment 的两个
-  地址必然进入不同 futex key。探针和自动 runner 已接入，本节只记录修复前证据，尚未修改内核 key。
+  地址必然进入不同 futex key。修复后 `attach_id` 仍只标识一次 attach、供 `shmdt` 成组拆映射；shared
+  futex key 改用该页 resident shared frame 的 PPN，页内 offset 继续区分不同 futex，因此不同虚拟地址
+  attach 的同一物理页进入同一队列，不需要新增全局 segment 索引。
+- **双架构验证**：修复后 RV64/LA64 同配置均输出 `SYSV_SHM_FUTEX PASS`，runner 输出
+  `SysV SHM futex probe PASS`，日志为 `/tmp/respos-{rv,la}-sysv-shm-futex-fix.log`。普通
+  `futex_wait01,futex_wake03` 回归在两架构 musl/glibc 均为 `SUMMARY: 2 passed, 0 failed`，日志为
+  `/tmp/respos-{rv,la}-sysv-shm-futex-regression.log`。LA64 首组 musl wait 仍受已知 secondary hart
+  冷启动窗口影响约 0.9 秒，但 case 通过，本修复不宣称关闭该时间问题。
+- **剩余边界**：当前 probe 覆盖一个 segment 的单页、不同 attach 地址、跨进程数据可见性与
+  wait/wake；`IPC_RMID` 后最后 detach、并发 attach/detach、异常退出回收以及多页/复用压力仍需独立
+  验证，不能由本项外推为 SysV SHM 生命周期全部完成。
 
 ## 2026-08-14 Linux/POSIX Phase 5 SysV SHM 清账与 LA64 glibc 2.38 `SHMLBA` 差异（基于 `7622572`）
 
@@ -31,9 +41,9 @@
   随后删除专用 64 KiB header，恢复 generic page-size 定义。
 - **决策与剩余边界**：内核保持当前 Linux 的 page-size ABI，不按调用二进制猜测 4/64 KiB，也不为
   旧 glibc 特判地址尾数；该单项记为 glibc 2.38/LTP header `已知差异`，纳入统一 runtime 更新。
-  本轮无源码修改。现有 `shmat01` 只验证单次 attach、rounding、readonly 与基本计数；segment 的
-  数据 frame 已跨 attach 共享，但 futex key 仍使用每次 attach 的独立 id，不能由三环境通过外推为
-  SysV SHM 完成。
+  本轮没有为旧 runtime 修改源码。现有 `shmat01` 只验证单次 attach、rounding、readonly 与基本计数；
+  segment 的跨 attach 数据与 futex identity 已由上节专项闭合，但 `IPC_RMID` 最后 detach 和并发回收
+  仍不能由三环境通过外推为完成。
 
 ## 2026-08-14 Linux/POSIX Phase 5 `CLONE_VFORK|CLONE_VM` 可见性（基于 `e39cdd9` 的当前工作树）
 
