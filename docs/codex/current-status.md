@@ -1,5 +1,17 @@
 # RespOS 当前状态
 
+## 2026-08-14 Linux/POSIX Phase 5 `getcwd04` rename 竞态清账（基于 `8e2336a`）
+
+- **历史结果纠正**：`rv-output.txt`/`la-output.txt` 中两架构 musl/glibc 的 `getcwd04` 都以
+  status 32 结束，但正文是 `TCONF: Test needs at least 2 CPUs online`；这四项没有执行 rename/getcwd
+  竞态，不能记为内核语义失败，也不能记为通过。
+- **当前证据**：release 初赛 snapshot、4 GiB/2 hart 聚焦 `getcwd04`；RV64/LA64 的 musl/glibc
+  四组各运行约 5 秒，均输出 `TPASS: Bug is not reproduced!` 与
+  `SUMMARY: 1 passed, 0 failed, 0 skipped`。日志为 `/tmp/respos-{rv,la}-getcwd04-phase5.log`。
+- **适用边界**：该 LTP 只验证另一个 task 持续 rename cwd 内普通文件时，当前 task 的 cwd 字符串
+  不得退化或改变；它不覆盖 cwd 自身/祖先被 rename、跨 mount rename、已删除 cwd 的 `ENOENT`、
+  rename 与 chroot 并发，也不能替代 namei/rename 的更广泛 SMP 原子性测试。本轮没有源码修改。
+
 ## 2026-08-14 Linux/POSIX Phase 5 LA64 `PROT_NONE`（基于 `7619764` 的当前工作树）
 
 - **失败边界**：release 初赛 snapshot、4 GiB/2 hart 聚焦 `mmap05`；修复前 RV64 的
