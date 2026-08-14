@@ -228,6 +228,24 @@
   再由调度路径提交。退出任务通过 `DEAD_TASKS` 延迟 drop，避免在自身内核栈上释放自身。
 - 后续影响：不要从多个路径重复入队或重复唤醒；close/signal/timeout 竞争必须保持 single-winner。
 
+### CPU clock 以真实调度运行区间记账
+
+- 状态：已实现并通过双架构单核/LTP 与 2-hart probe
+- 适用范围：RV64/LA64 scheduler、thread group、CPU clock、POSIX CPU timer
+- 最后验证：2026-08-14
+- 证据：`os/src/task/{processor,task}.rs`、`os/src/syscall/time.rs`、
+  `user/src/bin/task_a_clock_probe.rs`；`/tmp/respos-{rv,la}-cpu-clock-{cluster,probe-smp2}.log`
+- 内容：idle scheduler 在切入 task 前开启 thread/process 运行区间，task 交回 idle 后关闭区间；idle
+  栈保留该 task 的 Arc，因此即使 task 已从 manager 移除也能完成最后一次记账。thread clock 每任务
+  独立；`CLONE_THREAD` 共享 process clock，后者以固定 per-hart slot 表示同时运行的线程并在读取时
+  加上所有 live interval。锁为关本地中断的 spin lock，避免 timer trap 在同 CPU 重入。
+- 生命周期：fork/new process 从零创建两类 clock，线程 clone 只共享 process clock，exec 保留累计
+  时间。POSIX CPU timer 只强持有 detached clock state；thread clock 在创建线程退出后冻结，process
+  clock 则由线程组累计状态继续前进，不借 timer 保留 TCB、MemorySet 或 fd table。
+- 后续影响：CPU clock 的 begin/end 必须继续包围真实 `__switch`，不能移到 ready/block 状态变更处；
+  SMP 实现不得退化为单一 `running_since`。若增加 CPU hotplug 或 hart 数量，必须同步审计 slot 上限与
+  已运行区间。当前 `times/getrusage` 未区分 user/system，不能把两字段均为 total 解释为完整会计语义。
+
 ### 精确 task deadline 由 timer-service hart 单点编程
 
 - 状态：已实现并通过双架构单核/SMP 专项
@@ -373,6 +391,21 @@ FdTable slot (FdEntry: descriptor flags)
 - 后续影响：任何新增 namespace create 操作都必须保持 prepare → lower create → metadata commit →
   publish 顺序；若 lower backend 不能回滚，必须先建立它自己的 transaction，不能恢复忽略 setattr
   错误的做法。
+
+### ext4 命名 FIFO 的类型由 lower inode 持久化，运行态缓冲由 VFS 管理
+
+- 状态：已实现并由双架构 LTP 验证
+- 适用范围：`mknod(S_IFIFO)`、`mkfifo`、FIFO stat/open/read/write/lseek/fsync
+- 最后验证：2026-08-14
+- 证据：`os/src/fs/{ext4/inode.rs,pipe.rs}`；RV64/LA64 musl/glibc 的
+  `fsync03,lseek02,open06,read03,write04`
+- 内容：ext4 create 必须用 lower `ext4_mknod(EXT4_DE_FIFO)` 写入 FIFO inode type，之后 lookup/stat
+  才能稳定恢复 `InodeType::Fifo`。`sys_openat` 根据这个持久类型把 pathname inode 转为
+  `NamedFifoEnd`；同一路径的运行态 reader/writer 共享 VFS `PipeRingBuffer`，关闭最后一个端点后释放，
+  不把瞬时管道内容写入 ext4。
+- 后续影响：不能用普通文件占位再只改低 12 位 permission 假装特殊 inode；否则 reopen/readdir/stat
+  会继续识别成 regular，并绕过所有 FIFO errno/阻塞语义。字符/块设备仍需先把 `dev` 参数贯穿 create
+  接口后再切换 lower mknod，不能照搬 FIFO 的固定 payload 0。
 
 ### ext4 inode 属性以底层 transaction 成功为发布点
 

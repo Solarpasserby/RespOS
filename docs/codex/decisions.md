@@ -34,6 +34,17 @@
 - 后续影响：不再接受“底层 ENOENT 但内存 override 成功”的兼容语义，也不得重新拆分 chown 的 owner/
   mode 提交。底层时间精度扩展仍是后续独立设计，不用更多路径特判替代。
 
+## ext4 FIFO 直接创建真实特殊 inode，不使用 regular placeholder
+
+- 状态：已采用
+- 适用范围：ext4 `mknod(S_IFIFO)`/`mkfifo` 与命名 FIFO reopen
+- 最后验证：2026-08-14
+- 证据：`os/src/fs/ext4/inode.rs`、lwext4 `ext4_mknod`；双架构四环境五项 FIFO LTP
+- 内容：FIFO 的 lower namespace entry 直接以 `EXT4_DE_FIFO` 创建。VFS mode/owner commit 只修改权限
+  与所有者，不承担修复 inode type；运行态 FIFO buffer 仍由 `open_named_fifo` 管理。
+- 后续影响：特殊 inode 类型必须在 lower create 时正确，不能依赖内存中的 requested type。字符/块
+  设备的 device number 尚未穿过通用 create 接口，必须单独设计和验证，不能固定写 0 后宣称完成。
+
 ## nlink=0 inode 按最后 VFS 引用延迟回收，不按 open File 数猜测
 
 - 状态：已采用，崩溃恢复仍待完善
@@ -620,3 +631,20 @@
   改为 fully lazy save/restore。
 - 后续影响：fork 复制激活标记和扩展状态，exec 清零；signal mcontext 仍需独立补齐。测得 535 次
   user trap 中扩展 eager save 为 62 次；该数值证明门控生效，不是正式 BuildStorm 加速比。
+
+## CPU clock 采用 scheduler occupancy，并让 POSIX timer 只持有 detached clock
+
+- 状态：已采用
+- 适用范围：RV64/LA64 `CLOCK_PROCESS_CPUTIME_ID`、`CLOCK_THREAD_CPUTIME_ID`、POSIX timer
+- 最后验证：2026-08-14
+- 证据：`os/src/task/{processor,task}.rs`、`os/src/syscall/time.rs`；双架构五目标 LTP 和 2-hart
+  `task_a_clock_probe` 20 轮
+- 决策：CPU time 只累计 task 实际占用 CPU 的 `__switch` 区间，不使用进程存活 wall time。thread
+  clock 每 TCB 独立；process clock 由 `CLONE_THREAD` 组共享，并允许不同 hart 的 live interval 同时
+  贡献。CPU timer 捕获仅含 clock state 的 handle，signal owner 仍按 tgid 弱引用进程 leader。
+- 原因：wall time 会把 sleep/block 计入 CPU time，无法驱动只应在执行期间到期的 CPU timer；单一
+  process running flag 又会漏记 SMP 并行线程。让 timer 强持有 TCB 会连带延长地址空间和资源生命周期，
+  detached state 可在退出后冻结 thread clock，同时保持 timer 查询安全。
+- 后续影响：fork/new process 必须清零 clock，exec 保留 clock，线程 clone 仅共享 process clock。
+  user/system 拆分、跨进程 encoded CPU clock id 与 CPU-time nanosleep 尚未包含在本决策中；实现前需
+  单独固定 ABI 与生命周期契约。

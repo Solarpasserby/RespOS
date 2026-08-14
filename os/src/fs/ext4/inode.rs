@@ -1239,6 +1239,7 @@ impl InodeOp for Ext4Inode {
 
         let path = Self::child_path(parent_path, name);
         let ext4_ty = Ext4InodeTypes::from(ty);
+        let c_path = CString::new(path.as_str()).map_err(|_| Errno::EINVAL)?;
         {
             let guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Namespace);
             let file = &mut Ext4File::new(parent_path, self.ty.clone());
@@ -1263,8 +1264,15 @@ impl InodeOp for Ext4Inode {
                         .map_err(Self::map_lwext4_err)?;
                     new_file.file_close().map_err(Self::map_lwext4_err)?;
                 }
-                Ext4InodeTypes::EXT4_DE_FIFO
-                | Ext4InodeTypes::EXT4_DE_CHRDEV
+                Ext4InodeTypes::EXT4_DE_FIFO => {
+                    let ret = unsafe {
+                        bindings::ext4_mknod(c_path.as_ptr(), bindings::EXT4_DE_FIFO as i32, 0)
+                    };
+                    if ret != 0 {
+                        return Err(Self::map_lwext4_err(ret));
+                    }
+                }
+                Ext4InodeTypes::EXT4_DE_CHRDEV
                 | Ext4InodeTypes::EXT4_DE_BLKDEV
                 | Ext4InodeTypes::EXT4_DE_SOCK => {
                     new_file

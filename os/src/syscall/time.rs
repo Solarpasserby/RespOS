@@ -6,7 +6,7 @@ use crate::mm::{copy_from_user, copy_to_user};
 use crate::mutex::SpinLock;
 use crate::signal::{SiField, Sig, SigInfo};
 use crate::task::{
-    TASK_MANAGER, current_task, prepare_current_task_blocked, switch_to_next_task,
+    CpuClockHandle, TASK_MANAGER, current_task, prepare_current_task_blocked, switch_to_next_task,
     yield_current_task,
 };
 use crate::timer::{TimeSpec, get_timeout_us};
@@ -20,6 +20,7 @@ const CAP_SYS_TIME: usize = 25;
 
 const CLOCK_REALTIME: usize = 0;
 const CLOCK_MONOTONIC: usize = 1;
+const CLOCK_PROCESS_CPUTIME_ID: usize = 2;
 const CLOCK_THREAD_CPUTIME_ID: usize = 3;
 const CLOCK_MONOTONIC_RAW: usize = 4;
 const CLOCK_REALTIME_COARSE: usize = 5;
@@ -82,6 +83,7 @@ struct PosixTimer {
     owner_tgid: usize,
     owner: Weak<crate::task::TaskControlBlock>,
     clock_id: usize,
+    cpu_clock: Option<CpuClockHandle>,
     signo: i32,
     deadline_ms: usize,
     interval_ms: usize,
@@ -209,8 +211,8 @@ static NEXT_POSIX_TIMER_ID: AtomicUsize = AtomicUsize::new(1);
 
 /// 系统调用 sys-times。
 ///
-/// TODO[ABI-COMPAT]: 当前先用 wall-clock 近似 user/system CPU tick，后续应替换为
-/// 调度器实际运行时间记账。
+/// User/system time are not split yet, but the total is now derived from
+/// scheduler runtime rather than wall-clock lifetime.
 pub fn sys_times(buf: *mut Tms) -> SysResult<usize> {
     let task = current_task().expect("no current task");
     let ticks = task.elapsed_ticks();
@@ -318,6 +320,8 @@ fn clock_time_us(clock_id: usize) -> SysResult<usize> {
     match clock_id {
         CLOCK_REALTIME => Ok(realtime_us()),
         CLOCK_MONOTONIC | CLOCK_MONOTONIC_RAW | CLOCK_BOOTTIME => Ok(monotonic_us()),
+        CLOCK_PROCESS_CPUTIME_ID => Ok(current_task().ok_or(Errno::ESRCH)?.process_cpu_time_us()),
+        CLOCK_THREAD_CPUTIME_ID => Ok(current_task().ok_or(Errno::ESRCH)?.thread_cpu_time_us()),
         CLOCK_REALTIME_COARSE => Ok(realtime_us() / 1000 * 1000),
         CLOCK_MONOTONIC_COARSE => Ok(monotonic_us() / 1000 * 1000),
         _ => Err(Errno::EINVAL),
@@ -339,6 +343,8 @@ fn is_readable_clock(clock_id: usize) -> bool {
         clock_id,
         CLOCK_REALTIME
             | CLOCK_MONOTONIC
+            | CLOCK_PROCESS_CPUTIME_ID
+            | CLOCK_THREAD_CPUTIME_ID
             | CLOCK_MONOTONIC_RAW
             | CLOCK_REALTIME_COARSE
             | CLOCK_MONOTONIC_COARSE
@@ -351,7 +357,14 @@ fn is_nanosleep_clock(clock_id: usize) -> bool {
 }
 
 fn is_posix_timer_clock(clock_id: usize) -> bool {
-    matches!(clock_id, CLOCK_REALTIME | CLOCK_MONOTONIC | CLOCK_BOOTTIME)
+    matches!(
+        clock_id,
+        CLOCK_REALTIME
+            | CLOCK_MONOTONIC
+            | CLOCK_PROCESS_CPUTIME_ID
+            | CLOCK_THREAD_CPUTIME_ID
+            | CLOCK_BOOTTIME
+    )
 }
 
 fn register_nanosleep_wait(tid: usize, clock_id: usize, deadline_us: usize) {
@@ -555,7 +568,20 @@ fn posix_timer_remaining_ms(timer: &PosixTimer) -> usize {
     } else {
         timer
             .deadline_ms
-            .saturating_sub(clock_time_ms(timer.clock_id).unwrap_or(usize::MAX))
+            .saturating_sub(timer.clock_time_ms().unwrap_or(usize::MAX))
+    }
+}
+
+impl PosixTimer {
+    fn clock_time_ms(&self) -> SysResult<usize> {
+        match self.clock_id {
+            CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => self
+                .cpu_clock
+                .as_ref()
+                .map(|clock| clock.now_us() / 1000)
+                .ok_or(Errno::EINVAL),
+            _ => clock_time_ms(self.clock_id),
+        }
     }
 }
 
@@ -590,6 +616,11 @@ pub fn sys_timer_create(
     };
 
     let task = current_task().expect("no current task");
+    let cpu_clock = match clock_id {
+        CLOCK_PROCESS_CPUTIME_ID => Some(task.process_cpu_clock()),
+        CLOCK_THREAD_CPUTIME_ID => Some(task.thread_cpu_clock()),
+        _ => None,
+    };
     let owner = TASK_MANAGER
         .get(task.tgid())
         .unwrap_or_else(|| Arc::clone(&task));
@@ -598,6 +629,7 @@ pub fn sys_timer_create(
         owner_tgid: task.tgid(),
         owner: Arc::downgrade(&owner),
         clock_id,
+        cpu_clock,
         signo,
         deadline_ms: 0,
         interval_ms: 0,
@@ -700,7 +732,7 @@ pub fn sys_timer_settime(
         timer.clone()
     };
     let old = posix_timer_snapshot(&prepared_timer);
-    let now_ms = clock_time_ms(prepared_timer.clock_id)?;
+    let now_ms = prepared_timer.clock_time_ms()?;
     let deadline_ms = if value_ms == 0 {
         0
     } else if flags & TIMER_ABSTIME != 0 {
@@ -728,7 +760,7 @@ pub fn check_posix_timers() {
     {
         let mut timers = POSIX_TIMERS.lock();
         for timer in timers.values_mut() {
-            let Ok(now_ms) = clock_time_ms(timer.clock_id) else {
+            let Ok(now_ms) = timer.clock_time_ms() else {
                 continue;
             };
             if timer.deadline_ms == 0 || now_ms < timer.deadline_ms {

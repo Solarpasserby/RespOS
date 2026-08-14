@@ -349,6 +349,47 @@ query-only `rt_sigprocmask`、`rt_sigaction` size/EFAULT、`rt_sigqueueinfo(sig=
 跨 exec。修改 signal wait/timer 唤醒后还应复跑 `task_a_clock_probe` 与
 `/glibc/busybox timeout 1 /glibc/busybox sleep 10`；只通过 ABI 探针不能替代阻塞路径门禁。
 
+CPU clock/CPU timer 专项使用无 feature release；两架构必须顺序构建：
+
+```bash
+TASK_A_LTP_ONLY=1 \
+LTP_CASE_FILTER=clock_getres01,clock_gettime01,clock_gettime02,timer_delete01,timer_settime01,timer_settime02 \
+RUSTUP_TOOLCHAIN=nightly-2025-01-18 \
+make run-rv-pre RV_PRE_OUTPUT=/tmp/respos-rv-cpu-clock-cluster.log
+
+TASK_A_LTP_ONLY=1 \
+LTP_CASE_FILTER=clock_getres01,clock_gettime01,clock_gettime02,timer_delete01,timer_settime01,timer_settime02 \
+RUSTUP_TOOLCHAIN=nightly-2025-01-18 \
+make run-la-pre LA_PRE_OUTPUT=/tmp/respos-la-cpu-clock-cluster.log
+
+TASK_A_CLOCK_PROBE=1 RUSTUP_TOOLCHAIN=nightly-2025-01-18 \
+make run-rv-pre PRE_SMP=2 RV_PRE_OUTPUT=/tmp/respos-rv-cpu-clock-probe-smp2.log
+TASK_A_CLOCK_PROBE=1 RUSTUP_TOOLCHAIN=nightly-2025-01-18 \
+make run-la-pre PRE_SMP=2 LA_PRE_OUTPUT=/tmp/respos-la-cpu-clock-probe-smp2.log
+```
+
+LTP 必须逐项检查五个目标的退出值；RV64 glibc 在冷缓存下运行的第一个动态程序可能先触发独立的
+loader file-fault `SIGBUS`，不能把后续目标通过伪装成整组全绿。SMP probe 每轮必须同时出现
+`process/thread CPU clocks PASS`、`process aggregation PASS`、`ALL PASS`，共 20 轮。
+
+ext4 命名 FIFO 专项使用无 feature release，并把日志写到 `/tmp`，避免覆盖完整初赛日志：
+
+```bash
+TASK_A_LTP_ONLY=1 \
+LTP_CASE_FILTER=fsync03,lseek02,open06,read03,write04 \
+RUSTUP_TOOLCHAIN=nightly-2025-01-18 \
+make run-rv-pre RV_PRE_OUTPUT=/tmp/respos-rv-fifo-ltp.log
+
+TASK_A_LTP_ONLY=1 \
+LTP_CASE_FILTER=fsync03,lseek02,open06,read03,write04 \
+RUSTUP_TOOLCHAIN=nightly-2025-01-18 \
+make run-la-pre LA_PRE_OUTPUT=/tmp/respos-la-fifo-ltp.log
+```
+
+两架构必须顺序运行，因为 build target 会改写共享 Cargo config。每个日志应同时包含 musl/glibc
+`SUMMARY: 5 passed, 0 failed, 0 skipped, 5 selected` 和最终 poweroff；还要逐项确认 `open06=ENXIO`、
+`read03/write04=EAGAIN`、`lseek02=ESPIPE`、`fsync03=EINVAL`，不能只看 case exit 0。
+
 Phase 5 AF_UNIX、pipe 与 poll 对照：
 
 ```bash

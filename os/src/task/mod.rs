@@ -34,7 +34,7 @@ pub use scheduler::{
     wakeup_task, yield_current_task,
 };
 pub use task::TaskStatus;
-pub use task::{CloneFlags, TaskControlBlock, check_active_itimers};
+pub use task::{CloneFlags, CpuClockHandle, TaskControlBlock, check_active_itimers};
 
 lazy_static! {
     pub static ref INITPROC: Arc<TaskControlBlock> = {

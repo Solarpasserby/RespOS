@@ -1,5 +1,45 @@
 # RespOS 当前状态
 
+## 2026-08-14 初赛 ext4 命名 FIFO 修复（当前工作树）
+
+- **根因与修复边界**：`mknod/mkfifo` 请求的 FIFO 在 ext4 lower create 中误走普通文件
+  `O_CREAT`，落盘 inode type 因而成为 regular；`stat`、`open_named_fifo()` 以及已有 pipe 的
+  `ENXIO/EAGAIN/ESPIPE/EINVAL` 语义都无法到达。当前仅把 FIFO lower create 改为 lwext4
+  `ext4_mknod(..., EXT4_DE_FIFO, 0)`，普通文件/目录路径不变。字符/块设备的 `dev` 参数尚未贯穿
+  `filename_create/InodeOp::create`，本轮没有借机扩大该接口。
+- **双架构专项门禁**：初赛 snapshot、4 GiB/1 hart，以
+  `TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=fsync03,lseek02,open06,read03,write04` 分别运行
+  `make run-rv-pre` 与 `make run-la-pre`；RV64/LA64 的 musl/glibc 四组均为
+  `5 passed, 0 failed, 0 skipped`。日志为 `/tmp/respos-{rv,la}-fifo-ltp.log`。两架构 release
+  构建均通过，日志中正常执行到 testrunner poweroff。
+- **影响范围**：这五项是 2026-08-14 完整初赛四环境共同失败，因此预计下一次完整复跑四组各减少
+  5 个失败；专项结果不能代替完整 summary，最终增量仍以用户下一轮 `rv-output.txt`/
+  `la-output.txt` 为准。
+
+## 2026-08-14 初赛 CPU clock 簇实现（当前工作树）
+
+- **实现边界**：scheduler 在每次真实 task `__switch` 前后记录硬件计数器；thread clock 保存本线程
+  累计运行时间，process clock 由线程组共享并以 per-hart running slot 汇总可并行运行的线程。
+  `CLOCK_PROCESS_CPUTIME_ID`/`CLOCK_THREAD_CPUTIME_ID` 已接入 `clock_gettime/getres` 和 POSIX
+  `timer_create/settime/gettime/delete`。CPU timer 保存脱离 TCB/address space 的 clock handle，线程
+  退出后时钟停止但 timer 不会延长完整 task 生命周期。`times/getrusage` 仍未拆分 user/system，
+  只是 total 已从 wall-clock 近似切换为 scheduler runtime。
+- **LTP 专项**：初赛 snapshot、4 GiB/1 hart，以 `clock_getres01` 作为动态装载预热，再筛选
+  `clock_gettime01,clock_gettime02,timer_delete01,timer_settime01,timer_settime02`。RV64/LA64 的
+  musl/glibc 五个目标均返回 0；LA64 连同预热项为两组 `6 passed, 0 failed`。日志为
+  `/tmp/respos-{rv,la}-cpu-clock-cluster.log`。RV64 glibc 的冷启动预热项有独立 loader `SIGBUS`
+  边界，见 `pitfalls.md`，不属于 CPU clock syscall 失败。
+- **SMP probe**：`TASK_A_CLOCK_PROBE=1 PRE_SMP=2` 在 RV64/LA64 各运行 20 轮，全部打印
+  `process/thread CPU clocks PASS`、`process aggregation PASS` 与 `ALL PASS`。probe 创建同一进程
+  worker thread，并验证 process 增量至少覆盖 main/worker 两条 thread clock 增量。日志为
+  `/tmp/respos-{rv,la}-cpu-clock-probe-smp2.log`。
+- **完整复跑**：基于 `bf780542774b9cc9428f2935446609c17035c97a` 加当前 CPU clock 工作树，
+  2026-08-14 03:00 UTC 的 `rv-output.txt` 与 02:57 UTC 的 `la-output.txt` 均正常结束全部 19 组并
+  poweroff。RV64 LTP musl/glibc 为 `634/37/24`、`643/31/21`，LA64 为 `638/34/23`、
+  `646/29/20`（passed/failed/skipped，均选择 695 项）；CPU clock/timer 六个 case 在四环境均退出 0。
+  未见 kernel panic、用户 fault 或 OOM，末段 health 为 `tasks=2 ready=0 blocked=1`。RV64 冷启动
+  glibc loader EIO 仍应作为 MM/ext4 独立任务推进。
+
 ## 2026-08-13 初赛亚 10 ms 精确 deadline 修复（当前工作树）
 
 - **根因**：`poll02`、`pselect01`/`pselect01_64`、`select02`、`epoll_wait02`、`futex_wait05`、

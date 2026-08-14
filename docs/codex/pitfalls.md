@@ -51,6 +51,19 @@
 - 后续影响：完整 tmpfs 是独立实现任务，不能把 ext4 runner 隔离宣称为 `/dev/shm` 已完整兼容。若日志
   再出现 `/dev/shm/LTP_*`，先确认实际 `/tmp` 后端和 runner 入口，再分析具体 syscall。
 
+## requested `InodeType::Fifo` 不等于 ext4 已持久化 FIFO 类型
+
+- 状态：已确认并修复 FIFO
+- 适用范围：ext4 create、mknod/mkfifo、命名 FIFO 的 stat/open 与 errno
+- 最后验证：2026-08-14
+- 证据：修复前 `fsync03,lseek02,open06,read03,write04` 四环境共同失败；修复后四环境全通过
+- 内容：旧 create 根据 requested type 构造 Rust inode，却用普通文件 `O_CREAT` 写 lower inode；后续
+  lookup 以磁盘 mode 为准，又把对象恢复成 regular。结果不是单个 read/write 分支错误，而是 stat
+  不含 `S_IFIFO`、非阻塞 writer 不报 `ENXIO`、lseek/fsync 不报特殊文件 errno、缓冲区不受 pipe
+  capacity 约束的一整簇症状。
+- 后续影响：遇到多个特殊文件 syscall 同时失败，先检查 lower inode mode 与 reopen 后 node_type，
+  不要在每个 syscall 添加 pathname 特判。setattr 只保留/更新权限位时尤其不能用它补救错误的 type。
+
 ## 直接从 `wait4` 返回 EINTR 会绕过 SA_RESTART 并放大成 LTP 任务泄漏
 
 - 状态：已确认并对 `wait4` 修复
@@ -838,3 +851,19 @@
 - 后续影响：不能用 runner 清理、测例换序或缩短清单声称修复。遇到“某 daemon 使无关 sleep/
   timeout 卡住”时，先检查 daemon 是否长期停留在一次 kernel syscall 的 polling/yield 循环，以及该
   循环是否在无锁位置服务延迟 timer work；不要先归因于 wait、SIGCHLD 或文件写回。
+
+## RV64 首个 glibc 动态程序可能在 loader 尾页冷 fault 时收到 SIGBUS
+
+- 状态：已确认，根因层级已定位到 file-backed loader page 的 lower `EIO`，具体 lwext4 失败点待修复
+- 适用范围：RV64 release、初赛 glibc 冷启动、动态链接器 writable/BSS 尾页
+- 最后验证：2026-08-14
+- 证据：无 feature `clock_gettime01`/`clock_getres01` 作为首个 glibc 程序稳定以 raw wait status 135
+  退出；QEMU GDB 在不改变 guest 布局时命中 `trap_handler` 的 `Errno::EIO → SIGBUS` 分支，记录
+  `sepc=0x3000010d2c`、store fault `stval=0x3000022290`。该地址属于
+  `/glibc/lib/ld-linux-riscv64-lp64d.so.1` 的 writable LOAD/BSS 尾页；后续 glibc 程序与 LA64 不复现。
+- 内容：启用 `fault_trace` 会改变 kernel/物理页布局并使问题消失，因此“诊断内核通过且无 fault”不能
+  否定正式内核故障。CPU clock 五目标在先运行一个动态程序、loader 页热后全部通过，说明这个 135
+  不是 `clock_gettime` 返回值或 CPU timer 语义失败。
+- 后续影响：定位此类布局敏感冷 fault 应优先使用不改 guest image 的 GDB 地址断点。测试报告必须
+  单列预热项失败，不能宣称整组 6/6；修复应进入 MM/ext4/PageCache 线，并验证 loader 最后文件页
+  offset `0x21000` 的 lower read/open/seek/read/close 返回链，而不是在 CPU clock 代码中加时序掩盖。

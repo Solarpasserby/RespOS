@@ -17,7 +17,7 @@ use crate::signal::sig_stack::{SS_DISABLE, SignalStack};
 use crate::signal::sig_struct::SigPending;
 use crate::signal::{SiField, Sig, SigSet};
 use crate::syscall::{Errno, SysResult};
-use crate::timer::{get_accounting_ms, get_timeout_ms};
+use crate::timer::{get_accounting_clock_freq, get_time, get_timeout_ms};
 use crate::trap::TrapContext;
 use alloc::collections::btree_map::BTreeMap;
 use alloc::collections::btree_set::BTreeSet;
@@ -31,6 +31,108 @@ use spin::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 lazy_static! {
     static ref ACTIVE_ITIMER_TASKS: SpinLock<BTreeSet<usize>> = SpinLock::new(BTreeSet::new());
+}
+
+const CPU_CLOCK_STOPPED: usize = usize::MAX;
+const MAX_CPU_CLOCK_HARTS: usize = crate::arch::smp::MAX_HARTS;
+
+#[derive(Default)]
+struct ThreadCpuClock {
+    accumulated_ticks: usize,
+    running_since: Option<usize>,
+}
+
+impl ThreadCpuClock {
+    fn begin_run(&mut self, now: usize) {
+        debug_assert!(self.running_since.is_none());
+        self.running_since = Some(now);
+    }
+
+    fn end_run(&mut self, now: usize) {
+        let Some(started) = self.running_since.take() else {
+            return;
+        };
+        self.accumulated_ticks = self
+            .accumulated_ticks
+            .saturating_add(now.wrapping_sub(started));
+    }
+
+    fn ticks_at(&self, now: usize) -> usize {
+        self.accumulated_ticks.saturating_add(
+            self.running_since
+                .map(|started| now.wrapping_sub(started))
+                .unwrap_or(0),
+        )
+    }
+}
+
+struct ProcessCpuClock {
+    accumulated_ticks: usize,
+    running_since: [usize; MAX_CPU_CLOCK_HARTS],
+}
+
+impl ProcessCpuClock {
+    fn new() -> Self {
+        Self {
+            accumulated_ticks: 0,
+            running_since: [CPU_CLOCK_STOPPED; MAX_CPU_CLOCK_HARTS],
+        }
+    }
+
+    fn begin_run(&mut self, cpu: usize, now: usize) {
+        debug_assert_eq!(self.running_since[cpu], CPU_CLOCK_STOPPED);
+        self.running_since[cpu] = now;
+    }
+
+    fn end_run(&mut self, cpu: usize, now: usize) {
+        let started = core::mem::replace(&mut self.running_since[cpu], CPU_CLOCK_STOPPED);
+        if started == CPU_CLOCK_STOPPED {
+            return;
+        }
+        self.accumulated_ticks = self
+            .accumulated_ticks
+            .saturating_add(now.wrapping_sub(started));
+    }
+
+    fn ticks_at(&self, now: usize) -> usize {
+        self.running_since
+            .iter()
+            .filter(|started| **started != CPU_CLOCK_STOPPED)
+            .fold(self.accumulated_ticks, |total, started| {
+                total.saturating_add(now.wrapping_sub(*started))
+            })
+    }
+}
+
+#[derive(Clone)]
+enum CpuClockSource {
+    Thread(Arc<SpinNoIrqLock<ThreadCpuClock>>),
+    Process(Arc<SpinNoIrqLock<ProcessCpuClock>>),
+}
+
+/// A detached clock reference retained by POSIX timers without retaining the
+/// complete task or its address space after a thread exits.
+#[derive(Clone)]
+pub struct CpuClockHandle {
+    source: CpuClockSource,
+}
+
+impl CpuClockHandle {
+    pub fn now_us(&self) -> usize {
+        let now = get_time();
+        let ticks = match &self.source {
+            CpuClockSource::Thread(clock) => clock.lock().ticks_at(now),
+            CpuClockSource::Process(clock) => clock.lock().ticks_at(now),
+        };
+        cpu_ticks_to_us(ticks)
+    }
+}
+
+fn cpu_ticks_to_us(ticks: usize) -> usize {
+    let frequency = get_accounting_clock_freq();
+    (ticks / frequency)
+        .saturating_mul(1_000_000)
+        .saturating_add((ticks % frequency).saturating_mul(1_000_000) / frequency)
 }
 
 #[inline]
@@ -464,7 +566,8 @@ pub struct TaskControlBlock {
     itimers: Arc<TaskTimers>,
     personality: AtomicUsize,
     did_exec: AtomicBool,
-    start_time_ms: AtomicUsize,
+    thread_cpu_clock: Arc<SpinNoIrqLock<ThreadCpuClock>>,
+    process_cpu_clock: Arc<SpinNoIrqLock<ProcessCpuClock>>,
     child_utime_ticks: AtomicUsize,
     child_stime_ticks: AtomicUsize,
 }
@@ -544,7 +647,8 @@ impl TaskControlBlock {
             itimers: Arc::new(TaskTimers::new()),
             personality: AtomicUsize::new(0),
             did_exec: AtomicBool::new(false),
-            start_time_ms: AtomicUsize::new(get_accounting_ms()),
+            thread_cpu_clock: Arc::new(SpinNoIrqLock::new(ThreadCpuClock::default())),
+            process_cpu_clock: Arc::new(SpinNoIrqLock::new(ProcessCpuClock::new())),
             child_utime_ticks: AtomicUsize::new(0),
             child_stime_ticks: AtomicUsize::new(0),
         }
@@ -637,7 +741,8 @@ impl TaskControlBlock {
             itimers: Arc::new(TaskTimers::new()),
             personality: AtomicUsize::new(0),
             did_exec: AtomicBool::new(false),
-            start_time_ms: AtomicUsize::new(get_accounting_ms()),
+            thread_cpu_clock: Arc::new(SpinNoIrqLock::new(ThreadCpuClock::default())),
+            process_cpu_clock: Arc::new(SpinNoIrqLock::new(ProcessCpuClock::new())),
             child_utime_ticks: AtomicUsize::new(0),
             child_stime_ticks: AtomicUsize::new(0),
         });
@@ -765,6 +870,11 @@ impl TaskControlBlock {
         } else {
             Arc::new(TaskTimers::new())
         };
+        let process_cpu_clock = if is_thread {
+            self.process_cpu_clock.clone()
+        } else {
+            Arc::new(SpinNoIrqLock::new(ProcessCpuClock::new()))
+        };
         let net_ns = if flags.contains(CloneFlags::CLONE_NEWNET) {
             Arc::new(NetNamespace::new())
         } else {
@@ -848,7 +958,8 @@ impl TaskControlBlock {
             itimers,
             personality: AtomicUsize::new(self.personality()),
             did_exec: AtomicBool::new(false),
-            start_time_ms: AtomicUsize::new(get_accounting_ms()),
+            thread_cpu_clock: Arc::new(SpinNoIrqLock::new(ThreadCpuClock::default())),
+            process_cpu_clock,
             child_utime_ticks: AtomicUsize::new(0),
             child_stime_ticks: AtomicUsize::new(0),
         });
@@ -1823,10 +1934,41 @@ impl TaskControlBlock {
         self.personality.swap(personality, Ordering::Relaxed)
     }
 
+    pub(crate) fn begin_cpu_run(&self, cpu: usize, now: usize) {
+        self.thread_cpu_clock.lock().begin_run(now);
+        self.process_cpu_clock.lock().begin_run(cpu, now);
+    }
+
+    pub(crate) fn end_cpu_run(&self, cpu: usize, now: usize) {
+        self.thread_cpu_clock.lock().end_run(now);
+        self.process_cpu_clock.lock().end_run(cpu, now);
+    }
+
+    pub fn thread_cpu_clock(&self) -> CpuClockHandle {
+        CpuClockHandle {
+            source: CpuClockSource::Thread(self.thread_cpu_clock.clone()),
+        }
+    }
+
+    pub fn process_cpu_clock(&self) -> CpuClockHandle {
+        CpuClockHandle {
+            source: CpuClockSource::Process(self.process_cpu_clock.clone()),
+        }
+    }
+
+    pub fn thread_cpu_time_us(&self) -> usize {
+        self.thread_cpu_clock().now_us()
+    }
+
+    pub fn process_cpu_time_us(&self) -> usize {
+        self.process_cpu_clock().now_us()
+    }
+
     pub fn elapsed_ticks(&self) -> usize {
-        let start = self.start_time_ms.load(Ordering::Relaxed);
-        let elapsed = get_accounting_ms().saturating_sub(start);
-        (elapsed * CLK_TCK / 1000).max(1)
+        self.process_cpu_time_us()
+            .saturating_mul(CLK_TCK)
+            .div_ceil(1_000_000)
+            .max(1)
     }
 
     pub fn child_ticks(&self) -> (usize, usize) {

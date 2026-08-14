@@ -215,16 +215,21 @@ pub fn run_tasks() -> ! {
             let mut processor = current_processor().lock();
             processor.switch_to(next_task.clone());
             drop(processor);
-            // 事实上这个循环只会执行一次，这里需要释放 `next_task` 的引用
-            drop(next_task);
-            let running_started = crate::perf::now_ticks();
+            // Keep one Arc on the idle stack across the switch so the exact
+            // outgoing task can close its CPU-accounting interval even when
+            // it exited and removed itself from the task manager.
+            let running_started = crate::timer::get_time();
+            next_task.begin_cpu_run(current_cpu_id(), running_started);
             crate::perf::context_switch(1);
             #[cfg(target_arch = "riscv64")]
             crate::perf::local_sfence(1);
             unsafe {
                 __switch(next_task_kstack, idle_task_ptr);
             }
-            crate::perf::task_running_ticks(crate::perf::elapsed_since(running_started));
+            let running_finished = crate::timer::get_time();
+            next_task.end_cpu_run(current_cpu_id(), running_finished);
+            crate::perf::task_running_ticks(running_finished.wrapping_sub(running_started));
+            drop(next_task);
             // 任务在无 runnable work 时会恢复本 CPU 的 idle context，继续
             // 从全局 ready queue 选择下一个已 claim 的任务。
             continue;
