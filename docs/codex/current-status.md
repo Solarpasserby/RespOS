@@ -1,5 +1,24 @@
 # RespOS 当前状态
 
+## 2026-08-14 Phase 5 `shmctl01` 恢复审计与 LA64 teardown 阻断（基于 `b78f082`）
+
+- **审计方法**：仅临时取消 `user/oscomp_ltp_list.txt` 中 `shmctl01` 的注释并用
+  `TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=shmctl01` 定向运行；审计后已恢复注释，未改变正式 695-case 清单。
+  该 LTP case 覆盖 `IPC_STAT/SHM_STAT` 基本 metadata、20 child 独立 attach/detach，以及 parent attach
+  后 20 child fork 继承/各自 detach 的 `shm_nattch=21→1→0`。
+- **RV64 结果**：release 初赛 snapshot、4 GiB/2 hart 的 musl/glibc 均完整输出 12 项 TPASS、summary
+  `1 passed, 0 failed`，单组约 116--117 ms；日志为 `/tmp/respos-rv-shmctl01-phase5-audit.log`。此前
+  “两架构都会卡死”的旧注释不再准确，但尚不足以直接恢复正式清单。
+- **LA64 阻断**：4 GiB/2 hart 的 musl 已输出全部 12 项 TPASS，包括继承组最后
+  `after parent shmdt() shm_nattch=0`，随后在 `signal_children(); reap_children();` 阶段超过 case 自身
+  30 秒 timeout，未产生 summary；日志为 `/tmp/respos-la-shmctl01-phase5-audit.log`。4 GiB/1 hart 复核
+  排除了 secondary 上线竞态：它在第一组 20 child 已 detach、`shm_nattch=0` 后同样卡在最终
+  signal/reap，日志为 `/tmp/respos-la-shmctl01-phase5-smp1.log`。两次 QEMU 均由宿主定向终止。
+- **边界与下一步**：当前证据支持 SysV metadata/计数断言正确，不支持把 case 记为通过；阻断点属于
+  LA64 多子进程 signal delivery、exit 或 wait/reap 活性，而不是 `shmctl` 返回值。正式清单继续注释
+  `shmctl01`。若继续修复，需要带 child id/kill/wait 进度的最小 probe，再审计 LA64 task/signal/退出
+  路径；该范围与既有 process-identity/task-lifecycle 高风险项重叠，实施前需与用户协商。
+
 ## 2026-08-14 Linux/POSIX Phase 5 SysV SHM attach/回收线性化（基于 `e831255` 的当前工作树）
 
 - **Linux 契约与门禁**：新增 `scripts/sysv_shm_attach_race_probe_linux.c` 和 guest
@@ -28,7 +47,8 @@
   只有既有 64 KiB `SHMLBA` rounding 差异。
 - **剩余边界**：本轮关闭的是单 segment 的 `shmat` 与最后 detach/`IPC_RMID` 发布竞态及失败回滚；
   多个并发 attacher、`SHM_REMAP` 与并发 unmap、资源上限/attach-id 耗尽、多轮 frame 复用压力和其余
-  `IPC_STAT/SHM_STAT` metadata 仍需独立门禁。历史时序性卡死的 `shmctl01` 仍未恢复。
+  `IPC_STAT/SHM_STAT` metadata 仍需独立门禁。`shmctl01` 的 metadata/计数断言已通过，但 LA64
+  teardown 活性阻断仍使其不能恢复，见上节。
 
 ## 2026-08-14 Linux/POSIX Phase 5 SysV SHM `shm_nattch` MM identity（基于 `4e2e6c7` 的当前工作树）
 
