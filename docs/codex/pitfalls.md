@@ -570,6 +570,20 @@
   inode size 并保留洞，不需要为洞分配数据块。
 - 后续影响：稀疏写回回归必须检查最终长度、洞区为零以及尾部模式数据，不能只检查 write 返回值。
 
+## LTP `fallocate03` 通过不证明物理空间已经预留
+
+- 状态：已确认
+- 适用范围：普通 ext4 `fallocate()` default/`FALLOC_FL_KEEP_SIZE`、LTP 20240524
+- 最后验证：2026-08-14；基于 `80e8c5a` 的 Linux probe 与双架构聚焦 LTP
+- 证据：`scripts/fallocate_prealloc_probe_linux.c`、官方 LTP
+  `testcases/kernel/syscalls/fallocate/fallocate03.c`、
+  `/tmp/respos-{rv,la}-fallocate-phase5-baseline.log`
+- 内容：该 LTP case 在稀疏文件的八个位置调用 fallocate，但只断言返回成功；它不检查 `st_blocks`、
+  logical size、零读或数据保留。仅做 sparse truncate、写零后缩回或让 `KEEP_SIZE` 无操作成功，都可能
+  让 case 变绿却没有提供 Linux `fallocate()` 所需的空间预留保证。
+- 后续影响：实现必须由文件系统真实分配 extent，并用独立 probe 检查块数增长和 size/data/offset；
+  底层没有独立预分配状态时应继续诚实返回 `EOPNOTSUPP`，不能在 syscall 层模拟成功。
+
 ## 可写共享文件映射不能永久冻结 mmap 时的 EOF
 
 - 状态：已确认并修复专项 mmap 扩容回归

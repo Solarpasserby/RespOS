@@ -559,6 +559,25 @@ guest 日志中 musl/glibc 都必须出现 `SUMMARY: 2 passed, 0 failed`，`getd
 内部应显示 `EBADF/EINVAL/ENOTDIR/ENOENT` 通过。修改目录 cache 后不能只跑错误项；
 `getdents01` 还要确认普通 `.`/`..` 和文件遍历未回归。
 
+### fallocate 真实预分配门禁
+
+宿主 probe 同时检查逻辑长度、物理块数、零读、原数据和 open-file offset，避免把 LTP 仅检查返回值的
+`fallocate03` 误当成完整语义证明：
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror -O2 \
+  scripts/fallocate_prealloc_probe_linux.c \
+  -o /tmp/fallocate_prealloc_probe_linux
+/tmp/fallocate_prealloc_probe_linux
+
+TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=fallocate03 \
+  make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-fallocate-phase5.log
+TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=fallocate03 \
+  make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-fallocate-phase5.log
+```
+
 Phase 5 iperf→iozone 固定顺序门禁：
 
 ```bash

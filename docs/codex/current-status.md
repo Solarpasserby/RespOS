@@ -1,5 +1,21 @@
 # RespOS 当前状态
 
+## 2026-08-14 Linux/POSIX Phase 5 ext4 `fallocate()` 预分配审计（基于 `80e8c5a`）
+
+- **契约门禁**：新增 `scripts/fallocate_prealloc_probe_linux.c`，不只复刻 LTP 的返回值检查，还固定
+  `FALLOC_FL_KEEP_SIZE` 必须增加 `st_blocks` 且不改变逻辑长度、默认模式必须把 EOF 扩展到 range end、
+  两种模式均不得推进 open-file offset，并验证预分配范围零读及既有数据不变。宿主 Linux 以
+  `cc -std=c11 -Wall -Wextra -Werror -O2` 编译并通过。
+- **当前双架构差异**：release 初赛镜像、4 GiB/2 hart、筛选 `fallocate03`；RV64/LA64 的 musl 与
+  glibc 均为 `SUMMARY: 0 passed, 1 failed`，每组八个 default/`KEEP_SIZE` 调用全部返回
+  `EOPNOTSUPP`。日志为 `/tmp/respos-{rv,la}-fallocate-phase5-baseline.log`。该结果确认当前 HEAD 的
+  普通 ext4 `File` 没有实现 `allocate_range()`，不是沿用历史 LTP 结果。
+- **实现边界**：LTP 20240524 `fallocate03` 只断言 syscall 成功，不核对块预留；不得用稀疏
+  `truncate`、临时写零再缩回或无操作成功换取通过。vendored lwext4 已能读取/写入 unwritten extent，
+  但没有公开“在不改变 inode size 时建立 unwritten extent”的接口。真实修复需要给 extent allocator
+  增加预分配入口，并由 ext4 `File` 在 PageCache writeback exclusion 下事务化调用；该项涉及 on-disk
+  extent 元数据，实施前需取得用户确认。
+
 ## 2026-08-14 Linux/POSIX Phase 5 已删除目录 fd 的 `getdents64()`（当前工作树）
 
 - **Linux 契约**：`scripts/getdents_unlinked_probe_linux.c` 确认，空目录被 `rmdir()` 从
