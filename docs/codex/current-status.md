@@ -1,5 +1,23 @@
 # RespOS 当前状态
 
+## 2026-08-14 Linux/POSIX Phase 5 已删除目录 fd 的 `getdents64()`（当前工作树）
+
+- **Linux 契约**：`scripts/getdents_unlinked_probe_linux.c` 确认，空目录被 `rmdir()` 从
+  namespace 移除后，无论其 open fd 是否已经读取过目录流，后续 `getdents64()` 都返回
+  `ENOENT`；未删除目录的 1-byte 结果 buffer 仍返回 `EINVAL`。宿主 probe 以
+  `-Wall -Wextra -Werror` 通过。
+- **根因与修复**：ext4 deferred unlink 已在 inode 上保留 `unlinked` 原子状态，但目录 fd 的
+  `readdir_cached()` 未读取它，仍可从 lower inode 或 open-file `dirent_cache` 返回 `.`/`..`。
+  当前 `File` 在生成或返回缓存目录项之前检查 ext4 inode 的 `is_unlinked()`，脱离
+  namespace 后精确返回 `ENOENT`；不改变延迟回收和 open fd 对 inode 的 Arc 生命周期。
+- **双架构证据**：RV64/LA64 release、初赛 snapshot、4 GiB/2 hart 聚焦
+  `getdents01,getdents02`；两架构 musl/glibc 四组均为 `SUMMARY: 2 passed, 0 failed`，
+  `getdents02` 内部的 `EBADF/EINVAL/ENOTDIR/ENOENT` 均通过。日志为
+  `/tmp/respos-{rv,la}-getdents-phase5.log`。
+- **剩余边界**：该检查当前由 ext4 的 deferred-unlink 状态驱动；`/dev/shm`、proc/devfs 等
+  自定义目录若日后支持打开后 unlink/rmdir，需把同一语义下沉为通用 inode 状态，不能
+  从本轮 ext4 通过推导它们已支持。
+
 ## 2026-08-14 Linux/POSIX Phase 5 `pwrite()` + `O_APPEND`（当前工作树）
 
 - **目标契约**：Linux 在 open-file status 含 `O_APPEND` 时让 `pwrite()` 忽略显式 offset 并写到

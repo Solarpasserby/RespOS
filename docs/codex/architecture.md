@@ -564,6 +564,21 @@ FdTable slot (FdEntry: descriptor flags)
   分块 copy/write；若要证明大写与并发 append 的整个 syscall 原子性，需要单独收紧
   chunk 提交边界，不能由本轮 LTP 结果推导。
 
+### 目录脱离 namespace 后，getdents 不得继续返回 open-file 缓存
+
+- 状态：ext4 已删除目录 fd 语义已实现并完成双架构 SMP 聚焦回归
+- 适用范围：ext4 `rmdir`、deferred inode reclaim、`File::readdir_cached`、`getdents64`
+- 最后验证：2026-08-14
+- 证据：`os/src/fs/{ext4/inode.rs,file.rs}`、`scripts/getdents_unlinked_probe_linux.c`；
+  RV64/LA64 4 GiB/2 hart 的 musl/glibc `getdents01/getdents02`
+- 内容：ext4 成功删除最后 namespace link 后先以 release store 标记 inode `unlinked`，
+  lower inode 的物理回收仍等到最后 VFS Arc 消失。目录 `File` 每次 `readdir_cached()` 都在
+  返回旧 `dirent_cache` 或重建快照之前 acquire-load 该状态；已脱离 namespace 则返回
+  `ENOENT`，而不是继续暴露 deferred lower inode 中的 `.`/`..`。
+- 后续影响：目录项缓存是 open-file 遍历快照，不是 namespace 生存证明；任何新的
+  unlinkable 目录后端都必须提供同等的 detached 状态。该检查不能改成按 pathname 重新
+  lookup，否则 rename 或 open-after-unlink 会把 inode identity 退化为路径猜测。
+
 ## 设备与 DMA 模型
 
 ### VirtIO descriptor 的虚拟连续不等于物理连续

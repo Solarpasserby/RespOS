@@ -317,6 +317,16 @@ impl File {
     }
 
     pub fn readdir_cached(&self, current_off: usize) -> SysResult<Arc<Vec<LinuxDirent64>>> {
+        // Linux getdents rejects an open directory after it has been detached
+        // by rmdir. Check before serving an existing directory-stream cache.
+        if self
+            .inode
+            .as_any()
+            .downcast_ref::<Ext4Inode>()
+            .is_some_and(Ext4Inode::is_unlinked)
+        {
+            return Err(Errno::ENOENT);
+        }
         {
             let inner = self.inner.lock();
             if current_off != 0 {

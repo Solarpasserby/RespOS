@@ -462,6 +462,10 @@ impl Ext4Inode {
         self.invalidate_raw_metadata();
     }
 
+    pub(crate) fn is_unlinked(&self) -> bool {
+        self.unlinked.load(Ordering::Acquire)
+    }
+
     fn dirent64_reclen(name_len: usize) -> usize {
         // 目录项固定字段大小
         const DIRENT64_HEADER_SIZE: usize = 8 + 8 + 2 + 1;

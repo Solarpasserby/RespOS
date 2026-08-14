@@ -539,6 +539,26 @@ musl/glibc 都必须出现 `SUMMARY: 16 passed, 0 failed`。LTP `pwrite04` 测�
 对 POSIX 文本的已知偏离，覆盖矩阵应显式标记为 Linux ABI 兼容，不宣称为纯 POSIX
 行为。两架构必须顺序运行，因为 build target 会改写共享 Cargo config。
 
+Phase 5 已删除目录 fd 的 `getdents64()` Linux 对照与 LTP：
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror -O2 scripts/getdents_unlinked_probe_linux.c \
+  -o /tmp/getdents_unlinked_probe_linux
+/tmp/getdents_unlinked_probe_linux
+TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=getdents01,getdents02 \
+  make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-getdents-phase5.log
+TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=getdents01,getdents02 \
+  make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-getdents-phase5.log
+```
+
+宿主 probe 同时覆盖 rmdir 前未读目录流、先 getdents+lseek 建立过遍历状态的两种 fd；
+删除后都必须返回 `ENOENT`，且未删除目录的 1-byte buffer 必须返回 `EINVAL`。两份
+guest 日志中 musl/glibc 都必须出现 `SUMMARY: 2 passed, 0 failed`，`getdents02`
+内部应显示 `EBADF/EINVAL/ENOTDIR/ENOENT` 通过。修改目录 cache 后不能只跑错误项；
+`getdents01` 还要确认普通 `.`/`..` 和文件遍历未回归。
+
 Phase 5 iperf→iozone 固定顺序门禁：
 
 ```bash

@@ -1,5 +1,18 @@
 # RespOS 已确认易错点
 
+## open-file 目录项缓存不能证明目录仍在 namespace
+
+- 状态：已确认并对 ext4 修复
+- 适用范围：`getdents64`、open directory fd、`rmdir`、deferred inode reclaim
+- 最后验证：2026-08-14
+- 证据：`scripts/getdents_unlinked_probe_linux.c`、双架构 musl/glibc `getdents01/getdents02`
+- 内容：为保持一次目录遍历的 d_off 一致性，`File` 会缓存 readdir 快照；但目录
+  被 `rmdir` 后，open fd 的 inode 只因 Arc 而继续存活，已不属于 namespace。若先返回
+  缓存或从 deferred lower inode 重建，Linux 要求的 `ENOENT` 会被伪装成成功的 `.`/`..`。
+- 后续影响：在读任何 open-file namespace cache 前先检查所有者的 detached/unlinked 状态；
+  不得用 pathname lookup 代替 inode identity。添加新的可 unlink 内存目录后端时，必须同步
+  实现该状态，不能只修 ext4 特判后宣称通用 VFS 已闭环。
+
 ## libc 在用户态丢弃接口参数时，内核无法补回 POSIX 错误语义
 
 - 状态：已确认；当前 musl runtime 替换待协商
