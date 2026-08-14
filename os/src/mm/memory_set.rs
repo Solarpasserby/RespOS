@@ -831,6 +831,25 @@ impl MemorySet {
         ids
     }
 
+    pub fn shm_attach_ids(&self) -> Vec<usize> {
+        let mut ids = Vec::new();
+        for area in self.areas.iter() {
+            let Some(attach_id) = area.shm_attach_id else {
+                continue;
+            };
+            if !ids.contains(&attach_id) {
+                ids.push(attach_id);
+            }
+        }
+        ids
+    }
+
+    pub fn has_shm_attach_id(&self, attach_id: usize) -> bool {
+        self.areas
+            .iter()
+            .any(|area| area.shm_attach_id == Some(attach_id))
+    }
+
     pub fn remove_shm_attachment(&mut self, vpn_start: VirtPageNum) -> SysResult<usize> {
         let attach_id = self
             .areas

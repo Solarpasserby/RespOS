@@ -1056,11 +1056,16 @@ impl TaskControlBlock {
             let mut memory_set_handle = self.memory_set.lock();
             core::mem::replace(&mut *memory_set_handle, new_memory_set.clone())
         };
+        let old_shm_attach_ids = memory_set_read(&old_memory_set).shm_attach_ids();
         // 刷新页表，由于应用程序通过异常进入，在异常返回时不会刷新页表
         // 为了程序返回后看到的地址空间为自身而非父任务的地址空间，需要主动刷新页表
         memory_set_read(&new_memory_set).activate();
         memory_set_read(&old_memory_set).clear_current_hart_active();
         drop(old_memory_set);
+        crate::syscall::ipc::release_shm_attachments(
+            old_shm_attach_ids.as_slice(),
+            self.tgid() as i32,
+        );
 
         /* ===== 修改异常上下文 ===== */
         let argc = args.len();
@@ -2462,6 +2467,11 @@ fn exit_process_group(task: Arc<TaskControlBlock>, cause: ExitCause) {
     // 修改孩子进程的父亲——托孤。children 是进程级资源，只处理一次。
     reparent_children_to_init(&task);
 
+    let released_shm_attach_ids = if memory_set_owned_by_group {
+        task.op_memory_set_read(|mem| mem.shm_attach_ids())
+    } else {
+        Vec::new()
+    };
     if memory_set_owned_by_group {
         let writebacks = task.op_memory_set_read(|mem| mem.prepare_file_writeback(None));
         match writebacks {
@@ -2479,6 +2489,7 @@ fn exit_process_group(task: Arc<TaskControlBlock>, cause: ExitCause) {
             mem.retire_asid();
         });
     }
+    crate::syscall::ipc::release_shm_attachments(released_shm_attach_ids.as_slice(), tgid as i32);
     if fd_table_owned_by_group {
         task.fd_table.lock().clear();
     }

@@ -56,6 +56,8 @@ const TASK_A_SESSION_PROBE: bool = option_env!("TASK_A_SESSION_PROBE").is_some()
 const TASK_A_TASK_PHASE5_PROBE: bool = option_env!("TASK_A_TASK_PHASE5_PROBE").is_some();
 const TASK_A_MMAP_PHASE5_PROBE: bool = option_env!("TASK_A_MMAP_PHASE5_PROBE").is_some();
 const TASK_A_SYSV_SHM_FUTEX_PROBE: bool = option_env!("TASK_A_SYSV_SHM_FUTEX_PROBE").is_some();
+const TASK_A_SYSV_SHM_LIFECYCLE_PROBE: bool =
+    option_env!("TASK_A_SYSV_SHM_LIFECYCLE_PROBE").is_some();
 const TASK_A_SIGNAL_PHASE5_PROBE: bool = option_env!("TASK_A_SIGNAL_PHASE5_PROBE").is_some();
 const TASK_A_SOCKET_PHASE5_PROBE: bool = option_env!("TASK_A_SOCKET_PHASE5_PROBE").is_some();
 const TASK_A_SOCKET_FLAGS_PROBE: bool = option_env!("TASK_A_SOCKET_FLAGS_PROBE").is_some();
@@ -1617,6 +1619,29 @@ fn run_task_a_sysv_shm_futex_probe() -> i32 {
     status
 }
 
+fn run_task_a_sysv_shm_lifecycle_probe() -> i32 {
+    let pid = fork();
+    assert!(pid >= 0, "failed to fork sysv_shm_lifecycle_probe");
+    if pid == 0 {
+        let argv = ["sysv_shm_lifecycle_probe\0".as_ptr(), core::ptr::null()];
+        let ret = exec("sysv_shm_lifecycle_probe\0", &argv);
+        println!("[testrunner] exec sysv_shm_lifecycle_probe failed: {}", ret);
+        exit(-1);
+    }
+
+    let mut status = 0;
+    assert_eq!(waitpid(pid as usize, &mut status), pid);
+    if status == 0 {
+        println!("[testrunner] SysV SHM lifecycle probe PASS");
+    } else {
+        println!(
+            "[testrunner] SysV SHM lifecycle probe failed: status={}",
+            status
+        );
+    }
+    status
+}
+
 fn run_task_a_signal_phase5_probe() {
     let pid = fork();
     assert!(pid >= 0, "failed to fork signal_phase5_probe");
@@ -1806,6 +1831,12 @@ fn main() -> i32 {
         poweroff();
         return if status == 0 { 0 } else { 1 };
     }
+    if TASK_A_SYSV_SHM_LIFECYCLE_PROBE {
+        let status = run_task_a_sysv_shm_lifecycle_probe();
+        println!("[testrunner] SysV SHM lifecycle probe finished, powering off");
+        poweroff();
+        return if status == 0 { 0 } else { 1 };
+    }
     if TASK_A_SIGNAL_PHASE5_PROBE {
         run_task_a_signal_phase5_probe();
         println!("[testrunner] signal Phase 5 probe finished, powering off");
@@ -1976,6 +2007,12 @@ fn main() -> i32 {
     if TASK_A_SYSV_SHM_FUTEX_PROBE {
         let status = run_task_a_sysv_shm_futex_probe();
         println!("[testrunner] SysV SHM futex probe finished, powering off");
+        poweroff();
+        return if status == 0 { 0 } else { 1 };
+    }
+    if TASK_A_SYSV_SHM_LIFECYCLE_PROBE {
+        let status = run_task_a_sysv_shm_lifecycle_probe();
+        println!("[testrunner] SysV SHM lifecycle probe finished, powering off");
         poweroff();
         return if status == 0 { 0 } else { 1 };
     }

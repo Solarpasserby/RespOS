@@ -254,6 +254,55 @@ fn shm_attach_count(frames: &[Arc<FrameTracker>]) -> usize {
     count
 }
 
+fn shm_attach_id_in_use(attach_id: usize) -> bool {
+    TASK_MANAGER
+        .snapshot()
+        .iter()
+        .any(|task| task.op_memory_set_read(|memory_set| memory_set.has_shm_attach_id(attach_id)))
+}
+
+/// Commit the implicit detach caused by exec or address-space teardown.
+///
+/// The caller must first make the old mappings unreachable from every task
+/// that is being released.  A forked or CLONE_VM peer may still retain the
+/// same attach id, so the owner entry is removed only after a live-MM scan.
+pub(crate) fn release_shm_attachments(attach_ids: &[usize], pid: i32) {
+    if attach_ids.is_empty() {
+        return;
+    }
+
+    let unused_ids: Vec<usize> = attach_ids
+        .iter()
+        .copied()
+        .filter(|attach_id| !shm_attach_id_in_use(*attach_id))
+        .collect();
+    let now = now_sec();
+    let mut table = SHM_TABLE.lock();
+    for attach_id in attach_ids.iter().copied() {
+        let Some(shmid) = table.attach_owners.get(&attach_id).copied() else {
+            continue;
+        };
+        if let Some(segment) = table.segments.get_mut(&shmid) {
+            segment.lpid = pid;
+            segment.dtime = now;
+        }
+    }
+    for attach_id in unused_ids {
+        table.attach_owners.remove(&attach_id);
+    }
+
+    let remove_ids: Vec<usize> = table
+        .segments
+        .iter()
+        .filter_map(|(id, segment)| {
+            (segment.marked_removed && shm_attach_count(&segment.frames) == 0).then_some(*id)
+        })
+        .collect();
+    for id in remove_ids {
+        table.remove_segment(id);
+    }
+}
+
 fn shmid_ds(segment: &ShmSegment, nattch: usize) -> ShmidDs {
     let mut mode = segment.mode;
     if segment.marked_removed {
@@ -546,24 +595,7 @@ pub fn sys_shmdt(shmaddr: usize) -> SysResult<usize> {
         Ok(attach_id)
     })?;
 
-    let mut table = SHM_TABLE.lock();
     let pid = task.tgid() as i32;
-    let now = now_sec();
-    if let Some(shmid) = table.attach_owners.remove(&attach_id) {
-        if let Some(segment) = table.segments.get_mut(&shmid) {
-            segment.lpid = pid;
-            segment.dtime = now;
-        }
-    }
-    let remove_ids: Vec<usize> = table
-        .segments
-        .iter()
-        .filter_map(|(id, segment)| {
-            (segment.marked_removed && shm_attach_count(&segment.frames) == 0).then_some(*id)
-        })
-        .collect();
-    for id in remove_ids {
-        table.remove_segment(id);
-    }
+    release_shm_attachments(&[attach_id], pid);
     Ok(0)
 }

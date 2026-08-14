@@ -654,8 +654,8 @@
   libc header 版本信息，无法同时满足旧 glibc 与 musl 的冲突期望。内核特判只会制造不可维护的
   非 Linux ABI。
 - 后续影响：该 LTP 单项通过需更新 glibc runtime/test image。SysV segment 跨 attach 的共享
-  frame/futex identity 已由独立 probe 闭合；`IPC_RMID` 最后 detach 与并发回收仍需独立验证，不能由
-  rounding 决策代替。
+  frame/futex identity 与 `IPC_RMID` 基本生命周期已由独立 probe 闭合；并发发布/回收仍需独立验证，
+  不能由 rounding 决策代替。
 
 ## SysV SHM futex key 使用共享 frame 身份，attach id 只管理 detach
 
@@ -670,7 +670,25 @@
   作为同步 identity 会让不同虚拟地址错误地进入不同 futex 队列；frame 身份直接表达当前实际共享的
   backing page，且无需新增全局 segment-to-futex 索引。
 - 后续影响：VMA 切分/合并不得丢失 detach 所需 attach id，futex 路径也不得退回映射实例 identity。
-  `IPC_RMID` 最后 detach、并发 attach/detach、异常退出与 frame 复用压力仍须独立验证。
+  `IPC_RMID` 的显式/exit/exec/fork-inherited 生命周期已独立验证；并发 attach/detach 与 frame 复用压力
+  仍须单独覆盖。
+
+## exec/exit 在旧 MM 不可达后显式提交 SysV SHM detach
+
+- 状态：已采用
+- 适用范围：SysV SHM、成功 exec、group exit、显式 `shmdt`、fork/`CLONE_VM`
+- 最后验证：2026-08-14
+- 证据：`os/src/task/task.rs::{install_exec_image,exit_process_group}`、
+  `os/src/syscall/ipc.rs::release_shm_attachments()`；Linux/RV64/LA64 2-hart lifecycle probe
+- 决策：task 在成功安装新 MM 或完成旧 MM recycle 后，把旧地址空间的 attach id 显式提交给 SysV
+  table；显式 `shmdt` 使用同一提交点。table 只有在 live MM 不再持有该 id 时才移除 owner，并仅在
+  `IPC_RMID` segment 的全局 attachment 为零时释放 frames。
+- 原因：MM 只拥有映射，`SHM_TABLE` 仍独立持有 segment frames；只删除 PTE 或等待 Rust `Drop` 会留下
+  可重新 attach 的旧 shmid。反过来，无条件按 task exit 删除会破坏 fork/CLONE_VM peer 仍可访问的
+  attachment，因此提交必须发生在 MM 状态改变之后并以 live owner 复核。
+- 后续影响：失败的 exec 不提交 detach；共享旧 MM 的 vfork child exec 不能回收 parent mapping。若后续
+  引入 per-MM nattch 计数或并发 attach reservation，必须保持“VMA 发布/撤销先于最终 table 回收”的
+  提交顺序。
 
 ## LoongArch shootdown 使用每目标 hart 的 generation 槽
 

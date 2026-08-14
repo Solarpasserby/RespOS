@@ -372,8 +372,23 @@
   `shmdt` 映射分组，不再参与同步身份。
 - 后续影响：普通 wait 应复用“锁外预触页、锁内 no-fault 复核”的模式；在完成前不能宣称
   futex queue lock 内已全面禁止通用用户拷贝或潜在 frame 分配。System V shm 后续仍需验证
-  `IPC_RMID` 最后 detach、并发回收与 frame 复用压力，不能把跨 attach wait/wake 通过解释为生命周期
-  全部闭合。
+  并发回收与 frame 复用压力，不能把跨 attach wait/wake 通过解释为生命周期全部闭合。
+
+### SysV SHM 生命周期由 MM detach 与 SHM table 两阶段提交
+
+- 状态：当前工作树已实现并通过双架构 lifecycle 专项
+- 适用范围：显式 `shmdt`、成功 exec、group exit、fork/`CLONE_VM` 继承、`IPC_RMID`
+- 最后验证：2026-08-14
+- 证据：`MemorySet::{shm_attach_ids,remove_shm_attachment}`、
+  `ipc::release_shm_attachments()`、`task::{install_exec_image,exit_process_group}`；Linux/RV64/LA64
+  `sysv_shm_lifecycle_probe`
+- 内容：VMA/PTE/frame 归 `MemorySet`，segment key、删除标记和 owner 索引归 `SHM_TABLE`；销毁
+  MemorySet 本身不能完成 SysV 生命周期。显式 detach 或旧 MM 已从 task handle 替换/完成 recycle 后，
+  才向 table 提交 attach id。提交扫描 live MM，fork/CLONE_VM peer 仍持有同 id 时 segment 保持存活；
+  `IPC_RMID` segment 只在全局 attachment 归零后释放。
+- 后续影响：不得在旧 MM 仍可被 task 访问时先删 table/frame，也不得只依赖 `Drop<MemorySet>` 隐式
+  猜测 IPC owner。并发 `shmat` 的“table owner 已发布但 VMA 尚未安装”窗口与 `shm_nattch` MM 去重仍需
+  单独收敛。
 
 ## FS、VFS 与 fd 模型
 

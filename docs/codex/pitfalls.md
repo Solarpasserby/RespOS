@@ -789,6 +789,19 @@
 - 后续影响：设计共享映射元数据时应分别列出“映射生命周期 identity”和“共享内容 identity”；至少用
   不同虚拟地址的跨进程 wait/wake 验证，不能以数据读写可见性替代 futex 证明。
 
+## 回收 MemorySet 不会自动清理独立的 SysV SHM table
+
+- 状态：已确认并修复 exit/exec 基本路径
+- 适用范围：已 `IPC_RMID` segment、进程不调用 `shmdt` 而 exit/exec、fork/`CLONE_VM`
+- 最后验证：2026-08-14；release、4 GiB/2 hart
+- 证据：`os/src/task/task.rs`、`os/src/syscall/ipc.rs::release_shm_attachments()`；修复前后双架构
+  `sysv_shm_lifecycle_probe`
+- 内容：旧实现只在 `sys_shmdt()` 扫描 marked-removed segment。exit/exec 虽回收 PTE，`SHM_TABLE`
+  仍持有 frames 和旧 shmid，故旧 id 可再次 attach。不能把 cleanup 塞进 `Drop<MemorySet>`：table 是
+  外部 owner，且 fork/CLONE_VM peer 可能仍持有同一 attach identity。
+- 后续影响：地址空间 teardown 应先让 mapping 对 task 不可达，再显式提交 detach，并以 live MM 复核
+  最后 owner。测试必须同时覆盖“最后 owner 退出应删除”和“child 退出但 parent 仍持有时不得删除”。
+
 ## QEMU 10.0.2 LoongArch `LDPTE` 会截掉 PTE 的 NR/NX 高位
 
 - 状态：已确认并为 `PROT_NONE` 增加兼容表示

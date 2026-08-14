@@ -1,5 +1,32 @@
 # RespOS 当前状态
 
+## 2026-08-14 Linux/POSIX Phase 5 SysV SHM `IPC_RMID` 地址空间回收（基于 `f22b3fd` 的当前工作树）
+
+- **Linux 契约与门禁**：新增 `scripts/sysv_shm_lifecycle_probe_linux.c` 和 guest
+  `sysv_shm_lifecycle_probe`。五组向量确认：`IPC_RMID` 立即释放 key namespace、旧 mapping 活到最后
+  detach；显式最后 `shmdt` 后旧 shmid 返回 `EINVAL`；进程不调用 `shmdt` 而 exit/成功 exec 时也必须
+  隐式 detach；signal group-exit 遵守同一回收；fork 继承 mapping 的 child 退出后，parent 仍能访问并
+  再次 attach，直到 parent 最后 detach 才删除 segment。Linux 以
+  `-std=c11 -Wall -Wextra -Werror -O2` 编译并输出
+  `SYSV_SHM_LIFECYCLE_LINUX PASS`。
+- **修复前反证与根因**：release 初赛 snapshot、4 GiB/2 hart 的 RV64/LA64 都只有显式 detach 通过，
+  exit/exec 后旧 shmid 仍可 `shmat`，输出
+  `SYSV_SHM_LIFECYCLE_EXPECTED_FAIL exit_stale=true exec_stale=true`；日志为
+  `/tmp/respos-{rv,la}-sysv-shm-lifecycle-baseline.log`。根因是 `MemorySet` 回收了 PTE/frame 引用，但
+  segment 及 `attach_owners` 由独立 `SHM_TABLE` 持有，清理只从 `sys_shmdt()` 触发。
+- **实现与所有权**：`MemorySet` 暴露当前 attach id 快照；成功 exec 在安装新 MM 后、group exit 在旧
+  MM 完成 recycle 后，把隐式 detach 提交给 `SHM_TABLE`。提交前扫描 live MM：若 fork 或
+  `CLONE_VM` peer 仍持有同一 attach id，只更新时间而不删除 owner/segment；只有已标记删除且全局
+  attachment 归零时才释放 segment。显式 `shmdt` 复用同一提交函数，避免 fork child 先 detach 就过早
+  丢失共享 attach owner。
+- **双架构验证**：RV64/LA64 2-hart 五组向量均输出 `SYSV_SHM_LIFECYCLE PASS` 与 runner PASS，日志为
+  `/tmp/respos-{rv,la}-sysv-shm-lifecycle-final.log`。既有跨 attach futex probe 同配置通过，日志为
+  `/tmp/respos-{rv,la}-sysv-shm-lifecycle-futex-regression.log`。聚焦 `clone05,shmat01,shmdt02` 时 RV64
+  双 libc、LA64 musl 均为 `3 passed, 0 failed`；LA64 glibc 的 clone/shmdt 通过，只有已知旧 64 KiB
+  `SHMLBA` 的 shmat rounding 失败，日志为 `/tmp/respos-{rv,la}-sysv-shm-lifecycle-ltp.log`。
+- **剩余边界**：本轮不宣称关闭 `shmat` 发布与最后 detach 的真实并发竞态、`shm_nattch` 对共享 MM/
+  多线程的去重、多轮资源压力或 `SHM_STAT/IPC_STAT` 完整元数据；这些仍需独立 probe。
+
 ## 2026-08-14 Linux/POSIX Phase 5 SysV SHM 跨 attach futex 闭合（基于 `806eb5a` 的当前工作树）
 
 - **新增门禁**：`scripts/sysv_shm_futex_probe_linux.c` 与 guest `sysv_shm_futex_probe` 建立同一 SysV
@@ -21,8 +48,8 @@
   `/tmp/respos-{rv,la}-sysv-shm-futex-regression.log`。LA64 首组 musl wait 仍受已知 secondary hart
   冷启动窗口影响约 0.9 秒，但 case 通过，本修复不宣称关闭该时间问题。
 - **剩余边界**：当前 probe 覆盖一个 segment 的单页、不同 attach 地址、跨进程数据可见性与
-  wait/wake；`IPC_RMID` 后最后 detach、并发 attach/detach、异常退出回收以及多页/复用压力仍需独立
-  验证，不能由本项外推为 SysV SHM 生命周期全部完成。
+  wait/wake；`IPC_RMID` 显式/exit/exec/fork-inherited 生命周期已由上节闭合，并发 attach/detach、
+  多页/复用压力仍需独立验证，不能由本项外推为 SysV SHM 全部完成。
 
 ## 2026-08-14 Linux/POSIX Phase 5 SysV SHM 清账与 LA64 glibc 2.38 `SHMLBA` 差异（基于 `7622572`）
 
@@ -42,8 +69,8 @@
 - **决策与剩余边界**：内核保持当前 Linux 的 page-size ABI，不按调用二进制猜测 4/64 KiB，也不为
   旧 glibc 特判地址尾数；该单项记为 glibc 2.38/LTP header `已知差异`，纳入统一 runtime 更新。
   本轮没有为旧 runtime 修改源码。现有 `shmat01` 只验证单次 attach、rounding、readonly 与基本计数；
-  segment 的跨 attach 数据与 futex identity 已由上节专项闭合，但 `IPC_RMID` 最后 detach 和并发回收
-  仍不能由三环境通过外推为完成。
+  segment 的跨 attach 数据/futex identity 与 `IPC_RMID` 基本生命周期已由上方专项闭合，但并发发布/
+  回收与完整 metadata 仍不能由三环境通过外推为完成。
 
 ## 2026-08-14 Linux/POSIX Phase 5 `CLONE_VFORK|CLONE_VM` 可见性（基于 `e39cdd9` 的当前工作树）
 

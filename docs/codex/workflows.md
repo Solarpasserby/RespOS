@@ -408,6 +408,28 @@ TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=futex_wait01,futex_wake03 \
 
 musl/glibc 都必须为 `SUMMARY: 2 passed, 0 failed`。两架构仍须顺序运行。
 
+Phase 5 SysV SHM `IPC_RMID` 地址空间生命周期：
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror -O2 scripts/sysv_shm_lifecycle_probe_linux.c \
+  -o /tmp/sysv_shm_lifecycle_probe_linux
+/tmp/sysv_shm_lifecycle_probe_linux
+
+TASK_A_SYSV_SHM_LIFECYCLE_PROBE=1 \
+  make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-sysv-shm-lifecycle.log
+TASK_A_SYSV_SHM_LIFECYCLE_PROBE=1 \
+  make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-sysv-shm-lifecycle.log
+```
+
+Linux 必须输出 `SYSV_SHM_LIFECYCLE_LINUX PASS`；guest 必须依次输出 explicit detach、exit cleanup、
+exec cleanup、inherited attach、signal-exit cleanup 五项 PASS，最终输出 `SYSV_SHM_LIFECYCLE PASS`
+和 runner PASS。修复前
+`SYSV_SHM_LIFECYCLE_EXPECTED_FAIL exit_stale=true exec_stale=true` 是反证。修改该提交点后还须复跑
+跨 attach futex probe 和 `clone05,shmat01,shmdt02`；LA64 glibc `shmat01` 的旧 64 KiB `SHMLBA` 差异
+仍按既有 runtime 边界判读，不能为了 lifecycle 回归改内核 rounding。
+
 Phase 5 session/`getsid` Linux 对照：
 
 ```bash
