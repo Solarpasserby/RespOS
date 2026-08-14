@@ -59,6 +59,7 @@ const TASK_A_SOCKET_PHASE5_PROBE: bool = option_env!("TASK_A_SOCKET_PHASE5_PROBE
 const TASK_A_SOCKET_FLAGS_PROBE: bool = option_env!("TASK_A_SOCKET_FLAGS_PROBE").is_some();
 const TASK_A_SOCKET_CONNECT_PROBE: bool = option_env!("TASK_A_SOCKET_CONNECT_PROBE").is_some();
 const TASK_A_NETWORK_ORDER_PROBE: bool = option_env!("TASK_A_NETWORK_ORDER_PROBE").is_some();
+const TASK_A_GETPEERNAME_PROBE: bool = option_env!("TASK_A_GETPEERNAME_PROBE").is_some();
 const TASK_A_PERF_PROBE: bool = option_env!("TASK_A_PERF_PROBE").is_some();
 
 const RV_MUSL_LOADER: &str = "/lib/ld-musl-riscv64.so.1\0";
@@ -1639,6 +1640,22 @@ fn run_task_a_network_order_probe() {
     _run_iozone_glibc();
 }
 
+fn run_task_a_getpeername_probe() {
+    let pid = fork();
+    assert!(pid >= 0, "failed to fork getpeername_probe");
+    if pid == 0 {
+        let argv = ["getpeername_probe\0".as_ptr(), core::ptr::null()];
+        let ret = exec("getpeername_probe\0", &argv);
+        println!("[testrunner] exec getpeername_probe failed: {}", ret);
+        exit(-1);
+    }
+
+    let mut status = 0;
+    assert_eq!(waitpid(pid as usize, &mut status), pid);
+    assert_eq!(status, 0, "getpeername_probe failed");
+    println!("[testrunner] getpeername probe PASS");
+}
+
 #[cfg(target_arch = "riscv64")]
 #[unsafe(no_mangle)]
 fn main() -> i32 {
@@ -1708,6 +1725,12 @@ fn main() -> i32 {
     if TASK_A_NETWORK_ORDER_PROBE {
         run_task_a_network_order_probe();
         println!("[testrunner] network order probe finished, powering off");
+        poweroff();
+        return 0;
+    }
+    if TASK_A_GETPEERNAME_PROBE {
+        run_task_a_getpeername_probe();
+        println!("[testrunner] getpeername probe finished, powering off");
         poweroff();
         return 0;
     }
@@ -1845,6 +1868,12 @@ fn main() -> i32 {
     if TASK_A_NETWORK_ORDER_PROBE {
         run_task_a_network_order_probe();
         println!("[testrunner] network order probe finished, powering off");
+        poweroff();
+        return 0;
+    }
+    if TASK_A_GETPEERNAME_PROBE {
+        run_task_a_getpeername_probe();
+        println!("[testrunner] getpeername probe finished, powering off");
         poweroff();
         return 0;
     }

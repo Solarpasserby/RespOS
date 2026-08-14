@@ -1,5 +1,24 @@
 # RespOS 当前状态
 
+## 2026-08-14 Linux/POSIX Phase 5 `getpeername` 错误优先级（当前工作树）
+
+- **Linux 契约与修复边界**：`scripts/getpeername_probe_linux.c` 和 LTP `getpeername01` 固定七类错误
+  向量，并额外确认未连接 inet socket 即使带非法 `addrlen` 也先返回 `ENOTCONN`。RespOS 现在先解析 fd
+  并确认 socket，再按地址族确认连接态；AF_UNIX socketpair 不再被误判为未连接，而是回报长度为
+  `sizeof(sa_family_t)` 的未命名 peer 地址。连接成立后，地址 writer 校验 `addrlen` 指针、负值/过大
+  长度和实际写入范围，因此 LTP 的 connected socketpair 分支得到 `EINVAL/EFAULT`，且校验失败不产生
+  部分写回。
+- **双架构证据**：宿主 probe 以 `cc -std=c11 -Wall -Wextra -Werror -O2` 通过。RV64/LA64 release、
+  初赛 snapshot、4 GiB/2 hart 的 `TASK_A_GETPEERNAME_PROBE=1` 均输出
+  `GETPEERNAME ALL PASS`，日志为 `/tmp/respos-{rv,la}-getpeername-phase5.log`。同配置聚焦
+  `LTP_CASE_FILTER=getpeername01` 后，musl/glibc 在两架构均为 `passed 7, failed 0` 和
+  `SUMMARY: 1 passed, 0 failed`，日志为 `/tmp/respos-{rv,la}-getpeername-ltp.log`；既有
+  `TASK_A_SOCKET_PHASE5_PROBE=1` 双架构 2 hart 回归也全通过，日志为
+  `/tmp/respos-{rv,la}-socket-phase5-after-getpeername.log`。
+- **剩余边界**：本轮关闭的是 LTP 覆盖的错误优先级和未命名 socketpair peer，不代表
+  `getsockname/getpeername` 全契约完成；AF_UNIX pathname/abstract peer 的成功回报、截断长度和已关闭/
+  半关闭 inet socket 仍需单独 Linux 对照。
+
 ## 2026-08-14 Linux/POSIX Phase 5 iperf→iozone 固定顺序 SMP 门禁（当前工作树）
 
 - **可复现入口**：testrunner 新增 `TASK_A_NETWORK_ORDER_PROBE=1`，只按官方初赛脚本顺序运行

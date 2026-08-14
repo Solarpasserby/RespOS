@@ -884,11 +884,19 @@ pub fn sys_getsockname(socketfd: usize, addr: usize, addrlen: usize) -> SysResul
 }
 
 pub fn sys_getpeername(socketfd: usize, addr: usize, addrlen: usize) -> SysResult<usize> {
-    if addr == 0 || addrlen == 0 {
-        return Err(Errno::EFAULT);
-    }
     with_socket(socketfd, |sock| {
+        if sock.domain == SocketDomain::AF_UNIX {
+            sock.ensure_unix_connected()?;
+            if addr == 0 {
+                return Err(Errno::EFAULT);
+            }
+            write_sockaddr_un(addr, addrlen, None)?;
+            return Ok(0);
+        }
         let peer = sock.get_remote_addr()?;
+        if addr == 0 {
+            return Err(Errno::EFAULT);
+        }
         write_sockaddr_for_domain(&sock.domain, addr, addrlen, peer)?;
         Ok(0)
     })

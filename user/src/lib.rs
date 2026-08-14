@@ -641,6 +641,10 @@ pub fn getsockname(fd: usize, addr: &mut SockAddrIn, addrlen: &mut u32) -> isize
     )
 }
 
+pub fn getpeername_raw(fd: usize, addr: usize, addrlen: usize) -> isize {
+    sys_getpeername(fd, addr, addrlen)
+}
+
 pub fn connect_unix(fd: usize, addr: &SockAddrUn, addrlen: usize) -> isize {
     sys_connect(fd, addr as *const SockAddrUn as usize, addrlen)
 }

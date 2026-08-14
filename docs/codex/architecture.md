@@ -612,6 +612,22 @@ FdTable slot (FdEntry: descriptor flags)
   `SO_ERROR` 才能消费。close/retry 替换 smoltcp handle 时必须保持唯一所有权；不得跳过
   `ECONNABORTED` 复位边界或让旧 pending error 污染新连接。
 
+### `getpeername` 先确认对象与连接态，再原子写回地址
+
+- 状态：LTP 错误路径已实现并完成双架构 SMP 专项
+- 适用范围：`sys_getpeername` 的 fd/socket、peer-state、用户输出参数和 AF_UNIX socketpair
+- 最后验证：2026-08-14
+- 证据：`os/src/syscall/net.rs`、`scripts/getpeername_probe_linux.c`、
+  `user/src/bin/getpeername_probe.rs`；RV64/LA64 4 GiB/2 hart probe 与 musl/glibc `getpeername01`
+- 内容：syscall 先通过 fd table 解析并确认对象是 socket，再按地址族确认 remote endpoint 或 AF_UNIX
+  peer 已连接；连接态成立后才由地址 writer 读取 `addrlen`、验证实际写入范围，并提交地址和最终长度。
+  因而 `EBADF/ENOTSOCK` 和未连接 inet 的 `ENOTCONN` 保持 Linux 优先级；connected AF_UNIX
+  socketpair 则以长度 `sizeof(sa_family_t)` 的未命名地址进入 writer，使非法长度/指针精确返回
+  `EINVAL/EFAULT`，且校验失败不会产生部分写回。
+- 后续影响：其他带 `sockaddr *` 输出的 syscall 不能简单复制连接态优先的查询顺序；应先用 Linux
+  probe 固定各接口和连接态组合的错误优先级。扩展 named/abstract AF_UNIX peer 回报时需同步维护
+  peer 地址所有权、实际长度和截断写入范围，不能把未命名 socketpair 当成通用 AF_UNIX 地址模型。
+
 ## 双架构差异
 
 | 项目 | RISC-V 64 | LoongArch 64 |

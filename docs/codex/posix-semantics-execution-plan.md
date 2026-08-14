@@ -79,6 +79,7 @@ Phase 6 的调度器、allocator、异步 I/O 和细粒度锁重构。
 | `SO_RCVTIMEO`/`SO_SNDTIMEO`、`MSG_DONTWAIT` | Linux/RespOS probe 已有；LA64 SMP 50 ms 晚醒约 1 秒 | 阻断 | 归一化 LA64 per-hart 时间域后重跑 |
 | nonblocking `connect`、`poll`、`SO_ERROR` | loopback success/refused、error consumption 与同 fd 失败后重连双架构 2 hart 通过；LA64 2 hart iperf 在 UDP→TCP 顺序停滞 | 阻断 | 定位 LA64 SMP iperf；补 unreachable/timeout/reset |
 | `MSG_PEEK/WAITALL/NOSIGNAL`、partial I/O | Linux/RespOS probe 含 timeout/EOF/signal 短读，双架构 2 hart 通过 | 已闭合（当前范围） | 完整初赛与网络回归 |
+| `getpeername()` 错误优先级与地址写回 | Linux/RespOS probe 与 musl/glibc `getpeername01` 双架构 2 hart 通过；未命名 socketpair 已回报 | 双架构已验证 | 补 named/abstract AF_UNIX peer、截断长度与关闭态路径 |
 | `getsid()` | syscall dispatch 缺项，已有 `setsid/getpgid/setpgid` | 已知差异 | session probe 与最小实现 |
 | termios/job control | 当前 tty ioctl 主要只有窗口查询，源码明确未建模 controlling tty | 已知差异 | tty/session/pgrp 状态设计和 probe |
 | leader `exit`、non-leader `exec` | `task_phase5_probe` 有三项 expected failure | 已知差异 | leader identity 与 de-thread 实现 |
@@ -158,6 +159,9 @@ error，不能继续固定返回 0。refused、reset、timeout、unreachable 和
 逐个实现或诚实拒绝 `MSG_PEEK`、`MSG_WAITALL`、`MSG_NOSIGNAL`；未知 flag 返回契约规定的错误，不能
 静默忽略。统一校验 blocking/nonblock、EOF、half-close、`EPIPE/SIGPIPE`、`POLLIN/POLLOUT/HUP/ERR`
 和 epoll 观察到的结果。AF_UNIX 与 inet 可以有不同内部机制，但对相同契约不得出现两个 errno 模型。
+socket 地址查询也沿用同一方法：先用 Linux 对照固定 fd、用户输出参数和各连接态组合的错误优先级，
+再提交成功写回；例如未连接 inet 的 `ENOTCONN` 先于非法长度，而 connected socketpair 才进入
+`EINVAL/EFAULT` 输出校验，不能用一条全局优先级替代状态矩阵。
 
 ### M1 退出门槛
 

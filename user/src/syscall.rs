@@ -99,6 +99,7 @@ const SYSCALL_LISTEN: usize = 201;
 const SYSCALL_ACCEPT: usize = 202;
 const SYSCALL_CONNECT: usize = 203;
 const SYSCALL_GETSOCKNAME: usize = 204;
+const SYSCALL_GETPEERNAME: usize = 205;
 const SYSCALL_SENDTO: usize = 206;
 const SYSCALL_RECVFROM: usize = 207;
 const SYSCALL_SETSOCKOPT: usize = 208;
@@ -1096,6 +1097,10 @@ pub fn sys_connect(fd: usize, addr: usize, addrlen: usize) -> isize {
 
 pub fn sys_getsockname(fd: usize, addr: usize, addrlen: usize) -> isize {
     syscall(SYSCALL_GETSOCKNAME, [fd, addr, addrlen, 0, 0, 0])
+}
+
+pub fn sys_getpeername(fd: usize, addr: usize, addrlen: usize) -> isize {
+    syscall(SYSCALL_GETPEERNAME, [fd, addr, addrlen, 0, 0, 0])
 }
 
 pub fn sys_shutdown(fd: usize, how: usize) -> isize {

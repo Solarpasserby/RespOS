@@ -533,6 +533,10 @@ impl UnixSocket {
         self.bound_key.lock().clone()
     }
 
+    fn is_connected(&self) -> bool {
+        self.peer_rx.lock().is_some()
+    }
+
     fn shutdown(&self, how: usize) -> SysResult {
         if self.peer_rx.lock().is_none() {
             return Err(Errno::ENOTCONN);
@@ -858,6 +862,14 @@ impl Socket {
     pub fn get_bound_unix_key(&self) -> SysResult<String> {
         match &self.inner {
             SocketInner::Unix(unix) => unix.bound_key().ok_or(Errno::EINVAL),
+            SocketInner::Tcp(_) | SocketInner::Udp(_) => Err(Errno::EAFNOSUPPORT),
+        }
+    }
+
+    pub fn ensure_unix_connected(&self) -> SysResult {
+        match &self.inner {
+            SocketInner::Unix(unix) if unix.is_connected() => Ok(()),
+            SocketInner::Unix(_) => Err(Errno::ENOTCONN),
             SocketInner::Tcp(_) | SocketInner::Udp(_) => Err(Errno::EAFNOSUPPORT),
         }
     }
