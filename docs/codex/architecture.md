@@ -628,6 +628,22 @@ FdTable slot (FdEntry: descriptor flags)
   probe 固定各接口和连接态组合的错误优先级。扩展 named/abstract AF_UNIX peer 回报时需同步维护
   peer 地址所有权、实际长度和截断写入范围，不能把未命名 socketpair 当成通用 AF_UNIX 地址模型。
 
+### AF_UNIX peer credentials 在建链提交点快照
+
+- 状态：`SO_PEERCRED` 已实现并完成双架构 SMP 专项
+- 适用范围：AF_UNIX socketpair、pathname listen/connect/accept、`getsockopt(SO_PEERCRED)`
+- 最后验证：2026-08-14
+- 证据：`os/src/net/socket.rs`、`os/src/syscall/net.rs`、
+  `scripts/socket_peercred_probe_linux.c`、`user/src/bin/socket_peercred_probe.rs`；RV64/LA64 4 GiB/2 hart
+  probe 与 musl/glibc `getsockopt02`
+- 内容：socketpair 创建时把当前 TGID/real UID/GID 快照到两端；listen 时把 server 凭据放入 listener，
+  connect 提交时把 listener 快照装到 client、把 connector 当前凭据装到待 accept 的 server endpoint。
+  accept 只转移已带凭据的 socket，`SO_PEERCRED` 只复制固定大小的 `struct ucred` 快照，不查找 live
+  task。因此对端退出、调度迁移或查询者变化不会改变已建立连接的 peer identity。
+- 后续影响：AF_UNIX 建链失败必须和 buffer/close/shutdown peer 状态一起回滚 credentials，不能留下半
+  发布身份；dup/fork 共享同一 socket 快照。实现 `SCM_CREDENTIALS/SO_PASSCRED` 时不能复用此固定
+  连接快照代替逐消息凭据，稳定 TGID 的最终所有权仍取决于 Phase 5 process-identity 重构。
+
 ## 双架构差异
 
 | 项目 | RISC-V 64 | LoongArch 64 |

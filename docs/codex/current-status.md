@@ -1,5 +1,21 @@
 # RespOS 当前状态
 
+## 2026-08-14 Linux/POSIX Phase 5 AF_UNIX `SO_PEERCRED`（当前工作树）
+
+- **Linux 契约与所有权**：`scripts/socket_peercred_probe_linux.c` 确认 AF_UNIX socketpair 两端持有建链
+  进程的 PID/UID/GID；pathname connect 建链后，client 观察 listener 凭据，accept 端观察 connector
+  凭据。RespOS 现在在 socketpair、listen/connect 提交点快照 `UnixPeerCredentials` 到连接端点，
+  `getsockopt(SO_PEERCRED)` 只读取快照，不保存 live task 引用，也不在查询时用当前调用者身份伪造。
+- **双架构证据**：宿主 probe 以 `cc -std=c11 -Wall -Wextra -Werror -O2` 通过。RV64/LA64 release、
+  初赛 snapshot、4 GiB/2 hart 的 `TASK_A_SOCKET_PEERCRED_PROBE=1` 均输出
+  `SOCKET_PEERCRED ALL PASS`，日志为 `/tmp/respos-{rv,la}-socket-peercred-phase5.log`。同配置聚焦
+  `LTP_CASE_FILTER=getsockopt02` 后，musl/glibc 在两架构均为 `SUMMARY: 1 passed, 0 failed`，日志为
+  `/tmp/respos-{rv,la}-getsockopt02-ltp.log`；既有 `TASK_A_SOCKET_PHASE5_PROBE=1` 双架构 2 hart 回归
+  也全通过，日志为 `/tmp/respos-{rv,la}-socket-phase5-after-peercred.log`。
+- **剩余边界**：本轮使用现有 TGID 与 real UID/GID 生成快照；leader exit/non-leader exec 后的稳定
+  process identity 仍由独立 Phase 5 task 方案负责。`SCM_CREDENTIALS/SO_PASSCRED`、user namespace 与
+  credential change 后的完整 Linux 矩阵未实现，不能由 `SO_PEERCRED` 通过推导。
+
 ## 2026-08-14 Linux/POSIX Phase 5 `getpeername` 错误优先级（当前工作树）
 
 - **Linux 契约与修复边界**：`scripts/getpeername_probe_linux.c` 和 LTP `getpeername01` 固定七类错误

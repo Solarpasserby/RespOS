@@ -29,6 +29,7 @@ const SO_KEEPALIVE: usize = 9;
 const SO_OOBINLINE: usize = 10;
 const SO_LINGER: usize = 13;
 const SO_REUSEPORT: usize = 15;
+const SO_PEERCRED: usize = 17;
 const SO_RCVTIMEO: usize = 20;
 const SO_SNDTIMEO: usize = 21;
 const SO_SNDBUFFORCE: usize = 32;
@@ -80,6 +81,14 @@ struct MsgHdr {
 struct MMsgHdr {
     msg_hdr: MsgHdr,
     msg_len: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct UCred {
+    pid: i32,
+    uid: u32,
+    gid: u32,
 }
 
 #[repr(C)]
@@ -1150,6 +1159,15 @@ pub fn sys_getsockopt(
         match (level, optname) {
             (SOL_SOCKET, SO_TYPE) => write_sockopt(optval, optlen, &sock.socket_type_value()),
             (SOL_SOCKET, SO_ERROR) => write_sockopt(optval, optlen, &sock.take_socket_error()),
+            (SOL_SOCKET, SO_PEERCRED) => {
+                let credentials = sock.unix_peer_credentials()?;
+                let raw = UCred {
+                    pid: credentials.pid as i32,
+                    uid: credentials.uid as u32,
+                    gid: credentials.gid as u32,
+                };
+                write_sockopt(optval, optlen, &raw)
+            }
             (
                 SOL_SOCKET,
                 SO_OOBINLINE | SO_DONTROUTE | SO_BROADCAST | SO_KEEPALIVE | SO_REUSEPORT,

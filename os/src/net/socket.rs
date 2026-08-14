@@ -77,6 +77,7 @@ enum SocketInner {
 struct UnixSocket {
     rx: Arc<SpinLock<UnixBuffer>>,
     peer_rx: SpinLock<Option<Arc<SpinLock<UnixBuffer>>>>,
+    peer_credentials: SpinLock<Option<UnixPeerCredentials>>,
     closed: Arc<AtomicBool>,
     peer_closed: SpinLock<Option<Arc<AtomicBool>>>,
     read_shutdown: Arc<AtomicBool>,
@@ -91,6 +92,14 @@ struct UnixSocket {
 struct UnixListener {
     pending: SpinLock<UnixPending>,
     poll_waiters: Arc<PollWaiters>,
+    credentials: UnixPeerCredentials,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnixPeerCredentials {
+    pub pid: usize,
+    pub uid: usize,
+    pub gid: usize,
 }
 
 struct UnixBuffer {
@@ -117,15 +126,25 @@ impl UnixBuffer {
 }
 
 impl UnixListener {
-    fn new() -> Self {
+    fn new(credentials: UnixPeerCredentials) -> Self {
         Self {
             pending: SpinLock::new(UnixPending {
                 sockets: VecDeque::new(),
                 accept_waiters: VecDeque::new(),
             }),
             poll_waiters: Arc::new(PollWaiters::new()),
+            credentials,
         }
     }
+}
+
+fn current_unix_credentials() -> SysResult<UnixPeerCredentials> {
+    let task = current_task().ok_or(Errno::ESRCH)?;
+    Ok(UnixPeerCredentials {
+        pid: task.tgid(),
+        uid: task.uid(),
+        gid: task.gid(),
+    })
 }
 
 impl UnixSocket {
@@ -133,6 +152,7 @@ impl UnixSocket {
         Self {
             rx: Arc::new(SpinLock::new(UnixBuffer::new())),
             peer_rx: SpinLock::new(None),
+            peer_credentials: SpinLock::new(None),
             closed: Arc::new(AtomicBool::new(false)),
             peer_closed: SpinLock::new(None),
             read_shutdown: Arc::new(AtomicBool::new(false)),
@@ -145,7 +165,7 @@ impl UnixSocket {
         }
     }
 
-    fn pair() -> (Self, Self) {
+    fn pair(credentials: UnixPeerCredentials) -> (Self, Self) {
         let left = Self::new();
         let right = Self::new();
         *left.peer_rx.lock() = Some(right.rx.clone());
@@ -156,6 +176,8 @@ impl UnixSocket {
         *right.peer_read_shutdown.lock() = Some(left.read_shutdown.clone());
         *left.peer_write_shutdown.lock() = Some(right.write_shutdown.clone());
         *right.peer_write_shutdown.lock() = Some(left.write_shutdown.clone());
+        *left.peer_credentials.lock() = Some(credentials);
+        *right.peer_credentials.lock() = Some(credentials);
         (left, right)
     }
 
@@ -429,11 +451,12 @@ impl UnixSocket {
 
     fn listen(&self) -> SysResult {
         let key = self.bound_key.lock().clone().ok_or(Errno::EINVAL)?;
+        let credentials = current_unix_credentials()?;
         let mut registry = UNIX_LISTENERS.lock();
         if registry.iter().any(|(item_key, _)| item_key == &key) {
             return Err(Errno::EADDRINUSE);
         }
-        let listener = Arc::new(UnixListener::new());
+        let listener = Arc::new(UnixListener::new(credentials));
         *self.listener.lock() = Some(listener.clone());
         registry.push((key, listener));
         Ok(())
@@ -443,6 +466,7 @@ impl UnixSocket {
         if self.peer_rx.lock().is_some() {
             return Err(Errno::EISCONN);
         }
+        let connector_credentials = current_unix_credentials()?;
         let listener = UNIX_LISTENERS
             .lock()
             .iter()
@@ -459,6 +483,8 @@ impl UnixSocket {
         *self.peer_read_shutdown.lock() = Some(server.read_shutdown.clone());
         *server.peer_write_shutdown.lock() = Some(self.write_shutdown.clone());
         *self.peer_write_shutdown.lock() = Some(server.write_shutdown.clone());
+        *server.peer_credentials.lock() = Some(connector_credentials);
+        *self.peer_credentials.lock() = Some(listener.credentials);
 
         let mut pending = listener.pending.lock();
         if pending.sockets.len() >= UNIX_LISTEN_QUEUE_LIMIT {
@@ -466,6 +492,7 @@ impl UnixSocket {
             *self.peer_closed.lock() = None;
             *self.peer_read_shutdown.lock() = None;
             *self.peer_write_shutdown.lock() = None;
+            *self.peer_credentials.lock() = None;
             return Err(Errno::EAGAIN);
         }
         pending.sockets.push_back(server);
@@ -535,6 +562,14 @@ impl UnixSocket {
 
     fn is_connected(&self) -> bool {
         self.peer_rx.lock().is_some()
+    }
+
+    fn peer_credentials(&self) -> SysResult<UnixPeerCredentials> {
+        self.peer_credentials
+            .lock()
+            .as_ref()
+            .copied()
+            .ok_or(Errno::ENOTCONN)
     }
 
     fn shutdown(&self, how: usize) -> SysResult {
@@ -717,7 +752,8 @@ impl Socket {
         ) {
             return Err(Errno::EINVAL);
         }
-        let (left, right) = UnixSocket::pair();
+        let credentials = current_unix_credentials()?;
+        let (left, right) = UnixSocket::pair(credentials);
         let make = |inner| Socket {
             domain: SocketDomain::AF_UNIX,
             kind: socket_type,
@@ -871,6 +907,13 @@ impl Socket {
             SocketInner::Unix(unix) if unix.is_connected() => Ok(()),
             SocketInner::Unix(_) => Err(Errno::ENOTCONN),
             SocketInner::Tcp(_) | SocketInner::Udp(_) => Err(Errno::EAFNOSUPPORT),
+        }
+    }
+
+    pub fn unix_peer_credentials(&self) -> SysResult<UnixPeerCredentials> {
+        match &self.inner {
+            SocketInner::Unix(unix) => unix.peer_credentials(),
+            SocketInner::Tcp(_) | SocketInner::Udp(_) => Err(Errno::ENOPROTOOPT),
         }
     }
 

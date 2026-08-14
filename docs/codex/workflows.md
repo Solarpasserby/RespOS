@@ -432,6 +432,27 @@ TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=getpeername01 make run-la-pre PRE_MEM=4G PRE_S
 带非法长度仍优先 `ENOTCONN`，以及未命名 socketpair 成功回报 `AF_UNIX`。修改地址写回后还要复跑
 2 hart `TASK_A_SOCKET_PHASE5_PROBE=1`；本组不覆盖 named/abstract AF_UNIX peer 地址。
 
+Phase 5 AF_UNIX `SO_PEERCRED` Linux 对照、guest 专项与聚焦 LTP：
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror -O2 scripts/socket_peercred_probe_linux.c \
+  -o /tmp/socket_peercred_probe_linux
+/tmp/socket_peercred_probe_linux
+TASK_A_SOCKET_PEERCRED_PROBE=1 make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-socket-peercred-phase5.log
+TASK_A_SOCKET_PEERCRED_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-socket-peercred-phase5.log
+TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=getsockopt02 make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-getsockopt02-ltp.log
+TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=getsockopt02 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-getsockopt02-ltp.log
+```
+
+专项以 `SOCKET_PEERCRED ALL PASS` 为标志，必须同时验证 socketpair 两端、client 看到 listener 凭据、
+accept 端看到 connector 子进程凭据；LTP 的 musl/glibc 都必须出现
+`SUMMARY: 1 passed, 0 failed`。修改 AF_UNIX 建链/accept 所有权后还要复跑双架构 2 hart
+`TASK_A_SOCKET_PHASE5_PROBE=1`。该流程不验证 `SCM_CREDENTIALS/SO_PASSCRED`。
+
 Phase 5 iperf→iozone 固定顺序门禁：
 
 ```bash

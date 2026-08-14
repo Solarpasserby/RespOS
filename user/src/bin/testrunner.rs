@@ -60,6 +60,7 @@ const TASK_A_SOCKET_FLAGS_PROBE: bool = option_env!("TASK_A_SOCKET_FLAGS_PROBE")
 const TASK_A_SOCKET_CONNECT_PROBE: bool = option_env!("TASK_A_SOCKET_CONNECT_PROBE").is_some();
 const TASK_A_NETWORK_ORDER_PROBE: bool = option_env!("TASK_A_NETWORK_ORDER_PROBE").is_some();
 const TASK_A_GETPEERNAME_PROBE: bool = option_env!("TASK_A_GETPEERNAME_PROBE").is_some();
+const TASK_A_SOCKET_PEERCRED_PROBE: bool = option_env!("TASK_A_SOCKET_PEERCRED_PROBE").is_some();
 const TASK_A_PERF_PROBE: bool = option_env!("TASK_A_PERF_PROBE").is_some();
 
 const RV_MUSL_LOADER: &str = "/lib/ld-musl-riscv64.so.1\0";
@@ -1656,6 +1657,22 @@ fn run_task_a_getpeername_probe() {
     println!("[testrunner] getpeername probe PASS");
 }
 
+fn run_task_a_socket_peercred_probe() {
+    let pid = fork();
+    assert!(pid >= 0, "failed to fork socket_peercred_probe");
+    if pid == 0 {
+        let argv = ["socket_peercred_probe\0".as_ptr(), core::ptr::null()];
+        let ret = exec("socket_peercred_probe\0", &argv);
+        println!("[testrunner] exec socket_peercred_probe failed: {}", ret);
+        exit(-1);
+    }
+
+    let mut status = 0;
+    assert_eq!(waitpid(pid as usize, &mut status), pid);
+    assert_eq!(status, 0, "socket_peercred_probe failed");
+    println!("[testrunner] socket peercred probe PASS");
+}
+
 #[cfg(target_arch = "riscv64")]
 #[unsafe(no_mangle)]
 fn main() -> i32 {
@@ -1731,6 +1748,12 @@ fn main() -> i32 {
     if TASK_A_GETPEERNAME_PROBE {
         run_task_a_getpeername_probe();
         println!("[testrunner] getpeername probe finished, powering off");
+        poweroff();
+        return 0;
+    }
+    if TASK_A_SOCKET_PEERCRED_PROBE {
+        run_task_a_socket_peercred_probe();
+        println!("[testrunner] socket peercred probe finished, powering off");
         poweroff();
         return 0;
     }
@@ -1874,6 +1897,12 @@ fn main() -> i32 {
     if TASK_A_GETPEERNAME_PROBE {
         run_task_a_getpeername_probe();
         println!("[testrunner] getpeername probe finished, powering off");
+        poweroff();
+        return 0;
+    }
+    if TASK_A_SOCKET_PEERCRED_PROBE {
+        run_task_a_socket_peercred_probe();
+        println!("[testrunner] socket peercred probe finished, powering off");
         poweroff();
         return 0;
     }
