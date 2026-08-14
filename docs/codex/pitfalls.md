@@ -802,6 +802,19 @@
 - 后续影响：地址空间 teardown 应先让 mapping 对 task 不可达，再显式提交 detach，并以 live MM 复核
   最后 owner。测试必须同时覆盖“最后 owner 退出应删除”和“child 退出但 parent 仍持有时不得删除”。
 
+## task 数量不是 SysV SHM attachment 数量
+
+- 状态：已确认并修复
+- 适用范围：`shm_nattch`、pthread/`CLONE_VM`、fork、`IPC_RMID` 最后 owner 判断
+- 最后验证：2026-08-14；release、4 GiB/2 hart
+- 证据：`os/src/syscall/ipc.rs::shm_attach_count()`；Linux、RV64、LA64
+  `sysv_shm_nattch_probe`
+- 内容：一个线程组的多个 TCB 可以共享同一 `MemorySet`，逐 task 扫描会把其中每个 attach 重复 N 次。
+  相反，fork 复制出独立 MM 后，继承的每次 attach 确实应在 parent/child 分别计数。正确的两级身份是
+  先去重 MM，再在 MM 内去重 attach id。
+- 后续影响：任何按 live task 推导资源 owner 的统计都应先明确资源属于 thread、process 还是 MM；
+  不能因为 thread probe 最终退出后数值恢复，就忽略其存活窗口内的 ABI 错误。
+
 ## QEMU 10.0.2 LoongArch `LDPTE` 会截掉 PTE 的 NR/NX 高位
 
 - 状态：已确认并为 `PROT_NONE` 增加兼容表示

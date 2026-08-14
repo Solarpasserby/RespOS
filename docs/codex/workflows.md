@@ -430,6 +430,27 @@ exec cleanup、inherited attach、signal-exit cleanup 五项 PASS，最终输出
 跨 attach futex probe 和 `clone05,shmat01,shmdt02`；LA64 glibc `shmat01` 的旧 64 KiB `SHMLBA` 差异
 仍按既有 runtime 边界判读，不能为了 lifecycle 回归改内核 rounding。
 
+Phase 5 SysV SHM `shm_nattch` MM identity：
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror -O2 -pthread \
+  scripts/sysv_shm_nattch_probe_linux.c -o /tmp/sysv_shm_nattch_probe_linux
+/tmp/sysv_shm_nattch_probe_linux
+
+TASK_A_SYSV_SHM_NATTCH_PROBE=1 \
+  make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-sysv-shm-nattch.log
+TASK_A_SYSV_SHM_NATTCH_PROBE=1 \
+  make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-sysv-shm-nattch.log
+```
+
+Linux 必须输出 `SYSV_SHM_NATTCH_LINUX PASS`；guest 必须输出 `SYSV_SHM_NATTCH PASS` 与 runner PASS。
+修复前 `SYSV_SHM_NATTCH_EXPECTED_FAIL thread_count=4` 表示两个 attachment 被两个共享 MM 线程重复计数，
+不是通过。probe 同时要求同一 MM 重复 attach 为 2、fork 后为 4、child exit 后回到 2、逐次 detach 为
+1/0。修改统计后还须双架构复跑 lifecycle probe 和 `shmctl03,shmctl07,shmctl08`；不得仅以 thread
+退出后的最终 2 代替其存活窗口验证。
+
 Phase 5 session/`getsid` Linux 对照：
 
 ```bash

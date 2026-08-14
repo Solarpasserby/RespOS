@@ -1,5 +1,26 @@
 # RespOS 当前状态
 
+## 2026-08-14 Linux/POSIX Phase 5 SysV SHM `shm_nattch` MM identity（基于 `4e2e6c7` 的当前工作树）
+
+- **Linux 契约与门禁**：新增 `scripts/sysv_shm_nattch_probe_linux.c` 和 guest
+  `sysv_shm_nattch_probe`，覆盖初始 0、同一 MM 两次 attach 计 2、共享该 MM 的 pthread 存活期间仍为
+  2、fork 复制为两个独立 MM 后计 4、child exit 回到 2，以及逐次 detach 的 1/0。Linux 以
+  `-std=c11 -Wall -Wextra -Werror -O2 -pthread` 编译并输出 `SYSV_SHM_NATTCH_LINUX PASS`。
+- **修复前反证与根因**：RV64/LA64 release 初赛 snapshot、4 GiB/2 hart 都在 worker thread 存活时把
+  两个 attachment 报为 4，输出 `SYSV_SHM_NATTCH_EXPECTED_FAIL thread_count=4`；其余重复 attach、fork
+  与 detach 向量正确。日志为 `/tmp/respos-{rv,la}-sysv-shm-nattch-baseline.log`。根因是
+  `shm_attach_count()` 按 `TASK_MANAGER` 中每个 TCB 扫描，同一 `Arc<RwLock<MemorySet>>` 被线程组重复
+  累计。
+- **实现与验证**：统计先按 `Arc<RwLock<MemorySet>>` identity 去重，再对每个独立 MM 中匹配 segment
+  frames 的 attach id 计数；因此线程共享不增加，fork 生成的新 MM 仍独立累计。修复后 RV64/LA64
+  2-hart 均输出 `SYSV_SHM_NATTCH PASS` 与 runner PASS，日志为
+  `/tmp/respos-{rv,la}-sysv-shm-nattch-fix.log`。上一轮五向量 lifecycle probe 双架构回归通过，日志为
+  `/tmp/respos-{rv,la}-sysv-shm-nattch-lifecycle-regression.log`；`shmctl03,shmctl07,shmctl08` 在两架构
+  musl/glibc 均为 `3 passed, 0 failed`，日志为 `/tmp/respos-{rv,la}-sysv-shm-nattch-ltp.log`。
+- **剩余边界**：本轮固定的是 observable `IPC_STAT.shm_nattch` 与生命周期零值判断；被正式清单注释、
+  历史会时序性卡死的 `shmctl01` 未恢复。并发 `shmat` 发布/失败回滚与最后 detach/`IPC_RMID` 竞争、
+  多轮资源压力仍需下一独立 probe。
+
 ## 2026-08-14 Linux/POSIX Phase 5 SysV SHM `IPC_RMID` 地址空间回收（基于 `f22b3fd` 的当前工作树）
 
 - **Linux 契约与门禁**：新增 `scripts/sysv_shm_lifecycle_probe_linux.c` 和 guest
@@ -24,8 +45,8 @@
   `/tmp/respos-{rv,la}-sysv-shm-lifecycle-futex-regression.log`。聚焦 `clone05,shmat01,shmdt02` 时 RV64
   双 libc、LA64 musl 均为 `3 passed, 0 failed`；LA64 glibc 的 clone/shmdt 通过，只有已知旧 64 KiB
   `SHMLBA` 的 shmat rounding 失败，日志为 `/tmp/respos-{rv,la}-sysv-shm-lifecycle-ltp.log`。
-- **剩余边界**：本轮不宣称关闭 `shmat` 发布与最后 detach 的真实并发竞态、`shm_nattch` 对共享 MM/
-  多线程的去重、多轮资源压力或 `SHM_STAT/IPC_STAT` 完整元数据；这些仍需独立 probe。
+- **剩余边界**：`shm_nattch` 的共享 MM/多线程去重已由上节闭合；本轮仍不宣称关闭 `shmat` 发布与
+  最后 detach 的真实并发竞态、多轮资源压力或 `SHM_STAT/IPC_STAT` 其余完整元数据。
 
 ## 2026-08-14 Linux/POSIX Phase 5 SysV SHM 跨 attach futex 闭合（基于 `806eb5a` 的当前工作树）
 

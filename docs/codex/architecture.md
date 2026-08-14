@@ -385,10 +385,12 @@
 - 内容：VMA/PTE/frame 归 `MemorySet`，segment key、删除标记和 owner 索引归 `SHM_TABLE`；销毁
   MemorySet 本身不能完成 SysV 生命周期。显式 detach 或旧 MM 已从 task handle 替换/完成 recycle 后，
   才向 table 提交 attach id。提交扫描 live MM，fork/CLONE_VM peer 仍持有同 id 时 segment 保持存活；
-  `IPC_RMID` segment 只在全局 attachment 归零后释放。
+  `IPC_RMID` segment 只在全局 attachment 归零后释放。`shm_nattch` 按唯一 MM handle
+  `Arc<RwLock<MemorySet>>` 扫描其中的 attach id：共享 MM 的多个线程只算一次，fork 复制出的独立 MM
+  分别累计。
 - 后续影响：不得在旧 MM 仍可被 task 访问时先删 table/frame，也不得只依赖 `Drop<MemorySet>` 隐式
-  猜测 IPC owner。并发 `shmat` 的“table owner 已发布但 VMA 尚未安装”窗口与 `shm_nattch` MM 去重仍需
-  单独收敛。
+  猜测 IPC owner。并发 `shmat` 的“table owner 已发布但 VMA 尚未安装”窗口仍需单独收敛；新增
+  `CLONE_VM` 形式不得退回按 TCB 数量累计 attachment。
 
 ## FS、VFS 与 fd 模型
 

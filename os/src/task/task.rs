@@ -1617,7 +1617,7 @@ impl TaskControlBlock {
     }
 
     /* ======= 操作内部数据 ====== */
-    fn memory_set_arc(&self) -> Arc<RwLock<MemorySet>> {
+    pub(crate) fn memory_set_arc(&self) -> Arc<RwLock<MemorySet>> {
         self.memory_set.lock().clone()
     }
 

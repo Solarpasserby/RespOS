@@ -690,6 +690,21 @@
   引入 per-MM nattch 计数或并发 attach reservation，必须保持“VMA 发布/撤销先于最终 table 回收”的
   提交顺序。
 
+## SysV `shm_nattch` 按唯一 MM 中的 attach identity 计数
+
+- 状态：已采用
+- 适用范围：`IPC_STAT/SHM_STAT`、重复 `shmat`、pthread/`CLONE_VM`、fork
+- 最后验证：2026-08-14
+- 证据：`os/src/syscall/ipc.rs::shm_attach_count()`、`TaskControlBlock::memory_set_arc()`；
+  Linux/RV64/LA64 2-hart `sysv_shm_nattch_probe` 与双架构 `shmctl03,07,08`
+- 决策：先以 `Arc<MemorySet>` identity 去重 live task，再累计该 MM 中指向 segment frames 的唯一
+  attach id。同一 MM 的两次 `shmat` 计 2，共享 MM 的额外线程不重复计数；fork 的独立 MM 复制每个
+  inherited attachment，因此两次 attach 在 parent+child 中计 4。
+- 原因：`shm_nattch` 描述地址空间 attachment，不描述调度实体数量。按 TCB 扫描会让 pthread 的创建/
+  退出凭空改变 metadata，并可能延迟 `IPC_RMID` segment 的最后回收。
+- 后续影响：task snapshot 与 MM handle 必须成对读取，不能先取 identity 再通过可能已 exec 的 task
+  handle 读取另一个 MM。未来若改为显式 per-MM refcount，仍须保持重复 attach 与 fork 复制的上述计数。
+
 ## LoongArch shootdown 使用每目标 hart 的 generation 槽
 
 - 状态：已采用

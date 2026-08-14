@@ -3,7 +3,7 @@ use crate::config::PAGE_SIZE;
 use crate::mm::{FrameTracker, MapPermission, MmapBacking, VirtAddr, copy_from_user, copy_to_user};
 use crate::task::{TASK_MANAGER, current_task};
 use crate::timer::get_time_ms;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -247,9 +247,13 @@ fn shm_access_allowed(segment: &ShmSegment, requested: usize) -> bool {
 
 fn shm_attach_count(frames: &[Arc<FrameTracker>]) -> usize {
     let mut count = 0usize;
+    let mut seen_memory_sets = BTreeSet::new();
     TASK_MANAGER.for_each(|task| {
-        count += task
-            .op_memory_set_read(|memory_set| memory_set.shm_attach_ids_for_frames(frames).len());
+        let memory_set = task.memory_set_arc();
+        let identity = Arc::as_ptr(&memory_set) as usize;
+        if seen_memory_sets.insert(identity) {
+            count += memory_set.read().shm_attach_ids_for_frames(frames).len();
+        }
     });
     count
 }
