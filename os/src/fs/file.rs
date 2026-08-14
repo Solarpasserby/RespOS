@@ -120,6 +120,10 @@ pub trait FileOp: Any + Send + Sync {
     fn splice_supported(&self) -> bool {
         false
     }
+    /// Validate input-side state before splice starts consuming data.
+    fn validate_splice_read(&self) -> SysResult {
+        Ok(())
+    }
     /// 将文件缓冲数据刷入存储介质。当前文件系统在内存中，默认无操作。
     fn fsync(&self) -> SysResult<usize> {
         Ok(0)

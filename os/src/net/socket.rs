@@ -1147,6 +1147,13 @@ impl FileOp for Socket {
         true
     }
 
+    fn validate_splice_read(&self) -> SysResult {
+        match &self.inner {
+            SocketInner::Unix(unix) if !unix.is_connected() => Err(Errno::EINVAL),
+            SocketInner::Tcp(_) | SocketInner::Udp(_) | SocketInner::Unix(_) => Ok(()),
+        }
+    }
+
     fn read<'a>(&'a self, buf: &'a mut [u8]) -> SysResult<usize> {
         let deadline_us = self.recv_deadline_us(false);
         match &self.inner {

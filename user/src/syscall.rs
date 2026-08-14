@@ -37,6 +37,7 @@ const SYSCALL_LSEEK: usize = 62;
 const SYSCALL_READ: usize = 63;
 const SYSCALL_WRITE: usize = 64;
 const SYSCALL_PPOLL: usize = 73;
+const SYSCALL_SPLICE: usize = 76;
 const SYSCALL_PREAD64: usize = 67;
 const SYSCALL_PWRITE64: usize = 68;
 const SYSCALL_PREADV: usize = 69;
@@ -257,6 +258,17 @@ pub fn sys_write(fd: usize, buf: &[u8]) -> isize {
         SYSCALL_WRITE,
         [fd, buf.as_ptr() as usize, buf.len(), 0, 0, 0],
     )
+}
+
+pub fn sys_splice(
+    fd_in: usize,
+    off_in: usize,
+    fd_out: usize,
+    off_out: usize,
+    len: usize,
+    flags: usize,
+) -> isize {
+    syscall(SYSCALL_SPLICE, [fd_in, off_in, fd_out, off_out, len, flags])
 }
 
 pub fn sys_pread64(fd: usize, buf: &mut [u8], offset: isize) -> isize {

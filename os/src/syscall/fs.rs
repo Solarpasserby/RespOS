@@ -988,6 +988,7 @@ pub fn sys_splice(
     if output.get_flags().contains(OpenFlags::O_APPEND) {
         return Err(Errno::EINVAL);
     }
+    input.validate_splice_read()?;
 
     if !off_in.is_null() {
         check_user_writable(off_in.cast::<u8>(), core::mem::size_of::<i64>())?;

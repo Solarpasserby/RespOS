@@ -533,6 +533,21 @@ FdTable slot (FdEntry: descriptor flags)
   引用；也不能在 `Drop` 中直接取得 ext4 锁。当前 syscall 安全点把正常运行时的回收窗口限制到下一次
   syscall，但 lwext4 尚无完整 ext4 orphan-list 崩溃恢复，异常断电后的 nlink=0 inode 清理仍待实现。
 
+### `splice` 在消费输入前按 FileOp 状态完成预检
+
+- 状态：AF_UNIX 输入错误语义已实现并完成双架构 SMP 专项
+- 适用范围：`sys_splice`、FileOp/pipe 方向、AF_UNIX/inet socket 输入
+- 最后验证：2026-08-14
+- 证据：`os/src/{syscall/fs.rs,fs/file.rs,net/socket.rs}`、`scripts/splice_socket_probe_linux.c`、
+  `user/src/bin/splice_socket_probe.rs`；RV64/LA64 4 GiB/2 hart probe 与 musl/glibc `splice01`--`splice07`
+- 内容：通用 splice 层先解析两端 fd，检查 O_PATH、至少一端为 pipe、splice capability、pipe offset、
+  fd 读写方向和 output append；只有这些通用错误都排除后，才调用输入 FileOp 的
+  `validate_splice_read()`，最后进入复制循环。AF_UNIX socket 在该预检中把未连接输入映射为 `EINVAL`；
+  inet 保留传输层 `ENOTCONN`，connected AF_UNIX 继续真实读取和传输。预检只观察状态，不消费数据。
+- 后续影响：新增 splice-capable 对象若有调用前状态约束，应在 FileOp 预检提交精确 errno，不能等到
+  `read()` 已产生协议专用错误或副作用后再翻译；也不能把 AF_UNIX 规则泛化到 inet。当前 bounded-copy
+  实现满足返回值/数据语义，不代表 Linux pipe-buffer zero-copy 所有权模型。
+
 ## 设备与 DMA 模型
 
 ### VirtIO descriptor 的虚拟连续不等于物理连续

@@ -453,6 +453,31 @@ accept 端看到 connector 子进程凭据；LTP 的 musl/glibc 都必须出现
 `SUMMARY: 1 passed, 0 failed`。修改 AF_UNIX 建链/accept 所有权后还要复跑双架构 2 hart
 `TASK_A_SOCKET_PHASE5_PROBE=1`。该流程不验证 `SCM_CREDENTIALS/SO_PASSCRED`。
 
+Phase 5 AF_UNIX→pipe `splice` Linux 对照、guest 专项与 LTP 簇：
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror -O2 scripts/splice_socket_probe_linux.c \
+  -o /tmp/splice_socket_probe_linux
+/tmp/splice_socket_probe_linux
+TASK_A_SPLICE_SOCKET_PROBE=1 make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-splice-socket-phase5.log
+TASK_A_SPLICE_SOCKET_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-splice-socket-phase5.log
+TASK_A_LTP_ONLY=1 \
+  LTP_CASE_FILTER=splice01,splice02,splice03,splice04,splice05,splice06,splice07 \
+  make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-splice-cluster-phase5.log
+TASK_A_LTP_ONLY=1 \
+  LTP_CASE_FILTER=splice01,splice02,splice03,splice04,splice05,splice06,splice07 \
+  make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-splice-cluster-phase5.log
+```
+
+专项以 `SPLICE_SOCKET ALL PASS` 为标志，必须同时看到 unconnected AF_UNIX=`EINVAL`、unconnected
+inet=`ENOTCONN`、错误 pipe 方向=`EBADF` 和 connected AF_UNIX 实际传输；LTP 的 musl/glibc 都必须
+出现 `SUMMARY: 7 passed, 0 failed`，且 `splice07` 内部为 `passed 159, failed 0`。修改 FileOp splice
+预检或 AF_UNIX read 状态后还要复跑双架构 2 hart `TASK_A_SOCKET_PHASE5_PROBE=1`。
+
 Phase 5 iperf→iozone 固定顺序门禁：
 
 ```bash

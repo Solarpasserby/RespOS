@@ -197,6 +197,16 @@ pub fn read(fd: usize, buf: &mut [u8]) -> isize {
 pub fn write(fd: usize, buf: &[u8]) -> isize {
     sys_write(fd, buf)
 }
+pub fn splice_raw(
+    fd_in: usize,
+    off_in: usize,
+    fd_out: usize,
+    off_out: usize,
+    len: usize,
+    flags: usize,
+) -> isize {
+    sys_splice(fd_in, off_in, fd_out, off_out, len, flags)
+}
 pub fn pread(fd: usize, buf: &mut [u8], offset: isize) -> isize {
     sys_pread64(fd, buf, offset)
 }

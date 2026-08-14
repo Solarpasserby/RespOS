@@ -1,5 +1,23 @@
 # RespOS 当前状态
 
+## 2026-08-14 Linux/POSIX Phase 5 AF_UNIX `splice` 错误语义（当前工作树）
+
+- **Linux 契约与修复边界**：`scripts/splice_socket_probe_linux.c` 确认未连接 AF_UNIX stream→pipe 写端
+  返回 `EINVAL`，未连接 inet 的同一操作仍返回 `ENOTCONN`，目标为 pipe 读端时则由方向错误优先返回
+  `EBADF`；connected AF_UNIX→pipe 必须成功传输。RespOS 给 `FileOp` 增加只读
+  `validate_splice_read()` 预检，在通用 fd/pipe/方向检查完成后、消费输入前由 AF_UNIX socket 拒绝未连接
+  splice，因此不再让普通 `read()` 的 `ENOTCONN` 泄漏成 splice ABI。
+- **双架构证据**：宿主 probe 以 `cc -std=c11 -Wall -Wextra -Werror -O2` 通过。RV64/LA64 release、
+  初赛 snapshot、4 GiB/2 hart 的 `TASK_A_SPLICE_SOCKET_PROBE=1` 均输出
+  `SPLICE_SOCKET ALL PASS`，日志为 `/tmp/respos-{rv,la}-splice-socket-phase5.log`。同配置聚焦
+  `splice07` 后，两架构 musl/glibc 均为 `passed 159, failed 0`；扩展到 `splice01`--`splice07` 后四组
+  均为 `SUMMARY: 7 passed, 0 failed`，日志为 `/tmp/respos-{rv,la}-splice-cluster-phase5.log`。既有
+  `TASK_A_SOCKET_PHASE5_PROBE=1` 双架构 2 hart 回归也全通过，日志为
+  `/tmp/respos-{rv,la}-socket-phase5-after-splice.log`。
+- **剩余边界**：当前 splice 仍通过有界 kernel buffer 复制，不宣称具备 Linux pipe-buffer page steal/
+  zero-copy 性能；本轮只关闭 AF_UNIX 未连接输入的错误映射和已连接传输，不扩展 datagram/seqpacket、
+  socket 输出方向或 `SPLICE_F_MOVE/MORE` 的性能含义。
+
 ## 2026-08-14 Linux/POSIX Phase 5 AF_UNIX `SO_PEERCRED`（当前工作树）
 
 - **Linux 契约与所有权**：`scripts/socket_peercred_probe_linux.c` 确认 AF_UNIX socketpair 两端持有建链
