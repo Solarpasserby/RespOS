@@ -705,6 +705,23 @@
 - 后续影响：task snapshot 与 MM handle 必须成对读取，不能先取 identity 再通过可能已 exec 的 task
   handle 读取另一个 MM。未来若改为显式 per-MM refcount，仍须保持重复 attach 与 fork 复制的上述计数。
 
+## SysV `shmat` 在 table 中预留后才跨越 MM 提交窗口
+
+- 状态：已采用
+- 适用范围：`shmat`、最后 `shmdt`/隐式 detach、`IPC_RMID`、非空 `shmaddr`
+- 最后验证：2026-08-14；release、4 GiB/2 hart
+- 证据：`os/src/syscall/ipc.rs::sys_shmat()`；Linux/RV64/LA64
+  `sysv_shm_attach_race_probe`
+- 决策：在 `SHM_TABLE` 下确认 segment 可 attach 后立即增加 `pending_attaches`，再释放 table lock 安装
+  VMA；完成时无论成功或失败都在 table 下撤销预留并统一执行延迟删除。segment 只有在 reservation 与
+  已安装 attachment 同时归零时可释放。非空 `shmaddr` 且无 `SHM_REMAP` 时采用精确不可覆盖映射，
+  冲突按 `shmat` ABI 返回 `EINVAL`，不允许退化为通用 mmap hint。
+- 原因：仅提前发布 attach owner 不能被按 MM 扫描的 `shm_nattch` 看见，最后 detach 可在 VMA commit
+  前删除 segment，制造“`shmat` 成功但 shmid 已失效”的孤儿映射。持有 table lock 跨越 MM 操作会扩大
+  锁序和 fault 临界区；轻量 reservation 提供同一线性化保证，并允许失败路径回滚。
+- 后续影响：所有早退必须撤销 reservation 与 owner；回收判断不得只看 `shm_nattch`。扩展
+  `SHM_REMAP` 并发、批量 attach 或资源配额时必须保持同一 prepare/commit/rollback 协议。
+
 ## LoongArch shootdown 使用每目标 hart 的 generation 槽
 
 - 状态：已采用

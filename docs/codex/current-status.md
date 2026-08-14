@@ -1,5 +1,35 @@
 # RespOS 当前状态
 
+## 2026-08-14 Linux/POSIX Phase 5 SysV SHM attach/回收线性化（基于 `e831255` 的当前工作树）
+
+- **Linux 契约与门禁**：新增 `scripts/sysv_shm_attach_race_probe_linux.c` 和 guest
+  `sysv_shm_attach_race_probe`。64 轮中 child 的并发 `shmat(old_shmid)` 只允许两种结果：返回
+  `EINVAL/EIDRM`，或成功且随后的 `IPC_STAT` 仍有效、`shm_nattch` 为 1--2；不允许 attach 成功后旧
+  shmid 已被最后 detach 回收。另以已占用的非空 `shmaddr` 强制 attach 失败，确认返回 `EINVAL`，且
+  失败预留撤销后 survivor 最后 detach 仍能删除 segment。Linux 以
+  `-std=c11 -Wall -Wextra -Werror -O2` 编译并输出 `SYSV_SHM_ATTACH_RACE_LINUX PASS`。
+- **修复前反证与根因**：在 `sys_shmat()` 发布 table owner 后、安装 VMA 前强制让出 64 次，RV64/LA64
+  release 初赛 snapshot、4 GiB/2 hart 均稳定输出
+  `SYSV_SHM_ATTACH_RACE_EXPECTED_FAIL orphan=64 invalid=0 attached=0`，日志为
+  `/tmp/respos-{rv,la}-sysv-shm-attach-race-baseline.log`。最后 detach 只观察已安装 VMA，因而可在
+  in-flight attach 尚未进入 `shm_attach_count()` 时删除 segment；随后 attach 虽成功，却已没有可查询的
+  shmid。审计同时发现通用 mmap hint 路径会把被占用的非空 `shmaddr` 静默搬到其他地址，偏离 Linux
+  `shmat` 的精确地址契约。
+- **实现与线性化点**：`ShmSegment::pending_attaches` 在持有 `SHM_TABLE` 时先预留，VMA 安装成功或失败后
+  再在同一 table 下撤销；`IPC_RMID`、显式/隐式 detach 只有在 pending 与已提交 attachment 都归零时
+  才释放 segment。成功路径在撤销预留前已安装 VMA，失败路径同时删除 attach owner，并再次执行延迟
+  删除判定。非空 `shmaddr` 且未指定 `SHM_REMAP` 时改为精确、不可覆盖映射，内部地址冲突规范化为
+  `EINVAL`；`SHM_REMAP` 仍走显式覆盖路径。
+- **双架构验证**：强制让出构建在 RV64/LA64 均为 `invalid=0 attached=64`；日志为
+  `/tmp/respos-{rv,la}-sysv-shm-attach-race-final-forced-v2.log`。恢复默认构建后 RV64 为
+  `invalid=1 attached=63`，LA64 为 `invalid=0 attached=64`，日志为对应
+  `final-default-v3`/`final-default-v2`。lifecycle 五向量和 `shm_nattch` 专项在两架构继续通过；聚焦
+  `shmat01,shmdt02,shmctl03` 时 RV64 musl/glibc 与 LA64 musl 均为 `3 passed, 0 failed`，LA64 glibc
+  只有既有 64 KiB `SHMLBA` rounding 差异。
+- **剩余边界**：本轮关闭的是单 segment 的 `shmat` 与最后 detach/`IPC_RMID` 发布竞态及失败回滚；
+  多个并发 attacher、`SHM_REMAP` 与并发 unmap、资源上限/attach-id 耗尽、多轮 frame 复用压力和其余
+  `IPC_STAT/SHM_STAT` metadata 仍需独立门禁。历史时序性卡死的 `shmctl01` 仍未恢复。
+
 ## 2026-08-14 Linux/POSIX Phase 5 SysV SHM `shm_nattch` MM identity（基于 `4e2e6c7` 的当前工作树）
 
 - **Linux 契约与门禁**：新增 `scripts/sysv_shm_nattch_probe_linux.c` 和 guest
@@ -17,9 +47,9 @@
   `/tmp/respos-{rv,la}-sysv-shm-nattch-fix.log`。上一轮五向量 lifecycle probe 双架构回归通过，日志为
   `/tmp/respos-{rv,la}-sysv-shm-nattch-lifecycle-regression.log`；`shmctl03,shmctl07,shmctl08` 在两架构
   musl/glibc 均为 `3 passed, 0 failed`，日志为 `/tmp/respos-{rv,la}-sysv-shm-nattch-ltp.log`。
-- **剩余边界**：本轮固定的是 observable `IPC_STAT.shm_nattch` 与生命周期零值判断；被正式清单注释、
-  历史会时序性卡死的 `shmctl01` 未恢复。并发 `shmat` 发布/失败回滚与最后 detach/`IPC_RMID` 竞争、
-  多轮资源压力仍需下一独立 probe。
+- **剩余边界**：本轮固定的是 observable `IPC_STAT.shm_nattch` 与生命周期零值判断；并发 `shmat`
+  发布/失败回滚与最后 detach/`IPC_RMID` 竞争已由上节闭合。被正式清单注释、历史会时序性卡死的
+  `shmctl01` 未恢复，多 attacher 与多轮资源压力仍需独立 probe。
 
 ## 2026-08-14 Linux/POSIX Phase 5 SysV SHM `IPC_RMID` 地址空间回收（基于 `f22b3fd` 的当前工作树）
 

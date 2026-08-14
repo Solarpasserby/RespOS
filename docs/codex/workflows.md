@@ -451,6 +451,35 @@ Linux 必须输出 `SYSV_SHM_NATTCH_LINUX PASS`；guest 必须输出 `SYSV_SHM_N
 1/0。修改统计后还须双架构复跑 lifecycle probe 和 `shmctl03,shmctl07,shmctl08`；不得仅以 thread
 退出后的最终 2 代替其存活窗口验证。
 
+Phase 5 SysV SHM `shmat` 与最后 detach/`IPC_RMID` 线性化：
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror -O2 \
+  scripts/sysv_shm_attach_race_probe_linux.c -o /tmp/sysv_shm_attach_race_probe_linux
+/tmp/sysv_shm_attach_race_probe_linux
+
+TASK_A_SYSV_SHM_ATTACH_RACE_PROBE=1 TASK_A_SYSV_SHM_ATTACH_TEST_YIELD=1 \
+  make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-sysv-shm-attach-race-forced.log
+TASK_A_SYSV_SHM_ATTACH_RACE_PROBE=1 TASK_A_SYSV_SHM_ATTACH_TEST_YIELD=1 \
+  make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-sysv-shm-attach-race-forced.log
+
+TASK_A_SYSV_SHM_ATTACH_RACE_PROBE=1 \
+  make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-sysv-shm-attach-race-default.log
+TASK_A_SYSV_SHM_ATTACH_RACE_PROBE=1 \
+  make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-sysv-shm-attach-race-default.log
+```
+
+Linux 必须输出 `SYSV_SHM_ATTACH_RACE_LINUX PASS`。强制让出构建用于稳定扩大 table reservation 与 VMA
+commit 之间的窗口；修复前 `SYSV_SHM_ATTACH_RACE_EXPECTED_FAIL orphan=64` 是反证，修复后两架构必须
+输出 `SYSV_SHM_ATTACH_RACE PASS` 与 runner PASS。64 轮中 `invalid`/`attached` 比例不固定，但总和必须
+为 64 且不得出现 orphan。probe 还要求已占用的非空 `shmaddr` 返回 `EINVAL`，并验证失败 attach 的
+reservation 回滚。强制构建后必须不带 `TASK_A_SYSV_SHM_ATTACH_TEST_YIELD` 依次重建和运行两架构，恢复
+默认 kernel；随后复跑 lifecycle、nattch 及 `shmat01,shmdt02,shmctl03`。
+
 Phase 5 session/`getsid` Linux 对照：
 
 ```bash

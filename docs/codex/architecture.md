@@ -374,10 +374,11 @@
   futex queue lock 内已全面禁止通用用户拷贝或潜在 frame 分配。System V shm 后续仍需验证
   并发回收与 frame 复用压力，不能把跨 attach wait/wake 通过解释为生命周期全部闭合。
 
-### SysV SHM 生命周期由 MM detach 与 SHM table 两阶段提交
+### SysV SHM attach/detach 由 table reservation 与 MM commit 线性化
 
-- 状态：当前工作树已实现并通过双架构 lifecycle 专项
-- 适用范围：显式 `shmdt`、成功 exec、group exit、fork/`CLONE_VM` 继承、`IPC_RMID`
+- 状态：当前工作树已实现并通过双架构 lifecycle、nattch 与 attach-race 专项
+- 适用范围：`shmat` 发布/失败、显式 `shmdt`、成功 exec、group exit、fork/`CLONE_VM` 继承、
+  `IPC_RMID`
 - 最后验证：2026-08-14
 - 证据：`MemorySet::{shm_attach_ids,remove_shm_attachment}`、
   `ipc::release_shm_attachments()`、`task::{install_exec_image,exit_process_group}`；Linux/RV64/LA64
@@ -387,10 +388,14 @@
   才向 table 提交 attach id。提交扫描 live MM，fork/CLONE_VM peer 仍持有同 id 时 segment 保持存活；
   `IPC_RMID` segment 只在全局 attachment 归零后释放。`shm_nattch` 按唯一 MM handle
   `Arc<RwLock<MemorySet>>` 扫描其中的 attach id：共享 MM 的多个线程只算一次，fork 复制出的独立 MM
-  分别累计。
+  分别累计。`shmat` 在释放 table lock、进入 MM 写锁前先增加 segment 的 `pending_attaches`；VMA 安装
+  成功或失败后再撤销 reservation，因此最后 detach/`IPC_RMID` 只有在 pending 与已安装 attachment
+  同时归零时才能删除 segment。非空 `shmaddr` 不是 mmap hint：无 `SHM_REMAP` 时必须精确且不可覆盖，
+  地址冲突返回 `EINVAL`。
 - 后续影响：不得在旧 MM 仍可被 task 访问时先删 table/frame，也不得只依赖 `Drop<MemorySet>` 隐式
-  猜测 IPC owner。并发 `shmat` 的“table owner 已发布但 VMA 尚未安装”窗口仍需单独收敛；新增
-  `CLONE_VM` 形式不得退回按 TCB 数量累计 attachment。
+  猜测 IPC owner。任何跨 table/MM 的新 attach 路径都必须在可删除性检查之前登记 reservation，并在
+  所有成功/失败出口撤销；新增 `CLONE_VM` 形式不得退回按 TCB 数量累计 attachment。多 attacher、
+  `SHM_REMAP` 并发覆盖和资源耗尽仍需独立压力验证。
 
 ## FS、VFS 与 fd 模型
 

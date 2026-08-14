@@ -1,7 +1,7 @@
 use super::{Errno, SysResult};
 use crate::config::PAGE_SIZE;
 use crate::mm::{FrameTracker, MapPermission, MmapBacking, VirtAddr, copy_from_user, copy_to_user};
-use crate::task::{TASK_MANAGER, current_task};
+use crate::task::{TASK_MANAGER, current_task, yield_current_task};
 use crate::timer::get_time_ms;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::sync::Arc;
@@ -39,6 +39,7 @@ const MODE_MASK: u32 = 0o777;
 // RespOS uses 4 KiB base pages on both supported architectures and does not
 // implement cache-aliasing constraints requiring a larger attach alignment.
 const SHMLBA: usize = PAGE_SIZE;
+const SHM_ATTACH_TEST_YIELD: bool = option_env!("TASK_A_SYSV_SHM_ATTACH_TEST_YIELD").is_some();
 
 static SHMMAX_VALUE: AtomicUsize = AtomicUsize::new(DEFAULT_SHMMAX);
 static SHMMNI_VALUE: AtomicUsize = AtomicUsize::new(SHMMNI);
@@ -112,6 +113,7 @@ struct ShmSegment {
     dtime: isize,
     ctime: isize,
     marked_removed: bool,
+    pending_attaches: usize,
     locked: bool,
     frames: Vec<Arc<FrameTracker>>,
 }
@@ -299,7 +301,10 @@ pub(crate) fn release_shm_attachments(attach_ids: &[usize], pid: i32) {
         .segments
         .iter()
         .filter_map(|(id, segment)| {
-            (segment.marked_removed && shm_attach_count(&segment.frames) == 0).then_some(*id)
+            (segment.marked_removed
+                && segment.pending_attaches == 0
+                && shm_attach_count(&segment.frames) == 0)
+                .then_some(*id)
         })
         .collect();
     for id in remove_ids {
@@ -411,6 +416,7 @@ pub fn sys_shmget(key: isize, size: usize, shmflg: usize) -> SysResult<usize> {
             dtime: 0,
             ctime: now_sec(),
             marked_removed: false,
+            pending_attaches: 0,
             locked: false,
             frames,
         },
@@ -454,6 +460,11 @@ pub fn sys_shmat(shmid: usize, shmaddr: usize, shmflg: usize) -> SysResult<usize
         let map_len = segment.map_len;
         let frames = segment.frames.clone();
         let attach_id = table.alloc_attach_id()?;
+        let segment = table.segments.get_mut(&shmid).ok_or(Errno::EINVAL)?;
+        segment.pending_attaches = segment
+            .pending_attaches
+            .checked_add(1)
+            .ok_or(Errno::ENOSPC)?;
         table.attach_owners.insert(attach_id, shmid);
         (map_len, frames, readonly, attach_id)
     };
@@ -466,29 +477,61 @@ pub fn sys_shmat(shmid: usize, shmaddr: usize, shmflg: usize) -> SysResult<usize
         permission |= MapPermission::EXECUTE;
     }
 
+    if SHM_ATTACH_TEST_YIELD {
+        for _ in 0..64 {
+            yield_current_task();
+        }
+    }
+
     let task = current_task().expect("[kernel] current task is None.");
     let result = task.op_memory_set_write(|memory_set| {
-        let start = memory_set.mmap_area(
-            addr,
-            map_len,
-            permission,
-            shmflg & SHM_REMAP != 0,
-            false,
-            false,
-            MmapBacking::SharedFrames {
-                attach_id,
-                frames: frames.as_slice(),
-            },
-        )?;
+        let exact_addr = addr.is_some() && shmflg & SHM_REMAP == 0;
+        let start = memory_set
+            .mmap_area(
+                addr,
+                map_len,
+                permission,
+                shmflg & SHM_REMAP != 0,
+                exact_addr,
+                false,
+                MmapBacking::SharedFrames {
+                    attach_id,
+                    frames: frames.as_slice(),
+                },
+            )
+            .map_err(|err| {
+                if exact_addr && err == Errno::EEXIST {
+                    Errno::EINVAL
+                } else {
+                    err
+                }
+            })?;
         memory_set.flush_tlb();
         Ok(start)
     });
     let mut table = SHM_TABLE.lock();
+    if let Some(segment) = table.segments.get_mut(&shmid) {
+        debug_assert!(segment.pending_attaches > 0);
+        segment.pending_attaches = segment.pending_attaches.saturating_sub(1);
+    }
     if result.is_err() {
         table.attach_owners.remove(&attach_id);
     } else if let Some(segment) = table.segments.get_mut(&shmid) {
         segment.atime = now_sec();
         segment.lpid = task.tgid() as i32;
+    }
+    let remove_ids: Vec<usize> = table
+        .segments
+        .iter()
+        .filter_map(|(id, segment)| {
+            (segment.marked_removed
+                && segment.pending_attaches == 0
+                && shm_attach_count(&segment.frames) == 0)
+                .then_some(*id)
+        })
+        .collect();
+    for id in remove_ids {
+        table.remove_segment(id);
     }
     result
 }
@@ -565,7 +608,7 @@ pub fn sys_shmctl(shmid: usize, cmd: usize, buf: usize) -> SysResult<usize> {
                 return Err(Errno::EPERM);
             }
             let frames = segment.frames.clone();
-            if shm_attach_count(&frames) == 0 {
+            if segment.pending_attaches == 0 && shm_attach_count(&frames) == 0 {
                 table.remove_segment(shmid);
             } else {
                 segment.marked_removed = true;

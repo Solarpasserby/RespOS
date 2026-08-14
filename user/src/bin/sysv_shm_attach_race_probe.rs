@@ -1,0 +1,172 @@
+#![no_std]
+#![no_main]
+
+#[macro_use]
+extern crate user_lib;
+
+use core::sync::atomic::{AtomicU32, Ordering};
+use user_lib::{fork, mmap_raw, munmap, shmat, shmctl, shmdt, shmget, waitpid, yield_};
+
+const PAGE_SIZE: usize = 4096;
+const IPC_PRIVATE: isize = 0;
+const IPC_CREAT: usize = 0o1000;
+const IPC_RMID: usize = 0;
+const IPC_STAT: usize = 2;
+const EINVAL: isize = 22;
+const EIDRM: isize = 43;
+const PROT_READ_WRITE: usize = 0x1 | 0x2;
+const MAP_SHARED_ANONYMOUS: usize = 0x1 | 0x20;
+const ROUNDS: usize = 64;
+const CHILD_INVALID: i32 = 10;
+const CHILD_ATTACHED: i32 = 11;
+const CHILD_ORPHAN: i32 = 12;
+
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+struct IpcPerm {
+    key: i32,
+    uid: u32,
+    gid: u32,
+    cuid: u32,
+    cgid: u32,
+    mode: u32,
+    seq: i32,
+    pad1: isize,
+    pad2: isize,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+struct ShmidDs {
+    shm_perm: IpcPerm,
+    shm_segsz: usize,
+    shm_atime: isize,
+    shm_dtime: isize,
+    shm_ctime: isize,
+    shm_cpid: i32,
+    shm_lpid: i32,
+    shm_nattch: usize,
+    pad1: usize,
+    pad2: usize,
+}
+
+#[repr(C)]
+struct RaceControl {
+    ready: AtomicU32,
+    go: AtomicU32,
+}
+
+fn removed_result(result: isize) -> bool {
+    result == -EINVAL || result == -EIDRM
+}
+
+fn read_word(addr: usize) -> u32 {
+    unsafe { core::ptr::read_volatile(addr as *const u32) }
+}
+
+fn write_word(addr: usize, value: u32) {
+    unsafe { core::ptr::write_volatile(addr as *mut u32, value) }
+}
+
+#[unsafe(no_mangle)]
+fn main() -> i32 {
+    let control_addr = mmap_raw(0, PAGE_SIZE, PROT_READ_WRITE, MAP_SHARED_ANONYMOUS, -1, 0);
+    assert!(control_addr > 0, "control mmap failed: {}", control_addr);
+    let control_addr = control_addr as usize;
+    let control = unsafe { &*(control_addr as *const RaceControl) };
+
+    let rollback_id = shmget(IPC_PRIVATE, PAGE_SIZE, IPC_CREAT | 0o600);
+    assert!(rollback_id > 0, "rollback shmget failed: {}", rollback_id);
+    let rollback_id = rollback_id as usize;
+    let rollback_survivor = shmat(rollback_id, 0, 0);
+    assert!(
+        rollback_survivor > 0,
+        "rollback survivor shmat failed: {}",
+        rollback_survivor
+    );
+    assert_eq!(shmctl(rollback_id, IPC_RMID, 0), 0);
+    assert_eq!(shmat(rollback_id, control_addr, 0), -EINVAL);
+    assert_eq!(shmdt(rollback_survivor as usize), 0);
+    assert_eq!(shmat(rollback_id, 0, 0), -EINVAL);
+
+    let mut invalid = 0usize;
+    let mut attached = 0usize;
+    let mut orphan = 0usize;
+    for _round in 0..ROUNDS {
+        control.ready.store(0, Ordering::Relaxed);
+        control.go.store(0, Ordering::Relaxed);
+
+        let shmid = shmget(IPC_PRIVATE, PAGE_SIZE, IPC_CREAT | 0o600);
+        assert!(shmid > 0, "shmget failed: {}", shmid);
+        let shmid = shmid as usize;
+        let parent = shmat(shmid, 0, 0);
+        assert!(parent > 0, "parent shmat failed: {}", parent);
+        let parent = parent as usize;
+        write_word(parent, 0xa77a_c0de);
+        assert_eq!(shmctl(shmid, IPC_RMID, 0), 0);
+
+        let child = fork();
+        assert!(child >= 0, "fork failed: {}", child);
+        if child == 0 {
+            assert_eq!(shmdt(parent), 0);
+            control.ready.store(1, Ordering::Release);
+            while control.go.load(Ordering::Acquire) == 0 {
+                let _ = yield_();
+            }
+
+            let mapping = shmat(shmid, 0, 0);
+            if removed_result(mapping) {
+                return CHILD_INVALID;
+            }
+            assert!(mapping > 0, "concurrent shmat failed: {}", mapping);
+            let mapping = mapping as usize;
+            assert_eq!(read_word(mapping), 0xa77a_c0de);
+
+            let mut ds = ShmidDs::default();
+            let ds_ptr = &mut ds as *mut ShmidDs as usize;
+            let stat_result = shmctl(shmid, IPC_STAT, ds_ptr);
+            if removed_result(stat_result) {
+                assert_eq!(shmdt(mapping), 0);
+                return CHILD_ORPHAN;
+            }
+            assert_eq!(stat_result, 0);
+            assert!(ds.shm_nattch >= 1 && ds.shm_nattch <= 2);
+            assert_eq!(shmdt(mapping), 0);
+            return CHILD_ATTACHED;
+        }
+
+        while control.ready.load(Ordering::Acquire) == 0 {
+            let _ = yield_();
+        }
+        control.go.store(1, Ordering::Release);
+        let _ = yield_();
+        let _ = yield_();
+        assert_eq!(shmdt(parent), 0);
+
+        let mut status = 0;
+        assert_eq!(waitpid(child as usize, &mut status), child);
+        let code = status >> 8;
+        match code {
+            CHILD_INVALID => invalid += 1,
+            CHILD_ATTACHED => attached += 1,
+            CHILD_ORPHAN => orphan += 1,
+            _ => panic!("unexpected child status: {}", status),
+        }
+        assert_eq!(shmat(shmid, 0, 0), -EINVAL);
+    }
+
+    assert_eq!(munmap(control_addr, PAGE_SIZE), 0);
+    if orphan != 0 {
+        println!(
+            "SYSV_SHM_ATTACH_RACE_EXPECTED_FAIL orphan={} invalid={} attached={}",
+            orphan, invalid, attached
+        );
+        return 1;
+    }
+
+    println!(
+        "SYSV_SHM_ATTACH_RACE PASS invalid={} attached={}",
+        invalid, attached
+    );
+    0
+}

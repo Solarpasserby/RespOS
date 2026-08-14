@@ -100,7 +100,7 @@ Phase 6 的调度器、allocator、异步 I/O 和细粒度锁重构。
 | `chroot()` pathname/permission/privilege 错误优先级 | Linux probe 固定 `EACCES/ENOENT` 先于 `EPERM`；双架构 musl/glibc `chroot01`--`chroot04` 通过 | 双架构已验证（当前权限模型） | capability/user/mount namespace 按需求另立状态模型 |
 | ext4 特殊 inode、`mknod` device payload 与 xattr 限制 | 双架构 probe 验证四类 inode mode、12-bit major/20-bit minor 的 stat/statx 回报与 xattr 限制；musl/glibc 13-case mknod/xattr 及 4-case statx 簇通过 | 双架构已验证（当前范围） | 设备驱动 open/read/write 语义按需求另立子项；不扩展 kernel 32-bit device encoding |
 | ext4 `fallocate()` default/`KEEP_SIZE` | Linux 物理预留 probe 通过；双架构 musl/glibc `fallocate03` 八项均返回 `EOPNOTSUPP` | 已知差异 | 待确认：为 lwext4 unwritten extent 增加事务化预分配入口；禁止稀疏扩容伪装 |
-| SysV SHM `shmat/shmdt` | 跨 attach 数据/futex、`IPC_RMID` lifecycle 及 `shm_nattch` 重复 attach/thread/fork 的 Linux/RV64/LA64 probe 通过；LA64 glibc 2.38 仍有旧 64 KiB SHMLBA 冲突 | 双架构已验证（当前共享/生命周期/计数范围）；已知 runtime 差异 | 验证并发 attach/detach 与其余 metadata；runtime 更新 |
+| SysV SHM `shmat/shmdt` | 跨 attach 数据/futex、`IPC_RMID` lifecycle、`shm_nattch` MM identity，以及 `shmat` 与最后 detach/RMID 的 64 轮发布竞态和失败回滚 probe 均在 Linux/RV64/LA64 通过；非空地址已按精确映射处理；LA64 glibc 2.38 仍有旧 64 KiB SHMLBA 冲突 | 双架构已验证（当前共享/生命周期/计数/单 attacher 线性化范围）；已知 runtime 差异 | 多 attacher、`SHM_REMAP` 并发、资源压力与其余 metadata；runtime 更新 |
 | `pthread_*`/named sem/shm/AIO/`posix_spawn` | 尚无完整 libc 组合矩阵 | 待验证 | musl/glibc 同源 probe 簇 |
 | message queue、`mlockall`、其余 XSI IPC | 需求尚无证据 | 可选扩展 | 需求触发记录；默认不实现 |
 

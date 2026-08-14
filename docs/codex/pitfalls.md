@@ -815,6 +815,21 @@
 - 后续影响：任何按 live task 推导资源 owner 的统计都应先明确资源属于 thread、process 还是 MM；
   不能因为 thread probe 最终退出后数值恢复，就忽略其存活窗口内的 ABI 错误。
 
+## table owner 不是已提交的 SysV SHM attachment
+
+- 状态：已确认并修复
+- 适用范围：并发 `shmat` 与最后 detach/`IPC_RMID`、attach 失败回滚、非空 `shmaddr`
+- 最后验证：2026-08-14；release、4 GiB/2 hart
+- 证据：`os/src/syscall/ipc.rs::sys_shmat()`；修复前后 RV64/LA64
+  `sysv_shm_attach_race_probe`
+- 内容：`attach_owners` 提前插入只说明一次 attach 正在建立，按 live MM 扫描时还看不到对应 VMA。
+  若回收只检查已安装 attachment，最后 detach 会删除 segment，随后 attach 仍可安装共享 frames 并返回
+  成功，形成无法 `IPC_STAT` 的孤儿映射。另一个容易掩盖回滚缺陷的错误是把非空 `shmaddr` 当 mmap
+  hint：地址冲突会被静默搬家，使预期失败路径根本没有发生。
+- 后续影响：跨不同 owner/锁域的资源发布必须区分 reservation 与 committed state，并让删除条件同时
+  观察两者；失败测试应断言精确 errno 和最终回收，不能只检查返回地址为正。`SHM_REMAP` 的覆盖语义
+  需要单独验证，不得由普通精确地址测试外推。
+
 ## QEMU 10.0.2 LoongArch `LDPTE` 会截掉 PTE 的 NR/NX 高位
 
 - 状态：已确认并为 `PROT_NONE` 增加兼容表示
