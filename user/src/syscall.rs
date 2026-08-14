@@ -73,6 +73,10 @@ const SYSCALL_SETPGID: usize = 154;
 const SYSCALL_GETPGID: usize = 155;
 const SYSCALL_GETSID: usize = 156;
 const SYSCALL_SETSID: usize = 157;
+const SYSCALL_SHMGET: usize = 194;
+const SYSCALL_SHMCTL: usize = 195;
+const SYSCALL_SHMAT: usize = 196;
+const SYSCALL_SHMDT: usize = 197;
 const SYSCALL_UNAME: usize = 160;
 const SYSCALL_GETRUSAGE: usize = 165;
 const SYSCALL_KILL: usize = 129;
@@ -938,6 +942,22 @@ pub fn sys_futex_full(
         SYSCALL_FUTEX,
         [uaddr as usize, op, val, val2, uaddr2 as usize, val3],
     )
+}
+
+pub fn sys_shmget(key: isize, size: usize, shmflg: usize) -> isize {
+    syscall(SYSCALL_SHMGET, [key as usize, size, shmflg, 0, 0, 0])
+}
+
+pub fn sys_shmctl(shmid: usize, cmd: usize, buf: usize) -> isize {
+    syscall(SYSCALL_SHMCTL, [shmid, cmd, buf, 0, 0, 0])
+}
+
+pub fn sys_shmat(shmid: usize, shmaddr: usize, shmflg: usize) -> isize {
+    syscall(SYSCALL_SHMAT, [shmid, shmaddr, shmflg, 0, 0, 0])
+}
+
+pub fn sys_shmdt(shmaddr: usize) -> isize {
+    syscall(SYSCALL_SHMDT, [shmaddr, 0, 0, 0, 0, 0])
 }
 
 pub fn sys_kill(pid: usize, signum: i32) -> isize {

@@ -594,6 +594,22 @@ pub fn futex_cmp_requeue_raw(
     )
 }
 
+pub fn shmget(key: isize, size: usize, shmflg: usize) -> isize {
+    sys_shmget(key, size, shmflg)
+}
+
+pub fn shmctl(shmid: usize, cmd: usize, buf: usize) -> isize {
+    sys_shmctl(shmid, cmd, buf)
+}
+
+pub fn shmat(shmid: usize, shmaddr: usize, shmflg: usize) -> isize {
+    sys_shmat(shmid, shmaddr, shmflg)
+}
+
+pub fn shmdt(shmaddr: usize) -> isize {
+    sys_shmdt(shmaddr)
+}
+
 pub fn mmap_raw(
     addr: usize,
     len: usize,

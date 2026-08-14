@@ -377,6 +377,26 @@ TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=shmat01,shmdt02 \
 失败。不得通过按调用者特判或全局改成 64 KiB 消除该差异。该小簇不覆盖同一 segment 的重复/跨进程
 attach 共享数据、futex、`IPC_RMID` 后最后 detach 回收或并发 attach/detach。
 
+Phase 5 SysV SHM 跨 attach futex identity：
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror -O2 scripts/sysv_shm_futex_probe_linux.c \
+  -o /tmp/sysv_shm_futex_probe_linux
+/tmp/sysv_shm_futex_probe_linux
+
+TASK_A_SYSV_SHM_FUTEX_PROBE=1 \
+  make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-sysv-shm-futex.log
+TASK_A_SYSV_SHM_FUTEX_PROBE=1 \
+  make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-sysv-shm-futex.log
+```
+
+Linux 必须输出 `SYSV_SHM_FUTEX_LINUX PASS`。修复前 guest 会输出
+`SYSV_SHM_FUTEX_EXPECTED_FAIL wake=0`：第二 attach 已读到 sentinel，但 attach-specific futex key 使
+child timeout；该 marker 是反证，不是通过。修复后两架构都必须输出 `SYSV_SHM_FUTEX PASS`，且 runner
+输出 `SysV SHM futex probe PASS`。两架构仍须顺序运行。
+
 Phase 5 session/`getsid` Linux 对照：
 
 ```bash

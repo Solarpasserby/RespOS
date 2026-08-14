@@ -100,7 +100,7 @@ Phase 6 的调度器、allocator、异步 I/O 和细粒度锁重构。
 | `chroot()` pathname/permission/privilege 错误优先级 | Linux probe 固定 `EACCES/ENOENT` 先于 `EPERM`；双架构 musl/glibc `chroot01`--`chroot04` 通过 | 双架构已验证（当前权限模型） | capability/user/mount namespace 按需求另立状态模型 |
 | ext4 特殊 inode、`mknod` device payload 与 xattr 限制 | 双架构 probe 验证四类 inode mode、12-bit major/20-bit minor 的 stat/statx 回报与 xattr 限制；musl/glibc 13-case mknod/xattr 及 4-case statx 簇通过 | 双架构已验证（当前范围） | 设备驱动 open/read/write 语义按需求另立子项；不扩展 kernel 32-bit device encoding |
 | ext4 `fallocate()` default/`KEEP_SIZE` | Linux 物理预留 probe 通过；双架构 musl/glibc `fallocate03` 八项均返回 `EOPNOTSUPP` | 已知差异 | 待确认：为 lwext4 unwritten extent 增加事务化预分配入口；禁止稀疏扩容伪装 |
-| SysV SHM `shmat/shmdt` | RV64 双 libc 与 LA64 musl 的 shmat01/shmdt02 通过；LA64 glibc 2.38 仍按旧 64 KiB SHMLBA，和当前 Linux 4 KiB ABI 冲突 | 已知 runtime 差异；共享身份未闭合 | runtime 更新；补重复/跨进程 attach 数据与 futex 共享 probe |
+| SysV SHM `shmat/shmdt` | 数据 frame 跨 attach 可见，但双架构跨 attach futex wake 失败；LA64 glibc 2.38 另有旧 64 KiB SHMLBA 冲突 | 已知内核与 runtime 差异 | futex key 改用稳定 frame/segment identity；runtime 更新 |
 | `pthread_*`/named sem/shm/AIO/`posix_spawn` | 尚无完整 libc 组合矩阵 | 待验证 | musl/glibc 同源 probe 簇 |
 | message queue、`mlockall`、其余 XSI IPC | 需求尚无证据 | 可选扩展 | 需求触发记录；默认不实现 |
 

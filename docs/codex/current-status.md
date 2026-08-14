@@ -1,5 +1,19 @@
 # RespOS 当前状态
 
+## 2026-08-14 Linux/POSIX Phase 5 SysV SHM 跨 attach futex 基线（基于 `a2257b6` 的当前工作树）
+
+- **新增门禁**：`scripts/sysv_shm_futex_probe_linux.c` 与 guest `sysv_shm_futex_probe` 建立同一 SysV
+  segment 的两个不同 attach 地址；child 从第二地址读 parent sentinel，随后在该地址执行 shared
+  `FUTEX_WAIT`，parent 从第一地址执行 `FUTEX_WAKE`。Linux oracle 以
+  `-std=c11 -Wall -Wextra -Werror -O2` 编译运行并输出 `SYSV_SHM_FUTEX_LINUX PASS`。
+- **双架构反证**：release 初赛 snapshot、4 GiB/2 hart 下，RV64/LA64 都确认第二 attach 能读到
+  sentinel，但 parent wake 始终返回 0，child 两秒后返回 `ETIMEDOUT`，最终输出
+  `SYSV_SHM_FUTEX_EXPECTED_FAIL wake=0 child_status=256`。日志为
+  `/tmp/respos-{rv,la}-sysv-shm-futex-baseline.log`。
+- **根因边界**：`ShmSegment` 已持有稳定的共享 `Arc<FrameTracker>`，所以不是数据页复制问题；
+  `MemorySet::shared_futex_key()` 却以每次 `shmat` 新分配的 `attach_id` 作为 owner，同一 segment 的两个
+  地址必然进入不同 futex key。探针和自动 runner 已接入，本节只记录修复前证据，尚未修改内核 key。
+
 ## 2026-08-14 Linux/POSIX Phase 5 SysV SHM 清账与 LA64 glibc 2.38 `SHMLBA` 差异（基于 `7622572`）
 
 - **当前结果**：release 初赛 snapshot、4 GiB/2 hart 聚焦 `shmat01,shmdt02`；RV64 musl/glibc 与
@@ -17,9 +31,9 @@
   随后删除专用 64 KiB header，恢复 generic page-size 定义。
 - **决策与剩余边界**：内核保持当前 Linux 的 page-size ABI，不按调用二进制猜测 4/64 KiB，也不为
   旧 glibc 特判地址尾数；该单项记为 glibc 2.38/LTP header `已知差异`，纳入统一 runtime 更新。
-  本轮无源码修改。现有 `shmat01` 只验证单次 attach、rounding、readonly 与基本计数；SysV segment
-  当前每次 `shmat` 仍分配独立映射身份，跨进程/重复 attach 的数据与 futex 共享尚未闭合，不能由本轮
-  三环境通过外推为 SysV SHM 完成。
+  本轮无源码修改。现有 `shmat01` 只验证单次 attach、rounding、readonly 与基本计数；segment 的
+  数据 frame 已跨 attach 共享，但 futex key 仍使用每次 attach 的独立 id，不能由三环境通过外推为
+  SysV SHM 完成。
 
 ## 2026-08-14 Linux/POSIX Phase 5 `CLONE_VFORK|CLONE_VM` 可见性（基于 `e39cdd9` 的当前工作树）
 
