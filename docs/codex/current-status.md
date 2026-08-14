@@ -1,5 +1,22 @@
 # RespOS 当前状态
 
+## 2026-08-14 Linux/POSIX Phase 5 iperf→iozone 固定顺序 SMP 门禁（当前工作树）
+
+- **可复现入口**：testrunner 新增 `TASK_A_NETWORK_ORDER_PROBE=1`，只按官方初赛脚本顺序运行
+  musl iperf、glibc iperf 和 glibc iozone 后关机；默认完整 runner 顺序不变。两组 iperf 各覆盖
+  BASIC/PARALLEL/REVERSE 的 UDP/TCP 六种模式，iozone 完整运行镜像脚本而不是只检查首个 writer。
+- **通过证据**：基于 `8550a13` 加当前测试入口，RV64 release、4 GiB/2 hart 的 12 个 iperf 项全部
+  `success`，其后 iozone 输出完整 group end 并正常 poweroff；LA64 release、4 GiB/1 hart 得到相同结果。
+  日志为 `/tmp/respos-rv-network-order-phase5.log` 与
+  `/tmp/respos-la-network-order-phase5-smp1.log`。
+- **LA64 SMP 反证**：LA64 release、4 GiB/2 hart 连续两轮都在 musl BASIC_UDP success 后停在
+  BASIC_TCP 的 `Connecting to host 127.0.0.1`，未打印本地 endpoint；分别观察 139 秒和由外部
+  100 秒 watchdog 终止。日志为 `/tmp/respos-la-network-order-phase5.log` 与
+  `/tmp/respos-la-network-order-phase5-smp2-r2.log`。该结果不是通过，也不能由 LA64 单核替代。
+- **当前边界**：既有 loopback connect probe 在 LA64 2 hart 通过，真实 iperf 固定顺序却稳定失败；
+  目前只能确定差异与 SMP/连续 workload 相关，尚不能把它直接归因于 per-hart 时钟、TCP listener
+  补位或 scheduler/wakeup。M1 的双架构 iperf 退出门槛保持阻断，根因标记 `待验证`。
+
 ## 2026-08-14 Linux/POSIX Phase 5 task 生命周期修复前门禁与方案（当前工作树）
 
 - **修复前门禁**：把既有 `task_phase5_probe` 接入 `TASK_A_TASK_PHASE5_PROBE=1` 自动入口；失败时仍会

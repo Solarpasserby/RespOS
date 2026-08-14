@@ -58,6 +58,7 @@ const TASK_A_SIGNAL_PHASE5_PROBE: bool = option_env!("TASK_A_SIGNAL_PHASE5_PROBE
 const TASK_A_SOCKET_PHASE5_PROBE: bool = option_env!("TASK_A_SOCKET_PHASE5_PROBE").is_some();
 const TASK_A_SOCKET_FLAGS_PROBE: bool = option_env!("TASK_A_SOCKET_FLAGS_PROBE").is_some();
 const TASK_A_SOCKET_CONNECT_PROBE: bool = option_env!("TASK_A_SOCKET_CONNECT_PROBE").is_some();
+const TASK_A_NETWORK_ORDER_PROBE: bool = option_env!("TASK_A_NETWORK_ORDER_PROBE").is_some();
 const TASK_A_PERF_PROBE: bool = option_env!("TASK_A_PERF_PROBE").is_some();
 
 const RV_MUSL_LOADER: &str = "/lib/ld-musl-riscv64.so.1\0";
@@ -1631,6 +1632,13 @@ fn run_task_a_socket_connect_probe() {
     println!("[testrunner] socket connect probe PASS");
 }
 
+fn run_task_a_network_order_probe() {
+    prepare_full_featured_tmp();
+    _run_iperf_musl();
+    _run_iperf_glibc();
+    _run_iozone_glibc();
+}
+
 #[cfg(target_arch = "riscv64")]
 #[unsafe(no_mangle)]
 fn main() -> i32 {
@@ -1694,6 +1702,12 @@ fn main() -> i32 {
     if TASK_A_SOCKET_CONNECT_PROBE {
         run_task_a_socket_connect_probe();
         println!("[testrunner] socket connect probe finished, powering off");
+        poweroff();
+        return 0;
+    }
+    if TASK_A_NETWORK_ORDER_PROBE {
+        run_task_a_network_order_probe();
+        println!("[testrunner] network order probe finished, powering off");
         poweroff();
         return 0;
     }
@@ -1825,6 +1839,12 @@ fn main() -> i32 {
     if TASK_A_SOCKET_CONNECT_PROBE {
         run_task_a_socket_connect_probe();
         println!("[testrunner] socket connect probe finished, powering off");
+        poweroff();
+        return 0;
+    }
+    if TASK_A_NETWORK_ORDER_PROBE {
+        run_task_a_network_order_probe();
+        println!("[testrunner] network order probe finished, powering off");
         poweroff();
         return 0;
     }

@@ -77,7 +77,7 @@ Phase 6 的调度器、allocator、异步 I/O 和细粒度锁重构。
 | 接口簇 | 当前证据 | 初始状态 | 下一交付物 |
 | --- | --- | --- | --- |
 | `SO_RCVTIMEO`/`SO_SNDTIMEO`、`MSG_DONTWAIT` | Linux/RespOS probe 已有；LA64 SMP 50 ms 晚醒约 1 秒 | 阻断 | 归一化 LA64 per-hart 时间域后重跑 |
-| nonblocking `connect`、`poll`、`SO_ERROR` | loopback success/refused、error consumption 与同 fd 失败后重连双架构 2 hart 通过 | 部分闭合 | unreachable/timeout/reset 与 iperf 回归 |
+| nonblocking `connect`、`poll`、`SO_ERROR` | loopback success/refused、error consumption 与同 fd 失败后重连双架构 2 hart 通过；LA64 2 hart iperf 在 UDP→TCP 顺序停滞 | 阻断 | 定位 LA64 SMP iperf；补 unreachable/timeout/reset |
 | `MSG_PEEK/WAITALL/NOSIGNAL`、partial I/O | Linux/RespOS probe 含 timeout/EOF/signal 短读，双架构 2 hart 通过 | 已闭合（当前范围） | 完整初赛与网络回归 |
 | `getsid()` | syscall dispatch 缺项，已有 `setsid/getpgid/setpgid` | 已知差异 | session probe 与最小实现 |
 | termios/job control | 当前 tty ioctl 主要只有窗口查询，源码明确未建模 controlling tty | 已知差异 | tty/session/pgrp 状态设计和 probe |

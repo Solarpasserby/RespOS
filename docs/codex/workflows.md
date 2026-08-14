@@ -410,6 +410,23 @@ TASK_A_SOCKET_CONNECT_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
 `SO_ERROR=0`，同 fd 重连路径要求随后观察 `ECONNABORTED -> EINPROGRESS -> success` 并实际传输数据。
 该 loopback probe 不替代真实 unreachable/SYN timeout/reset 和 iperf 回归。
 
+Phase 5 iperf→iozone 固定顺序门禁：
+
+```bash
+timeout 240s env TASK_A_NETWORK_ORDER_PROBE=1 \
+  make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-network-order-phase5.log
+timeout 240s env TASK_A_NETWORK_ORDER_PROBE=1 \
+  make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-network-order-phase5.log
+```
+
+日志必须包含 musl/glibc 的 BASIC/PARALLEL/REVERSE UDP/TCP 共 12 个 `end: success`、三个测试组的
+`GROUP END`，以及 `[testrunner] network order probe finished, powering off`。该入口保留 iperf daemon，
+随后完整运行 glibc iozone，用于同时检查网络模式和 daemon 存活时的无关 timer/I/O 前进。2026-08-14
+RV64 2 hart 与 LA64 1 hart 通过；LA64 2 hart 连续两轮停在 musl BASIC_UDP 后的 BASIC_TCP connect，
+当前预期暴露未闭合阻断，不能以单核结果关闭 M1。
+
 Phase 5 mmap EOF/SIGBUS Linux 对照：
 
 ```bash
