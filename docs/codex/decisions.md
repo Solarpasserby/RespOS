@@ -641,6 +641,21 @@
   也不得把 parent wakeup 与共享可见性混成单一测试结论。non-leader exec 重构必须保持这一 handle
   所有权边界。
 
+## LA64 SysV `SHMLBA` 跟随当前 Linux 的 4 KiB page size
+
+- 状态：已采用
+- 适用范围：LA64 `shmat(SHM_RND)` 与不同 libc header 版本
+- 最后验证：2026-08-14
+- 证据：`os/src/syscall/ipc.rs::sys_shmat()`；Linux `d23b77953f5a`、glibc `cae3c9e3a117`；
+  RV64/LA64 双 libc `shmat01,shmdt02`
+- 决策：RespOS 的 LA64 `SHMLBA` 保持 `PAGE_SIZE=4096`。不为镜像中 glibc 2.38 编译期的旧
+  64 KiB 常量修改全局 rounding，也不按调用二进制或地址形态分流。
+- 原因：当前 Linux 已从 64 KiB 改为 page size，当前 glibc 也恢复 generic 定义；同一 syscall 没有
+  libc header 版本信息，无法同时满足旧 glibc 与 musl 的冲突期望。内核特判只会制造不可维护的
+  非 Linux ABI。
+- 后续影响：该 LTP 单项通过需更新 glibc runtime/test image。SysV segment 跨 attach 的共享 frame
+  identity、`IPC_RMID` 最后 detach 与并发回收仍需独立实现和验证，不能由 rounding 决策代替。
+
 ## LoongArch shootdown 使用每目标 hart 的 generation 槽
 
 - 状态：已采用

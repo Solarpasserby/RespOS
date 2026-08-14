@@ -361,6 +361,22 @@ TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=clone05 \
 wakeup 后，还要至少跑一个真实的 vfork/exec command workload；短门禁可用 final CAgent，并明确区分
 CAgent 完成与随后 BuildStorm 是否被诊断 timeout。
 
+Phase 5 SysV SHM attach/detach 小簇：
+
+```bash
+TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=shmat01,shmdt02 \
+  make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-sysv-shm-phase5.log
+TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=shmat01,shmdt02 \
+  make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-sysv-shm-phase5.log
+```
+
+两架构必须顺序运行。当前 RV64 musl/glibc 与 LA64 musl 应各为 `2 passed, 0 failed`；LA64 glibc 2.38
+的 `shmdt02` 通过，但 `shmat01` 会因编译期 64 KiB `SHMLBA` 与当前 Linux/RespOS 4 KiB ABI 不一致而
+失败。不得通过按调用者特判或全局改成 64 KiB 消除该差异。该小簇不覆盖同一 segment 的重复/跨进程
+attach 共享数据、futex、`IPC_RMID` 后最后 detach 回收或并发 attach/detach。
+
 Phase 5 session/`getsid` Linux 对照：
 
 ```bash

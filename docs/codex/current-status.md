@@ -1,5 +1,26 @@
 # RespOS 当前状态
 
+## 2026-08-14 Linux/POSIX Phase 5 SysV SHM 清账与 LA64 glibc 2.38 `SHMLBA` 差异（基于 `7622572`）
+
+- **当前结果**：release 初赛 snapshot、4 GiB/2 hart 聚焦 `shmat01,shmdt02`；RV64 musl/glibc 与
+  LA64 musl 均为 `SUMMARY: 2 passed, 0 failed`，`shmat01` 内 NULL、aligned、`SHM_RND` 和
+  `SHM_RDONLY` 四项全部通过；LA64 glibc 的 `shmdt02` 两个 `EINVAL` 向量通过，但 `shmat01` 的
+  `SHM_RND` 一项失败，整个组为 `1 passed, 1 failed`。日志为
+  `/tmp/respos-{rv,la}-sysv-shm-phase5.log`。旧完整日志中 setup 的固定 key `EEXIST` 当前不复现，
+  不能继续记为 `IPC_RMID` 泄漏。
+- **ABI 归因**：LA64 glibc 测试把 `SHMLBA` 编译为 64 KiB，期望把输入向下舍入到
+  `0x2000200000`；RespOS 按 4 KiB `PAGE_SIZE` 舍入得到 `0x200020f000`。镜像实际是 glibc 2.38，
+  其 LoongArch 专用 header 定义 `SHMLBA=0x10000`；同镜像 musl header 定义 4096。Linux
+  [d23b779](https://github.com/torvalds/linux/commit/d23b77953f5a4fbf94c05157b186aac2a247ae32)
+  已在 2024 年把 LoongArch `SHMLBA` 改为 `PAGE_SIZE`，glibc
+  [cae3c9e](https://github.com/bminor/glibc/commit/cae3c9e3a117fd240fbf5fd4b403ef4e5304c4a6)
+  随后删除专用 64 KiB header，恢复 generic page-size 定义。
+- **决策与剩余边界**：内核保持当前 Linux 的 page-size ABI，不按调用二进制猜测 4/64 KiB，也不为
+  旧 glibc 特判地址尾数；该单项记为 glibc 2.38/LTP header `已知差异`，纳入统一 runtime 更新。
+  本轮无源码修改。现有 `shmat01` 只验证单次 attach、rounding、readonly 与基本计数；SysV segment
+  当前每次 `shmat` 仍分配独立映射身份，跨进程/重复 attach 的数据与 futex 共享尚未闭合，不能由本轮
+  三环境通过外推为 SysV SHM 完成。
+
 ## 2026-08-14 Linux/POSIX Phase 5 `CLONE_VFORK|CLONE_VM` 可见性（基于 `e39cdd9` 的当前工作树）
 
 - **失败契约与根因**：LTP 20240524 `clone05` 要求 vfork child 在共享地址空间把全局

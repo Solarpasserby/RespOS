@@ -761,6 +761,20 @@
   SIGCHLD、yield 或单核通过代替该协议。共享可见性与 parent wakeup 是两条独立门禁，分别以
   `clone05` 和 vfork/exec command workload 验证。
 
+## 不要为旧 LA64 glibc 的 64 KiB `SHMLBA` 改写当前内核 ABI
+
+- 状态：已确认
+- 适用范围：LA64 `shmat(SHM_RND)`、glibc 2.38/LTP 与 musl/current Linux 混用
+- 最后验证：2026-08-14；release、4 GiB/2 hart
+- 证据：`os/src/syscall/ipc.rs::sys_shmat()`、镜像 `/glibc/lib/libc.so.6` 与两套 LTP `shmat01`；
+  Linux `d23b77953f5a`、glibc `cae3c9e3a117`
+- 内容：旧 LA64 glibc header 把 `SHMLBA` 固定为 64 KiB，musl 和当前 Linux/glibc 使用
+  `PAGE_SIZE`。LTP 用各自编译期常量构造输入和期望，因此同一 4 KiB 内核会表现为 musl 通过、旧
+  glibc 期望向下多舍入 60 KiB。syscall flags 不携带 libc 的 header 版本，内核无法无歧义兼容两种
+  rounding。
+- 后续影响：不得按进程名、ELF/libc 或地址尾数猜测 `SHMLBA`，也不得全局改成 64 KiB 让当前 musl
+  回归。应更新 runtime/test image；SysV SHM 的跨 attach 共享身份仍作为独立内核语义推进。
+
 ## QEMU 10.0.2 LoongArch `LDPTE` 会截掉 PTE 的 NR/NX 高位
 
 - 状态：已确认并为 `PROT_NONE` 增加兼容表示
