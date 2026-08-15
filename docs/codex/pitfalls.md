@@ -1204,6 +1204,18 @@
 - 后续影响：probe 应把规范明确且状态稳定的未连接、已连接非法 how、活跃 half-close 分开；listener、
   post-FIN、reset/linger 需先独立固定 Linux 状态时序，不能为了统一代码提前改 RespOS 错误优先级。
 
+## RDHUP 观察 peer FIN，不能等接收缓冲读空
+
+- 状态：Linux/RV64/LA64 probe 已确认并修复
+- 适用范围：TCP、`POLLRDHUP/EPOLLRDHUP`、buffered data、read EOF
+- 最后验证：2026-08-15
+- 证据：`tcp_half_close_probe`；日志 `/tmp/respos-{rv,la}-tcp-rdhup.log`
+- 内容：peer 的数据和 FIN 可以在同一观察窗口到达。此时普通 read readiness 来自缓冲数据，RDHUP 来自
+  TCP peer-FIN state；两者应同时报告。若用 `!may_recv()` 推导 RDHUP，smoltcp 会因缓冲非空继续返回
+  true，从而把 RDHUP 错误推迟到数据读空。
+- 后续影响：RDHUP 必须是独立只读状态，不得消费数据、改写 socket state 或无条件升级为 HUP。epoll
+  edge/oneshot、AF_UNIX 和 reset/linger 仍需各自 probe，不能从 TCP level-triggered 结果外推。
+
 ## 一个存活的 TCP daemon 不应破坏无关进程的 wait/信号同步
 
 - 状态：已确认并修复

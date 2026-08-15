@@ -1,11 +1,28 @@
 # RespOS 当前状态
 
+## 2026-08-15 Phase 5 TCP `POLLRDHUP/EPOLLRDHUP`（基于 `1058e7d`）
+
+- **契约**：[Linux `poll(2)`](https://man7.org/linux/man-pages/man2/poll.2.html) 与
+  [`epoll_ctl(2)`](https://man7.org/linux/man-pages/man2/epoll_ctl.2.html) 规定 stream peer 关闭连接或
+  发送半边时报告 `RDHUP`。该状态独立于普通 read readiness：FIN 已到而接收缓冲仍有数据时，应同时
+  报告 `IN|RDHUP`，不能等到数据读空才补 RDHUP。
+- **基线与修复**：扩展 `tcp_half_close_probe`，在 server 尚未消费 `request` 时分别要求 poll 与 epoll
+  返回 `IN|RDHUP`。Linux 同向量通过；修复前 RV64 只有 `POLLIN`。`FileOp` 现增加默认 false 的
+  `poll_rdhup()` 只读观察点，TCP 通过 smoltcp state 判断 peer FIN；ppoll/epoll 仅在用户请求该位时写回，
+  不改变 socket 状态、数据消费、waiter 或 HUP/ERR 规则。
+- **验证结果**：Linux 输出 `TCP_HALF_CLOSE_LINUX PASS ... rdhup=pass`；release 初赛 snapshot、4 GiB/
+  2 hart 的 RV64/LA64 均输出 guest `... rdhup=pass` 与 runner PASS，日志为
+  `/tmp/respos-{rv,la}-tcp-rdhup.log`。既有 `socket_phase5_probe` 同配置双架构回归输出
+  `SOCKET_PHASE5 ALL PASS`，日志为 `/tmp/respos-{rv,la}-socket-phase5-after-rdhup.log`。
+- **保留边界**：本轮只下沉 TCP；AF_UNIX 的独立 RDHUP bit、edge-triggered/oneshot 重置矩阵、reset/
+  linger、跨线程阻塞唤醒和真实非 loopback 网络仍待验证，不能据此宣布网络 M1 退出。
+
 ## 2026-08-15 Phase 5 TCP half-close 基础状态机（基于 `c2910ff`）
 
 - **契约与范围**：[Linux `shutdown(2)`](https://man7.org/linux/man-pages/man2/shutdown.2.html) 将
   `SHUT_WR` 定义为禁止后续发送，同时保留全双工连接的接收半边；[Linux `poll(2)`](https://man7.org/linux/man-pages/man2/poll.2.html)
-  要求可读取数据或 EOF 时报告 read readiness。本轮只验证 loopback TCP 的基础 half-close，不扩展
-  `POLLRDHUP`、reset/linger 或跨线程 close 竞态。
+  要求可读取数据或 EOF 时报告 read readiness。本轮当时只验证 loopback TCP 的基础 half-close；TCP
+  `POLLRDHUP/EPOLLRDHUP` 由本文件顶部后续专项关闭。
 - **独立门禁**：新增同向量 Linux/guest `tcp_half_close_probe`。先验证未连接 socket 的 `ENOTCONN` 和
   已连接 socket 非法 `how` 的 `EINVAL`；client 排队发送 `request` 后 `SHUT_WR`，经 duplicate fd 再
   send 必须 `EPIPE`，server 必须先读完排队数据、由 poll 观察 EOF 再读 0；发送半边关闭期间 server
@@ -14,8 +31,8 @@
   `TCP_HALF_CLOSE_LINUX PASS ... poll_eof=pass`。release 初赛 snapshot、4 GiB/2 hart 的 RV64/LA64 均
   输出对应 guest marker 与 runner PASS，日志为 `/tmp/respos-{rv,la}-tcp-half-close.log`。现有内核已
   满足这些向量，因此本轮没有修改网络实现。
-- **保留边界**：`POLLRDHUP/EPOLLRDHUP`、FIN 与排队数据/timeout/signal/reset 同时发生、dup 后另一线程
-  正阻塞 send/recv、`SHUT_RD` 丢弃语义、linger 及真实非 loopback 网络仍待验证；不能据此宣布 M1 退出。
+- **保留边界**：FIN 与排队数据/timeout/signal/reset 同时发生、dup 后另一线程正阻塞 send/recv、
+  `SHUT_RD` 丢弃语义、linger 及真实非 loopback 网络仍待验证；不能据此宣布 M1 退出。
 
 ## 2026-08-15 Phase 5 `utimensat/futimens` 非 owner 权限矩阵（基于 `f5dd47f`）
 

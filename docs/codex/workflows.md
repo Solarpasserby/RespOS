@@ -622,10 +622,11 @@ TASK_A_TCP_HALF_CLOSE_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
   LA_PRE_OUTPUT=/tmp/respos-la-tcp-half-close.log
 ```
 
-Linux 必须输出 `TCP_HALF_CLOSE_LINUX PASS ... poll_eof=pass`，guest 输出对应无 `_LINUX` marker 与
+Linux 必须输出 `TCP_HALF_CLOSE_LINUX PASS ... poll_eof=pass rdhup=pass`，guest 输出对应无 `_LINUX` marker 与
 runner PASS。向量覆盖未连接/非法 how 的错误、排队数据先于 FIN/EOF、`SHUT_WR` 后反向数据流、dup
-共享 shutdown 状态和 peer FIN 的 read readiness；不覆盖 `POLLRDHUP/EPOLLRDHUP`、跨线程阻塞
-send/recv、reset/linger 或非 loopback 网络。
+共享 shutdown 状态、peer FIN 的 read readiness，以及数据尚未消费时 poll/epoll 同时返回
+`IN|RDHUP`。修改 FileOp/poll/epoll readiness 后须同配置复跑 `TASK_A_SOCKET_PHASE5_PROBE=1`。该门禁
+不覆盖 AF_UNIX 独立 RDHUP、跨线程阻塞 send/recv、reset/linger 或非 loopback 网络。
 
 Phase 5 `getpeername` 错误优先级 Linux 对照、guest 专项与聚焦 LTP：
 

@@ -117,6 +117,7 @@ impl EpollFd {
         const EPOLLOUT: u32 = 0x004;
         const EPOLLERR: u32 = 0x008;
         const EPOLLHUP: u32 = 0x010;
+        const EPOLLRDHUP: u32 = 0x2000;
         const EPOLLET: u32 = 1 << 31;
 
         let task = current_task().expect("[kernel] current task is None.");
@@ -157,6 +158,9 @@ impl EpollFd {
             }
             if interest.file.poll_hup() {
                 ready |= EPOLLHUP;
+            }
+            if interest.events & EPOLLRDHUP != 0 && interest.file.poll_rdhup() {
+                ready |= EPOLLRDHUP;
             }
 
             let report = if interest.events & EPOLLET != 0 {
@@ -700,10 +704,10 @@ pub fn sys_epoll_ctl(epfd: usize, op: usize, fd: usize, event: *const u8) -> Sys
     let event = if op == EPOLL_CTL_DEL {
         None
     } else {
-        // Tokio/mio registers every source with EPOLLRDHUP. Pipes and TCP
-        // already surface peer close as read-ready followed by EOF, so the
-        // interest bit is accepted even though readiness is reported through
-        // EPOLLIN rather than a separate RDHUP bit for now.
+        // Tokio/mio registers every source with EPOLLRDHUP. The bit is valid
+        // for stream descriptors; TCP reports it through FileOp::poll_rdhup,
+        // while stream backends without a distinct RDHUP state may still
+        // expose EOF through ordinary EPOLLIN.
         const EPOLLPRI: u32 = 0x002;
         const EPOLLRDHUP: u32 = 0x2000;
         const EPOLL_SUPPORTED_EVENTS: u32 =

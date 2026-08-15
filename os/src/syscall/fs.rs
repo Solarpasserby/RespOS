@@ -3252,6 +3252,7 @@ const POLLOUT: i16 = 0x0004;
 const POLLERR: i16 = 0x0008;
 const POLLHUP: i16 = 0x0010;
 const POLLNVAL: i16 = 0x0020;
+const POLLRDHUP: i16 = 0x2000;
 const PPOLL_MAXFDS: usize = 4096;
 
 #[derive(Clone, Copy, Default)]
@@ -3356,6 +3357,9 @@ fn ppoll_scan_ready(pollfds: &mut [PollFd]) -> usize {
         }
         if file.poll_hup() {
             pollfd.revents |= POLLHUP;
+        }
+        if pollfd.events & POLLRDHUP != 0 && file.poll_rdhup() {
+            pollfd.revents |= POLLRDHUP;
         }
         if pollfd.revents != 0 {
             ready += 1;

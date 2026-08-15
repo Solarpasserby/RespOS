@@ -112,6 +112,11 @@ pub trait FileOp: Any + Send + Sync {
     fn poll_hup(&self) -> bool {
         false
     }
+    /// Stream peer closed its write half. Unlike HUP, RDHUP is reported only
+    /// when userspace explicitly requests the Linux extension bit.
+    fn poll_rdhup(&self) -> bool {
+        false
+    }
     fn poll_error(&self) -> bool {
         false
     }

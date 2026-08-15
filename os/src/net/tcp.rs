@@ -248,6 +248,31 @@ impl TcpSocket {
         }
     }
 
+    /// Whether the peer has closed its TCP write half. This remains true
+    /// while unread bytes are buffered, which is the key distinction between
+    /// RDHUP and ordinary EOF/read readiness.
+    pub fn peer_write_closed(&self) -> bool {
+        if !self.is_connected() {
+            return false;
+        }
+        poll_interfaces();
+        let Some(handle) = (unsafe { self.handle.get().read() }) else {
+            return false;
+        };
+        socket_set()
+            .lock()
+            .with_socket::<_, tcp::Socket, _>(handle, |socket| {
+                matches!(
+                    socket.state(),
+                    State::CloseWait
+                        | State::Closing
+                        | State::LastAck
+                        | State::TimeWait
+                        | State::Closed
+                )
+            })
+    }
+
     /// 检查监听 socket 是否有已完成握手的连接。
     fn poll_listening(&self) -> PollState {
         let port = unsafe { self.local_addr.get().read().port };

@@ -8,6 +8,7 @@
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/epoll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -51,6 +52,34 @@ static void expect_readable(int fd)
     assert((pollfd.revents & POLLIN) != 0);
 }
 
+static void expect_rdhup_with_buffered_data(int fd)
+{
+    struct pollfd pollfd = { .fd = fd, .events = POLLIN | POLLRDHUP };
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        pollfd.revents = 0;
+        assert(poll(&pollfd, 1, 0) >= 0);
+        if ((pollfd.revents & POLLRDHUP) != 0)
+            break;
+        usleep(1000);
+    }
+    assert((pollfd.revents & POLLIN) != 0);
+    assert((pollfd.revents & POLLRDHUP) != 0);
+
+    int epfd = epoll_create1(0);
+    assert(epfd >= 0);
+    struct epoll_event interest = {
+        .events = EPOLLIN | EPOLLRDHUP,
+        .data.u64 = 0x5244485550ULL,
+    };
+    assert(epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &interest) == 0);
+    struct epoll_event ready = { 0 };
+    assert(epoll_wait(epfd, &ready, 1, 0) == 1);
+    assert((ready.events & EPOLLIN) != 0);
+    assert((ready.events & EPOLLRDHUP) != 0);
+    assert(ready.data.u64 == 0x5244485550ULL);
+    assert(close(epfd) == 0);
+}
+
 int main(void)
 {
     setbuf(stdout, NULL);
@@ -82,6 +111,7 @@ int main(void)
     errno = 0;
     assert(send(duplicate, "x", 1, MSG_NOSIGNAL) == -1 && errno == EPIPE);
 
+    expect_rdhup_with_buffered_data(server);
     receive_exact(server, "request");
     char byte = 0;
     expect_readable(server);
@@ -97,6 +127,6 @@ int main(void)
     assert(close(client) == 0);
     assert(close(server) == 0);
     assert(close(listener) == 0);
-    puts("TCP_HALF_CLOSE_LINUX PASS errors=pass queued_fin=pass reverse_flow=pass dup=pass poll_eof=pass");
+    puts("TCP_HALF_CLOSE_LINUX PASS errors=pass queued_fin=pass reverse_flow=pass dup=pass poll_eof=pass rdhup=pass");
     return 0;
 }
