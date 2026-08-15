@@ -4,7 +4,7 @@
 #[macro_use]
 extern crate user_lib;
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
 use user_lib::{
     O_WRONLY, close, fork, getpid, mmap_raw, munmap, open, shmat, shmctl, shmdt, shmget, waitpid,
     write, yield_,
@@ -91,6 +91,13 @@ struct RaceControl {
     go: AtomicU32,
 }
 
+#[repr(C)]
+struct ConcurrentCreateControl {
+    ready: AtomicU32,
+    go: AtomicU32,
+    results: [AtomicIsize; ATTACHERS],
+}
+
 fn removed_result(result: isize) -> bool {
     result == -EINVAL || result == -EIDRM
 }
@@ -139,6 +146,62 @@ fn remove_if_created(shmid: isize) -> isize {
     } else {
         0
     }
+}
+
+fn concurrent_create_round(control: &ConcurrentCreateControl) -> Option<[isize; ATTACHERS]> {
+    control.ready.store(0, Ordering::Relaxed);
+    control.go.store(0, Ordering::Relaxed);
+    for result in &control.results {
+        result.store(0, Ordering::Relaxed);
+    }
+
+    let mut children = [-1isize; ATTACHERS];
+    let mut spawned = 0u32;
+    for (index, child_slot) in children.iter_mut().enumerate() {
+        let child = fork();
+        if child < 0 {
+            control.results[index].store(child, Ordering::Release);
+            continue;
+        }
+        if child == 0 {
+            control.ready.fetch_add(1, Ordering::Release);
+            while control.go.load(Ordering::Acquire) == 0 {
+                let _ = yield_();
+            }
+            let result = shmget(IPC_PRIVATE, PAGE_SIZE, IPC_CREAT | 0o600);
+            control.results[index].store(result, Ordering::Release);
+            return None;
+        }
+        *child_slot = child;
+        spawned += 1;
+    }
+
+    while control.ready.load(Ordering::Acquire) != spawned {
+        let _ = yield_();
+    }
+    control.go.store(1, Ordering::Release);
+
+    for (index, child) in children.iter().enumerate() {
+        if *child <= 0 {
+            continue;
+        }
+        let mut status = 0;
+        if waitpid(*child as usize, &mut status) != *child || status != 0 {
+            control.results[index].store(-EIO, Ordering::Release);
+        }
+    }
+
+    Some(core::array::from_fn(|index| {
+        control.results[index].load(Ordering::Acquire)
+    }))
+}
+
+fn assert_one_create(results: [isize; ATTACHERS]) {
+    assert_eq!(results.iter().filter(|result| **result > 0).count(), 1);
+    assert_eq!(
+        results.iter().filter(|result| **result == -ENOSPC).count(),
+        1
+    );
 }
 
 fn verify_size_limits() -> usize {
@@ -376,12 +439,77 @@ fn verify_dynamic_limits() {
     assert_eq!(restored_shmmni.shmmni, limits.shmmni);
 }
 
+fn verify_concurrent_limits() -> Option<()> {
+    let control_addr = mmap_raw(0, PAGE_SIZE, PROT_READ_WRITE, MAP_SHARED_ANONYMOUS, -1, 0);
+    assert!(
+        control_addr > 0,
+        "concurrent control mmap failed: {}",
+        control_addr
+    );
+    let control_addr = control_addr as usize;
+    let control = unsafe { &*(control_addr as *const ConcurrentCreateControl) };
+
+    let mut limits = ShmInfoLimits::default();
+    let limits_ptr = &mut limits as *mut ShmInfoLimits as usize;
+    assert!(shmctl(0, IPC_INFO, limits_ptr) >= 0);
+    assert!(limits.shmall >= 1);
+    assert!(limits.shmmni >= 1);
+
+    let lower_shmall = write_usize_sysctl("/proc/sys/kernel/shmall\0", 1);
+    let shmall_results = concurrent_create_round(control)?;
+    let mut shmall_info = ShmInfo::default();
+    let shmall_info_ptr = &mut shmall_info as *mut ShmInfo as usize;
+    let query_shmall = shmctl(0, SHM_INFO, shmall_info_ptr);
+    let shmall_cleanup = shmall_results.map(remove_if_created);
+    let restore_shmall = write_usize_sysctl("/proc/sys/kernel/shmall\0", limits.shmall);
+    let mut restored_shmall = ShmInfoLimits::default();
+    let restored_shmall_ptr = &mut restored_shmall as *mut ShmInfoLimits as usize;
+    let query_restored_shmall = shmctl(0, IPC_INFO, restored_shmall_ptr);
+
+    assert_eq!(lower_shmall, 0);
+    assert_one_create(shmall_results);
+    assert!(query_shmall >= 0);
+    assert_eq!(shmall_info.used_ids, 1);
+    assert_eq!(shmall_info.shm_tot, 1);
+    assert!(shmall_cleanup.iter().all(|result| *result == 0));
+    assert_eq!(restore_shmall, 0);
+    assert!(query_restored_shmall >= 0);
+    assert_eq!(restored_shmall.shmall, limits.shmall);
+
+    let lower_shmmni = write_usize_sysctl("/proc/sys/kernel/shmmni\0", 1);
+    let shmmni_results = concurrent_create_round(control)?;
+    let mut shmmni_info = ShmInfo::default();
+    let shmmni_info_ptr = &mut shmmni_info as *mut ShmInfo as usize;
+    let query_shmmni = shmctl(0, SHM_INFO, shmmni_info_ptr);
+    let shmmni_cleanup = shmmni_results.map(remove_if_created);
+    let restore_shmmni = write_usize_sysctl("/proc/sys/kernel/shmmni\0", limits.shmmni);
+    let mut restored_shmmni = ShmInfoLimits::default();
+    let restored_shmmni_ptr = &mut restored_shmmni as *mut ShmInfoLimits as usize;
+    let query_restored_shmmni = shmctl(0, IPC_INFO, restored_shmmni_ptr);
+    let unmap_control = munmap(control_addr, PAGE_SIZE);
+
+    assert_eq!(lower_shmmni, 0);
+    assert_one_create(shmmni_results);
+    assert!(query_shmmni >= 0);
+    assert_eq!(shmmni_info.used_ids, 1);
+    assert_eq!(shmmni_info.shm_tot, 1);
+    assert!(shmmni_cleanup.iter().all(|result| *result == 0));
+    assert_eq!(restore_shmmni, 0);
+    assert!(query_restored_shmmni >= 0);
+    assert_eq!(restored_shmmni.shmmni, limits.shmmni);
+    assert_eq!(unmap_control, 0);
+    Some(())
+}
+
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     let shmmax = verify_size_limits();
     let shmmni = verify_shmmni_limit();
     let shmall = verify_shmall_limit();
     verify_dynamic_limits();
+    if verify_concurrent_limits().is_none() {
+        return 0;
+    }
 
     let control_addr = mmap_raw(0, PAGE_SIZE, PROT_READ_WRITE, MAP_SHARED_ANONYMOUS, -1, 0);
     assert!(control_addr > 0, "control mmap failed: {}", control_addr);
@@ -500,7 +628,7 @@ fn main() -> i32 {
     }
 
     println!(
-        "SYSV_SHM_ATTACH_RACE PASS shmmax={} shmmni={} shmall={} dynamic_limits=pass pressure={} attempts={} invalid={} attached={}",
+        "SYSV_SHM_ATTACH_RACE PASS shmmax={} shmmni={} shmall={} dynamic_limits=pass concurrent_limits=pass pressure={} attempts={} invalid={} attached={}",
         shmmax,
         shmmni,
         shmall,

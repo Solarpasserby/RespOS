@@ -482,11 +482,13 @@ probe 先确认 `SHMMIN=1`、size 0/`SHMMAX+1` 新建、existing-key 的 size 0/
 2，验证两个单页和一个双页的额度边界、`ENOSPC`、删除后复用，再恢复原值并由 `IPC_INFO` 复核；任何
 新增失败出口也必须先恢复该全局值。随后 guest 在已有双页 segment 时把 `SHMALL` 降为 1，并在已有
 两个 segment 时把 `SHMMNI` 降为 1：已有对象必须继续由 `IPC_STAT/SHM_INFO` 可见，新建必须阻塞到
-用量低于新阈值，两个 sysctl 都须在断言前恢复并复核。强制让出
+用量低于新阈值，两个 sysctl 都须在断言前恢复并复核。最后以共享原子 ready/go 屏障同时释放两个
+child，在固定 `SHMALL=1` 和 `SHMMNI=1` 下分别要求恰好一成一败、失败为 `ENOSPC`、全局计数为
+1 个 ID/1 页；parent 清理成功对象，恢复并复核 sysctl。强制让出
 构建用于稳定扩大 table reservation 与 VMA commit 之间的窗口；修复前
 `SYSV_SHM_ATTACH_RACE_EXPECTED_FAIL orphan=64` 是反证，修复后两架构必须输出
-`SYSV_SHM_ATTACH_RACE PASS shmmax=... shmmni=... dynamic_limits=pass pressure=128 attempts=64 ...` 与
-runner PASS。当前门禁
+`SYSV_SHM_ATTACH_RACE PASS shmmax=... shmmni=... dynamic_limits=pass concurrent_limits=pass
+pressure=128 attempts=64 ...` 与 runner PASS。当前门禁
 再做 128 轮顺序单页创建/删除/最后 detach 回收复用，再做 32 轮、每轮两个 child 同时 attach；
 `invalid`/`attached` 比例不固定，但总和必须为 64 且不得出现 orphan。probe 还要求已占用的非空
 `shmaddr` 返回 `EINVAL`，并验证失败 attach 的 reservation 回滚。强制构建后必须不带

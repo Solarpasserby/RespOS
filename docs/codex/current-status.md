@@ -1,5 +1,24 @@
 # RespOS 当前状态
 
+## 2026-08-15 Phase 5 SysV SHM 固定配额下并发创建（基于 `81b60b1`）
+
+- **契约与线性化点**：[Linux `ipc/shm.c`](https://github.com/torvalds/linux/blob/master/ipc/shm.c) 标明
+  `newseg()` 在 IPC IDs writer 锁下执行；其中先以当前 `shm_tot` 检查 `shm_ctlall`，再把
+  `shm_ctlmni` 交给 `ipc_addid()`。因此固定 `SHMALL=1` 或 `SHMMNI=1` 时，两个并发单页创建必须可
+  线性化为恰好一个成功、一个 `ENOSPC`，不能都越过额度检查。
+- **guest 门禁**：扩展 `sysv_shm_attach_race_probe`，以共享匿名页中的原子 ready/go 屏障同时释放两个
+  child。分别临时设置 `SHMALL=1` 与 `SHMMNI=1`，要求每轮恰好一个返回正 shmid、另一个返回
+  `ENOSPC`，`SHM_INFO` 同时只能看到 1 个 ID/1 页；parent 回收成功对象并在断言前恢复 sysctl，再用
+  `IPC_INFO` 复核原值。child 只提交结果并退出，不自行删除 segment，避免把配额线性化与回收时序混合。
+- **验证结果**：release 初赛 snapshot、4 GiB/2 hart 的 RV64/LA64 均输出
+  `SYSV_SHM_ATTACH_RACE PASS ... dynamic_limits=pass concurrent_limits=pass pressure=128 attempts=64
+  invalid=0 attached=64` 与 runner PASS，日志为
+  `/tmp/respos-{rv,la}-sysv-shm-concurrent-limits.log`。同一完整 probe 的既有 size、资源、动态下调、顺序
+  回收和双 attacher 向量均未回退。
+- **实现结论与边界**：RespOS `sys_shmget()` 已在同一 `SHM_TABLE` mutex 内完成用量汇总、额度判断和
+  segment 插入，固定配额并发创建无需修改内核。本结果不覆盖 sysctl 写入与 `shmget()` 同时发生时的
+  线性化、超过两个创建者、IPC namespace、物理 `ENOMEM` 或 ID 溢出。
+
 ## 2026-08-15 Phase 5 SysV SHM 已有对象时动态下调配额（基于 `1bb9752`）
 
 - **Linux 契约来源**：[Linux sysctl 文档](https://www.kernel.org/doc/html/latest/admin-guide/sysctl/kernel.html#shmall)

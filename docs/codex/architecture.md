@@ -378,7 +378,7 @@
 
 - 状态：当前工作树已实现并通过双架构 lifecycle、nattch、双 attacher attach-race、顺序回收循环、
   `SHMMIN/SHMMAX` size 矩阵、默认 `SHMMNI` 耗尽、clean-table `SHMALL` 页额度、已有对象时动态下调
-  `SHMALL/SHMMNI`、核心 metadata、基础权限与 lock flag 专项
+  `SHMALL/SHMMNI`、固定配额下双创建者线性化、核心 metadata、基础权限与 lock flag 专项
 - 适用范围：`shmat` 发布/失败、显式 `shmdt`、成功 exec、group exit、fork/`CLONE_VM` 继承、
   `IPC_RMID`
 - 最后验证：2026-08-15
@@ -411,8 +411,9 @@
   两个同时在途 attacher、128 轮顺序单页回收循环、`SHMMIN/SHMMAX` 与 existing-key size/flag errno
   优先级、默认 `SHMMNI=4096` 的顺序耗尽/槽位归还，以及 clean-table 下调 `SHMALL=2` 后的页计数/
   回收、已有对象时把 `SHMALL/SHMMNI` 降到当前用量以下的保留/阻塞/阈值恢复，以及核心单进程
-  metadata 状态转换；更宽 N 路并发、`SHM_REMAP` 并发覆盖、并发 sysctl/create、IPC namespace、
-  物理内存、单调 segment/attach ID 溢出、namespace capability、lock 的
+  metadata 状态转换；固定配额 `SHMALL=1`/`SHMMNI=1` 下两个并发创建者由全局 table lock 线性化为
+  一成一败。更宽 N 路并发、`SHM_REMAP` 并发覆盖、并发 sysctl/create、IPC namespace、物理内存、
+  单调 segment/attach ID 溢出、namespace capability、lock 的
   `RLIMIT_MEMLOCK`/真实 pinning accounting 与绝对 realtime timestamp 仍需独立验证。
 
 ## FS、VFS 与 fd 模型
