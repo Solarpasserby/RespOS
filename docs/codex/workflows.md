@@ -640,12 +640,15 @@ TASK_A_UDP_SHUTDOWN_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
   LA_PRE_OUTPUT=/tmp/respos-la-udp-shutdown.log
 ```
 
-Linux 必须输出 `UDP_SHUTDOWN_LINUX PASS unconnected=pass shut_wr=pass shut_rd=pass shut_rdwr=pass`，
+Linux marker 必须同时包含 `UDP_SHUTDOWN_LINUX PASS`、`readiness=pass`、
+`blocking_poll=pass` 与 `blocking_epoll=pass`，
 guest 输出对应无 `_LINUX` marker 与 runner PASS。向量覆盖未连接/仅 bind 的 `ENOTCONN`、
 非法 how、`SHUT_WR` 的 `EPIPE` 与反向接收、`SHUT_RD` 的已排队/未来数据报与空队列
-EOF，以及 `SHUT_RDWR`。修改 UDP 接收路径后还应双架构复跑
-`TASK_A_SOCKET_FLAGS_PROBE=1`。当前不覆盖 poll/epoll readiness、并发 shutdown 唤醒、
-disconnect/reconnect、error queue 或非 loopback 网络。
+EOF，以及 `SHUT_RDWR`。readiness 矩阵要求 RD 精确为 `IN|OUT|RDHUP`、WR 为 `OUT`、
+RDWR 为 `IN|OUT|HUP|RDHUP`，并要求延迟 RD shutdown 唤醒阻塞 poll/epoll。修改 UDP
+接收路径后还应双架构复跑 `TASK_A_SOCKET_FLAGS_PROBE=1`；修改 FileOp readiness 后复跑
+`TASK_A_SOCKET_PHASE5_PROBE=1`。当前不覆盖 epoll ET/ONESHOT、并发阻塞 recv/send 的
+shutdown 竞争、disconnect/reconnect、error queue 或非 loopback 网络。
 
 Phase 5 `getpeername` 错误优先级 Linux 对照、guest 专项与聚焦 LTP：
 

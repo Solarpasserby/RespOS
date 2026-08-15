@@ -3,10 +3,13 @@
 #include <arpa/inet.h>
 #include <assert.h>
 #include <errno.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/epoll.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 struct udp_pair {
@@ -68,6 +71,73 @@ static void expect_send_epipe(int fd)
     assert(errno == EPIPE);
 }
 
+static void expect_readiness(int fd, short expected)
+{
+    const short interest = POLLIN | POLLOUT | POLLRDHUP;
+    struct pollfd pollfd = {.fd = fd, .events = interest};
+    assert(poll(&pollfd, 1, 0) == 1);
+    assert(pollfd.revents == expected);
+
+    int epfd = epoll_create1(0);
+    assert(epfd >= 0);
+    struct epoll_event event = {
+        .events = EPOLLIN | EPOLLOUT | EPOLLRDHUP,
+        .data.u64 = 0x55445053485554ULL,
+    };
+    assert(epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &event) == 0);
+    memset(&event, 0, sizeof(event));
+    assert(epoll_wait(epfd, &event, 1, 0) == 1);
+    assert(event.events == (uint32_t)expected);
+    assert(event.data.u64 == 0x55445053485554ULL);
+    assert(close(epfd) == 0);
+}
+
+static void expect_blocking_poll_shutdown(void)
+{
+    struct udp_pair pair = make_pair();
+    pid_t child = fork();
+    assert(child >= 0);
+    if (child == 0) {
+        usleep(100000);
+        _exit(shutdown(pair.left, SHUT_RD) == 0 ? 0 : 1);
+    }
+
+    struct pollfd pollfd = {
+        .fd = pair.left,
+        .events = POLLIN | POLLRDHUP,
+    };
+    assert(poll(&pollfd, 1, 2000) == 1);
+    assert(pollfd.revents == (POLLIN | POLLRDHUP));
+    int status = 0;
+    assert(waitpid(child, &status, 0) == child);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    close_pair(pair);
+
+    pair = make_pair();
+    int epfd = epoll_create1(0);
+    assert(epfd >= 0);
+    struct epoll_event event = {
+        .events = EPOLLIN | EPOLLRDHUP,
+        .data.u64 = 0x554450424c4f43ULL,
+    };
+    assert(epoll_ctl(epfd, EPOLL_CTL_ADD, pair.left, &event) == 0);
+    child = fork();
+    assert(child >= 0);
+    if (child == 0) {
+        usleep(100000);
+        _exit(shutdown(pair.left, SHUT_RD) == 0 ? 0 : 1);
+    }
+    memset(&event, 0, sizeof(event));
+    assert(epoll_wait(epfd, &event, 1, 2000) == 1);
+    assert(event.events == (EPOLLIN | EPOLLRDHUP));
+    assert(event.data.u64 == 0x554450424c4f43ULL);
+    status = 0;
+    assert(waitpid(child, &status, 0) == child);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    assert(close(epfd) == 0);
+    close_pair(pair);
+}
+
 int main(void)
 {
     setbuf(stdout, NULL);
@@ -96,8 +166,14 @@ int main(void)
     send_and_receive(pair.left, pair.right, "before");
     assert(shutdown(pair.left, SHUT_WR) == 0);
     assert(shutdown(pair.left, SHUT_WR) == 0);
+    expect_readiness(pair.left, POLLOUT);
     expect_send_epipe(pair.left);
     send_and_receive(pair.right, pair.left, "reverse");
+    close_pair(pair);
+
+    pair = make_pair();
+    assert(shutdown(pair.left, SHUT_RD) == 0);
+    expect_readiness(pair.left, POLLIN | POLLOUT | POLLRDHUP);
     close_pair(pair);
 
     pair = make_pair();
@@ -114,11 +190,14 @@ int main(void)
 
     pair = make_pair();
     assert(shutdown(pair.left, SHUT_RDWR) == 0);
+    expect_readiness(pair.left, POLLIN | POLLOUT | POLLHUP | POLLRDHUP);
     assert(recv(pair.left, &byte, 1, 0) == 0);
     expect_send_epipe(pair.left);
     close_pair(pair);
 
+    expect_blocking_poll_shutdown();
+
     alarm(0);
-    puts("UDP_SHUTDOWN_LINUX PASS unconnected=pass shut_wr=pass shut_rd=pass shut_rdwr=pass");
+    puts("UDP_SHUTDOWN_LINUX PASS unconnected=pass shut_wr=pass shut_rd=pass shut_rdwr=pass readiness=pass blocking_poll=pass blocking_epoll=pass");
     return 0;
 }

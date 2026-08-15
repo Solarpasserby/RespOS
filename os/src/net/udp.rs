@@ -280,6 +280,16 @@ impl UdpSocket {
         Ok(())
     }
 
+    /// Linux datagram poll 在本地接收半边关闭后报告 RDHUP。
+    pub fn poll_rdhup(&self) -> bool {
+        self.recv_shutdown.load(Ordering::Acquire)
+    }
+
+    /// 只有 UDP 本地收发两个半边都关闭时才报告 HUP。
+    pub fn poll_hup(&self) -> bool {
+        self.recv_shutdown.load(Ordering::Acquire) && self.send_shutdown.load(Ordering::Acquire)
+    }
+
     /// 关闭并释放底层 smoltcp socket，仅供析构使用。
     fn close(&self) {
         let handle = unsafe { self.handle.get().read().unwrap() };
@@ -299,11 +309,13 @@ impl UdpSocket {
             };
         }
         let handle = unsafe { self.handle.get().read().unwrap() };
+        let recv_shutdown = self.recv_shutdown.load(Ordering::Acquire);
+        let send_shutdown = self.send_shutdown.load(Ordering::Acquire);
         socket_set()
             .lock()
             .with_socket_mut::<_, udp::Socket, _>(handle, |socket| PollState {
-                readable: socket.can_recv(),
-                writeable: socket.can_send(),
+                readable: recv_shutdown || socket.can_recv(),
+                writeable: send_shutdown || socket.can_send(),
             })
     }
 }

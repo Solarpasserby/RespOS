@@ -1,5 +1,25 @@
 # RespOS 当前状态
 
+## 2026-08-15 Phase 5 UDP shutdown poll/epoll readiness（基于 `5beecf7`）
+
+- **Linux oracle**：扩展 `udp_shutdown_probe_linux` 后严格编译运行通过。connected UDP 空队列
+  `SHUT_RD` 后，poll/epoll 精确报告 `IN|OUT|RDHUP`；`SHUT_WR` 仍只报告 `OUT`；
+  `SHUT_RDWR` 报告 `IN|OUT|HUP|RDHUP`。跨 fork 共享 socket 的 child 延迟 `SHUT_RD`
+  必须唤醒只等 `IN|RDHUP` 的阻塞 poll 与 epoll。Linux
+  [`datagram_poll_queue()`](https://github.com/torvalds/linux/blob/master/net/core/datagram.c) 也在
+  `RCV_SHUTDOWN` 时发布 `EPOLLIN|EPOLLRDHUP`，且只在双半边 shutdown 时发布 `EPOLLHUP`。
+- **基线与最小修复**：修复前 RV64 在 `SHUT_RD` 后只返回 `POLLOUT(0x4)`，缺少
+  `POLLIN|POLLRDHUP(0x2001)`。现有 UDP recv/send shutdown 原子标志现被三个只读观察点
+  复用：收半边关闭使 read-ready/RDHUP 成立，发半边关闭使 write-ready 成立，双半边
+  关闭才使 HUP 成立。未新增 UDP waiter、队列、锁或 smoltcp 状态。
+- **验证结果**：Linux marker 增加 `readiness=pass blocking_poll=pass blocking_epoll=pass`。
+  release 初赛 snapshot、4 GiB/2 hart 的 RV64/LA64 均输出同一 guest marker 与 runner PASS，
+  日志为 `/tmp/respos-{rv,la}-udp-shutdown-readiness-final.log`。双架构 `socket_phase5_probe`
+  相邻回归均输出 `SOCKET_PHASE5 ALL PASS`。
+- **保留边界**：UDP shutdown readiness 的 epoll ET/ONESHOT 去重与 rearm、另一线程正阻塞在
+  `recv/send` 时的 shutdown 竞争、EOF `recvfrom` 地址写回、disconnect/reconnect、error queue/ICMP
+  与非 loopback 网络仍待独立验证。
+
 ## 2026-08-15 Phase 5 UDP `shutdown` 收发半边（基于 `015c187`）
 
 - **Linux 契约与基线**：新增独立 Linux/guest `udp_shutdown_probe`。Linux 对未连接和仅 bind 的
@@ -14,7 +34,7 @@
   `UDP_SHUTDOWN_LINUX PASS unconnected=pass shut_wr=pass shut_rd=pass shut_rdwr=pass`。release 初赛
   snapshot、4 GiB/2 hart 的 RV64/LA64 均输出对应 guest marker 与 runner PASS，日志为
   `/tmp/respos-{rv,la}-udp-shutdown-fixed.log`；两架构 `socket_flags_probe` 相邻回归也通过。
-- **保留边界**：`poll/epoll` 在 UDP 本地 shutdown 后的 readiness、并发阻塞 recv/send 与 shutdown、
+- **保留边界**：并发阻塞 recv/send 与 shutdown、
   `recvfrom` EOF 时地址输出、已连接 socket 显式 `sendto`、AF_UNSPEC disconnect/reconnect、错误队列/
   ICMP 及非 loopback 网络仍待验证，不因本轮宣布网络 M1 退出。
 

@@ -1215,8 +1215,9 @@
   `recv` 返回 0；此后 peer 新发送的数据报仍会入队并能被下次 `recv` 取出。因此不能把
   UDP `SHUT_RD` 实现成 close 底层 socket，也不能在 shutdown 标志置位后无条件拒绝所有数据报。
 - 后续影响：接收路径的顺序必须是“有数据报则消费，空队列才返回 shutdown EOF”。
-  poll/epoll readiness、并发阻塞唤醒与 EOF 时 `recvfrom` 地址写回尚未固定，需另立 oracle，
-  不能从本向量自动外推。
+  poll/epoll 还必须把 recv shutdown 观察为 `IN|RDHUP`，双半边 shutdown 才额外观察
+  HUP；这些 level 与阻塞唤醒已由后续向量固定。ET/ONESHOT、并发阻塞 recv/send 与 EOF
+  `recvfrom` 地址写回仍需另立 oracle，不能自动外推。
 
 ## RDHUP 观察 peer FIN，不能等接收缓冲读空
 
