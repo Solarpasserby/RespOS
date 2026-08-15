@@ -5,11 +5,12 @@
 extern crate user_lib;
 
 use core::sync::atomic::{AtomicU32, Ordering};
-use user_lib::{fork, mmap_raw, munmap, shmat, shmctl, shmdt, shmget, waitpid, yield_};
+use user_lib::{fork, getpid, mmap_raw, munmap, shmat, shmctl, shmdt, shmget, waitpid, yield_};
 
 const PAGE_SIZE: usize = 4096;
 const IPC_PRIVATE: isize = 0;
 const IPC_CREAT: usize = 0o1000;
+const IPC_EXCL: usize = 0o2000;
 const IPC_RMID: usize = 0;
 const IPC_STAT: usize = 2;
 const IPC_INFO: usize = 3;
@@ -17,6 +18,8 @@ const SHM_INFO: usize = 14;
 const EINVAL: isize = 22;
 const EIDRM: isize = 43;
 const ENOSPC: isize = 28;
+const EEXIST: isize = 17;
+const ENOENT: isize = 2;
 const PROT_READ_WRITE: usize = 0x1 | 0x2;
 const MAP_SHARED_ANONYMOUS: usize = 0x1 | 0x20;
 const ATTACHERS: usize = 2;
@@ -96,6 +99,39 @@ fn write_word(addr: usize, value: u32) {
     unsafe { core::ptr::write_volatile(addr as *mut u32, value) }
 }
 
+fn verify_size_limits() -> usize {
+    let mut limits = ShmInfoLimits::default();
+    let limits_ptr = &mut limits as *mut ShmInfoLimits as usize;
+    assert!(shmctl(0, IPC_INFO, limits_ptr) >= 0);
+    assert_eq!(limits.shmmin, 1);
+    let oversized = limits.shmmax.checked_add(1).unwrap();
+
+    assert_eq!(shmget(IPC_PRIVATE, 0, IPC_CREAT | 0o600), -EINVAL);
+    assert_eq!(shmget(IPC_PRIVATE, oversized, IPC_CREAT | 0o600), -EINVAL);
+
+    let mut key = 0x5200_0000isize ^ getpid();
+    let mut keyed = -EEXIST;
+    for _ in 0..256 {
+        keyed = shmget(key, PAGE_SIZE, IPC_CREAT | IPC_EXCL | 0o600);
+        if keyed > 0 {
+            break;
+        }
+        assert_eq!(keyed, -EEXIST);
+        key += 1;
+    }
+    assert!(keyed > 0, "keyed shmget failed: {}", keyed);
+    let keyed = keyed as usize;
+
+    assert_eq!(shmget(key, 0, 0), keyed as isize);
+    assert_eq!(shmget(key, PAGE_SIZE, 0), keyed as isize);
+    assert_eq!(shmget(key, PAGE_SIZE + 1, 0), -EINVAL);
+    assert_eq!(shmget(key, 0, IPC_CREAT | IPC_EXCL | 0o600), -EEXIST);
+    assert_eq!(shmctl(keyed, IPC_RMID, 0), 0);
+    assert_eq!(shmget(key, 0, 0), -ENOENT);
+    assert_eq!(shmget(key, 0, IPC_CREAT | IPC_EXCL | 0o600), -EINVAL);
+    limits.shmmax
+}
+
 fn verify_shmmni_limit() -> usize {
     let mut limits = ShmInfoLimits::default();
     let limits_ptr = &mut limits as *mut ShmInfoLimits as usize;
@@ -140,6 +176,7 @@ fn verify_shmmni_limit() -> usize {
 
 #[unsafe(no_mangle)]
 fn main() -> i32 {
+    let shmmax = verify_size_limits();
     let shmmni = verify_shmmni_limit();
 
     let control_addr = mmap_raw(0, PAGE_SIZE, PROT_READ_WRITE, MAP_SHARED_ANONYMOUS, -1, 0);
@@ -259,7 +296,8 @@ fn main() -> i32 {
     }
 
     println!(
-        "SYSV_SHM_ATTACH_RACE PASS shmmni={} pressure={} attempts={} invalid={} attached={}",
+        "SYSV_SHM_ATTACH_RACE PASS shmmax={} shmmni={} pressure={} attempts={} invalid={} attached={}",
+        shmmax,
         shmmni,
         PRESSURE_ROUNDS,
         ROUNDS * ATTACHERS,

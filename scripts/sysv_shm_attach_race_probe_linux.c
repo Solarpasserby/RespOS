@@ -2,6 +2,7 @@
 
 #include <assert.h>
 #include <errno.h>
+#include <limits.h>
 #include <sched.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -24,6 +25,60 @@ enum {
 static int removed_errno(int value)
 {
     return value == EINVAL || value == EIDRM;
+}
+
+static unsigned long verify_size_limits(void)
+{
+    struct shminfo limits;
+    assert(shmctl(0, IPC_INFO, (struct shmid_ds *)&limits) >= 0);
+    assert(limits.shmmin == 1);
+    assert(limits.shmmax < ULONG_MAX);
+
+    errno = 0;
+    int zero_private = shmget(IPC_PRIVATE, 0, IPC_CREAT | 0600);
+    int zero_private_errno = errno;
+    errno = 0;
+    int oversized = shmget(IPC_PRIVATE, limits.shmmax + 1, IPC_CREAT | 0600);
+    int oversized_errno = errno;
+
+    key_t key = (key_t)(0x52000000u ^ (unsigned int)getpid());
+    int keyed = -1;
+    for (unsigned int attempt = 0; attempt < 256; ++attempt) {
+        errno = 0;
+        keyed = shmget(key, 4096, IPC_CREAT | IPC_EXCL | 0600);
+        if (keyed >= 0)
+            break;
+        assert(errno == EEXIST);
+        key = (key_t)((unsigned int)key + 1);
+    }
+    assert(keyed >= 0);
+
+    int zero_lookup = shmget(key, 0, 0);
+    int exact_lookup = shmget(key, 4096, 0);
+    errno = 0;
+    int large_lookup = shmget(key, 4097, 0);
+    int large_lookup_errno = errno;
+    errno = 0;
+    int exclusive_lookup = shmget(key, 0, IPC_CREAT | IPC_EXCL | 0600);
+    int exclusive_lookup_errno = errno;
+    assert(shmctl(keyed, IPC_RMID, NULL) == 0);
+
+    errno = 0;
+    int missing_lookup = shmget(key, 0, 0);
+    int missing_lookup_errno = errno;
+    errno = 0;
+    int zero_create = shmget(key, 0, IPC_CREAT | IPC_EXCL | 0600);
+    int zero_create_errno = errno;
+
+    assert(zero_private == -1 && zero_private_errno == EINVAL);
+    assert(oversized == -1 && oversized_errno == EINVAL);
+    assert(zero_lookup == keyed);
+    assert(exact_lookup == keyed);
+    assert(large_lookup == -1 && large_lookup_errno == EINVAL);
+    assert(exclusive_lookup == -1 && exclusive_lookup_errno == EEXIST);
+    assert(missing_lookup == -1 && missing_lookup_errno == ENOENT);
+    assert(zero_create == -1 && zero_create_errno == EINVAL);
+    return limits.shmmax;
 }
 
 static unsigned long verify_shmmni_limit(void)
@@ -96,6 +151,7 @@ struct race_control {
 
 int main(void)
 {
+    unsigned long shmmax = verify_size_limits();
     unsigned long shmmni = verify_shmmni_limit();
 
     struct race_control *control =
@@ -205,8 +261,9 @@ int main(void)
 
     assert(munmap(control, 4096) == 0);
     assert(invalid + attached == ROUNDS * ATTACHERS);
-    printf("SYSV_SHM_ATTACH_RACE_LINUX PASS shmmni=%lu pressure=%u "
-           "attempts=%u invalid=%u attached=%u\n",
-           shmmni, PRESSURE_ROUNDS, ROUNDS * ATTACHERS, invalid, attached);
+    printf("SYSV_SHM_ATTACH_RACE_LINUX PASS shmmax=%lu shmmni=%lu "
+           "pressure=%u attempts=%u invalid=%u attached=%u\n",
+           shmmax, shmmni, PRESSURE_ROUNDS, ROUNDS * ATTACHERS, invalid,
+           attached);
     return 0;
 }

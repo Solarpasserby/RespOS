@@ -376,8 +376,8 @@
 
 ### SysV SHM attach/detach 由 table reservation 与 MM commit 线性化
 
-- 状态：当前工作树已实现并通过双架构 lifecycle、nattch、双 attacher attach-race、顺序回收循环与
-  默认 `SHMMNI` 耗尽专项
+- 状态：当前工作树已实现并通过双架构 lifecycle、nattch、双 attacher attach-race、顺序回收循环、
+  `SHMMIN/SHMMAX` size 矩阵与默认 `SHMMNI` 耗尽专项
 - 适用范围：`shmat` 发布/失败、显式 `shmdt`、成功 exec、group exit、fork/`CLONE_VM` 继承、
   `IPC_RMID`
 - 最后验证：2026-08-15
@@ -396,9 +396,9 @@
 - 后续影响：不得在旧 MM 仍可被 task 访问时先删 table/frame，也不得只依赖 `Drop<MemorySet>` 隐式
   猜测 IPC owner。任何跨 table/MM 的新 attach 路径都必须在可删除性检查之前登记 reservation，并在
   所有成功/失败出口撤销；新增 `CLONE_VM` 形式不得退回按 TCB 数量累计 attachment。当前 probe 已覆盖
-  两个同时在途 attacher、128 轮顺序单页回收循环，以及默认 `SHMMNI=4096` 的顺序耗尽/槽位归还；
-  更宽 N 路并发、`SHM_REMAP` 并发覆盖、动态 sysctl、`SHMALL`/物理内存和单调 segment/attach ID
-  溢出仍需独立压力验证。
+  两个同时在途 attacher、128 轮顺序单页回收循环、`SHMMIN/SHMMAX` 与 existing-key size/flag errno
+  优先级，以及默认 `SHMMNI=4096` 的顺序耗尽/槽位归还；更宽 N 路并发、`SHM_REMAP` 并发覆盖、动态
+  sysctl、`SHMALL`/物理内存和单调 segment/attach ID 溢出仍需独立压力验证。
 
 ## FS、VFS 与 fd 模型
 
