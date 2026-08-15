@@ -759,6 +759,20 @@ FdTable slot (FdEntry: descriptor flags)
   `SO_ERROR` 才能消费。close/retry 替换 smoltcp handle 时必须保持唯一所有权；不得跳过
   `ECONNABORTED` 复位边界或让旧 pending error 污染新连接。
 
+### TCP 发送 half-close 不关闭反向数据流
+
+- 状态：loopback 基础状态机已完成双架构 SMP 专项
+- 适用范围：TCP `shutdown(SHUT_WR)`、dup open-file、FIN/EOF 与 read readiness
+- 最后验证：2026-08-15
+- 证据：`os/src/net/tcp.rs`、`scripts/tcp_half_close_probe_linux.c`、
+  `user/src/bin/tcp_half_close_probe.rs`；RV64/LA64 4 GiB/2 hart 日志
+- 内容：`TcpSocket::shutdown_write()` 只发布共享 socket 的 send-shutdown 并令 smoltcp 发送 FIN，不把
+  RespOS socket 状态改为 CLOSED，也不设置 recv-shutdown。因此同一 open-file 的 duplicate fd 后续发送
+  返回 `EPIPE`，但接收半边继续消费对端数据。peer FIN 到达后，协议队列中的数据优先返回；队列清空且
+  `may_recv()` 为 false 时 read readiness 成立并由 read 返回 0。
+- 后续影响：close、`SHUT_RDWR` 与错误恢复不能把发送 half-close 提前升级为本地全关闭。当前证据不含
+  `POLLRDHUP/EPOLLRDHUP`、`SHUT_RD` 丢弃、跨线程阻塞唤醒、reset/linger 或非 loopback 网络。
+
 ### AF_UNIX 在建链提交点快照双方 raw 地址，查询时原子写回
 
 - 状态：错误路径与 stream 的 unnamed/pathname/abstract 地址已完成双架构 SMP 专项

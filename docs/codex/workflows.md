@@ -610,6 +610,23 @@ TASK_A_SOCKET_CONNECT_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
 `SO_ERROR=0`，同 fd 重连路径要求随后观察 `ECONNABORTED -> EINPROGRESS -> success` 并实际传输数据。
 该 loopback probe 不替代真实 unreachable/SYN timeout/reset 和 iperf 回归。
 
+Phase 5 TCP half-close Linux 对照及 guest 专项：
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror -O2 scripts/tcp_half_close_probe_linux.c \
+  -o /tmp/tcp_half_close_probe_linux
+/tmp/tcp_half_close_probe_linux
+TASK_A_TCP_HALF_CLOSE_PROBE=1 make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-tcp-half-close.log
+TASK_A_TCP_HALF_CLOSE_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-tcp-half-close.log
+```
+
+Linux 必须输出 `TCP_HALF_CLOSE_LINUX PASS ... poll_eof=pass`，guest 输出对应无 `_LINUX` marker 与
+runner PASS。向量覆盖未连接/非法 how 的错误、排队数据先于 FIN/EOF、`SHUT_WR` 后反向数据流、dup
+共享 shutdown 状态和 peer FIN 的 read readiness；不覆盖 `POLLRDHUP/EPOLLRDHUP`、跨线程阻塞
+send/recv、reset/linger 或非 loopback 网络。
+
 Phase 5 `getpeername` 错误优先级 Linux 对照、guest 专项与聚焦 LTP：
 
 ```bash

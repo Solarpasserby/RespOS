@@ -1,5 +1,22 @@
 # RespOS 当前状态
 
+## 2026-08-15 Phase 5 TCP half-close 基础状态机（基于 `c2910ff`）
+
+- **契约与范围**：[Linux `shutdown(2)`](https://man7.org/linux/man-pages/man2/shutdown.2.html) 将
+  `SHUT_WR` 定义为禁止后续发送，同时保留全双工连接的接收半边；[Linux `poll(2)`](https://man7.org/linux/man-pages/man2/poll.2.html)
+  要求可读取数据或 EOF 时报告 read readiness。本轮只验证 loopback TCP 的基础 half-close，不扩展
+  `POLLRDHUP`、reset/linger 或跨线程 close 竞态。
+- **独立门禁**：新增同向量 Linux/guest `tcp_half_close_probe`。先验证未连接 socket 的 `ENOTCONN` 和
+  已连接 socket 非法 `how` 的 `EINVAL`；client 排队发送 `request` 后 `SHUT_WR`，经 duplicate fd 再
+  send 必须 `EPIPE`，server 必须先读完排队数据、由 poll 观察 EOF 再读 0；发送半边关闭期间 server
+  仍可反向发送 `response`，最后 server `SHUT_WR` 同样令 client poll/read 观察 EOF。
+- **验证结果**：宿主以 `-std=c11 -Wall -Wextra -Werror -O2` 编译运行并输出
+  `TCP_HALF_CLOSE_LINUX PASS ... poll_eof=pass`。release 初赛 snapshot、4 GiB/2 hart 的 RV64/LA64 均
+  输出对应 guest marker 与 runner PASS，日志为 `/tmp/respos-{rv,la}-tcp-half-close.log`。现有内核已
+  满足这些向量，因此本轮没有修改网络实现。
+- **保留边界**：`POLLRDHUP/EPOLLRDHUP`、FIN 与排队数据/timeout/signal/reset 同时发生、dup 后另一线程
+  正阻塞 send/recv、`SHUT_RD` 丢弃语义、linger 及真实非 loopback 网络仍待验证；不能据此宣布 M1 退出。
+
 ## 2026-08-15 Phase 5 `utimensat/futimens` 非 owner 权限矩阵（基于 `f5dd47f`）
 
 - **契约**：[Linux `utimensat(2)`](https://man7.org/linux/man-pages/man2/utimensat.2.html) 区分三类请求：

@@ -71,6 +71,7 @@ const TASK_A_SIGNAL_PHASE5_PROBE: bool = option_env!("TASK_A_SIGNAL_PHASE5_PROBE
 const TASK_A_SOCKET_PHASE5_PROBE: bool = option_env!("TASK_A_SOCKET_PHASE5_PROBE").is_some();
 const TASK_A_SOCKET_FLAGS_PROBE: bool = option_env!("TASK_A_SOCKET_FLAGS_PROBE").is_some();
 const TASK_A_SOCKET_CONNECT_PROBE: bool = option_env!("TASK_A_SOCKET_CONNECT_PROBE").is_some();
+const TASK_A_TCP_HALF_CLOSE_PROBE: bool = option_env!("TASK_A_TCP_HALF_CLOSE_PROBE").is_some();
 const TASK_A_NETWORK_ORDER_PROBE: bool = option_env!("TASK_A_NETWORK_ORDER_PROBE").is_some();
 const TASK_A_GETPEERNAME_PROBE: bool = option_env!("TASK_A_GETPEERNAME_PROBE").is_some();
 const TASK_A_SOCKET_PEERCRED_PROBE: bool = option_env!("TASK_A_SOCKET_PEERCRED_PROBE").is_some();
@@ -1859,6 +1860,22 @@ fn run_task_a_socket_connect_probe() {
     println!("[testrunner] socket connect probe PASS");
 }
 
+fn run_task_a_tcp_half_close_probe() {
+    let pid = fork();
+    assert!(pid >= 0, "failed to fork tcp_half_close_probe");
+    if pid == 0 {
+        let argv = ["tcp_half_close_probe\0".as_ptr(), core::ptr::null()];
+        let ret = exec("tcp_half_close_probe\0", &argv);
+        println!("[testrunner] exec tcp_half_close_probe failed: {}", ret);
+        exit(-1);
+    }
+
+    let mut status = 0;
+    assert_eq!(waitpid(pid as usize, &mut status), pid);
+    assert_eq!(status, 0, "tcp_half_close_probe failed");
+    println!("[testrunner] TCP half-close probe PASS");
+}
+
 fn run_task_a_network_order_probe() {
     prepare_full_featured_tmp();
     _run_iperf_musl();
@@ -2047,6 +2064,12 @@ fn main() -> i32 {
     if TASK_A_SOCKET_CONNECT_PROBE {
         run_task_a_socket_connect_probe();
         println!("[testrunner] socket connect probe finished, powering off");
+        poweroff();
+        return 0;
+    }
+    if TASK_A_TCP_HALF_CLOSE_PROBE {
+        run_task_a_tcp_half_close_probe();
+        println!("[testrunner] TCP half-close probe finished, powering off");
         poweroff();
         return 0;
     }
@@ -2262,6 +2285,12 @@ fn main() -> i32 {
     if TASK_A_SOCKET_CONNECT_PROBE {
         run_task_a_socket_connect_probe();
         println!("[testrunner] socket connect probe finished, powering off");
+        poweroff();
+        return 0;
+    }
+    if TASK_A_TCP_HALF_CLOSE_PROBE {
+        run_task_a_tcp_half_close_probe();
+        println!("[testrunner] TCP half-close probe finished, powering off");
         poweroff();
         return 0;
     }

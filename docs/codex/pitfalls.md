@@ -1192,6 +1192,18 @@
 - 后续影响：排查“UDP 卡住”时不要忽略应用协议的 TCP 控制面；更改 TCP 阻塞策略时
   必须同时验证协议事件唤醒和空闲 listener 时的定时器前进。
 
+## 不要把所有非 established TCP 状态的 shutdown 错误合并成 ENOTCONN
+
+- 状态：Linux probe 已确认
+- 适用范围：TCP `shutdown()`、listener、FIN 后状态与 errno oracle
+- 最后验证：2026-08-15
+- 证据：`scripts/tcp_half_close_probe_linux.c` 的向量筛选过程与 Linux `shutdown(2)` 契约
+- 内容：当前 Linux 对从未连接的 stream socket 执行 `SHUT_WR` 返回 `ENOTCONN`，但 listener 上同一
+  调用可返回成功；双向 FIN 已完成后再次 shutdown 的结果也受实际 TCP 状态推进影响。不能只按
+  “不是 established”写一条全局 errno oracle。
+- 后续影响：probe 应把规范明确且状态稳定的未连接、已连接非法 how、活跃 half-close 分开；listener、
+  post-FIN、reset/linger 需先独立固定 Linux 状态时序，不能为了统一代码提前改 RespOS 错误优先级。
+
 ## 一个存活的 TCP daemon 不应破坏无关进程的 wait/信号同步
 
 - 状态：已确认并修复
