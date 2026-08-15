@@ -18,6 +18,7 @@ mod mounts;
 mod perf_stats;
 mod smaps;
 mod stat;
+mod uptime;
 mod version;
 
 use super::Statfs64;

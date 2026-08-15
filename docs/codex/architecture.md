@@ -165,6 +165,16 @@
 | syscall → net | socket FileOp 与 `os/src/net` | smoltcp socket 生命周期和 listen table 细节 |
 | 公共代码 → arch | `os/src/arch/{rv64,loongarch64}` | 直接散落的 CSR/寄存器、页表和 trap-frame 假设 |
 
+### `/proc/uptime` 使用硬件单调时间域
+
+- 第一列 uptime 由 `get_timeout_us()` 生成，使用 timer/deadline 的硬件频率，
+  不依赖可调的 user/accounting clock；因此可作为客体内 workload wall time。
+- 第二列是所有 hart 在 `wait_for_interrupt()` 中完成的 idle 时间之和。
+  记账按 hart 和 cache line 分片，每次 idle 返回只更新本 hart 原子；
+  当前尚未返回的 idle 区间最多滞后一个 timer period，不会倒退。
+- 输出保持 Linux `uptime idle\n` 的两位小数格式。不得用 user clock
+  频率、常量或 workload 特判生成该文件。
+
 ## MM 模型
 
 ### `MemorySet` 拥有地址空间语义

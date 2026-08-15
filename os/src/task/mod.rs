@@ -24,7 +24,8 @@ pub use futex::{check_futex_timeouts, do_futex};
 use lazy_static::lazy_static;
 pub use manager::TASK_MANAGER;
 pub use processor::{
-    current_task, current_user_token, init_per_cpu_idle_tasks, run_tasks, take_current_task,
+    current_task, current_user_token, init_per_cpu_idle_tasks, run_tasks, system_idle_time_us,
+    take_current_task,
 };
 pub use scheduler::{
     WaitOption, add_task, block_task, blocking_and_run_next, exit_and_run_next,

@@ -1,5 +1,28 @@
 # RespOS 当前状态
 
+## 2026-08-15 `/proc/uptime` 恢复 BuildStorm 真实客体计时（基于 `3ccdbee`）
+
+- **根因与影响**：官方 BuildStorm 脚本在 timed build 前后读取 `/proc/uptime`；
+  旧 procfs 没有该节点，脚本将两个空值按 0 计算，因而历史日志的
+  `elapsed_s=0.00` 无效。Cargo 编译、产物检查和嵌套 QEMU 启动仍真实完成，
+  但该字段不得用于性能评分归因。
+- **修复**：新增 Linux 格式的 `/proc/uptime`。第一列使用硬件单调
+  timeout clock，不经 user clock；第二列使用有界、永不回退的 per-hart
+  idle-wait 记账汇总。未修改 BuildStorm 脚本、计时器频率、`nproc` 或 judge marker。
+- **验证**：Rust 1.86 RV64/LA64 release 构建通过。2 GiB/2 hart diagnostic guest
+  中，RV64 两次读取为 `16.39 15.71` 和 `17.41 17.72`；LA64 为
+  `16.69 14.84` 和 `19.69 17.73`。两架构第一列严格增长，第二列也在
+  SMP idle 期间增长。日志为 `/tmp/respos-{rv,la}-proc-uptime*.log`。
+- **完整 RV64 final 复验**：同日以 release default features、16 GiB/8 hart、
+  `-snapshot` 完整通过 CAgent 10/10 与 BuildStorm；Cargo release 为 `10m 17s`，
+  axbuild 为 `624.74s`，最终 marker 为
+  `BUILDSTORM_COMPILE mode=multi ok=true elapsed_s=633.48 cores=8 bytes=1681000 arch=riscv64`，
+  脚本 exit 0。三种客体计时相互吻合，确认 `/proc/uptime` 修复没有缩放或冻结时间。
+  日志为 `/tmp/respos-rv-uptime-buildstorm-final.log`（SHA-256
+  `b72b6e94...1e619f28`），kernel 为 `02c701d2...840bda`，公开根盘仍为
+  `d74e4365...9b334c`。该结果是本地基线；平台倍率仍须用同一完整 workload 实测，
+  不从短 dev 编译耗时线性外推。
+
 ## 2026-08-15 P3 I/O buffer pool 后 RV64 完整 final BuildStorm（基于 `19e852b` 后工作树）
 
 - **命令与样本**：`make run-rv-final RV_FINAL_OUTPUT=/tmp/respos-rv-io-buffer-buildstorm-final.log`，

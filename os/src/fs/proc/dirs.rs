@@ -11,6 +11,7 @@ use super::mounts::MountsInode;
 use super::perf_stats::PerfStatsInode;
 use super::smaps::SmapsInode;
 use super::stat::{ProcStatInode, TaskStatInode};
+use super::uptime::UptimeInode;
 use super::version::VersionInode;
 use crate::fs::pipe::{pipe_max_size_string, set_pipe_max_size};
 use crate::net::proc_net_tcp;
@@ -67,6 +68,7 @@ const PROC_HEALTH_INO: u64 = 35;
 const PROC_NET_INO: u64 = 36;
 const PROC_NET_TCP_INO: u64 = 37;
 const PROC_RESPOS_PERF_INO: u64 = 38;
+const PROC_UPTIME_INO: u64 = 39;
 const PROC_PID_DIR_INO_BASE: u64 = 0x10000;
 const PROC_PID_STAT_INO_BASE: u64 = 0x20000;
 const PROC_DEV: u64 = 0x100;
@@ -122,6 +124,8 @@ impl InodeOp for ProcDirInode {
             Ok(Arc::new(MountsInode))
         } else if name == "stat" {
             Ok(Arc::new(ProcStatInode))
+        } else if name == "uptime" {
+            Ok(Arc::new(UptimeInode))
         } else if name == "cpuinfo" {
             Ok(Arc::new(CpuinfoInode))
         } else if name == "version" {
@@ -166,6 +170,7 @@ impl InodeOp for ProcDirInode {
                 13,
                 b"respos_perf\0",
             ),
+            entry(PROC_UPTIME_INO, InodeType::Regular, 14, b"uptime\0"),
         ];
         let pids = core::cell::RefCell::new(Vec::new());
         TASK_MANAGER.for_each(|task| {
@@ -174,7 +179,7 @@ impl InodeOp for ProcDirInode {
                 pids.borrow_mut().push(task.tid());
             }
         });
-        let mut off: i64 = 14;
+        let mut off: i64 = 15;
         for pid in pids.into_inner() {
             let name = alloc::format!("{}\0", pid).into_bytes();
             entries.push(entry(
@@ -1996,6 +2001,10 @@ pub(super) fn proc_health_ino() -> u64 {
 
 pub(super) fn proc_respos_perf_ino() -> u64 {
     PROC_RESPOS_PERF_INO
+}
+
+pub(super) fn proc_uptime_ino() -> u64 {
+    PROC_UPTIME_INO
 }
 
 pub(super) fn proc_mounts_ino() -> u64 {

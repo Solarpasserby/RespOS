@@ -11,6 +11,7 @@ use super::task::TaskControlBlock;
 use crate::arch::task::__switch;
 use crate::mutex::SpinNoIrqLock;
 use alloc::sync::Arc;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use lazy_static::lazy_static;
 
 const MAX_CPUS: usize = crate::arch::smp::MAX_HARTS;
@@ -30,6 +31,31 @@ pub fn init_per_cpu_idle_tasks() {
 
 static PROCESSORS: [SpinNoIrqLock<Processor>; MAX_CPUS] =
     [const { SpinNoIrqLock::new(Processor::new()) }; MAX_CPUS];
+
+#[repr(align(64))]
+struct PerHartIdleTicks(AtomicUsize);
+
+static IDLE_TICKS: [PerHartIdleTicks; MAX_CPUS] =
+    [const { PerHartIdleTicks(AtomicUsize::new(0)) }; MAX_CPUS];
+
+#[inline]
+fn account_idle_ticks(ticks: usize) {
+    IDLE_TICKS[current_cpu_id()]
+        .0
+        .fetch_add(ticks, Ordering::Relaxed);
+}
+
+/// Return aggregate idle time across all harts, matching `/proc/uptime`'s
+/// second-field convention.  The current sub-tick idle interval is accounted
+/// when `wait_for_interrupt()` returns, so a read may lag by at most one timer
+/// period per idle hart while remaining monotonic.
+pub fn system_idle_time_us() -> usize {
+    let ticks = IDLE_TICKS.iter().fold(0usize, |total, idle| {
+        total.saturating_add(idle.0.load(Ordering::Relaxed))
+    });
+    let freq = crate::arch::timer::get_hardware_clock_freq();
+    ticks / freq * 1_000_000 + ticks % freq * 1_000_000 / freq
+}
 
 /// 处理器管理
 ///
@@ -187,9 +213,11 @@ pub fn run_tasks() -> ! {
                     // locks and may enable interrupts until timer/IPI wakeup.
                     crate::arch::register::crmd::set_interrupt_enabled(true);
                 }
-                let idle_started = crate::perf::now_ticks();
+                let idle_started = crate::timer::get_time();
                 crate::arch::wait_for_interrupt();
-                crate::perf::idle_ticks(crate::perf::elapsed_since(idle_started));
+                let idle_elapsed = crate::timer::get_time().wrapping_sub(idle_started);
+                account_idle_ticks(idle_elapsed);
+                crate::perf::idle_ticks(idle_elapsed);
                 #[cfg(target_arch = "loongarch64")]
                 unsafe {
                     crate::arch::register::crmd::set_interrupt_enabled(false);

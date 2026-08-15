@@ -1652,6 +1652,10 @@ LA64 最终资源参数固定为 `-m 36G -smp 12`；具体 QEMU machine、BIOS �
 进入 guest shell 后执行 `/glibc/buildstorm_testcode.sh`。验收依次检查
 `BUILDSTORM_TOOLCHAIN ok`、`BUILDSTORM_MINIBUILD ok`、最终
 `BUILDSTORM_COMPILE mode=multi ok=true ... cores=8 bytes>=500000`；前一标记通过不能替代后一标记。
+运行前应先连续读取两次 `/proc/uptime`，确认两列为数值且第一列严格增长；
+最终 `BUILDSTORM_RESULT` 的 `elapsed_s` 必须为与 Cargo/宿主 wall time 同数量级的非零值。
+缺少 `/proc/uptime` 时官方脚本会把空值算成 `0.00`，该样本只能证明功能完成，
+不得用于性能评分或改进归因。
 新镜像将补回预编译 `tg-xtask`；官方计分只覆盖测试用例自身的编译时间，不包含前置依赖构建，也不
 包含编译完成后的运行验证。旧镜像仍应保留 minibuild/tg-xtask 自举作为兼容性诊断，但其耗时不能
 与新基线成绩直接比较。
