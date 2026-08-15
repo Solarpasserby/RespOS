@@ -869,6 +869,27 @@ Linux mode `0000` 向量要求以无 `CAP_IPC_OWNER` 的普通用户运行；若
 验证 `SHM_LOCKED` flag，运行 Linux oracle 前应确认 segment 大小不超过当前 `RLIMIT_MEMLOCK`。不得用
 本结果宣称 namespace capability、真实 page pinning/memlock accounting 或绝对 realtime timestamp 已通过。
 
+Phase 5 SysV SHM 核心 metadata（不进入多子进程 teardown）：
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror -O2 \
+  scripts/sysv_shm_metadata_probe_linux.c -o /tmp/sysv_shm_metadata_probe_linux
+/tmp/sysv_shm_metadata_probe_linux
+
+TASK_A_SYSV_SHM_METADATA_PROBE=1 \
+  make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-sysv-shm-metadata.log
+TASK_A_SYSV_SHM_METADATA_PROBE=1 \
+  make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-sysv-shm-metadata.log
+```
+
+Linux 必须输出 `SYSV_SHM_METADATA_LINUX PASS`；guest 必须输出 `SYSV_SHM_METADATA PASS` 与 runner
+PASS。probe 使用 4113-byte segment 同时验证 byte size 与 2-page accounting，覆盖 initial/attach/
+detach/`IPC_SET`/marked-removed/最后回收状态，以及 `SHM_STAT` index、`SHM_STAT_ANY` 和 `SHM_INFO`。
+它不 fork 工作 child，可用于区分 metadata 回归和 LA64 `shmctl01` 的 signal/reap teardown 阻断；不得用
+本结果宣称非 root 权限、`SHM_LOCK` capability 或绝对 realtime timestamp 已通过。
+
 Phase 5 session/`getsid` Linux 对照：
 
 ```bash
