@@ -1,5 +1,32 @@
 # RespOS 当前状态
 
+## 2026-08-15 队友 Phase 5 合并后的 BuildStorm 短窗口与完整 final（当前 `fe95f0b5`）
+
+- **合并结果**：将性能提交 rebase 到队友 `1fc3915b`；仅 `current-status.md/decisions.md` 顶部追加记录冲突，
+  已按日期保留双方内容。自动合并的 ext4 inode 读失败清理与队友特殊 inode/rdev 元数据扩展可同时成立；
+  RV64/LA64 无 feature release 顺序构建通过。
+- **相同工作量窗口**：LA 8 GiB/12 hart、默认 Global-on、512 MiB PageCache、相同 pub root/diagnostic x1、
+  `-snapshot`、`NI=-10/CLS=TS`、`perf_counters`，固定 120 秒仍到达相同 23 个 `Compiling` marker。相对
+  既有 4096 样本，block read requests/bytes 变化约 -0.03%/-0.04%，PageCache fill bytes 约 -0.04%；
+  file close、stat/lookup/readdir/create/write 等操作计数一致，没有 I/O 工作量回退。
+- **可归因结构变化**：COW faults `32158 -> 10097`（约 -68.6%），local sfence calls
+  `647577 -> 609066`（约 -5.9%），与恢复 `CLONE_VFORK|CLONE_VM` 共享地址空间的源码方向一致；
+  最近稳定的合并前样本同样显示 context switch 无增加、ext4 hold 只变化约 +0.75%；短窗口不外推
+  最终加速比，完整结果见下项。
+- **完整 final**：同为 8 GiB/12 hart 的无 feature 当前轮 CAgent 10/10、BuildStorm 成功，axbuild
+  `721.22s`；相对上一轮 `714.24s` 为 `+6.98s`（约 +0.98%），整轮约 `753s` 对 `747s`
+  （约 +0.8%）。两轮平均 QEMU CPU 为 650.7%/649.5%，当前轮 swap-in/out 与 major fault 约
+  7.1 MiB/0/1875，基线约 7.3 MiB/10.8 MiB/2013；未见 panic、OOM、SIGBUS 或 I/O error marker。
+  单对约 1% 差值不足以证明代码回退，当前判断为性能基本持平。
+- **风险边界**：SysV SHM exec/exit 清理会多扫描一次当前 MM 的 VMA，但无 SHM 时在空 attach-id 列表处
+  立即返回；pwrite 重构主要影响 `O_APPEND pwrite`，普通 sequential write 仍走同一 PageCache 提交逻辑；
+  getdents 只为已删除 ext4 目录增加一次原子状态检查。新增嵌入式 probe 使静态 kernel 末端约增加
+  RV 1.8 MiB/LA 1.3 MiB，在比赛内存下不是主要压力。
+- **证据**：短窗口日志 `/tmp/respos-la-post-team-merge-120.log` 与时间线
+  `/tmp/respos-la-post-team-merge-120-timeline/`，perf kernel SHA-256 `949bcee9...4a09a`；完整
+  日志 `/tmp/respos-la-post-team-final.log` SHA-256 `91171b3d...5509`，时间线
+  `/tmp/respos-la-post-team-final-timeline/`。
+
 ## 2026-08-15 lwext4 metadata cache 8192 容量实验（No-Go，已恢复 4096）
 
 - **口径**：LA 8 GiB/12 hart、默认 Global-on、512 MiB PageCache、相同 pub root/diagnostic x1、
