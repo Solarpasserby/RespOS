@@ -1,90 +1,80 @@
 = 12. 总结与展望
 <12-总结与展望>
-#quote(block: true)[
-本章回答：RespOS 的最终贡献是什么？当前限制有哪些？如何复现？未来方向是什么？
-]
+RespOS 的实现最终落在一条完整的用户态执行链上：架构入口负责启动和建立最初的运行环境，任务模块负责创建与调度，trap 连接用户态和内核态，内存与文件系统提供程序运行所需的资源，IPC、信号、时钟和网络模块再处理同步、通信与 I/O。
 
-== 12.1 本队最终贡献摘要
-<121-本队最终贡献摘要>
-【待人工填写------从前面各章提炼 3-6 条核心贡献，每条绑定代码路径和测试状态】
+== 12.1 项目成果
+<121-项目成果>
+在架构适配方面，RespOS 已经支持 RISC-V64 和 LoongArch64 的启动、页表、trap、任务切换和时钟。公共内核代码负责任务、内存、文件和系统调用等通用逻辑，硬件相关差异集中在 `arch/` 目录中处理。
 
-#quote(block: true)[
-【建议写什么】
+在进程管理方面，内核使用统一的 `TaskControlBlock` 表示可调度任务，能够承载进程和线程创建、exec、wait、退出、调度以及 RV64 SMP 等功能。fork、clone 和线程创建之间的区别，主要通过地址空间、文件描述符表、信号状态等资源是否共享来表达。
 
-- 双架构 HAL 抽象层的完整实现（RISC-V64 + LoongArch64）
-- 统一进程/线程模型的 TCB 设计，含细粒度字段分类、SMP 多核支持、exec sibling quiescence 协议
-- 完整虚拟地址空间模型（MemorySet→VMA→PTE），含 COW、lazy allocation、file-backed ELF、FDT 动态内存识别
-- 类 Linux VFS 架构，含 dentry 缓存、页缓存、挂载子系统、ext4 适配
-- 每条贡献绑定代码路径和测试证据
+内存管理已经形成了以 `MemorySet` 为中心的地址空间模型，包含 VMA、PTE、页帧、lazy allocation、COW、ELF 装载和文件映射。地址范围、硬件页表映射和物理页所有权分别由不同对象维护，缺页时再根据映射类型建立实际页面。
 
-【建议准备的表】贡献---代码---证据---状态摘要表
-]
+文件系统部分建立了 VFS、ext4、procfs、devfs、挂载、namei、dentry cache、page cache 和 fd 生命周期。`FileOp` 将普通文件、管道、socket、timerfd 和部分特殊文件接入统一的打开文件接口，`InodeOp` 则把不同后端的文件操作收敛到 inode 层。
 
-== 12.2 当前限制与未完成项
-<122-当前限制与未完成项>
-内核的已知边界按模块列出：
+IPC 与信号模块实现了信号、管道、futex 和 System V 共享内存。它们共同依赖任务的等待与唤醒机制，在阻塞、超时、信号打断和任务退出同时发生时，需要通过明确的完成协议决定哪个路径最终生效。
 
-#figure(
-  align(center)[#table(
-    columns: 2,
-    align: (auto,auto,),
-    table.header([模块], [当前限制],),
-    table.hline(),
-    [进程管理], [vfork 地址空间共享语义未完整实现（仅有同步语义）；非 leader exec 未支持；LA64 SMP 未经过动态验证；动态链接器仍为 eager load],
-    [内存管理], [无 swap 和页面回收机制；LA64 RAM 上限仍为静态配置；私有文件页 fault 的锁外 I/O 未完成；`MS_INVALIDATE` 与 `SIGBUS` 语义不完整],
-    [文件系统], [单 ext4 超块实例，无多设备支持；写密集场景下 NAMEI\_MUTATION\_LOCK 串行化；全路径存储 dentry 模型 rename 和缓存淘汰有额外开销；页缓存使用 Vec 而非物理页框，mmap 路径有多余拷贝],
-    [信号系统], [`SA_RESTART` 未实现；实时信号排队不完整（同种信号连续到达时合并）；Core dump 未实现],
-    [时钟模块], [线程 CPU clock、TAI、wakeup alarm 未支持；`times()` 的用户/系统时间仅为近似记账],
-    [网络模块], [TCP 重传/拥塞控制依赖 smoltcp 内部实现；物理网卡驱动未完成；select 系统调用未实现],
-    [IPC], [消息队列和 semaphore 未实现；跨 shmat 的 futex key 未统一],
-    [测试], [BuildStorm 完整 minibuild/compile 未通过；LA64 多核测试覆盖不足],
-  )]
-  , kind: table
-  )
+时钟模块提供了双架构时钟源，并实现 nanosleep、interval timer、POSIX timer 和 timerfd。各类时间服务都围绕 deadline 组织，再由 timer trap、调度器和等待队列完成到期唤醒。
 
-#quote(block: true)[
-【建议准备的表】已验证/部分验证/未实现/待验证四分类表
+网络模块在 smoltcp 的基础上实现了 loopback TCP/UDP、UNIX 域 socket、Linux socket ABI 和并发 listener 池。RespOS 自己补上了 socket 与 fd 的关系、阻塞和 poll 语义，以及 listener 句柄在 listen/accept 之间的管理。
 
-【容易出现的问题】不能用\"理论上支持\"填入已验证列；限制不是道歉段落，而是结果可解释性的一部分
-]
+这些功能并不是互相独立的。fork 会同时涉及 TCB、`MemorySet`、`FdTable` 和信号状态；exec 要在旧地址空间中完成必要的线程静止，再提交新的 ELF 映像；文件映射则把 VMA、PageCache 和 `FileOp` 的读写路径连接起来。项目中反复使用的 prepare/commit、引用计数、锁外 I/O 和安全点，都是为了解决这些跨模块操作中的所有权和失败问题。
 
-== 12.3 测试结果与性能数据
-<123-测试结果与性能数据>
-【待人工填写------补充最终测试数据】
+== 12.2 实现过程中的收获
+<122-实现过程中的收获>
+首先，内核对象的身份需要尽早划清。TCB 是可调度的执行单元，`TrapContext` 是用户态返回现场，`TaskContext` 是内核切换现场；VMA 表示地址空间承诺，PTE 表示硬件映射，页帧表示物理所有权。文件系统中的 `FdEntry`、`FileOp`、`Path`、`Dentry` 和 `InodeOp` 也分别对应不同的生命周期。对象边界明确之后，fork、dup、exec 和回收路径才有比较稳定的实现基础。
 
-#quote(block: true)[
-【建议写什么】
+其次，失败路径和并发路径不能等正常功能完成后再补。vfork 的父任务登记顺序、exec 的 sibling 静止、futex 的 single-winner、共享文件映射的锁外写回以及网络 listener 的句柄移交，都需要在设计阶段明确状态转换。只实现一次成功调用还不足以支撑真实的 libc、工具链和多线程程序。
 
-- LTP 等测例通过情况（按测试层级分组：basic / busybox / libc / LTP / CAgent / 自研 probe）
-- SMP 并发压力测试结果（按 SMP=1/2/4/8、debug/release、256M/8G 分列）
-- 关键性能对比数据（如与前版本或参考内核的对比）
+最后，双架构支持并不意味着把所有底层代码写成相同形式。RespOS 采用公共语义加架构特化的方式：公共模块只依赖页表切换、上下文访问和时钟读取等稳定接口，CSR、入口汇编、TLB 刷新和特权级返回留在架构目录中。这样既减少了重复代码，也更容易判断一个问题属于公共逻辑还是硬件适配。
 
-【建议准备的表】测试层级---测例数---通过数---主要失败原因表
-]
+== 12.3 构建与复现入口
+<123-构建与复现入口>
+内核构建使用仓库中的脚本。准备环境时，可以先获取比赛镜像：
 
-== 12.4 复现入口
-<124-复现入口>
-【待人工填写------最终提交版本确认后补充】
+```bash
+bash scripts/get_img.sh
+```
 
-#quote(block: true)[
-【建议写什么】
+两种架构可以一起构建，也可以分别构建：
 
-- 构建命令：`make all` 或 `make build-rv` / `make build-la`
-- 镜像准备：`bash scripts/get_img.sh`
-- 运行命令：`make rv` / `make la`
-- 日志路径：`rv-output.txt` / `la-output.txt`
-]
+```bash
+make all
+make build-rv
+make build-la
+```
 
-== 12.5 未来工作
-<125-未来工作>
-基于当前限制（§12.2），下一步工作的优先级排序：
+运行 QEMU 测试时使用：
 
-+ #strong[BuildStorm 完整通过]。当前最重要的未闭环问题，涉及 pipe 引用生命周期、wait/wakeup 竞争、exit 延迟回收的综合调试
-+ #strong[LA64 多核验证]。当前 LA64 仍走单核路径，需要完成 LA64 的 SMP 启动、IPI 和共享 MM 验证
-+ #strong[内存管理完善]。swap / 页面回收 / 动态链接器 file-backed 加载
-+ #strong[性能优化]。per-CPU run queue、锁竞争优化、页缓存零拷贝 mmap
-+ #strong[功能补全]。`SA_RESTART`、消息队列、物理网卡驱动
+```bash
+make rv
+make la
+```
 
-#quote(block: true)[
-【建议写什么】每项未来工作必须与 §12.2 的限制一一对应；区分\"已计划\"与\"方向性建议\"
-]
+构建产物是仓库根目录下的 `kernel-rv` 和 `kernel-la`，运行日志默认分别写入 `rv-output.txt` 和 `la-output.txt`。连续切换架构时，应确认使用了对应的 Cargo 配置，避免两个构建过程同时修改共享配置文件。
+
+决赛文档由 Markdown 生成 Typst，再由 Typst 输出 PDF：
+
+```bash
+bash docs/决赛文档/build.sh
+```
+
+正文源文件位于 `docs/决赛文档/markdown/`，`chapters/` 是自动生成的中间文件，不应直接修改。
+
+== 12.4 后续工作
+<124-后续工作>
+后续工作首先是继续完善双架构验证。RV64 的 SMP、共享地址空间和工具链压力测试已经积累了较多专项经验，下一步需要用同样的方法覆盖 LoongArch64，并把启动问题、功能问题和并发问题分别记录和复现。
+
+地址空间和文件映射还可以继续扩展。swap、通用页面回收、更完整的 file-backed loader 语义，以及共享映射在文件截断和失效时的处理，都可以建立在现有 VMA、PTE 和 backing 模型上。
+
+并发性能方面，当前全局调度队列、namei 修改锁和部分文件后端锁优先保证状态一致性。后续应先结合实际压力测试确定瓶颈，再考虑 per-CPU 队列、缓存粒度和锁顺序等优化，避免为了追求形式上的并发而破坏已有协议。
+
+Linux ABI 和 IPC 仍有补充空间，例如 `SA_RESTART`、实时信号排队、消息队列、semaphore、更多 socket 选项和更完整的 UNIX 域消息边界。这些功能可以继续沿用当前的任务、等待队列、FileOp 和信号对象，而不必重新建立一套独立框架。
+
+网络和设备数据面也可以继续扩展。当前网络重点是 loopback 和用户态可观察的 socket 语义，后续可以完善 virtio-net、真实网卡收发、IPv6 地址配置和路由，同时继续统一设备文件与驱动接口。
+
+== 12.5 结语
+<125-结语>
+RespOS 从用户态启动和基础系统调用出发，逐步扩展到双架构、进程生命周期、虚拟内存、文件系统、进程通信、时钟和网络。项目的主要成果不只是增加了系统调用，而是建立了这些模块之间可以配合工作的对象和协议：任务能够创建、阻塞、唤醒和回收，地址空间能够按需建立和修改，文件和 socket 能够沿统一的 fd 边界使用，硬件差异也被限制在架构层。
+
+当前实现仍有可以完善的地方，但已经形成了较完整的内核骨架和多模块协作路径。后续无论是补充 ABI、优化并发，还是扩展设备和网络，都可以在现有边界上逐步推进。

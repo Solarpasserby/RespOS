@@ -1,189 +1,138 @@
 = 1. 概述
 <1-概述>
-#quote(block: true)[
-本章回答：RespOS 面向什么目标构建？各内核模块如何协作？双架构、Linux ABI 兼容和 Rust 工程实践如何共同落到可运行的系统上？
-]
+RespOS 是一个使用 Rust 编写的教学与竞赛型宏内核，面向全国大学生操作系统比赛中的 Linux 用户态程序，支持 RISC-V64 与 LoongArch64 两种架构。项目的重点不是堆叠系统调用数量，而是把启动、任务、地址空间、文件、网络、信号和设备这些基础部分连接起来，使用户程序能够沿着一条完整的执行链运行。
 
-== 1.1 项目定位与设计目标
-<11-项目定位与设计目标>
-RespOS 是一个使用 Rust 编写的教学与竞赛型宏内核，面向全国大学生操作系统比赛的用户态工作负载，支持 RISC-V64 与 LoongArch64 两种架构。项目的主要目标不是实现一组彼此独立的系统调用，而是构建一条能够运行真实用户程序的内核执行链：从架构启动、地址空间和任务调度，到文件、网络、信号、时钟和设备，再通过接近 Linux 的 ABI 向用户态提供服务。
-
-内核设计围绕三个相互约束的目标展开：
+== 1.1 项目目标
+<11-项目目标>
+RespOS 的设计由三个目标共同决定：
 
 #figure(
   align(center)[#table(
     columns: 3,
     align: (auto,auto,auto,),
-    table.header([设计目标], [RespOS 的实现方向], [评委可观察的结果],),
+    table.header([目标], [具体做法], [体现出的结果],),
     table.hline(),
-    [跨架构复用], [公共模块复用任务、内存、文件和系统调用逻辑；启动、页表、trap、切换和计时在 `arch/` 中特化], [同一套内核功能可以落到 RV64 与 LA64 的不同特权体系],
-    [Linux 用户态兼容], [系统调用层负责 ABI 参数、返回值和错误码；领域模块维护实际对象与状态机], [musl/glibc 程序可以沿统一 syscall 边界运行],
-    [工程上的可维护性], [Rust 所有权、锁和 RAII 管理资源生命周期；失败路径先准备、后提交], [fork、exec、mmap、mount、socket、信号等复杂操作具有明确的提交边界],
+    [支持两种架构], [任务、内存、文件和系统调用等部分尽量复用；启动、页表、trap、上下文切换和时钟在架构层分别实现], [同一套内核功能可以运行在 RV64 与 LA64 上],
+    [兼容 Linux 用户态], [syscall 层处理 ABI 参数、返回值和错误码，具体状态由各领域模块维护], [musl/glibc 程序可以通过统一的系统调用边界使用内核],
+    [保持工程上的可维护性], [用明确的数据结构、锁和资源生命周期组织复杂操作，并为失败路径保留回滚空间], [fork、exec、mmap、mount、socket 和信号等操作有清晰的模块边界],
   )]
   , kind: table
   )
 
-表 1-1 RespOS 的总体设计目标
+表 1-1 RespOS 的设计目标
 
-这些目标决定了后续章节的叙述重点。常规的 Linux 接口只作必要说明；真正展开的是项目自身的数据结构、跨模块调用链、并发协议、资源生命周期和架构适配，因为这些部分体现了内核设计工作的主要内容。
+这三个目标相互制约。Linux 兼容要求内核提供稳定的用户态语义，双架构支持要求公共代码不能依赖某一套寄存器或页表格式，而多模块协作又要求文件、内存和任务对象能够安全地共享。因此，本文档重点介绍数据结构、调用关系、资源所有权和并发协议；对于已经约定俗成的接口，只说明它在 RespOS 中如何落地。
 
-== 1.2 从启动到用户程序的整体架构
-<12-从启动到用户程序的整体架构>
-RespOS 采用宏内核结构：内核子系统运行在同一特权级地址空间中，通过明确的模块边界组织职责；用户程序则通过系统调用、信号和文件/网络接口与内核交互。一次典型的启动与执行链如下：
+== 1.2 从启动到用户程序
+<12-从启动到用户程序>
+RespOS 采用宏内核结构。内核子系统运行在同一特权级地址空间中，通过对象和模块边界分工；用户程序通过系统调用、文件描述符、信号和网络接口与内核交互。
+
+一次典型的启动和执行过程可以概括为：
 
 ```text
-架构入口与早期地址映射
-          │
-          ▼
-公共 Rust 启动阶段：trap → 内存 → 网络 → initproc → timer
-          │
-          ▼
-任务管理与调度器创建用户态执行上下文
-          │
-          ▼
-用户程序通过 syscall / trap 进入内核
-          │
-          ├─ task：创建、阻塞、唤醒、切换与退出
-          ├─ mm：地址空间、缺页、COW、mmap
-          ├─ fs：VFS、文件描述符、页缓存与设备文件
-          ├─ ipc/signal：进程协作、同步与异步通知
-          ├─ timer：时间、超时、唤醒与计时器
-          └─ net/drivers：socket、协议轮询与设备访问
-          │
-          ▼
-返回用户态或由调度器切换到另一个任务
+架构入口
+  → 建立早期栈、页表和 trap 环境
+  → 初始化内存、任务、文件系统、网络和时钟
+  → 创建 initproc 并进入调度
+  → 用户程序通过 syscall 或硬件 trap 进入内核
+  → 各领域模块完成操作、阻塞或唤醒
+  → 返回用户态，或由调度器切换到其他任务
 ```
 
-图 1-1 RespOS 从启动到用户态执行的整体调用链
+图 1-1 RespOS 的启动与执行链
 
-公共启动顺序体现了模块之间的依赖关系：trap 入口必须先可用，内存管理必须在创建任务和网络对象前完成，initproc 入队后才进入正式调度，timer interrupt 则在调度路径准备好之后开启。用户程序运行后，系统调用和硬件 trap 共同成为进入内核的入口，最终由任务管理决定继续返回当前任务还是切换到其他任务。
+启动阶段的先后顺序由模块依赖决定：trap 入口需要先具备基本的保存和恢复能力，内存管理要先于用户任务和大多数内核对象建立，initproc 入队后系统才进入常规调度，时钟中断则为调度、睡眠和超时机制提供持续的时间事件。
 
-从代码组织看，内核主要由以下几类部分组成：
+用户程序运行后，系统调用和硬件异常共同成为进入内核的入口。syscall 层只负责解析用户参数、检查指针和转换返回值，随后把请求交给 task、mm、fs、net、signal 或 timer 等模块。操作完成后，内核根据当前任务的状态返回用户态；如果任务进入阻塞状态，则由调度器选择其他可运行任务。
+
+== 1.3 内核的主要组成
+<13-内核的主要组成>
+RespOS 的主要代码位于 `os/src/`：
 
 ```text
 os/src/
-├── arch/       # RV64/LA64 启动、页表、trap、上下文、时钟
-├── task/       # TCB、线程组、调度器、futex、退出回收
-├── mm/         # 页帧、堆、MemorySet、VMA、COW、文件映射
-├── fs/         # VFS、ext4、mount、namei、fd、page cache、pipe
-├── signal/     # pending、handler、siginfo、alt stack、sigreturn
-├── net/        # socket、TCP/UDP、UNIX socket、loopback、监听池
-├── drivers/    # virtio block/net、串口与设备中断
-├── syscall/    # Linux ABI 参数解析和各领域入口
+├── arch/       # RV64/LA64 启动、页表、trap、上下文和时钟
+├── task/       # 任务控制块、线程组、调度、futex 和退出回收
+├── mm/         # 页帧、MemorySet、VMA、COW 和文件映射
+├── fs/         # VFS、ext4、mount、namei、fd、页缓存和 pipe
+├── signal/     # pending、handler、siginfo、alt stack 和 sigreturn
+├── net/        # socket、TCP/UDP、UNIX socket、loopback 和监听池
+├── drivers/    # virtio、串口和设备中断相关代码
+├── syscall/    # Linux ABI 参数解析和各领域系统调用入口
 └── main.rs     # 公共启动入口
 ```
 
-图 1-2 RespOS 内核源码的主要模块
+图 1-2 RespOS 内核的主要模块
 
-这里的目录划分并不等同于完全独立的服务。各模块通过对象引用、任务状态和系统调用边界协作。例如，管道阻塞需要 task 的等待队列和 signal 的可中断语义，`mmap` 文件映射同时依赖 MM 的 VMA/PTE 和 FS 的 `FileOp`/页缓存，网络 socket 则通过 FS 的 `FileOp` 进入统一 fd 生命周期。
+这些目录不是彼此隔离的服务。例如，`mmap` 同时需要 MM 的 VMA/PTE 管理和 FS 的 `FileOp`、页缓存；pipe 和 socket 的阻塞需要 task 的等待与唤醒机制；信号投递要修改用户态 `TrapContext`，并由 trap 返回路径恢复；文件描述符则把普通文件、pipe、socket、timerfd 和设备对象放进同一套用户接口。
 
-== 1.3 核心对象与模块边界
-<13-核心对象与模块边界>
-RespOS 把"执行单元""地址空间""打开文件"和"硬件上下文"分开建模，避免一个对象同时承担过多身份。表 1-2 给出了贯穿多个章节的核心对象。
-
-#figure(
-  align(center)[#table(
-    columns: 4,
-    align: (auto,auto,auto,auto,),
-    table.header([对象], [所属模块], [负责的状态], [与其他模块的连接],),
-    table.hline(),
-    [`TaskControlBlock`], [task], [tid/tgid、任务状态、内核栈、资源引用、调度属性], [持有 `MemorySet`、`FdTable`、信号状态，并进入 scheduler],
-    [`MemorySet` / VMA], [mm], [用户地址空间、映射权限、驻留页、文件 backing], [trap 缺页入口调用，exec/mmap/clone 修改],
-    [`TrapContext`], [arch/trap], [用户寄存器、返回 PC、特权状态], [syscall、signal、page fault 修改后由返回汇编恢复],
-    [`TaskContext`], [task/arch], [内核切换点、内核栈和地址空间 token], [`__switch` 保存与恢复，连接 scheduler 和页表],
-    [`FdTable` / `FileOp`], [fs], [描述符旗标、open-file 状态、偏移和对象操作], [pipe、socket、timerfd、设备文件复用 fd 接口],
-    [`Dentry` / `InodeOp`], [fs], [路径身份和后端文件对象], [namei、mount、ext4、procfs、devfs 共享 VFS 入口],
-    [timeout registry], [timer/task/signal], [deadline、等待者和到期动作], [唤醒 nanosleep/futex，投递信号，通知 timerfd],
-  )]
-  , kind: table
-  )
-
-表 1-2 RespOS 的核心对象与跨模块连接
-
-这些对象之间存在清晰的所有权和生命周期边界。TCB 是调度器真正管理的执行单元，但用户态现场保存在其内核栈上的 `TrapContext` 中；`TaskContext` 只保存内核态切换所需的最小状态。`FdTable` 保存描述符层关系，真正的 open-file 状态由共享的 `FileOp` 持有，因此 `dup`、fork 和线程创建可以分别表达"共享打开实例"和"是否共享描述符表"。类似地，VMA 描述地址范围和权限，实际页帧由页表和映射 backing 管理，缺页时再按需建立 PTE。
-
-== 1.4 贯穿各模块的设计方法
-<14-贯穿各模块的设计方法>
-=== 1.4.1 用对象模型表达 Linux 语义
-<141-用对象模型表达-linux-语义>
-RespOS 没有把 Linux ABI 直接实现成大量 syscall 分支，而是将用户可观察语义落到稳定对象上：进程和线程统一由 TCB 表示，fork/clone 通过资源共享边界表达差异；文件描述符、open-file description、路径、dentry 和 inode 分层表达文件语义；socket、pipe 和 timerfd 则作为 `FileOp` 接入同一套 fd 生命周期。
-
-这种分层使系统调用层保持较薄。syscall 负责从用户空间读取参数、检查范围和权限、调用领域对象，并把结果转换为 ABI 规定的返回值；真正的状态转换、阻塞唤醒和失败回滚由 task、mm、fs、net 等模块各自维护。
-
-=== 1.4.2 以生命周期和提交边界保证失败安全
-<142-以生命周期和提交边界保证失败安全>
-内核中许多操作都不是单次赋值，而是跨越多个对象的状态迁移。RespOS 对这类操作采用"先准备、再提交、最后释放旧状态"的原则：
-
-#figure(
-  align(center)[#table(
-    columns: 4,
-    align: (auto,auto,auto,auto,),
-    table.header([操作], [先准备的内容], [提交时机], [需要保持的关系],),
-    table.hline(),
-    [fork/clone], [子任务、地址空间元数据、共享资源引用], [子任务状态和资源关系准备完成后入队], [父子任务不能重复入队，COW 权限修改保持一致],
-    [exec], [ELF、VMA、用户栈和参数辅助向量], [新映像可运行后替换旧地址空间], [旧映像失败时仍可继续运行，其他线程先完成静止协议],
-    [mmap/缺页], [VMA、页帧或文件 backing], [权限和资源准备成功后安装 PTE], [VMA、PTE 和页帧状态相容],
-    [mount/namei], [mount、dentry 和目标路径], [挂载关系验证后接入挂载树], [路径身份与后端 inode 不混淆],
-    [socket/accept], [协议对象、listener handle 和 fd], [对象所有权明确后发布 fd], [handle 不重复移交，失败时恢复队列和状态],
-  )]
-  , kind: table
-  )
-
-表 1-3 典型操作的准备---提交边界
-
-生命周期协议同样贯穿阻塞和回收：任务进入 blocked 集合后才发布可能唤醒它的事件，futex/pipe/socket 的竞争路径使用单赢家完成状态，退出任务则延迟到安全栈上析构。这样的实现重点不是让所有路径看起来相同，而是让每个跨模块操作都能说明"谁拥有对象、谁可以提交、失败后如何恢复"。
-
-=== 1.4.3 把架构差异收敛在硬件边界
-<143-把架构差异收敛在硬件边界>
-RISC-V64 和 LoongArch64 不共享寄存器、页表根寄存器或异常返回指令，因此 RespOS 没有强行把底层代码写成完全相同的实现。公共代码通过 `arch/mod.rs` 的条件编译和模块重导出使用统一语义入口；架构目录分别实现启动、地址转换、trap entry/return、任务切换、时钟和中断控制。
-
-例如，公共 trap handler 只需要通过 `get_a0`、`set_a0`、`get_sepc` 等方法读写上下文，具体是 RISC-V 的 `x[10]`/`sepc`，还是 LoongArch 的 `x[4]`/`era`，由架构上下文实现决定。公共内存管理也只依赖页表的 map、unmap、query 和刷新语义，而不直接散落 `satp`、`PGDL/PGDH` 或 TLB 指令。
-
-== 1.5 各模块的功能主线与章节导航
-<15-各模块的功能主线与章节导航>
-第 2---9 章按照"执行基础 → 资源管理 → 外部交互 → 硬件落地"的顺序展开。各章并非简单罗列接口，而是分别解释一个关键内核问题：
+== 1.4 贯穿内核的核心对象
+<14-贯穿内核的核心对象>
+RespOS 将执行状态、地址空间、文件对象和硬件现场分开保存。这样做的好处是，资源共享关系可以单独表达，架构差异也不会扩散到公共模块。
 
 #figure(
   align(center)[#table(
     columns: 3,
     align: (auto,auto,auto,),
-    table.header([章节], [核心问题], [主要设计内容],),
+    table.header([对象], [主要职责], [跨模块关系],),
     table.hline(),
-    [第 2 章 进程管理], [任务如何创建、调度、阻塞、退出并在多核下安全切换？], [TCB、线程组、clone/exec、调度队列、上下文切换、SMP 生命周期],
-    [第 3 章 中断与异常处理], [trap 如何保存现场、分发事件并安全返回？], [TrapContext、syscall、缺页、timer trap、信号交付、双架构返回协议],
-    [第 4 章 内存管理], [地址空间如何表示，页如何按需建立和回收？], [VMA/PTE/frame、lazy allocation、COW、文件映射、TLB 可见性],
-    [第 5 章 文件系统], [fd、路径和后端文件系统如何连接？], [VFS、mount/namei、ext4、procfs/devfs、页缓存、fd 生命周期],
-    [第 6 章 进程间通信与信号], [任务如何通知、传输、同步和共享内存？], [signal、pipe、futex、System V 共享内存及其竞争协议],
-    [第 7 章 时钟模块], [硬件计数器如何驱动超时、唤醒和用户时间接口？], [时间尺度、deadline registry、sleep、interval/POSIX timer、timerfd],
-    [第 8 章 网络模块], [socket ABI 如何连接协议栈、设备和阻塞模型？], [smoltcp、TCP/UDP/UNIX socket、loopback、listener pool、poll],
-    [第 9 章 硬件抽象层与架构适配], [同一套公共内核如何落到两种指令集？], [启动、页表、trap、TaskContext、时钟和架构边界],
+    [`TaskControlBlock`], [保存 tid/tgid、任务状态、内核栈、调度属性和资源引用], [持有或关联地址空间、fd 表和信号状态，由 scheduler 管理],
+    [`MemorySet` / VMA], [表示用户地址空间、映射权限和文件 backing], [被 exec、fork、mmap、缺页和 trap 路径共同使用],
+    [`TrapContext`], [保存用户寄存器、返回地址和特权状态], [syscall、缺页和信号处理会修改它，返回汇编负责恢复],
+    [`TaskContext`], [保存内核态切换点和内核栈信息], [由上下文切换代码保存和恢复，连接任务与调度器],
+    [`FdTable` / `FileOp`], [管理 fd 与打开文件状态], [pipe、socket、timerfd 和设备文件复用 `FileOp` 接口],
+    [`Dentry` / `InodeOp`], [分别表示路径中的目录项和后端文件对象], [由 namei、mount、ext4、procfs 和 devfs 共同使用],
+    [timeout registry], [管理 deadline、等待者和到期动作], [服务 sleep、futex、信号和 timerfd 的超时唤醒],
   )]
   , kind: table
   )
 
-表 1-4 第 2---9 章的功能主线
+表 1-2 RespOS 的核心对象
 
-阅读这些章节时，可以沿着三条贯穿全书的链路理解 RespOS。第一条是执行链：启动建立硬件环境，task 创建和调度执行单元，trap 在用户态与内核态之间切换。第二条是资源链：mm 管理地址空间，fs 管理文件和设备对象，net 将 socket 接入 fd 生命周期。第三条是事件链：timer 产生时间事件，signal、pipe、futex 和 socket 将事件转换为唤醒、通知或数据可见性。
+这些对象之间的区别也对应着不同的生命周期。例如，`FdTable` 保存的是描述符关系，打开文件的偏移和访问状态由共享的 `FileOp` 持有，因此 `dup`、fork 和线程创建可以分别表达不同的共享方式。VMA 只描述一段地址范围及其权限，实际页帧在缺页或映射建立时才进入页表。TCB 是调度器管理的执行单元，而用户态寄存器现场保存在其内核栈上的 `TrapContext` 中，`TaskContext` 只承担内核态切换所需的状态。
 
-== 1.6 功能与设计总结
-<16-功能与设计总结>
-RespOS 的整体设计可以概括为表 1-5：
+== 1.5 两条贯穿各模块的实现原则
+<15-两条贯穿各模块的实现原则>
+=== 1.5.1 用对象边界承载 Linux 语义
+<151-用对象边界承载-linux-语义>
+RespOS 没有把所有行为都堆在 syscall 分支中，而是把用户可以观察到的状态放入稳定对象：任务和线程由 TCB 表示，地址空间由 `MemorySet` 表示，文件系统把 fd、打开文件、路径、dentry 和 inode 分开，socket、pipe 和 timerfd 则通过 `FileOp` 接入统一的 fd 生命周期。
+
+因此，syscall 层的职责相对集中：从用户空间取参数，检查范围和权限，调用领域对象，并把结果转换成 ABI 规定的返回值。状态转换、阻塞唤醒和资源释放由具体模块负责。这种分工也使文件映射、socket 阻塞和信号返回等跨模块操作能够沿已有对象接口组合起来。
+
+=== 1.5.2 先准备，再提交
+<152-先准备再提交>
+fork、exec、mmap、mount 和 accept 等操作都会同时影响多个对象，单个步骤成功并不代表整个操作已经完成。RespOS 对这类路径采用"先准备、后发布"的组织方式：先创建对象、检查资源和建立引用关系，确认关键步骤成功后再改变任务状态、挂载关系、页表或 fd 表；如果中途失败，则释放已准备的资源，不发布半完成状态。
+
+例如，exec 要先完成 ELF 装载、地址空间和用户栈准备，再替换旧映像；fork 要先完成子任务和资源关系的建立，再把子任务放入可运行队列；阻塞操作则要先将任务和等待条件建立关联，再进入 blocked 状态。这个原则贯穿资源回收、阻塞唤醒和并发错误处理，是各模块之间能够稳定协作的基础。
+
+=== 1.5.3 把架构差异收敛在边界内
+<153-把架构差异收敛在边界内>
+RISC-V64 与 LoongArch64 在寄存器、页表根寄存器、异常入口和返回指令上都存在差异。RespOS 没有强行让底层实现完全相同，而是由公共模块使用统一的语义接口，架构目录分别实现启动、页表、trap、任务切换、时钟和中断控制。
+
+例如，公共 syscall 代码通过 `get_a0`、`set_a0`、`get_sepc` 等方法访问上下文，不直接读取某一架构的寄存器数组。公共内存管理也只依赖 map、unmap、query 和刷新等语义，具体页表格式和 TLB 指令由架构层处理。这样，架构适配不会改变上层任务、文件和系统调用的基本模型。
+
+== 1.6 章节安排
+<16-章节安排>
+第 2---9 章按照"执行基础---资源管理---外部交互---硬件落地"的顺序展开：
 
 #figure(
   align(center)[#table(
     columns: 3,
     align: (auto,auto,auto,),
-    table.header([设计成果], [形成方式], [对系统的作用],),
+    table.header([章节], [主要问题], [内容范围],),
     table.hline(),
-    [双架构公共内核], [公共 Rust 模块 + `arch/` 内的架构特化入口], [保持任务、内存、文件和网络语义一致，同时适配两套硬件体系],
-    [统一执行模型], [TCB、TrapContext、TaskContext 和 scheduler 分工], [将用户态运行、内核态处理和任务切换连接为完整闭环],
-    [统一资源接口], [VMA、VFS、FileOp、socket 和 timer registry 分层], [让 mmap、文件、网络、设备和计时器能够复用成熟的生命周期机制],
-    [Linux ABI 兼容路径], [syscall 薄层 + 领域模块状态机], [使真实用户程序通过一致的参数、返回值和错误语义使用内核],
-    [面向并发的工程实现], [锁、原子状态、single-winner 协议和延迟析构], [覆盖多核调度、阻塞唤醒、页表修改和资源回收中的竞态],
+    [第 2 章 进程管理], [任务如何创建、调度、阻塞和退出？], [TCB、线程组、clone/exec、调度器、上下文切换和 SMP 生命周期],
+    [第 3 章 中断与异常处理], [trap 如何保存现场并安全返回？], [TrapContext、syscall、缺页、timer trap、信号交付和双架构返回],
+    [第 4 章 内存管理], [地址空间如何建立、修改和回收？], [VMA/PTE/页帧、lazy allocation、COW、文件映射和 TLB 可见性],
+    [第 5 章 文件系统], [fd、路径和后端文件系统如何连接？], [VFS、mount/namei、ext4、procfs/devfs、页缓存和 fd 生命周期],
+    [第 6 章 进程间通信与信号], [任务如何传递数据、同步和通知？], [signal、pipe、futex、System V 共享内存及其竞争协议],
+    [第 7 章 时钟模块], [时间事件如何驱动睡眠和超时？], [时间尺度、deadline、sleep、POSIX timer 和 timerfd],
+    [第 8 章 网络模块], [socket ABI 如何连接协议栈和阻塞模型？], [smoltcp、TCP/UDP/UNIX socket、loopback、监听池和 poll],
+    [第 9 章 硬件抽象层与架构适配], [公共内核如何落到两种指令集？], [启动、页表、trap、TaskContext、时钟和架构边界],
   )]
   , kind: table
   )
 
-表 1-5 RespOS 的总体设计成果
+表 1-3 第 2---9 章的内容安排
 
-后续章节将从执行单元开始，依次展开任务、trap、内存、文件、IPC、时钟、网络和架构适配。它们共同说明 RespOS 如何把一个面向比赛测例的内核目标，落实为可启动、可调度、可交互并能够在两种架构上复用的系统实现。
+阅读后续章节时，可以把 RespOS 看成三条相互交织的链路：任务和 trap 构成执行链，MM、VFS 和 socket 构成资源链，timer、signal、pipe、futex 和网络 poll 构成事件链。它们最终汇合在同一个目标上：让用户程序能够在两种架构上通过接近 Linux 的接口完成加载、运行、阻塞、通信和退出。
