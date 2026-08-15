@@ -1,5 +1,25 @@
 # RespOS 当前状态
 
+## 2026-08-15 Phase 5 SysV SHM 核心 metadata 独立门禁（基于 `60deddb`）
+
+- **独立契约**：新增 Linux/guest `sysv_shm_metadata_probe`，不创建工作 child，避免把 `shmctl`
+  metadata 与 LA64 多子进程 signal/reap 活性混在一起。4113-byte segment 必须保留原始 `shm_segsz`，
+  同时在 `SHM_INFO.shm_tot` 中计为 2 页；初始 owner/group、`0640` mode、creator pid、last-op pid、
+  attach 数和零 atime/dtime 必须符合 Linux。
+- **状态转换**：probe 通过 `SHM_STAT` index 和 `SHM_STAT_ANY` 找回同一 shmid；attach/detach 验证
+  `shm_nattch=1->0`、`shm_lpid`、atime/dtime 的相对更新，`IPC_SET` 验证 mode 与 ctime，随后再次
+  attach、`IPC_RMID`，要求最后 detach 前 `SHM_DEST` 可见且 `SHM_INFO` 仍计入 segment/页数，最后
+  detach 后 shmid 返回 `EINVAL` 且全局计数恢复。
+- **验证结果**：Linux 以 `-std=c11 -Wall -Wextra -Werror -O2` 编译并输出
+  `SYSV_SHM_METADATA_LINUX PASS index=<namespace-dependent> size=4113 pages=2`。release 初赛 snapshot、
+  4 GiB/2 hart 的
+  RV64/LA64 均输出 `SYSV_SHM_METADATA PASS index=0 size=4113 pages=2` 与 runner PASS，日志为
+  `/tmp/respos-{rv,la}-sysv-shm-metadata.log`；本轮无需修改内核。
+- **边界**：该结果独立确认核心 `IPC_STAT/IPC_SET/SHM_STAT/SHM_STAT_ANY/SHM_INFO/SHM_DEST` 状态，不
+  代表非 root permission denial、`SHM_STAT_ANY` 权限绕过、`SHM_LOCK/SHM_UNLOCK` capability 或时间戳
+  的绝对 realtime 基准已闭合。LA64 `shmctl01` 的 20-child signal/reap teardown 阻断也仍存在，但不能
+  再归因于本 probe 已覆盖的 metadata 返回值。
+
 ## 2026-08-15 Phase 5 SysV SHM size 与 `SHMMNI/SHMALL` 配额回收（基于 `9548ded`）
 
 - **size/lookup 契约**：Linux 要求新建 segment 的 size 0 和 `SHMMAX+1` 返回 `EINVAL`。已有 keyed

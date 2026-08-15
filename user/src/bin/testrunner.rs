@@ -61,6 +61,8 @@ const TASK_A_SYSV_SHM_LIFECYCLE_PROBE: bool =
 const TASK_A_SYSV_SHM_NATTCH_PROBE: bool = option_env!("TASK_A_SYSV_SHM_NATTCH_PROBE").is_some();
 const TASK_A_SYSV_SHM_ATTACH_RACE_PROBE: bool =
     option_env!("TASK_A_SYSV_SHM_ATTACH_RACE_PROBE").is_some();
+const TASK_A_SYSV_SHM_METADATA_PROBE: bool =
+    option_env!("TASK_A_SYSV_SHM_METADATA_PROBE").is_some();
 const TASK_A_PWRITE_APPEND_ATOMIC_PROBE: bool =
     option_env!("TASK_A_PWRITE_APPEND_ATOMIC_PROBE").is_some();
 const TASK_A_SIGNAL_PHASE5_PROBE: bool = option_env!("TASK_A_SIGNAL_PHASE5_PROBE").is_some();
@@ -1696,6 +1698,29 @@ fn run_task_a_sysv_shm_attach_race_probe() -> i32 {
     status
 }
 
+fn run_task_a_sysv_shm_metadata_probe() -> i32 {
+    let pid = fork();
+    assert!(pid >= 0, "failed to fork sysv_shm_metadata_probe");
+    if pid == 0 {
+        let argv = ["sysv_shm_metadata_probe\0".as_ptr(), core::ptr::null()];
+        let ret = exec("sysv_shm_metadata_probe\0", &argv);
+        println!("[testrunner] exec sysv_shm_metadata_probe failed: {}", ret);
+        exit(-1);
+    }
+
+    let mut status = 0;
+    assert_eq!(waitpid(pid as usize, &mut status), pid);
+    if status == 0 {
+        println!("[testrunner] SysV SHM metadata probe PASS");
+    } else {
+        println!(
+            "[testrunner] SysV SHM metadata probe failed: status={}",
+            status
+        );
+    }
+    status
+}
+
 fn run_task_a_pwrite_append_atomic_probe() -> i32 {
     let pid = fork();
     assert!(pid >= 0, "failed to fork pwrite_append_atomic_probe");
@@ -1929,6 +1954,12 @@ fn main() -> i32 {
         poweroff();
         return if status == 0 { 0 } else { 1 };
     }
+    if TASK_A_SYSV_SHM_METADATA_PROBE {
+        let status = run_task_a_sysv_shm_metadata_probe();
+        println!("[testrunner] SysV SHM metadata probe finished, powering off");
+        poweroff();
+        return if status == 0 { 0 } else { 1 };
+    }
     if TASK_A_PWRITE_APPEND_ATOMIC_PROBE {
         let status = run_task_a_pwrite_append_atomic_probe();
         println!("[testrunner] pwrite append atomic probe finished, powering off");
@@ -2123,6 +2154,12 @@ fn main() -> i32 {
     if TASK_A_SYSV_SHM_ATTACH_RACE_PROBE {
         let status = run_task_a_sysv_shm_attach_race_probe();
         println!("[testrunner] SysV SHM attach race probe finished, powering off");
+        poweroff();
+        return if status == 0 { 0 } else { 1 };
+    }
+    if TASK_A_SYSV_SHM_METADATA_PROBE {
+        let status = run_task_a_sysv_shm_metadata_probe();
+        println!("[testrunner] SysV SHM metadata probe finished, powering off");
         poweroff();
         return if status == 0 { 0 } else { 1 };
     }
