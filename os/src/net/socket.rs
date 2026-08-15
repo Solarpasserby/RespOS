@@ -1282,7 +1282,8 @@ impl FileOp for Socket {
     fn poll_rdhup(&self) -> bool {
         match &self.inner {
             SocketInner::Tcp(tcp) => tcp.peer_write_closed(),
-            SocketInner::Udp(_) | SocketInner::Unix(_) => false,
+            SocketInner::Unix(unix) => unix.poll_rdhup(),
+            SocketInner::Udp(_) => false,
         }
     }
 
