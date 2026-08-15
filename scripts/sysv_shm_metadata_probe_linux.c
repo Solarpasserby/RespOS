@@ -108,6 +108,12 @@ static void assert_access_denials(key_t key, int shmid, int index,
         errno = 0;
         assert(shmctl(shmid, IPC_RMID, NULL) == -1);
         assert(errno == EPERM);
+        errno = 0;
+        assert(shmctl(shmid, SHM_LOCK, NULL) == -1);
+        assert(errno == EPERM);
+        errno = 0;
+        assert(shmctl(shmid, SHM_UNLOCK, NULL) == -1);
+        assert(errno == EPERM);
     }
 }
 
@@ -208,6 +214,17 @@ int main(void)
     assert((updated.shm_perm.mode & 0777) == 0604);
     assert(updated.shm_ctime >= detached.shm_ctime);
 
+    assert(shmctl(shmid, SHM_LOCK, NULL) == 0);
+    struct shmid_ds locked;
+    assert(shmctl(shmid, IPC_STAT, &locked) == 0);
+    assert((locked.shm_perm.mode & SHM_LOCKED) != 0);
+    assert(locked.shm_ctime >= updated.shm_ctime);
+    assert(shmctl(shmid, SHM_UNLOCK, NULL) == 0);
+    struct shmid_ds unlocked;
+    assert(shmctl(shmid, IPC_STAT, &unlocked) == 0);
+    assert((unlocked.shm_perm.mode & SHM_LOCKED) == 0);
+    assert(unlocked.shm_ctime >= locked.shm_ctime);
+
     mapping = shmat(shmid, NULL, 0);
     assert(mapping != (void *)-1);
     assert(mapping[0] == 0x51);
@@ -233,7 +250,7 @@ int main(void)
     verify_mode_permissions();
 
     printf("SYSV_SHM_METADATA_LINUX PASS index=%d size=%d pages=2 "
-           "mode_access=pass\n",
+           "mode_access=pass lock=pass\n",
            index, SEGMENT_SIZE);
     return 0;
 }

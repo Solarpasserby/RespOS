@@ -21,7 +21,10 @@ const IPC_INFO: usize = 3;
 const SHM_STAT: usize = 13;
 const SHM_INFO: usize = 14;
 const SHM_STAT_ANY: usize = 15;
+const SHM_LOCK: usize = 11;
+const SHM_UNLOCK: usize = 12;
 const SHM_DEST: u32 = 0o1000;
+const SHM_LOCKED: u32 = 0o2000;
 const SHM_RDONLY: usize = 0o10000;
 const EINVAL: isize = 22;
 const EACCES: isize = 13;
@@ -97,6 +100,8 @@ struct PermissionResults {
     shm_stat_any: isize,
     ipc_set: isize,
     ipc_rmid: isize,
+    shm_lock: isize,
+    shm_unlock: isize,
 }
 
 fn read_stat(shmid: usize) -> ShmidDs {
@@ -174,6 +179,8 @@ fn verify_permission_matrix() -> bool {
         results.shm_stat_any = shmctl(index, SHM_STAT_ANY, ds_ptr);
         results.ipc_set = shmctl(shmid, IPC_SET, ds_ptr);
         results.ipc_rmid = shmctl(shmid, IPC_RMID, 0);
+        results.shm_lock = shmctl(shmid, SHM_LOCK, 0);
+        results.shm_unlock = shmctl(shmid, SHM_UNLOCK, 0);
         let _ = exit(0);
         return true;
     }
@@ -199,6 +206,8 @@ fn verify_permission_matrix() -> bool {
     assert_eq!(results.shm_stat_any, shmid as isize);
     assert_eq!(results.ipc_set, -EPERM);
     assert_eq!(results.ipc_rmid, -EPERM);
+    assert_eq!(results.shm_lock, -EPERM);
+    assert_eq!(results.shm_unlock, -EPERM);
     assert_eq!(cleanup, 0);
     assert_eq!(unmap, 0);
     false
@@ -278,6 +287,15 @@ fn main() -> i32 {
     assert_eq!(updated.shm_perm.mode & 0o777, 0o604);
     assert!(updated.shm_ctime >= detached.shm_ctime);
 
+    assert_eq!(shmctl(shmid, SHM_LOCK, 0), 0);
+    let locked = read_stat(shmid);
+    assert_ne!(locked.shm_perm.mode & SHM_LOCKED, 0);
+    assert!(locked.shm_ctime >= updated.shm_ctime);
+    assert_eq!(shmctl(shmid, SHM_UNLOCK, 0), 0);
+    let unlocked = read_stat(shmid);
+    assert_eq!(unlocked.shm_perm.mode & SHM_LOCKED, 0);
+    assert!(unlocked.shm_ctime >= locked.shm_ctime);
+
     let mapping = shmat(shmid, 0, 0);
     assert!(mapping > 0, "second shmat failed: {}", mapping);
     let mapping = mapping as usize;
@@ -301,7 +319,7 @@ fn main() -> i32 {
     assert_eq!(after.shm_tot, before.shm_tot);
 
     println!(
-        "SYSV_SHM_METADATA PASS index={} size={} pages=2 permission=pass",
+        "SYSV_SHM_METADATA PASS index={} size={} pages=2 permission=pass lock=pass",
         index, SEGMENT_SIZE
     );
     0

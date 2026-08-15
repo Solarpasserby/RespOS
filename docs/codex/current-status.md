@@ -1,6 +1,6 @@
 # RespOS 当前状态
 
-## 2026-08-15 Phase 5 SysV SHM metadata 与非 owner 权限门禁（基于 `198e5ca`）
+## 2026-08-15 Phase 5 SysV SHM metadata、权限与 lock 控制面（基于 `412158d`）
 
 - **独立契约**：新增 Linux/guest `sysv_shm_metadata_probe`；核心状态向量不创建工作 child，权限向量只
   创建一个 child 并立即 wait，避免把 `shmctl` metadata 与 LA64 多子进程 signal/reap 活性混在一起。
@@ -16,16 +16,19 @@
   和 [`shmget(2)`](https://man7.org/linux/man-pages/man2/shmget.2.html) 同样要求所请求的 read/write 权限。
   Linux probe 以 mode `0000` 验证无权限查询/attach 和 `SHM_STAT_ANY`；guest 由 root parent 创建后只
   fork 一个 child，依次 `setgid/setuid(65534)`，再验证完整 `EACCES/EPERM` 矩阵并由 parent wait/清理。
+- **lock 控制面**：Linux probe 在当前 unlimited `RLIMIT_MEMLOCK` 环境中先 fault 两页，再要求 owner
+  `SHM_LOCK` 成功且 `IPC_STAT` 暴露 `SHM_LOCKED`，`SHM_UNLOCK` 后清零；guest 验证相同 flag 转换，并
+  要求非 owner child 的 lock/unlock 都返回 `EPERM`。RespOS 当前没有 swap，segment frames 创建时已
+  常驻，因此该向量只确认控制面 metadata 与 ownership，不证明 Linux page pinning/memlock accounting。
 - **验证结果**：Linux 以 `-std=c11 -Wall -Wextra -Werror -O2` 编译并输出
-  `SYSV_SHM_METADATA_LINUX PASS index=<namespace-dependent> size=4113 pages=2 mode_access=pass`。release
+  `SYSV_SHM_METADATA_LINUX PASS index=<namespace-dependent> size=4113 pages=2 mode_access=pass lock=pass`。release
   初赛 snapshot、4 GiB/2 hart 的 RV64/LA64 均输出
-  `SYSV_SHM_METADATA PASS index=1 size=4113 pages=2 permission=pass` 与 runner PASS，日志为
-  `/tmp/respos-{rv,la}-sysv-shm-permission.log`；本轮内核无需修改，仅为 guest user library 增加直接
-  `setuid/setgid` syscall 薄封装。
+  `SYSV_SHM_METADATA PASS index=1 size=4113 pages=2 permission=pass lock=pass` 与 runner PASS，日志为
+  `/tmp/respos-{rv,la}-sysv-shm-lock.log`；本轮内核无需修改。
 - **边界**：该结果独立确认核心 `IPC_STAT/IPC_SET/SHM_STAT/SHM_STAT_ANY/SHM_INFO/SHM_DEST` 状态，不
-  代表 user/IPC namespace capability、`SHM_LOCK/SHM_UNLOCK` 的 `CAP_IPC_LOCK`/`RLIMIT_MEMLOCK` 或
-  时间戳的绝对 realtime 基准已闭合。LA64 `shmctl01` 的 20-child signal/reap teardown 阻断也仍存在，
-  但不能再归因于本 probe 已覆盖的 metadata/基础权限返回值。
+  代表 user/IPC namespace capability、`SHM_LOCK/SHM_UNLOCK` 的 `CAP_IPC_LOCK`/`RLIMIT_MEMLOCK`/真实
+  page pinning accounting 或时间戳的绝对 realtime 基准已闭合。LA64 `shmctl01` 的 20-child
+  signal/reap teardown 阻断也仍存在，但不能再归因于本 probe 已覆盖的 metadata/基础权限返回值。
 
 ## 2026-08-15 Phase 5 SysV SHM size 与 `SHMMNI/SHMALL` 配额回收（基于 `9548ded`）
 

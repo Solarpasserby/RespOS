@@ -377,7 +377,8 @@
 ### SysV SHM attach/detach 由 table reservation 与 MM commit 线性化
 
 - 状态：当前工作树已实现并通过双架构 lifecycle、nattch、双 attacher attach-race、顺序回收循环、
-  `SHMMIN/SHMMAX` size 矩阵、默认 `SHMMNI` 耗尽、clean-table `SHMALL` 页额度与核心 metadata 专项
+  `SHMMIN/SHMMAX` size 矩阵、默认 `SHMMNI` 耗尽、clean-table `SHMALL` 页额度、核心 metadata、
+  基础权限与 lock flag 专项
 - 适用范围：`shmat` 发布/失败、显式 `shmdt`、成功 exec、group exit、fork/`CLONE_VM` 继承、
   `IPC_RMID`
 - 最后验证：2026-08-15
@@ -401,15 +402,17 @@
 - 权限分层：`shmget` 只检查 `shmflg` 明确请求的 `0400/0200`；因此 mode `0000` segment 的
   `shmget(key, 0, 0)` 仍可返回 id，带 read 请求才为 `EACCES`。普通 `IPC_STAT/SHM_STAT` 与 `shmat`
   按 owner/group/other mode 检查，`SHM_STAT_ANY` 显式绕过 read mode；`IPC_SET/IPC_RMID` 只允许 root、
-  owner 或 creator。当前 flat credential 模型的非 owner UID/GID 65534 路径已双架构验证。
+  owner 或 creator。当前 flat credential 模型的非 owner UID/GID 65534 路径已双架构验证。`SHM_LOCK`
+  只设置 segment `locked` metadata，`IPC_STAT` 以 `SHM_LOCKED` 回报，unlock 清零；由于 frames 创建时
+  已常驻且系统无 swap，这不等同于 Linux 的按用户 `RLIMIT_MEMLOCK`/page-pinning accounting。
 - 后续影响：不得在旧 MM 仍可被 task 访问时先删 table/frame，也不得只依赖 `Drop<MemorySet>` 隐式
   猜测 IPC owner。任何跨 table/MM 的新 attach 路径都必须在可删除性检查之前登记 reservation，并在
   所有成功/失败出口撤销；新增 `CLONE_VM` 形式不得退回按 TCB 数量累计 attachment。当前 probe 已覆盖
   两个同时在途 attacher、128 轮顺序单页回收循环、`SHMMIN/SHMMAX` 与 existing-key size/flag errno
   优先级、默认 `SHMMNI=4096` 的顺序耗尽/槽位归还，以及 clean-table 下调 `SHMALL=2` 后的页计数/
   回收，以及核心单进程 metadata 状态转换；更宽 N 路并发、`SHM_REMAP` 并发覆盖、已有对象时动态
-  sysctl、IPC namespace、物理内存、单调 segment/attach ID 溢出、namespace capability、
-  `SHM_LOCK/SHM_UNLOCK` 与绝对 realtime timestamp 仍需独立验证。
+  sysctl、IPC namespace、物理内存、单调 segment/attach ID 溢出、namespace capability、lock 的
+  `RLIMIT_MEMLOCK`/真实 pinning accounting 与绝对 realtime timestamp 仍需独立验证。
 
 ## FS、VFS 与 fd 模型
 
