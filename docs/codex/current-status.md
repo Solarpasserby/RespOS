@@ -1,5 +1,23 @@
 # RespOS 当前状态
 
+## 2026-08-15 Phase 5 SysV SHM 双 attacher 与回收循环门禁（基于 `1fc3915`）
+
+- **扩展契约**：Linux/guest `sysv_shm_attach_race_probe` 从单 child 竞态扩展为每轮两个 child 同时
+  `shmat()` 已标记 `IPC_RMID` 的同一 segment，共 32 轮、64 次 attach。每次只允许
+  `EINVAL/EIDRM`，或成功读取原值且 `IPC_STAT` 仍有效、`shm_nattch >= 1`；成功后不可出现已脱离
+  table 的孤儿映射。另增加 128 轮单页 `shmget -> shmat -> IPC_RMID -> shmdt` 回收复用，要求旧
+  shmid 在最后 detach 后稳定返回 `EINVAL`。该循环验证反复分配/回收，不假定底层 frame 必然复用。
+- **验证结果**：Linux 以 `-std=c11 -Wall -Wextra -Werror -O2` 编译运行通过，输出
+  `SYSV_SHM_ATTACH_RACE_LINUX PASS pressure=128 attempts=64 invalid=0 attached=64`。release 初赛
+  snapshot、4 GiB/2 hart 的 RV64/LA64 在强制扩大 reservation/commit 窗口和恢复默认构建后均输出
+  `SYSV_SHM_ATTACH_RACE PASS pressure=128 attempts=64 invalid=0 attached=64`；日志为
+  `/tmp/respos-{rv,la}-sysv-shm-multi-attach-{forced,default}.log`。
+- **回归与边界**：恢复默认构建后，两架构 lifecycle 五向量和 `shm_nattch` 专项继续通过，日志为
+  `/tmp/respos-{rv,la}-sysv-shm-multi-{lifecycle,nattch}-regression.log`。本轮只强化 probe，没有修改
+  内核；它关闭的是两个同时在途 attacher 和 128 轮顺序回收循环，不代表任意 N 路并发、`SHMMNI`/
+  `SHMALL`/attach-id 等资源上限耗尽或 `SHM_REMAP` 并发覆盖已经闭合。LA64 `shmctl01` 的多子进程
+  signal/reap teardown 阻断也仍独立存在。
+
 ## 2026-08-14 Phase 5 `O_APPEND pwrite` 整 syscall 原子性基线（基于 `8617f87`）
 
 - **Linux 契约**：新增 `scripts/pwrite_append_atomic_probe_linux.c`，每轮让 parent/child 通过同一

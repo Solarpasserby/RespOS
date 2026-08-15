@@ -16,7 +16,9 @@ const EINVAL: isize = 22;
 const EIDRM: isize = 43;
 const PROT_READ_WRITE: usize = 0x1 | 0x2;
 const MAP_SHARED_ANONYMOUS: usize = 0x1 | 0x20;
-const ROUNDS: usize = 64;
+const ATTACHERS: usize = 2;
+const ROUNDS: usize = 32;
+const PRESSURE_ROUNDS: usize = 128;
 const CHILD_INVALID: i32 = 10;
 const CHILD_ATTACHED: i32 = 11;
 const CHILD_ORPHAN: i32 = 12;
@@ -89,6 +91,21 @@ fn main() -> i32 {
     assert_eq!(shmdt(rollback_survivor as usize), 0);
     assert_eq!(shmat(rollback_id, 0, 0), -EINVAL);
 
+    for round in 0..PRESSURE_ROUNDS {
+        let pressure_id = shmget(IPC_PRIVATE, PAGE_SIZE, IPC_CREAT | 0o600);
+        assert!(pressure_id > 0, "pressure shmget failed: {}", pressure_id);
+        let pressure_id = pressure_id as usize;
+        let pressure = shmat(pressure_id, 0, 0);
+        assert!(pressure > 0, "pressure shmat failed: {}", pressure);
+        let pressure = pressure as usize;
+        let value = round as u32 ^ 0x51a7;
+        write_word(pressure, value);
+        assert_eq!(shmctl(pressure_id, IPC_RMID, 0), 0);
+        assert_eq!(read_word(pressure), value);
+        assert_eq!(shmdt(pressure), 0);
+        assert_eq!(shmat(pressure_id, 0, 0), -EINVAL);
+    }
+
     let mut invalid = 0usize;
     let mut attached = 0usize;
     let mut orphan = 0usize;
@@ -105,37 +122,41 @@ fn main() -> i32 {
         write_word(parent, 0xa77a_c0de);
         assert_eq!(shmctl(shmid, IPC_RMID, 0), 0);
 
-        let child = fork();
-        assert!(child >= 0, "fork failed: {}", child);
-        if child == 0 {
-            assert_eq!(shmdt(parent), 0);
-            control.ready.store(1, Ordering::Release);
-            while control.go.load(Ordering::Acquire) == 0 {
-                let _ = yield_();
-            }
+        let mut children = [0isize; ATTACHERS];
+        for child_slot in children.iter_mut() {
+            let child = fork();
+            assert!(child >= 0, "fork failed: {}", child);
+            if child == 0 {
+                assert_eq!(shmdt(parent), 0);
+                control.ready.fetch_add(1, Ordering::Release);
+                while control.go.load(Ordering::Acquire) == 0 {
+                    let _ = yield_();
+                }
 
-            let mapping = shmat(shmid, 0, 0);
-            if removed_result(mapping) {
-                return CHILD_INVALID;
-            }
-            assert!(mapping > 0, "concurrent shmat failed: {}", mapping);
-            let mapping = mapping as usize;
-            assert_eq!(read_word(mapping), 0xa77a_c0de);
+                let mapping = shmat(shmid, 0, 0);
+                if removed_result(mapping) {
+                    return CHILD_INVALID;
+                }
+                assert!(mapping > 0, "concurrent shmat failed: {}", mapping);
+                let mapping = mapping as usize;
+                assert_eq!(read_word(mapping), 0xa77a_c0de);
 
-            let mut ds = ShmidDs::default();
-            let ds_ptr = &mut ds as *mut ShmidDs as usize;
-            let stat_result = shmctl(shmid, IPC_STAT, ds_ptr);
-            if removed_result(stat_result) {
+                let mut ds = ShmidDs::default();
+                let ds_ptr = &mut ds as *mut ShmidDs as usize;
+                let stat_result = shmctl(shmid, IPC_STAT, ds_ptr);
+                if removed_result(stat_result) {
+                    assert_eq!(shmdt(mapping), 0);
+                    return CHILD_ORPHAN;
+                }
+                assert_eq!(stat_result, 0);
+                assert!(ds.shm_nattch >= 1);
                 assert_eq!(shmdt(mapping), 0);
-                return CHILD_ORPHAN;
+                return CHILD_ATTACHED;
             }
-            assert_eq!(stat_result, 0);
-            assert!(ds.shm_nattch >= 1 && ds.shm_nattch <= 2);
-            assert_eq!(shmdt(mapping), 0);
-            return CHILD_ATTACHED;
+            *child_slot = child;
         }
 
-        while control.ready.load(Ordering::Acquire) == 0 {
+        while control.ready.load(Ordering::Acquire) != ATTACHERS as u32 {
             let _ = yield_();
         }
         control.go.store(1, Ordering::Release);
@@ -143,18 +164,21 @@ fn main() -> i32 {
         let _ = yield_();
         assert_eq!(shmdt(parent), 0);
 
-        let mut status = 0;
-        assert_eq!(waitpid(child as usize, &mut status), child);
-        let code = status >> 8;
-        match code {
-            CHILD_INVALID => invalid += 1,
-            CHILD_ATTACHED => attached += 1,
-            CHILD_ORPHAN => orphan += 1,
-            _ => panic!("unexpected child status: {}", status),
+        for child in children {
+            let mut status = 0;
+            assert_eq!(waitpid(child as usize, &mut status), child);
+            let code = status >> 8;
+            match code {
+                CHILD_INVALID => invalid += 1,
+                CHILD_ATTACHED => attached += 1,
+                CHILD_ORPHAN => orphan += 1,
+                _ => panic!("unexpected child status: {}", status),
+            }
         }
         assert_eq!(shmat(shmid, 0, 0), -EINVAL);
     }
 
+    assert_eq!(invalid + attached + orphan, ROUNDS * ATTACHERS);
     assert_eq!(munmap(control_addr, PAGE_SIZE), 0);
     if orphan != 0 {
         println!(
@@ -165,8 +189,11 @@ fn main() -> i32 {
     }
 
     println!(
-        "SYSV_SHM_ATTACH_RACE PASS invalid={} attached={}",
-        invalid, attached
+        "SYSV_SHM_ATTACH_RACE PASS pressure={} attempts={} invalid={} attached={}",
+        PRESSURE_ROUNDS,
+        ROUNDS * ATTACHERS,
+        invalid,
+        attached
     );
     0
 }

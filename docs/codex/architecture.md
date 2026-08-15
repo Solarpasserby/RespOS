@@ -376,13 +376,13 @@
 
 ### SysV SHM attach/detach 由 table reservation 与 MM commit 线性化
 
-- 状态：当前工作树已实现并通过双架构 lifecycle、nattch 与 attach-race 专项
+- 状态：当前工作树已实现并通过双架构 lifecycle、nattch、双 attacher attach-race 与顺序回收循环专项
 - 适用范围：`shmat` 发布/失败、显式 `shmdt`、成功 exec、group exit、fork/`CLONE_VM` 继承、
   `IPC_RMID`
-- 最后验证：2026-08-14
+- 最后验证：2026-08-15
 - 证据：`MemorySet::{shm_attach_ids,remove_shm_attachment}`、
   `ipc::release_shm_attachments()`、`task::{install_exec_image,exit_process_group}`；Linux/RV64/LA64
-  `sysv_shm_lifecycle_probe`
+  `sysv_shm_lifecycle_probe`、`sysv_shm_nattch_probe`、`sysv_shm_attach_race_probe`
 - 内容：VMA/PTE/frame 归 `MemorySet`，segment key、删除标记和 owner 索引归 `SHM_TABLE`；销毁
   MemorySet 本身不能完成 SysV 生命周期。显式 detach 或旧 MM 已从 task handle 替换/完成 recycle 后，
   才向 table 提交 attach id。提交扫描 live MM，fork/CLONE_VM peer 仍持有同 id 时 segment 保持存活；
@@ -394,8 +394,9 @@
   地址冲突返回 `EINVAL`。
 - 后续影响：不得在旧 MM 仍可被 task 访问时先删 table/frame，也不得只依赖 `Drop<MemorySet>` 隐式
   猜测 IPC owner。任何跨 table/MM 的新 attach 路径都必须在可删除性检查之前登记 reservation，并在
-  所有成功/失败出口撤销；新增 `CLONE_VM` 形式不得退回按 TCB 数量累计 attachment。多 attacher、
-  `SHM_REMAP` 并发覆盖和资源耗尽仍需独立压力验证。
+  所有成功/失败出口撤销；新增 `CLONE_VM` 形式不得退回按 TCB 数量累计 attachment。当前 probe 已覆盖
+  两个同时在途 attacher 和 128 轮顺序单页回收循环；更宽 N 路并发、`SHM_REMAP` 并发覆盖以及
+  `SHMMNI`/`SHMALL`/attach-id 等资源耗尽仍需独立压力验证。
 
 ## FS、VFS 与 fd 模型
 

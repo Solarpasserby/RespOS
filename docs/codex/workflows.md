@@ -473,12 +473,15 @@ TASK_A_SYSV_SHM_ATTACH_RACE_PROBE=1 \
   LA_PRE_OUTPUT=/tmp/respos-la-sysv-shm-attach-race-default.log
 ```
 
-Linux 必须输出 `SYSV_SHM_ATTACH_RACE_LINUX PASS`。强制让出构建用于稳定扩大 table reservation 与 VMA
-commit 之间的窗口；修复前 `SYSV_SHM_ATTACH_RACE_EXPECTED_FAIL orphan=64` 是反证，修复后两架构必须
-输出 `SYSV_SHM_ATTACH_RACE PASS` 与 runner PASS。64 轮中 `invalid`/`attached` 比例不固定，但总和必须
-为 64 且不得出现 orphan。probe 还要求已占用的非空 `shmaddr` 返回 `EINVAL`，并验证失败 attach 的
-reservation 回滚。强制构建后必须不带 `TASK_A_SYSV_SHM_ATTACH_TEST_YIELD` 依次重建和运行两架构，恢复
-默认 kernel；随后复跑 lifecycle、nattch 及 `shmat01,shmdt02,shmctl03`。
+Linux 必须输出 `SYSV_SHM_ATTACH_RACE_LINUX PASS pressure=128 attempts=64 ...`。强制让出构建用于稳定
+扩大 table reservation 与 VMA commit 之间的窗口；修复前
+`SYSV_SHM_ATTACH_RACE_EXPECTED_FAIL orphan=64` 是反证，修复后两架构必须输出
+`SYSV_SHM_ATTACH_RACE PASS pressure=128 attempts=64 ...` 与 runner PASS。当前门禁先做 128 轮顺序单页
+创建/删除/最后 detach 回收复用，再做 32 轮、每轮两个 child 同时 attach；`invalid`/`attached` 比例不
+固定，但总和必须为 64 且不得出现 orphan。probe 还要求已占用的非空 `shmaddr` 返回 `EINVAL`，并验证
+失败 attach 的 reservation 回滚。强制构建后必须不带 `TASK_A_SYSV_SHM_ATTACH_TEST_YIELD` 依次重建和
+运行两架构，恢复默认 kernel；随后复跑 lifecycle、nattch 及 `shmat01,shmdt02,shmctl03`。本门禁不覆盖
+更宽 N 路并发、资源上限耗尽或 `SHM_REMAP` 并发覆盖。
 
 Phase 5 session/`getsid` Linux 对照：
 
