@@ -1215,7 +1215,8 @@
   true，从而把 RDHUP 错误推迟到数据读空。AF_UNIX 同理应读取既有 `peer_write_shutdown/peer_closed`，
   不能用接收队列为空推导 half-close。
 - 后续影响：RDHUP 必须是独立只读状态，不得消费数据、改写 socket state 或无条件升级为 HUP。epoll
-  edge/oneshot、只订阅 RDHUP 的阻塞唤醒和 reset/linger 仍需各自 probe，不能从 level-triggered 结果外推。
+  edge/oneshot 和 AF_UNIX 只订阅 RDHUP 的阻塞唤醒已由独立向量关闭；TCP 事件式 waiter、reset/linger
+  仍需各自 probe，不能从 AF_UNIX 结果外推。
 
 ## 一个存活的 TCP daemon 不应破坏无关进程的 wait/信号同步
 

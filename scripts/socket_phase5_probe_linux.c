@@ -121,6 +121,98 @@ static void test_shutdown_and_poll(void)
     puts("SOCKET_PHASE5_LINUX shutdown_poll_rdhup PASS");
 }
 
+static void test_rdhup_blocking_and_epoll_modes(void)
+{
+    int sv[2];
+    int ack[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    assert(pipe(ack) == 0);
+    pid_t child = fork();
+    assert(child >= 0);
+    if (child == 0) {
+        assert(close(sv[1]) == 0);
+        assert(close(ack[1]) == 0);
+        usleep(50000);
+        assert(write(sv[0], "p", 1) == 1);
+        assert(shutdown(sv[0], SHUT_WR) == 0);
+        char byte;
+        assert(read(ack[0], &byte, 1) == 1);
+        _exit(0);
+    }
+    assert(close(sv[0]) == 0);
+    assert(close(ack[0]) == 0);
+    struct pollfd pfd = {.fd = sv[1], .events = POLLRDHUP};
+    assert(poll(&pfd, 1, 1000) == 1);
+    assert((pfd.revents & POLLRDHUP) != 0);
+    assert((pfd.revents & (POLLIN | POLLHUP)) == 0);
+    char byte = 0;
+    assert(read(sv[1], &byte, 1) == 1 && byte == 'p');
+    assert(write(ack[1], "a", 1) == 1);
+    assert(close(ack[1]) == 0);
+    int status = -1;
+    assert(waitpid(child, &status, 0) == child);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    assert(close(sv[1]) == 0);
+
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    assert(pipe(ack) == 0);
+    int epfd = epoll_create1(0);
+    assert(epfd >= 0);
+    struct epoll_event interest = {
+        .events = EPOLLRDHUP,
+        .data.u64 = UINT64_C(0x1001),
+    };
+    assert(epoll_ctl(epfd, EPOLL_CTL_ADD, sv[1], &interest) == 0);
+    child = fork();
+    assert(child >= 0);
+    if (child == 0) {
+        assert(close(sv[1]) == 0);
+        assert(close(epfd) == 0);
+        assert(close(ack[1]) == 0);
+        usleep(50000);
+        assert(write(sv[0], "e", 1) == 1);
+        assert(shutdown(sv[0], SHUT_WR) == 0);
+        char child_byte;
+        assert(read(ack[0], &child_byte, 1) == 1);
+        _exit(0);
+    }
+    assert(close(sv[0]) == 0);
+    assert(close(ack[0]) == 0);
+    struct epoll_event ready = {0};
+    assert(epoll_wait(epfd, &ready, 1, 1000) == 1);
+    assert(ready.events == EPOLLRDHUP);
+    assert(ready.data.u64 == UINT64_C(0x1001));
+
+    interest.events = EPOLLRDHUP | EPOLLET;
+    interest.data.u64 = UINT64_C(0x2002);
+    assert(epoll_ctl(epfd, EPOLL_CTL_MOD, sv[1], &interest) == 0);
+    assert(epoll_wait(epfd, &ready, 1, 0) == 1);
+    assert(ready.events == EPOLLRDHUP);
+    assert(ready.data.u64 == UINT64_C(0x2002));
+    assert(epoll_wait(epfd, &ready, 1, 0) == 0);
+
+    interest.events = EPOLLRDHUP | EPOLLONESHOT;
+    interest.data.u64 = UINT64_C(0x3003);
+    assert(epoll_ctl(epfd, EPOLL_CTL_MOD, sv[1], &interest) == 0);
+    assert(epoll_wait(epfd, &ready, 1, 0) == 1);
+    assert(ready.events == EPOLLRDHUP);
+    assert(ready.data.u64 == UINT64_C(0x3003));
+    assert(epoll_wait(epfd, &ready, 1, 0) == 0);
+    assert(epoll_ctl(epfd, EPOLL_CTL_MOD, sv[1], &interest) == 0);
+    assert(epoll_wait(epfd, &ready, 1, 0) == 1);
+    assert(ready.events == EPOLLRDHUP);
+
+    assert(read(sv[1], &byte, 1) == 1 && byte == 'e');
+    assert(write(ack[1], "a", 1) == 1);
+    assert(close(ack[1]) == 0);
+    status = -1;
+    assert(waitpid(child, &status, 0) == child);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    assert(close(sv[1]) == 0);
+    assert(close(epfd) == 0);
+    puts("SOCKET_PHASE5_LINUX rdhup_blocking_edge_oneshot PASS");
+}
+
 static void test_blocking_poll_and_pipe_events(void)
 {
     int sv[2];
@@ -236,6 +328,7 @@ int main(void)
 
     test_pathname_and_nonblock(path_one);
     test_shutdown_and_poll();
+    test_rdhup_blocking_and_epoll_modes();
     test_blocking_poll_and_pipe_events();
     test_accept_eintr(path_two);
 

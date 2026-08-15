@@ -1051,7 +1051,9 @@ cc -std=c11 -Wall -Wextra -Werror -O2 scripts/socket_phase5_probe_linux.c \
 RV64 no-feature release、`-m 16G -smp 8 -snapshot` guest 中运行 `socket_phase5_probe`，以
 `SOCKET_PHASE5 ALL PASS` 为通过标志。它覆盖 pathname accept/connect、非阻塞 accept、EOF/EPIPE、
 AF_UNIX buffered shutdown 的 poll/epoll `IN|RDHUP`、阻塞 ppoll 数据唤醒、pipe 的无条件 HUP/ERR、
-epoll HUP 和 accept EINTR。Linux 还必须输出 `SOCKET_PHASE5_LINUX shutdown_poll_rdhup PASS`。修改
+epoll HUP 和 accept EINTR。Linux/guest 还必须分别输出 `shutdown_poll_rdhup PASS` 与
+`rdhup_blocking_edge_oneshot PASS`；后者覆盖只订阅 RDHUP 的阻塞 ppoll/epoll、ET 去重、ONESHOT
+禁用及 `EPOLL_CTL_MOD` rearm。修改
 Unix buffer/waiter 后还必须复跑 `unix_socket_block_probe` 的 128 KiB 满缓冲区传输；宿主 QEMU
 需要单独核对 `NI=-10/CLS=TS`。
 

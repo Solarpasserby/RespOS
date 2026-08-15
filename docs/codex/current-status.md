@@ -1,5 +1,20 @@
 # RespOS 当前状态
 
+## 2026-08-15 Phase 5 RDHUP blocking/edge/oneshot 模式（基于 `88ce7d2`）
+
+- **契约与门禁**：扩展 Linux/guest `socket_phase5_probe`。两个 fork child 分别延迟发布 buffered byte 与
+  AF_UNIX `SHUT_WR`：父进程只订阅 RDHUP，阻塞 ppoll 和 epoll 都必须被唤醒，不能因未订阅 IN 而漏掉
+  half-close。保持同一 RDHUP level 后，将 epoll interest 改为 `EPOLLET`，只允许报告一次；改为
+  `EPOLLONESHOT` 后同样只报告一次，且每次 `EPOLL_CTL_MOD` rearm 都必须重新报告。
+- **结果**：Linux 输出 `rdhup_blocking_edge_oneshot PASS`。现有 RespOS 通用 epoll 的 `last_ready`、
+  oneshot disabled/generation 以及 AF_UNIX shutdown 的既有 HUP-class waiter 通知已满足同一契约，因此
+  本轮无需修改内核，只增加持久回归门禁。
+- **验证范围**：release 初赛 snapshot、4 GiB/2 hart 的 RV64/LA64 和 RV64 16 GiB/8 hart 均输出
+  `rdhup_blocking_edge_oneshot PASS`、`SOCKET_PHASE5 ALL PASS` 与 runner PASS，日志为
+  `/tmp/respos-{rv,la}-rdhup-modes.log` 和 `/tmp/respos-rv-rdhup-modes-smp8.log`。
+- **保留边界**：当前关闭 AF_UNIX stream 的 level/edge/oneshot 与 RDHUP-only 阻塞等待；TCP 的事件式
+  RDHUP waiter、并发 close/shutdown、reset/linger、seqpacket/datagram 和真实网络仍待验证。
+
 ## 2026-08-15 Phase 5 AF_UNIX `POLLRDHUP/EPOLLRDHUP`（基于 `273c748`）
 
 - **契约与基线**：按 Linux stream RDHUP 契约扩展既有 `socket_phase5_probe`：socketpair 一端先写入
@@ -12,8 +27,8 @@
   2 hart 的 RV64/LA64 均输出 `shutdown_poll_rdhup PASS`、`SOCKET_PHASE5 ALL PASS` 和 runner PASS，日志为
   `/tmp/respos-{rv,la}-unix-rdhup.log`；既有 RV64 16 GiB/8 hart 门禁也同样通过，日志为
   `/tmp/respos-rv-unix-rdhup-smp8.log`。
-- **保留边界**：TCP/AF_UNIX level-triggered buffered RDHUP 已覆盖；edge-triggered/oneshot rearm、只订阅
-  RDHUP 后的跨线程阻塞唤醒、close/shutdown/reset 竞态、AF_UNIX seqpacket/datagram 和真实网络仍待验证。
+- **保留边界**：edge/oneshot rearm 与 RDHUP-only 跨进程阻塞唤醒由本文件顶部后续专项关闭；并发
+  close/shutdown/reset、AF_UNIX seqpacket/datagram 和真实网络仍待验证。
 
 ## 2026-08-15 Phase 5 TCP `POLLRDHUP/EPOLLRDHUP`（基于 `1058e7d`）
 

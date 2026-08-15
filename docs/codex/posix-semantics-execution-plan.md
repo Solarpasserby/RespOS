@@ -78,7 +78,7 @@ Phase 6 的调度器、allocator、异步 I/O 和细粒度锁重构。
 | --- | --- | --- | --- |
 | `SO_RCVTIMEO`/`SO_SNDTIMEO`、`MSG_DONTWAIT` | Linux/RespOS probe 已有；LA64 SMP 50 ms 晚醒约 1 秒 | 阻断 | 归一化 LA64 per-hart 时间域后重跑 |
 | nonblocking `connect`、`poll`、`SO_ERROR` | loopback success/refused、error consumption 与同 fd 失败后重连双架构 2 hart 通过；LA64 2 hart iperf 在 UDP→TCP 顺序停滞 | 阻断 | 定位 LA64 SMP iperf；补 unreachable/timeout/reset |
-| stream `shutdown(SHUT_WR)`/half-close | Linux/RV64/LA64 probe 覆盖 TCP 排队数据先于 EOF、反向流、dup 后 `EPIPE`，以及 TCP/AF_UNIX buffered peer shutdown 的 `POLLRDHUP/EPOLLRDHUP` | 双架构已验证（loopback TCP 与 AF_UNIX stream 当前范围） | 补 edge/oneshot、跨线程阻塞唤醒、reset/linger 与非 loopback |
+| stream `shutdown(SHUT_WR)`/half-close | Linux/RV64/LA64 probe 覆盖 TCP 排队数据先于 EOF、反向流、dup 后 `EPIPE`，TCP/AF_UNIX buffered peer shutdown 的 RDHUP，以及 AF_UNIX RDHUP-only blocking/edge/oneshot/rearm | 双架构已验证（loopback TCP 与 AF_UNIX stream 当前范围） | 补 TCP 事件式 waiter、并发 close/shutdown、reset/linger 与非 loopback |
 | `MSG_PEEK/WAITALL/NOSIGNAL`、partial I/O | Linux/RespOS probe 含 timeout/EOF/signal 短读，双架构 2 hart 通过 | 已闭合（当前范围） | 完整初赛与网络回归 |
 | `getsockname/getpeername/accept` 地址写回 | Linux/RespOS probe 覆盖错误优先级、AF_UNIX unnamed/pathname/非 UTF-8 abstract 双向地址与截断；musl/glibc `getpeername01,getsockname01` 双架构 2 hart 通过 | 双架构已验证（stream 当前范围） | 补 inet 关闭/半关闭、datagram/seqpacket disconnected/autobind 及 pathname alias/rename identity |
 | AF_UNIX `SO_PEERCRED` | socketpair 与 pathname 双向凭据快照、musl/glibc `getsockopt02` 双架构 2 hart 通过 | 双架构已验证 | 补 credential change；`SCM_CREDENTIALS/SO_PASSCRED` 另立子项 |
