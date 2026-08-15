@@ -288,6 +288,25 @@ fs_metadata_probe cleanup
 `FS_METADATA_EXPECTED_FAIL` 表示探针成功捕获尚未修复的差异，不表示该语义通过；只有对应的
 `FS_METADATA_*_PASS` 且无该项 expected failure 才能用于关闭缺陷。
 
+`UTIME_NOW/UTIME_OMIT` 特殊值单项门禁：
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror -O2 scripts/utimens_special_probe_linux.c \
+  -o /tmp/utimens_special_probe_linux
+/tmp/utimens_special_probe_linux
+
+TASK_A_UTIMENS_SPECIAL_PROBE=1 make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-utimens-special.log
+TASK_A_UTIMENS_SPECIAL_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-utimens-special.log
+```
+
+Linux 必须输出 `UTIMENS_SPECIAL_LINUX PASS omit=pass now=pass invalid_nsec=pass
+missing_double_omit=pass`，guest 输出对应无 `_LINUX` marker 与 runner PASS。probe 要求双 OMIT 保持
+atime/mtime/ctime 且不存在 pathname 也成功，单 OMIT 只保持指定字段，NOW 忽略 `tv_sec` 并落在按文件
+系统精度容许的 realtime 窗口内；任一普通 `tv_nsec` 为 `1000000000` 或 `-1` 时，两个字段及 ctime 均
+保持不变并返回 `EINVAL`。该门禁不用于宣称 ext4 已持久化纳秒或负秒；两架构仍须顺序运行。
+
 namespace identity/rename/unlink 对照：
 
 ```bash

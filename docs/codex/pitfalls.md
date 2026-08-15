@@ -433,6 +433,19 @@
 - 后续影响：区分“ELF 无法装载”和“启动后没有足够 RAM 预留目标 heap”。若要支持 256 MiB guest，
   必须实现按实际 RAM 缩减或动态扩容 heap，不能只缩小 ELF。
 
+## `UTIME_NOW` 要按文件系统精度比较，双 `UTIME_OMIT` 是特殊 no-op
+
+- 状态：Linux/RV64/LA64 专项已验证
+- 适用范围：`utimensat/futimens`、`UTIME_NOW/UTIME_OMIT`、timestamp validation、path lookup
+- 最后验证：2026-08-15
+- 证据：`utimens_special_probe`，日志 `/tmp/respos-{rv,la}-utimens-special.log`
+- 内容：文件系统可以把指定时间向下量化到自身支持的精度，所以 `UTIME_NOW` 不能与调用前纳秒级
+  clock 值做严格不小于比较；应使用声明的精度窗口。Linux 的双 OMIT 更特殊：它不改 atime/mtime/ctime，
+  并且 pathname 不存在也返回成功；这要求在 lookup 前识别 no-op。普通非法 nsec 则必须先完整校验，
+  不能先发布另一个 NOW/显式字段。
+- 后续影响：不得把双 OMIT 的早返回推广到单 OMIT 或其他向量，也不得用秒级 probe 宣称纳秒已落盘。
+  时间专项必须区分“特殊值选择状态机”“当前 realtime 来源”和“文件系统持久化精度”三层证据。
+
 ## 自动 atime 更新不能复用会刷新 ctime 的显式 utimens 路径
 
 - 状态：已确认并修复 BuildStorm 写放大

@@ -56,6 +56,7 @@ const TASK_A_SESSION_PROBE: bool = option_env!("TASK_A_SESSION_PROBE").is_some()
 const TASK_A_TASK_PHASE5_PROBE: bool = option_env!("TASK_A_TASK_PHASE5_PROBE").is_some();
 const TASK_A_MMAP_PHASE5_PROBE: bool = option_env!("TASK_A_MMAP_PHASE5_PROBE").is_some();
 const TASK_A_MPROTECT_FAILURE_PROBE: bool = option_env!("TASK_A_MPROTECT_FAILURE_PROBE").is_some();
+const TASK_A_UTIMENS_SPECIAL_PROBE: bool = option_env!("TASK_A_UTIMENS_SPECIAL_PROBE").is_some();
 const TASK_A_SYSV_SHM_FUTEX_PROBE: bool = option_env!("TASK_A_SYSV_SHM_FUTEX_PROBE").is_some();
 const TASK_A_SYSV_SHM_LIFECYCLE_PROBE: bool =
     option_env!("TASK_A_SYSV_SHM_LIFECYCLE_PROBE").is_some();
@@ -1627,6 +1628,29 @@ fn run_task_a_mprotect_failure_probe() -> i32 {
     status
 }
 
+fn run_task_a_utimens_special_probe() -> i32 {
+    let pid = fork();
+    assert!(pid >= 0, "failed to fork utimens_special_probe");
+    if pid == 0 {
+        let argv = ["utimens_special_probe\0".as_ptr(), core::ptr::null()];
+        let ret = exec("utimens_special_probe\0", &argv);
+        println!("[testrunner] exec utimens_special_probe failed: {}", ret);
+        exit(-1);
+    }
+
+    let mut status = 0;
+    assert_eq!(waitpid(pid as usize, &mut status), pid);
+    if status == 0 {
+        println!("[testrunner] utimens special probe PASS");
+    } else {
+        println!(
+            "[testrunner] utimens special probe failed: status={}",
+            status
+        );
+    }
+    status
+}
+
 fn run_task_a_sysv_shm_futex_probe() -> i32 {
     let pid = fork();
     assert!(pid >= 0, "failed to fork sysv_shm_futex_probe");
@@ -1960,6 +1984,12 @@ fn main() -> i32 {
         poweroff();
         return if status == 0 { 0 } else { 1 };
     }
+    if TASK_A_UTIMENS_SPECIAL_PROBE {
+        let status = run_task_a_utimens_special_probe();
+        println!("[testrunner] utimens special probe finished, powering off");
+        poweroff();
+        return if status == 0 { 0 } else { 1 };
+    }
     if TASK_A_SYSV_SHM_FUTEX_PROBE {
         let status = run_task_a_sysv_shm_futex_probe();
         println!("[testrunner] SysV SHM futex probe finished, powering off");
@@ -2166,6 +2196,12 @@ fn main() -> i32 {
     if TASK_A_MPROTECT_FAILURE_PROBE {
         let status = run_task_a_mprotect_failure_probe();
         println!("[testrunner] mprotect failure probe finished, powering off");
+        poweroff();
+        return if status == 0 { 0 } else { 1 };
+    }
+    if TASK_A_UTIMENS_SPECIAL_PROBE {
+        let status = run_task_a_utimens_special_probe();
+        println!("[testrunner] utimens special probe finished, powering off");
         poweroff();
         return if status == 0 { 0 } else { 1 };
     }

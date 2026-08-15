@@ -261,7 +261,8 @@ COW、grow/shrink、并发 fault/truncate、RV64/LA64 SMP shootdown 与 frame re
 该里程碑不重做 Phase 1--4，而只关闭已有文档明确保留的边界：
 
 1. ext4 纳秒、负时间和溢出规则，以及真实 `CLOCK_REALTIME` 初始化/设置的持久化边界；
-2. `UTIME_NOW/UTIME_OMIT`、atime/relatime/strictatime/`O_NOATIME` 的事件和 ctime 关系；
+2. `UTIME_NOW/UTIME_OMIT` 的当前运行时状态机已由 Linux/RV64/LA64 probe 关闭；继续补纳秒/负秒/
+   溢出持久化，以及 atime/relatime/strictatime/`O_NOATIME` 的事件和 ctime 关系；
 3. `times/getrusage` 的 user/system 拆分和子进程累计，不把 total 同填两字段当完整实现；
 4. namespace 并发可见性、POSIX record lock 的 fork/dup/close 生命周期和 FIFO 多开边界；
 5. 当前 LTP 失败矩阵中有规范证据的文件接口，其 errno、失败原子性和跨重启状态。

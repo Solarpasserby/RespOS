@@ -1,5 +1,25 @@
 # RespOS 当前状态
 
+## 2026-08-15 Phase 5 `UTIME_NOW/UTIME_OMIT` 特殊值（基于 `1c2511a`）
+
+- **契约**：[Linux `utimensat(2)`](https://man7.org/linux/man-pages/man2/utimensat.2.html) 规定
+  `UTIME_NOW/UTIME_OMIT` 对应的 `tv_sec` 被忽略；`OMIT` 保持该字段，双 `OMIT` 不修改任何时间且 Linux
+  扩展允许目标 pathname 不存在仍成功；普通 `tv_nsec` 必须落在 `[0,999999999]`，否则返回 `EINVAL`。
+  `UTIME_NOW` 结果按文件系统支持精度向下量化，因此 oracle 使用调用前一秒到调用后 realtime 的窗口，
+  不错误要求纳秒值严格晚于调用前 `clock_gettime()`。
+- **独立门禁**：新增 Linux/guest `utimens_special_probe`。向量覆盖双 `OMIT` 保持 atime/mtime/ctime、
+  不存在路径成功、单 `OMIT` 与显式另一字段、`NOW+OMIT` 且两者 `tv_sec` 为极值，以及
+  `tv_nsec=1000000000/-1` 时在任一字段发布前以 `EINVAL` 失败。每次均以 `stat` 复核最终字段，`NOW`
+  另由 realtime 窗口约束。
+- **验证结果**：Linux 以 `-std=c11 -Wall -Wextra -Werror -O2` 编译运行并输出
+  `UTIMENS_SPECIAL_LINUX PASS omit=pass now=pass invalid_nsec=pass missing_double_omit=pass`。release 初赛
+  snapshot、4 GiB/2 hart 的 RV64/LA64 均输出对应 guest marker 与 runner PASS，日志为
+  `/tmp/respos-{rv,la}-utimens-special.log`。
+- **实现结论与边界**：现有 `resolve_utimens_times()` 先拷贝并验证两个 timespec，再统一取一次 now；双
+  `OMIT` 在 path/fd lookup 前直接成功，其他向量经 inode `set_times` 选择性发布，本轮无需修改内核。
+  本结果只关闭当前运行时的特殊值/非法纳秒状态机，不覆盖 ext4 纳秒持久化、负 `tv_sec`、2038/32-bit
+  秒溢出、跨重启 epoch、非 owner 权限矩阵、自动 atime/relatime/strictatime 或 `O_NOATIME`。
+
 ## 2026-08-15 Phase 5 `mprotect()` 失败权限边界（基于 `de665eb`）
 
 - **契约校正**：[POSIX `mprotect()`](https://pubs.opengroup.org/onlinepubs/009696699/functions/mprotect.html) 明确规定，
