@@ -118,8 +118,9 @@ fchmod/fchown/futimens 直接作用于后端 inode，不再使用 orphan storage
 - 已修复：ext4 目录 `set_mode()` 只更新内存缓存、不持久化底层 inode；
 - 已修复：mode/owner override 在底层操作前发布，底层失败时可能破坏失败原子性；
 - 已确认：ext4 时间持久化主要使用 32-bit 秒，纳秒与真实 `CLOCK_REALTIME` 模型不完整；
-- 已验证（当前运行时范围）：`UTIME_NOW/UTIME_OMIT` 的字段选择、双 OMIT no-op/不存在路径与非法 nsec
-  无副作用；负时间、纳秒持久化和溢出边界仍待验证；
+- 已验证（当前运行时范围）：`UTIME_NOW/UTIME_OMIT` 的字段选择、双 OMIT no-op/不存在路径、非法 nsec
+  无副作用，以及 flat credential 下非 owner 对双 NOW/显式/混合时间的 `EACCES/EPERM` 权限矩阵；
+  `CAP_FOWNER`、ACL、负时间、纳秒持久化和溢出边界仍待验证；
 - 待验证：read EOF、零长度 read、readdir、`O_NOATIME`、relatime/strictatime 的完整行为；
 - 已验证：unlink 后打开 fd 的 futimens/fchmod/fchown 通过 inode-number API 作用于同一 inode；
 - 已验证（单线程及 reopen）：同 inode 不同 hardlink path 的属性缓存一致；并发与缓存回收仍待 Phase 2。

@@ -1810,22 +1810,36 @@ fn current_timespec() -> TimeSpec {
     }
 }
 
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum UtimensPermission {
+    Noop,
+    CurrentTime,
+    Arbitrary,
+}
+
 /// 将用户传入的 times[2] 解析为需要写入 inode 的 atime/mtime。
 ///
 /// 返回值中的 None 表示该时间戳保持不变；Some 表示需要写入。
 /// times 为 NULL 时，atime 和 mtime 都设置为当前时间。
 fn resolve_utimens_times(
     times: *const TimeSpec,
-) -> SysResult<(Option<TimeSpec>, Option<TimeSpec>)> {
+) -> SysResult<(Option<TimeSpec>, Option<TimeSpec>, UtimensPermission)> {
     if times.is_null() {
         let now = current_timespec();
-        return Ok((Some(now), Some(now)));
+        return Ok((Some(now), Some(now), UtimensPermission::CurrentTime));
     }
 
     let mut ts = [TimeSpec::default(); 2];
     copy_from_user(ts.as_mut_ptr(), times, 2)?;
     let atime = validate_utimens_time(ts[0])?;
     let mtime = validate_utimens_time(ts[1])?;
+    let permission = if atime.nsec == UTIME_OMIT && mtime.nsec == UTIME_OMIT {
+        UtimensPermission::Noop
+    } else if atime.nsec == UTIME_NOW && mtime.nsec == UTIME_NOW {
+        UtimensPermission::CurrentTime
+    } else {
+        UtimensPermission::Arbitrary
+    };
     let now = current_timespec();
 
     let atime = match atime.nsec {
@@ -1838,10 +1852,45 @@ fn resolve_utimens_times(
         UTIME_NOW => Some(now),
         _ => Some(mtime),
     };
-    Ok((atime, mtime))
+    Ok((atime, mtime, permission))
 }
 
-fn set_fd_times(fd: isize, atime: Option<TimeSpec>, mtime: Option<TimeSpec>) -> SysResult {
+fn utimens_write_allowed(stat: &KStat) -> bool {
+    let task = current_task().expect("[kernel] current task is None.");
+    let mode = stat.mode & 0o777;
+    let granted = if task.fsuid() as u32 == stat.uid {
+        (mode >> 6) & 0o7
+    } else if task.in_group(stat.gid as usize) {
+        (mode >> 3) & 0o7
+    } else {
+        mode & 0o7
+    };
+    granted & 0o2 != 0
+}
+
+fn check_utimens_permission(stat: &KStat, permission: UtimensPermission) -> SysResult {
+    let task = current_task().expect("[kernel] current task is None.");
+    if permission == UtimensPermission::Noop || task.fsuid() == 0 || task.fsuid() as u32 == stat.uid
+    {
+        return Ok(());
+    }
+    if permission == UtimensPermission::CurrentTime {
+        if utimens_write_allowed(stat) {
+            Ok(())
+        } else {
+            Err(Errno::EACCES)
+        }
+    } else {
+        Err(Errno::EPERM)
+    }
+}
+
+fn set_fd_times(
+    fd: isize,
+    atime: Option<TimeSpec>,
+    mtime: Option<TimeSpec>,
+    permission: UtimensPermission,
+) -> SysResult {
     if fd < 0 {
         return Err(Errno::EBADF);
     }
@@ -1851,6 +1900,9 @@ fn set_fd_times(fd: isize, atime: Option<TimeSpec>, mtime: Option<TimeSpec>) -> 
     if file.path().mnt.is_readonly() {
         return Err(Errno::EROFS);
     }
+    let metadata_path = file.metadata_path();
+    let inode = file.inode();
+    check_utimens_permission(&inode.stat(&metadata_path)?, permission)?;
     file.set_times(atime, mtime)
 }
 
@@ -2088,15 +2140,15 @@ pub fn sys_utimensat(
         return Err(Errno::EINVAL);
     }
 
-    let (atime, mtime) = resolve_utimens_times(times)?;
-    if atime.is_none() && mtime.is_none() {
+    let (atime, mtime, permission) = resolve_utimens_times(times)?;
+    if permission == UtimensPermission::Noop {
         return Ok(0);
     }
 
     // futimens(fd, times) 在 libc 中常落成 utimensat(fd, NULL, times, 0)。
     // NULL path 与空字符串不同：它直接表示 dirfd 指向的打开文件。
     if path.is_null() {
-        return set_fd_times(dirfd, atime, mtime).map(|_| 0);
+        return set_fd_times(dirfd, atime, mtime, permission).map(|_| 0);
     }
 
     let path = copy_cstr_from_user(path)?;
@@ -2107,7 +2159,7 @@ pub fn sys_utimensat(
             // musl 的 futimens(fd, ...) 可能落成 utimensat(fd, "", times, 0)。
             // 这里把非 AT_FDCWD 的空路径按 fd 目标处理，避免已 unlink 的打开文件
             // 只能通过路径更新而失败。
-            set_fd_times(dirfd, atime, mtime)?;
+            set_fd_times(dirfd, atime, mtime, permission)?;
         } else {
             if flags & AT_EMPTY_PATH == 0 {
                 return Err(Errno::ENOENT);
@@ -2117,9 +2169,10 @@ pub fn sys_utimensat(
             if cwd.mnt.is_readonly() {
                 return Err(Errno::EROFS);
             }
-            cwd.dentry
-                .get_inode()
-                .set_times(&cwd.abs_path(), atime, mtime)?;
+            let abs_path = cwd.abs_path();
+            let inode = cwd.dentry.get_inode();
+            check_utimens_permission(&inode.stat(&abs_path)?, permission)?;
+            inode.set_times(&abs_path, atime, mtime)?;
         }
     } else {
         // utimensat 同样根据 AT_SYMLINK_NOFOLLOW 决定修改链接本身还是链接目标。
@@ -2131,10 +2184,10 @@ pub fn sys_utimensat(
         if resolved.mnt.is_readonly() {
             return Err(Errno::EROFS);
         }
-        resolved
-            .dentry
-            .get_inode()
-            .set_times(&resolved.abs_path(), atime, mtime)?;
+        let abs_path = resolved.abs_path();
+        let inode = resolved.dentry.get_inode();
+        check_utimens_permission(&inode.stat(&abs_path)?, permission)?;
+        inode.set_times(&abs_path, atime, mtime)?;
     }
 
     Ok(0)

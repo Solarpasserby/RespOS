@@ -1,5 +1,26 @@
 # RespOS 当前状态
 
+## 2026-08-15 Phase 5 `utimensat/futimens` 非 owner 权限矩阵（基于 `f5dd47f`）
+
+- **契约**：[Linux `utimensat(2)`](https://man7.org/linux/man-pages/man2/utimensat.2.html) 区分三类请求：
+  双 `UTIME_OMIT` 不检查目标权限；`times == NULL` 或双 `UTIME_NOW` 允许 owner、特权进程或对文件有写
+  权限者；显式时间以及 `NOW+OMIT` 等混合请求只允许 owner 或具备 `CAP_FOWNER` 的进程。当前 RespOS
+  尚无完整 capability 模型，因此本轮只按现有 flat credential 边界处理 root、owner 和普通非 owner。
+- **缺陷与修复**：修复前 RV64 中 uid 65534 对 root 文件提交显式 `600/700` 秒错误返回成功。
+  `resolve_utimens_times()` 现在在完成两个 timespec 校验后将请求分类为 no-op、current-time 或 arbitrary；
+  path、`futimens` fd、empty-path 三条实际修改入口在写 inode 前统一检查 fsuid、组成员和 mode 写位。
+  非 owner 的 current-time 请求无写权限返回 `EACCES`，arbitrary 请求返回 `EPERM`；双 OMIT 仍在
+  lookup/权限检查前成功。
+- **独立门禁**：`utimens_special_probe` 新增 uid/gid 65534 子进程，对 mode `0666` 与 `0000` 分别验证
+  path 和继承 fd 的双 OMIT、双 NOW、显式时间及 `NOW+OMIT`。本机 Linux 进程为 uid 1000 且无提权能力，
+  因此 Linux marker 明确输出 `permission=skip`，未把该向量误记为本机实测通过；guest 中由 root 降权后
+  完整执行。
+- **验证结果**：Linux 严格编译运行输出 `UTIMENS_SPECIAL_LINUX PASS ... permission=skip`；release 初赛
+  snapshot、4 GiB/2 hart 的 RV64 与 LA64 均输出 `UTIMENS_SPECIAL PASS ... permission=pass` 和 runner
+  PASS，日志为 `/tmp/respos-{rv,la}-utimens-permission.log`。
+- **保留边界**：`CAP_FOWNER`、user namespace、ACL、immutable/append-only inode、`O_PATH` fd 及
+  read-only mount 与权限错误的完整优先级仍待单独验证；本轮不外推为完整 Linux setattr 授权模型。
+
 ## 2026-08-15 Phase 5 `UTIME_NOW/UTIME_OMIT` 特殊值（基于 `1c2511a`）
 
 - **契约**：[Linux `utimensat(2)`](https://man7.org/linux/man-pages/man2/utimensat.2.html) 规定
@@ -17,8 +38,9 @@
   `/tmp/respos-{rv,la}-utimens-special.log`。
 - **实现结论与边界**：现有 `resolve_utimens_times()` 先拷贝并验证两个 timespec，再统一取一次 now；双
   `OMIT` 在 path/fd lookup 前直接成功，其他向量经 inode `set_times` 选择性发布，本轮无需修改内核。
-  本结果只关闭当前运行时的特殊值/非法纳秒状态机，不覆盖 ext4 纳秒持久化、负 `tv_sec`、2038/32-bit
-  秒溢出、跨重启 epoch、非 owner 权限矩阵、自动 atime/relatime/strictatime 或 `O_NOATIME`。
+  本结果只关闭当前运行时的特殊值/非法纳秒状态机；非 owner 权限矩阵由本文件顶部后续专项关闭。ext4
+  纳秒持久化、负 `tv_sec`、2038/32-bit 秒溢出、跨重启 epoch、自动 atime/relatime/strictatime 与
+  `O_NOATIME` 仍未覆盖。
 
 ## 2026-08-15 Phase 5 `mprotect()` 失败权限边界（基于 `de665eb`）
 

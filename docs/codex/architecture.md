@@ -499,19 +499,23 @@ FdTable slot (FdEntry: descriptor flags)
 
 ### ext4 inode 属性以底层 transaction 成功为发布点
 
-- 状态：已实现 mode/owner/秒级 times 组合提交；`UTIME_NOW/UTIME_OMIT` 状态机已双架构验证
+- 状态：已实现 mode/owner/秒级 times 组合提交；`UTIME_NOW/UTIME_OMIT` 状态机及当前 flat credential
+  范围的非 owner 权限矩阵已双架构验证
 - 适用范围：chmod/chown/utimens、目录属性、hardlink alias、unlink 后打开 fd
-- 最后验证：2026-08-10
+- 最后验证：2026-08-15
 - 证据：`os/src/fs/{ext4/inode.rs,file.rs}`、`vendor/lwext4_rust/c/lwext4/src/ext4.c`；
-  `fs_metadata_probe` Linux/RV64 对照与跨启动 qcow2 检查
+  `fs_metadata_probe` Linux/RV64 对照与跨启动 qcow2 检查；`utimens_special_probe` RV64/LA64 权限门禁
 - 内容：`ext4_setattr_ino` 在一个 inode ref/transaction 内更新选定字段；Rust mode/owner/times cache
   仅在 lower commit 成功后发布。fd 操作直接使用后端 inode number，不再依赖可见路径或隐藏 orphan
   名字；同 inode hardlink 共享属性缓存。`resolve_utimens_times()` 在任何字段发布前验证两个 `tv_nsec`，
   对 NOW 使用同一份当前时间，对 OMIT 生成 `None`；双 OMIT 在 path/fd lookup 前直接成功，因此既不
-  改 atime/mtime/ctime，也保留 Linux 对不存在 pathname 成功的 no-op 扩展。
+  改 atime/mtime/ctime，也保留 Linux 对不存在 pathname 成功的 no-op 扩展。其余请求按双 NOW/current
+  time 与 arbitrary/mixed 分类：非 owner 前者要求 inode mode 写权限，否则 `EACCES`；后者返回
+  `EPERM`。path、打开 fd 和 empty-path 最终均在 inode 修改前执行同一检查。
 - 后续影响：新增 setattr 字段必须加入同一 prepare/commit/publish 协议；不得把 `ENOENT` 转成成功后只改
   Rust override。双 OMIT 是由契约明确允许的唯一 pathname-free no-op，不能推广到其他时间向量。
-  持久层仍只有 32-bit 秒精度，纳秒/epoch 扩展需另做 on-disk 设计与跨重启测试。
+  持久层仍只有 32-bit 秒精度，纳秒/epoch 扩展需另做 on-disk 设计与跨重启测试；`CAP_FOWNER`、ACL、
+  user namespace 与特殊 inode flags 不在当前 flat credential 模型内。
 
 ### PageCache 是普通文件驻留页的唯一所有者
 

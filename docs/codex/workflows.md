@@ -302,10 +302,14 @@ TASK_A_UTIMENS_SPECIAL_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
 ```
 
 Linux 必须输出 `UTIMENS_SPECIAL_LINUX PASS omit=pass now=pass invalid_nsec=pass
-missing_double_omit=pass`，guest 输出对应无 `_LINUX` marker 与 runner PASS。probe 要求双 OMIT 保持
-atime/mtime/ctime 且不存在 pathname 也成功，单 OMIT 只保持指定字段，NOW 忽略 `tv_sec` 并落在按文件
-系统精度容许的 realtime 窗口内；任一普通 `tv_nsec` 为 `1000000000` 或 `-1` 时，两个字段及 ctime 均
-保持不变并返回 `EINVAL`。该门禁不用于宣称 ext4 已持久化纳秒或负秒；两架构仍须顺序运行。
+missing_double_omit=pass permission=pass|skip`，guest 必须输出对应无 `_LINUX`、且
+`permission=pass` 的 marker 与 runner PASS。本机只有以 root 运行时才能降权到 uid/gid 65534 执行权限
+向量；非 root 的 `permission=skip` 只表示特殊值基线通过，不能记作 Linux 权限向量实测。probe 要求
+双 OMIT 保持 atime/mtime/ctime 且不存在 pathname 也成功，单 OMIT 只保持指定字段，NOW 忽略 `tv_sec`
+并落在按文件系统精度容许的 realtime 窗口内；任一普通 `tv_nsec` 为 `1000000000` 或 `-1` 时，两个字段及 ctime 均
+保持不变并返回 `EINVAL`。降权向量对 pathname 和继承 fd 验证：双 OMIT 始终成功；双 NOW 在 mode
+`0666` 时成功、在 `0000` 时返回 `EACCES`；显式时间和 `NOW+OMIT` 均返回 `EPERM`。该门禁不用于宣称
+ext4 已持久化纳秒或负秒；两架构仍须顺序运行。
 
 namespace identity/rename/unlink 对照：
 

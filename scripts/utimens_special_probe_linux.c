@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -32,13 +33,67 @@ static struct stat file_stat(const char *path)
     return value;
 }
 
+static void verify_nonowner_permissions(const char *path, int fd, mode_t mode,
+                                        int now_errno)
+{
+    assert(chmod(path, mode) == 0);
+    pid_t child = fork();
+    assert(child >= 0);
+    if (child == 0) {
+        assert(setgid(65534) == 0);
+        assert(setuid(65534) == 0);
+
+        struct timespec double_omit[2] = {
+            { .tv_sec = LLONG_MIN, .tv_nsec = UTIME_OMIT },
+            { .tv_sec = LLONG_MAX, .tv_nsec = UTIME_OMIT },
+        };
+        assert(utimensat(AT_FDCWD, path, double_omit, 0) == 0);
+        assert(futimens(fd, double_omit) == 0);
+
+        struct timespec explicit[2] = {
+            { .tv_sec = 600, .tv_nsec = 0 },
+            { .tv_sec = 700, .tv_nsec = 0 },
+        };
+        errno = 0;
+        assert(utimensat(AT_FDCWD, path, explicit, 0) == -1 && errno == EPERM);
+        errno = 0;
+        assert(futimens(fd, explicit) == -1 && errno == EPERM);
+
+        struct timespec now_and_omit[2] = {
+            { .tv_sec = LLONG_MAX, .tv_nsec = UTIME_NOW },
+            { .tv_sec = LLONG_MIN, .tv_nsec = UTIME_OMIT },
+        };
+        errno = 0;
+        assert(utimensat(AT_FDCWD, path, now_and_omit, 0) == -1 && errno == EPERM);
+        errno = 0;
+        assert(futimens(fd, now_and_omit) == -1 && errno == EPERM);
+
+        struct timespec double_now[2] = {
+            { .tv_sec = LLONG_MIN, .tv_nsec = UTIME_NOW },
+            { .tv_sec = LLONG_MAX, .tv_nsec = UTIME_NOW },
+        };
+        errno = 0;
+        int result = utimensat(AT_FDCWD, path, double_now, 0);
+        assert((now_errno == 0 && result == 0) ||
+               (now_errno != 0 && result == -1 && errno == now_errno));
+        errno = 0;
+        result = futimens(fd, double_now);
+        assert((now_errno == 0 && result == 0) ||
+               (now_errno != 0 && result == -1 && errno == now_errno));
+        _exit(0);
+    }
+
+    int status = -1;
+    assert(waitpid(child, &status, 0) == child);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+}
+
 int main(void)
 {
     setbuf(stdout, NULL);
     char path[] = "/tmp/respos-utimens-special-XXXXXX";
     int fd = mkstemp(path);
     assert(fd >= 0);
-    assert(close(fd) == 0);
 
     struct timespec times[2] = {
         { .tv_sec = 100, .tv_nsec = 0 },
@@ -105,7 +160,16 @@ int main(void)
     assert(timespec_equal(after_invalid.st_mtim, before_invalid.st_mtim));
     assert(timespec_equal(after_invalid.st_ctim, before_invalid.st_ctim));
 
+    const char *permission = "skip";
+    if (geteuid() == 0) {
+        verify_nonowner_permissions(path, fd, 0666, 0);
+        verify_nonowner_permissions(path, fd, 0000, EACCES);
+        permission = "pass";
+    }
+
+    assert(close(fd) == 0);
     assert(unlink(path) == 0);
-    puts("UTIMENS_SPECIAL_LINUX PASS omit=pass now=pass invalid_nsec=pass missing_double_omit=pass");
+    printf("UTIMENS_SPECIAL_LINUX PASS omit=pass now=pass invalid_nsec=pass "
+           "missing_double_omit=pass permission=%s\n", permission);
     return 0;
 }

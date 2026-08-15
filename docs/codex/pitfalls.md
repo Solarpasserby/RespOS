@@ -444,7 +444,9 @@
   并且 pathname 不存在也返回成功；这要求在 lookup 前识别 no-op。普通非法 nsec 则必须先完整校验，
   不能先发布另一个 NOW/显式字段。
 - 后续影响：不得把双 OMIT 的早返回推广到单 OMIT 或其他向量，也不得用秒级 probe 宣称纳秒已落盘。
-  时间专项必须区分“特殊值选择状态机”“当前 realtime 来源”和“文件系统持久化精度”三层证据。
+  时间专项必须区分“特殊值选择状态机”“权限分类”“当前 realtime 来源”和“文件系统持久化精度”四层
+  证据。尤其双 NOW/times NULL 属于 current-time：非 owner 可凭 inode 写权限成功、无写权限返回
+  `EACCES`；显式时间和 `NOW+OMIT` 属于 arbitrary，普通非 owner 应返回 `EPERM`，不能只复用 write bit。
 
 ## 自动 atime 更新不能复用会刷新 ctime 的显式 utimens 路径
 
