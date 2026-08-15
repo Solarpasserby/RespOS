@@ -12,13 +12,17 @@ const IPC_PRIVATE: isize = 0;
 const IPC_CREAT: usize = 0o1000;
 const IPC_RMID: usize = 0;
 const IPC_STAT: usize = 2;
+const IPC_INFO: usize = 3;
+const SHM_INFO: usize = 14;
 const EINVAL: isize = 22;
 const EIDRM: isize = 43;
+const ENOSPC: isize = 28;
 const PROT_READ_WRITE: usize = 0x1 | 0x2;
 const MAP_SHARED_ANONYMOUS: usize = 0x1 | 0x20;
 const ATTACHERS: usize = 2;
 const ROUNDS: usize = 32;
 const PRESSURE_ROUNDS: usize = 128;
+const MAX_TRACKED_SEGMENTS: usize = 4096;
 const CHILD_INVALID: i32 = 10;
 const CHILD_ATTACHED: i32 = 11;
 const CHILD_ORPHAN: i32 = 12;
@@ -53,6 +57,28 @@ struct ShmidDs {
 }
 
 #[repr(C)]
+#[derive(Copy, Clone, Default)]
+struct ShmInfoLimits {
+    shmmax: usize,
+    shmmin: usize,
+    shmmni: usize,
+    shmseg: usize,
+    shmall: usize,
+    unused: [usize; 4],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+struct ShmInfo {
+    used_ids: i32,
+    shm_tot: usize,
+    shm_rss: usize,
+    shm_swp: usize,
+    swap_attempts: usize,
+    swap_successes: usize,
+}
+
+#[repr(C)]
 struct RaceControl {
     ready: AtomicU32,
     go: AtomicU32,
@@ -70,8 +96,52 @@ fn write_word(addr: usize, value: u32) {
     unsafe { core::ptr::write_volatile(addr as *mut u32, value) }
 }
 
+fn verify_shmmni_limit() -> usize {
+    let mut limits = ShmInfoLimits::default();
+    let limits_ptr = &mut limits as *mut ShmInfoLimits as usize;
+    assert!(shmctl(0, IPC_INFO, limits_ptr) >= 0);
+
+    let mut before = ShmInfo::default();
+    let before_ptr = &mut before as *mut ShmInfo as usize;
+    assert!(shmctl(0, SHM_INFO, before_ptr) >= 0);
+    assert!(before.used_ids >= 0);
+    let before_used = before.used_ids as usize;
+    assert!(limits.shmmni > before_used);
+
+    let available = limits.shmmni - before_used;
+    assert!(available <= MAX_TRACKED_SEGMENTS);
+    let mut ids = [0usize; MAX_TRACKED_SEGMENTS];
+    for id_slot in ids[..available].iter_mut() {
+        let id = shmget(IPC_PRIVATE, PAGE_SIZE, IPC_CREAT | 0o600);
+        assert!(id > 0, "shmget before SHMMNI failed: {}", id);
+        *id_slot = id as usize;
+    }
+    assert_eq!(shmget(IPC_PRIVATE, PAGE_SIZE, IPC_CREAT | 0o600), -ENOSPC);
+
+    let released = ids[available - 1];
+    assert_eq!(shmctl(released, IPC_RMID, 0), 0);
+    let replacement = shmget(IPC_PRIVATE, PAGE_SIZE, IPC_CREAT | 0o600);
+    assert!(
+        replacement > 0,
+        "replacement shmget failed: {}",
+        replacement
+    );
+    ids[available - 1] = replacement as usize;
+
+    for id in &ids[..available] {
+        assert_eq!(shmctl(*id, IPC_RMID, 0), 0);
+    }
+    let mut after = ShmInfo::default();
+    let after_ptr = &mut after as *mut ShmInfo as usize;
+    assert!(shmctl(0, SHM_INFO, after_ptr) >= 0);
+    assert_eq!(after.used_ids, before.used_ids);
+    limits.shmmni
+}
+
 #[unsafe(no_mangle)]
 fn main() -> i32 {
+    let shmmni = verify_shmmni_limit();
+
     let control_addr = mmap_raw(0, PAGE_SIZE, PROT_READ_WRITE, MAP_SHARED_ANONYMOUS, -1, 0);
     assert!(control_addr > 0, "control mmap failed: {}", control_addr);
     let control_addr = control_addr as usize;
@@ -189,7 +259,8 @@ fn main() -> i32 {
     }
 
     println!(
-        "SYSV_SHM_ATTACH_RACE PASS pressure={} attempts={} invalid={} attached={}",
+        "SYSV_SHM_ATTACH_RACE PASS shmmni={} pressure={} attempts={} invalid={} attached={}",
+        shmmni,
         PRESSURE_ROUNDS,
         ROUNDS * ATTACHERS,
         invalid,

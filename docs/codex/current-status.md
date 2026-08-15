@@ -1,5 +1,20 @@
 # RespOS 当前状态
 
+## 2026-08-15 Phase 5 SysV SHM `SHMMNI` 耗尽与配额回收（基于 `e689182`）
+
+- **Linux 契约**：扩展 `sysv_shm_attach_race_probe_linux.c`，通过 `IPC_INFO/SHM_INFO` 读取当前
+  `shmmni` 和已用 segment 数；补满可用槽位后，下一次 `shmget(IPC_PRIVATE)` 必须返回 `ENOSPC`。
+  删除一个未 attach segment 后必须能立即创建 replacement，全部 `IPC_RMID` 后 `used_ids` 必须恢复
+  到测试前数值。当前 Linux namespace 在 `shmmni=4096` 下通过，并继续通过原双 attacher/回收循环。
+- **RespOS 验证**：guest probe 使用固定 4096 项栈上 ID 表，避免其小型用户堆无法一次分配 32 KiB
+  动态数组。release 初赛 snapshot、4 GiB/2 hart 的 RV64/LA64 均输出
+  `SYSV_SHM_ATTACH_RACE PASS shmmni=4096 pressure=128 attempts=64 invalid=0 attached=64` 与 runner
+  PASS，日志为 `/tmp/respos-rv-sysv-shm-shmmni-v2.log`、`/tmp/respos-la-sysv-shm-shmmni.log`。
+- **实现结论与边界**：`ShmTable::alloc_id()` 已在 segment 数达到运行时 `shmmni` 时返回 `ENOSPC`，
+  `IPC_RMID` 会归还槽位，本轮不需修改内核。该证据关闭默认 `SHMMNI=4096` 的单进程顺序耗尽/恢复；
+  动态下调 sysctl 时已有对象如何计入、并发创建、`SHMALL` 页额度、物理 `ENOMEM` 和单调
+  segment/attach ID 溢出仍未覆盖。
+
 ## 2026-08-15 Phase 5 SysV SHM 双 attacher 与回收循环门禁（基于 `1fc3915`）
 
 - **扩展契约**：Linux/guest `sysv_shm_attach_race_probe` 从单 child 竞态扩展为每轮两个 child 同时
