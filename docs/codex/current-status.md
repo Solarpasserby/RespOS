@@ -1,5 +1,31 @@
 # RespOS 当前状态
 
+## 2026-08-15 Phase 5 LA64 SMP 冷启动 timeout 阻断（基于 `c5e51fa`）
+
+- **当前反证与根因纠正**：当前 HEAD 的 Linux 与 RV64 4 GiB/2 hart `socket_timeout_probe`
+  均通过，LA64 4 GiB/2 hart 仍稳定在 50 ms recv timeout 上报
+  `recv elapsed=983ms`。临时 raw-counter 诊断记录 boot hart `5493664`、hart1 `5529402`，
+  只差 `35738 ticks`（按 100 MHz 约 0.357 ms）；QEMU 10.0.2 的 LoongArch constant timer 也直接
+  读全局 `QEMU_CLOCK_VIRTUAL`。因此旧的“每 hart `rdtime.d` 相差约 1 秒”推断已被否定，
+  临时诊断代码已撤销。
+- **真实时序**：LA64 boot hart 为兼容小于 `MAX_HARTS` 的 QEMU `-smp` 覆盖，最多等待
+  1 秒收集 online mask。修复前 hart1 发布 online 后立即进入 scheduler，令
+  `[contest_launcher]` 早于 hart0 的 `[smp] LA online mask=0x3` 运行。此时用户任务能注册
+  50 ms deadline，但唯一 timer-service hart0 仍在启动轮询、尚未启用并编程全局 timer，
+  所以第一组 timeout 要到约 1 秒启动窗口结束才能被扫描。
+- **最小修复**：LoongArch SMP boot state 增加 `BOOT_RELEASED`。secondary 仍先 enable IPI 并发布
+  online bit，使 hart0 可收集 mask；但在进入 per-hart timer 初始化和 scheduler 前等待释放。hart0
+  完成 bounded discovery、启用 timer interrupt 并编程首个 compare 后才发布 release。未修改
+  `rdtime.d`、deadline 表示、timer 频率、scheduler 队列或 affinity。
+- **验证结果**：LA64 release 初赛 snapshot 的 4 GiB/1 hart、4 GiB/2 hart 与 12 GiB/12 hart 均输出
+  `SOCKET_TIMEOUT_RESPOS ALL PASS`，且 12 hart online mask 为 `0xfff`；最终日志为
+  `/tmp/respos-la-socket-timeout-boot-release-{smp1,final,smp12-final}.log`。RV64 4 GiB/2 hart 顺序回归
+  同样通过。LA64 `socket_phase5_probe` 输出 `SOCKET_PHASE5 ALL PASS`；聚焦 LTP
+  `futex_wait_bitset01,futex_wake03` 的 musl/glibc 均为 `SUMMARY: 2 passed, 0 failed`，首组
+  monotonic wait 为 `101250us`，不再出现 0.87 秒冷启动晚醒。
+- **保留边界**：本轮证明 1/2/12-hart 启动状态机与已有 timeout/futex/socket 专项，未跑
+  LA64 完整初赛/final/BuildStorm。CPU hotplug、secondary 启动失败回收与实机启动时序仍未覆盖。
+
 ## 2026-08-15 Phase 5 UDP blocked recv 与 EOF 来源地址（基于 `1afa57e`）
 
 - **Linux oracle**：扩展 `udp_shutdown_probe_linux`。父进程在 connected UDP 空队列上阻塞
@@ -437,8 +463,8 @@
 - **双架构验证**：修复后 RV64/LA64 同配置均输出 `SYSV_SHM_FUTEX PASS`，runner 输出
   `SysV SHM futex probe PASS`，日志为 `/tmp/respos-{rv,la}-sysv-shm-futex-fix.log`。普通
   `futex_wait01,futex_wake03` 回归在两架构 musl/glibc 均为 `SUMMARY: 2 passed, 0 failed`，日志为
-  `/tmp/respos-{rv,la}-sysv-shm-futex-regression.log`。LA64 首组 musl wait 仍受已知 secondary hart
-  冷启动窗口影响约 0.9 秒，但 case 通过，本修复不宣称关闭该时间问题。
+  `/tmp/respos-{rv,la}-sysv-shm-futex-regression.log`。当时 LA64 首组 musl wait 受 secondary hart
+  冷启动窗口影响约 0.9 秒；该启动顺序问题已由本文顶部 2026-08-15 后续专项关闭。
 - **剩余边界**：当前 probe 覆盖一个 segment 的单页、不同 attach 地址、跨进程数据可见性与
   wait/wake；`IPC_RMID` 显式/exit/exec/fork-inherited 生命周期已由上节闭合，并发 attach/detach、
   多页/复用压力仍需独立验证，不能由本项外推为 SysV SHM 全部完成。
@@ -468,7 +494,8 @@
 
 - **失败契约与根因**：LTP 20240524 `clone05` 要求 vfork child 在共享地址空间把全局
   `child_exited` 置 1，且 parent 必须等 child 退出后才从 `clone()` 返回。修复前 RV64/LA64 的
-  musl/glibc 都正确等待约 0.16 秒（LA64 每次冷启动的首组 musl 另受 secondary 上线影响约 1 秒），
+  musl/glibc 都正确等待约 0.16 秒（当时 LA64 冷启动首组的 secondary 提前调度问题
+  已由本文顶部 2026-08-15 专项关闭），
   但都读回 0。`CloneFlags::share_user_vm()` 仍保留 2026-06 的临时规避：非线程 vfork 即使带
   `CLONE_VM` 也复制地址空间，因此 child 写入对 parent 不可见。
 - **实现**：删除该过期例外，所有 `CLONE_VM` 都共享同一内层 `MemorySet`。2026-08-08 已落地的
@@ -502,7 +529,7 @@
   与 truncate invalidation 缺口，而非架构页表特例。该项会改变 VMA/PTE/frame 生命周期、truncate 后
   shootdown 和 fault 分类；本轮只固定诊断入口与证据，未修改内核语义，按用户确认后再实施 M3 方案。
 
-## 2026-08-14 Linux/POSIX Phase 5 futex bitset/wake 清账与 LA64 冷启动阻断（基于 `b7cb356`）
+## 2026-08-14 Linux/POSIX Phase 5 futex bitset/wake 历史冷启动阻断（基于 `b7cb356`）
 
 - **已关闭项**：release 初赛 snapshot、4 GiB/2 hart 聚焦
   `futex_wait_bitset01,futex_wake03`；RV64 的 musl/glibc 两 case 均通过，其中 absolute
@@ -515,7 +542,8 @@
 - **边界判断**：当前证据说明 futex bitset 的 absolute timeout 解析、`ETIMEDOUT` 与正常 steady-state
   路径可用，旧完整日志中的 RV realtime 早醒和 RV wake 首项未 reap 也未在当前 HEAD 复现；但不能把
   LA64 musl 首组失败归咎于 libc，因为 syscall 确实阻塞约 0.87 s。现象与 secondary 启动窗口强相关，
-  归入待协商的 LA64 跨 hart 时间/启动调度审计；本轮不放宽测试、不伪造 deadline，也不修改架构时钟。
+  后续 2026-08-15 专项已确认根因是 secondary 在 boot timer-service 就绪前提前进入 scheduler，
+  而非跨 hart 时钟偏移；加入启动释放屏障后首组 musl monotonic wait 为 101250 us，本历史阻断已关闭。
 
 ## 2026-08-14 Linux/POSIX Phase 5 `getcwd04` rename 竞态清账（基于 `8e2336a`）
 
@@ -843,8 +871,8 @@
   初赛 snapshot、4 GiB/2 hart 的 `TASK_A_SOCKET_FLAGS_PROBE=1` 均输出 `SOCKET_FLAGS ALL PASS`，日志为
   `/tmp/respos-{rv,la}-socket-flags-v2.log`。既有 `TASK_A_SOCKET_PHASE5_PROBE=1` 同配置双架构回归全通过，
   日志为 `/tmp/respos-{rv,la}-socket-phase5-after-flags.log`。
-- **剩余边界**：LA64 2 hart 的 timeout 时长仍受未归一化 `rdtime.d` 阻断，本专项只证明 timeout 后短读
-  返回值正确，不能据此关闭下一节的 SMP 时钟问题。完整初赛/LTP 尚未在本轮改动后复跑。
+- **剩余边界**：当时 LA64 2 hart 的 0.98 秒 timeout 已由本文顶部 2026-08-15 启动屏障专项
+  关闭；完整初赛/LTP 仍尚未在本轮 socket flag 改动后复跑。
 
 ## 2026-08-14 Linux/POSIX Phase 5 `getsid` 与初始 PID 语义（当前工作树）
 
@@ -866,7 +894,7 @@
 - **边界**：完整初赛/LTP 尚未复跑；本轮只关闭 `getsid` 与 PID 0 基础模型，不能据此宣称 termios/
   controlling tty/job control 已完成。
 
-## 2026-08-14 Linux/POSIX Phase 5 socket timeout 验收阻断（基于 `75216ff` 加当前 probe）
+## 2026-08-14 Linux/POSIX Phase 5 socket timeout 历史验收阻断（基于 `75216ff` 加当前 probe）
 
 - **已完成部分**：`scripts/socket_timeout_probe_linux.c` 在宿主通过，覆盖 `SO_RCVTIMEO/SO_SNDTIMEO`
   的 timeval round-trip、零 timeout、`MSG_DONTWAIT`、recv timeout 和 send 满缓冲 timeout。新增对称
@@ -877,10 +905,13 @@
   日志为 `/tmp/respos-la-socket-timeout.log` 与 `/tmp/respos-la-socket-timeout-smp2-r2.log`。临时 affinity
   A/B 中固定 hart0 全通过，固定 hart1 稳定复现约 979 ms；日志为
   `/tmp/respos-la-socket-timeout-hart{0,1}.log`，临时 affinity 代码已撤销。
-- **当前判断与边界**：A/B 表明跨 hart 使用未归一化 `rdtime.d` 绝对 deadline 是首要根因候选；当前
+- **当时判断（后续已否定）**：A/B 曾表明跨 hart 使用未归一化 `rdtime.d` 绝对 deadline 是首要根因候选；当前
   timer-service hart 直接消费其他 hart 生成的 deadline，约 1 秒的时间域偏移会变成同量级晚醒。精确
   raw-counter offset 与归一化实现仍为 `待验证`，在完成 secondary boot 校准/统一单调时间域并重跑
   双架构专项前，socket timeout 状态保持“RV64/LA64 单核已验证，LA64 SMP 未通过”，不得关闭 M1.1。
+- **2026-08-15 纠正**：raw-counter 只差约 0.357 ms；真实根因是 secondary 在 boot hart 完成 bounded
+  discovery、启用 timer interrupt 和编程首个 compare 前已进入 scheduler。`BOOT_RELEASED` 启动 barrier
+  已关闭该阻断；当前结论和验证日志以本文顶部 2026-08-15 专项为准，不实施 per-hart 时钟归一化。
 
 ## 2026-08-14 初赛 ext4 命名 FIFO 修复（当前工作树）
 

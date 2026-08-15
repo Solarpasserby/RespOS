@@ -13,6 +13,7 @@ pub const MAX_HARTS: usize = 12;
 
 const BOOT_COLD: u8 = 0;
 const BOOT_READY: u8 = 1;
+const BOOT_RELEASED: u8 = 2;
 const IOCSR_IPI_STATUS: usize = 0x1000;
 const IOCSR_IPI_EN: usize = 0x1004;
 const IOCSR_IPI_CLEAR: usize = 0x100c;
@@ -243,6 +244,10 @@ pub fn start_secondary_harts() {
     println!("[smp] LA online mask={:#x}", online_hart_mask());
 }
 
+pub fn release_secondary_harts() {
+    BOOT_STATE.store(BOOT_RELEASED, Ordering::Release);
+}
+
 pub fn secondary_online() {
     let hart = current_hart_id();
     if hart == 0 || hart >= MAX_HARTS {
@@ -253,6 +258,9 @@ pub fn secondary_online() {
     }
     enable_local_ipi();
     ONLINE_HART_MASK.fetch_or(1 << hart, Ordering::AcqRel);
+    while BOOT_STATE.load(Ordering::Acquire) != BOOT_RELEASED {
+        core::hint::spin_loop();
+    }
 }
 
 #[inline]

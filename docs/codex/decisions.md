@@ -263,6 +263,19 @@
   hart、idle 或 timer scan 时必须保留单点编程、注册后发布、扫描后重建和无早醒四项不变量；实机需
   独立校准或移除 QEMU 提前量。
 
+## LA64 secondary 调度释放以 boot timer-service 首次编程为提交点
+
+- 状态：已采用
+- 适用范围：LA64 SMP cold boot、全局 timer-service、用户 timeout
+- 最后验证：2026-08-15
+- 证据：raw-counter 诊断、QEMU 10.0.2 LoongArch constant timer 实现，以及 release 初赛 snapshot
+  1/2/12 hart `socket_timeout_probe`；详见 [current-status.md](./current-status.md) 顶部专项。
+- 内容：secondary 启用本地 IPI 并发布 online bit 后，等待 boot hart 发布 `BOOT_RELEASED`。boot hart
+  仅在 bounded hart discovery、timer interrupt enable 和首个 compare 编程都完成后发布 release。
+- 后续影响：online publication 与 scheduler admission 是两个独立阶段。后续修改 boot/timer 顺序必须
+  保证用户任务不能早于全局 timeout 服务进入运行态；当前证据否定 per-hart `rdtime.d` 偏移假设，
+  不引入时钟归一化、任务 affinity 或放宽 timeout 容差。
+
 ## ext4 多字段时间戳在一次 inode transaction 中提交
 
 - 状态：已采用，当前工作树待提交

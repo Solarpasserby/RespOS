@@ -53,7 +53,8 @@
 - 最后验证：2026-08-10
 - 证据：`os/src/main.rs`、`os/src/mm/mod.rs`、`os/src/net/mod.rs`
 - 内容：MM 初始化先于网络全局对象和 initproc，initproc 入队后才开启周期调度。LoongArch 在
-  进入公共高半区路径前还有早期分页和架构扩展初始化。
+  进入公共高半区路径前还有早期分页和架构扩展初始化；secondary 可以先发布 online bit，但必须等
+  boot hart 完成 bounded discovery、启用 timer interrupt 并编程首个 compare 后才进入 scheduler。
 - 后续影响：新增依赖 allocator、页表或 timer 的全局对象时，要确认首次访问发生在相应子系统
   初始化之后。
 
@@ -862,13 +863,15 @@ FdTable slot (FdEntry: descriptor flags)
 
 - 状态：部分验证
 - 适用范围：多核启动、per-CPU idle/context、跨核调度唤醒、地址空间切换
-- 最后验证：2026-08-13
+- 最后验证：2026-08-15
 - 证据：`arch/{rv64,loongarch64}/smp.rs`、`task/processor.rs`、LoongArch QEMU
-  `-m 12G -smp 12` 串口 online mask 与 BuildStorm 并行编译
+  `-m 12G -smp 12` 串口 online mask、1/2/12 hart `socket_timeout_probe` 与 BuildStorm 并行编译
 - 内容：RV64 通过 SBI HSM/IPI，LoongArch QEMU-virt 通过 IOCSR mailbox/IPI 启动 secondary。
   每个 hart 使用独立 early/idle stack、processor/current-task 状态和本地 timer，ready queue 仍为
   全局串行调度器；enqueue 后会向满足 affinity 的 idle hart 发送 IPI。LoongArch 的 boot hart
-  在进入用户态前最多等待 1 秒收集 online mask，较小的 `-smp` 覆盖不会阻止启动。
+  最多等待 1 秒收集 online mask，较小的 `-smp` 覆盖不会阻止启动。secondary 在发布 online 后等待
+  `BOOT_RELEASED`；boot hart 完成收集并启用、首次编程全局 timer 后才释放它们进入调度，因而用户
+  timeout 不会早于 timer-service 就绪。
 - 页表失效：RV64 通过 SBI RFENCE 对 active address-space mask 做同步远端 TLB shootdown；
   LoongArch 通过 IOCSR IPI vector 1 和 per-target generation request/ack 槽完成同一协议。页表 root
   切换不发远端请求；LA 槽同时携带 `all`、`address-space` 或 `range`、ASID 和页对齐区间。

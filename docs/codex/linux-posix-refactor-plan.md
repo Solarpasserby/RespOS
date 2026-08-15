@@ -243,6 +243,9 @@ iozone/wait 停滞。平台不可用只推迟正式镜像验收，不改变本�
 4. Phase 1 保留的纳秒/realtime、atime 模式和 Phase 2 并发 namespace 边界不混入 Phase 5 主线，
    除非新 probe 证明它们成为当前阻断。
 
+2026-08-15：socket timeout 的 LA64 SMP 冷启动阻断已由 secondary `BOOT_RELEASED` barrier 关闭，
+1/2/12 hart 专项通过；该项可继续作为网络回归门禁，不再需要 per-hart 时钟归一化方案。
+
 共享文件及接口规则以 [current-status.md](./current-status.md) 顶部双线分工为准。
 
 ### 跨 Phase 的 POSIX 语义覆盖任务

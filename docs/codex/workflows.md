@@ -572,10 +572,12 @@ cc -std=c11 -Wall -Wextra -Werror -O2 scripts/socket_timeout_probe_linux.c \
 /tmp/socket_timeout_probe_linux
 TASK_A_SOCKET_TIMEOUT_PROBE=1 make run-rv-pre PRE_MEM=4G PRE_SMP=2
 TASK_A_SOCKET_TIMEOUT_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2
+TASK_A_SOCKET_TIMEOUT_PROBE=1 make run-la-pre PRE_MEM=12G PRE_SMP=12
 ```
 
-除 `SOCKET_TIMEOUT_RESPOS ALL PASS` 外，还必须检查 50 ms timeout 没有明显早醒或晚醒。2026-08-14
-LA64 2 hart 存在约 1 秒晚醒，故当前命令预期暴露未闭合阻断；不能只跑单核或固定 hart0 关闭任务。
+除 `SOCKET_TIMEOUT_RESPOS ALL PASS` 外，还必须检查 50 ms timeout 没有明显早醒或晚醒；LA64 还应
+确认 `[smp] LA online mask=...` 先于 `[contest_launcher]`。2026-08-15 已验证 LA64 release 初赛
+snapshot 的 1/2/12 hart，12 hart mask 为 `0xfff`；不能只跑单核或固定 hart0 关闭 SMP timeout 任务。
 
 Phase 5 socket message flags Linux 对照及 guest 专项：
 

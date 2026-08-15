@@ -109,6 +109,8 @@ fn rust_main_high() -> ! {
     }
     trap::enable_timer_interrupt();
     timer::set_next_ti_trigger();
+    #[cfg(target_arch = "loongarch64")]
+    arch::smp::release_secondary_harts();
 
     #[cfg(feature = "verbose_boot")]
     loader::list_apps();

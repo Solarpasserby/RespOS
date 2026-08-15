@@ -54,21 +54,21 @@
   确认参数是否到达 syscall，再决定内核所有者。不得特判 LTP runner；替换整套 libc
   必须单独协商并跑完整相关 workload。
 
-## LA64 SMP 不能直接跨 hart 比较未归一化的 `rdtime.d` deadline
+## LA64 secondary 不得在 boot timer-service 就绪前进入 scheduler
 
-- 状态：可观察差异与 affinity A/B 已确认；归一化实现待协商
-- 适用范围：LA64 SMP socket/nanosleep/futex/poll timeout、用户 monotonic time、CPU accounting
-- 最后验证：2026-08-14
-- 证据：50 ms `socket_timeout_probe` 在 LA64 单核和固定 hart0 通过，2 hart/固定 hart1 稳定约
-  979--981 ms；`/tmp/respos-la-socket-timeout-{smp1,smp2-r2,hart0,hart1}.log`
-- 内容：当前 task 以本 hart 的 `rdtime.d` 换算绝对微秒 deadline，timer-service hart 直接读取同一数值
-  编程和扫描。QEMU LA64 各 hart 的可观察时间域存在约 1 秒偏移时，从非服务 hart 发布的 50 ms
-  deadline 会在服务 hart 看来位于约 1 秒以后。单核通过、放宽超时上界或把任务固定到 hart0 都不能
-  证明 SMP timeout 正确。
-- 后续影响：应在 secondary boot 建立 per-hart offset 并统一到一个全局单调时间域，同时让本地硬件
-  timer 按相对 tick 编程。修复必须重跑跨 hart timeout、迁移 clock、CPU accounting 和双架构门禁；
-  不得用 affinity、1 秒轮询或扩大容差作为正式修复。精确 offset 校准协议完成前，根因实现细节保持
-  `待验证`。
+- 状态：已确认并修复
+- 适用范围：LA64 SMP 冷启动期间的 socket/nanosleep/futex/poll timeout
+- 最后验证：2026-08-15
+- 证据：修复前 2 hart 的 50 ms recv timeout 为 983 ms；临时诊断所见 boot/hart1 raw counter
+  仅差 35738 ticks（约 0.357 ms）。修复后 release 初赛 snapshot 的 1/2/12 hart
+  `socket_timeout_probe` 全过，12 hart online mask 为 `0xfff`。
+- 内容：boot hart 为兼容小于 `MAX_HARTS` 的 `-smp` 最多等待 1 秒收集 online mask。secondary 若发布
+  online 后立即进入 scheduler，可以在唯一 timer-service hart 尚未启用中断和编程首个 compare 时注册
+  deadline，首组 timeout 因而延迟到启动轮询结束。此前由 affinity A/B 推断的“每 hart `rdtime.d`
+  约 1 秒偏移”已被 raw counter 和 QEMU 全局 virtual clock 实现否定。
+- 后续影响：secondary 可以先发布 online，但必须等待 boot hart 完成 bounded discovery、启用 timer
+  interrupt 并编程首个 compare 后的 `BOOT_RELEASED`。不得用 affinity、扩大容差或未经证据的 per-hart
+  时钟归一化掩盖启动顺序问题；修改 SMP boot/timer 顺序后重跑 1/2/12 hart timeout 与 futex 专项。
 
 ## 100 Hz 扫描会把亚 10 ms timeout 量化到下一 tick
 
