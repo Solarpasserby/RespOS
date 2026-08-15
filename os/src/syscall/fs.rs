@@ -13,8 +13,8 @@ use crate::fs::{
     filename_symlink, filename_unlink, init_fdset, make_pipe, open_named_fifo, path_open,
 };
 use crate::mm::{
-    VPNRange, VirtAddr, check_user_readable, check_user_writable, copy_cstr_from_user,
-    copy_from_user, copy_to_user, writeback_file_pages,
+    IoBufferKind, KernelIoBuffer, VPNRange, VirtAddr, check_user_readable, check_user_writable,
+    copy_cstr_from_user, copy_from_user, copy_to_user, writeback_file_pages,
 };
 use crate::mutex::SpinLock;
 use crate::signal::sig_struct::{Sig, SigSet};
@@ -94,7 +94,6 @@ lazy_static! {
 
 // 使用 mm 实现的 `copy_cstr_from_user`, `copy_from_user`, `copy_to_user` 来访问用户空间的数据
 
-// TODO: write 和 read 借助堆上分配的空间中转数据，有额外开销，须优化
 const IO_CHUNK_SIZE: usize = PAGE_SIZE * 16;
 const PWRITE_APPEND_TEST_YIELD: bool = option_env!("TASK_A_PWRITE_APPEND_TEST_YIELD").is_some();
 
@@ -393,7 +392,7 @@ pub fn sys_read(fd: usize, buf: *mut u8, len: usize) -> SysResult<usize> {
         return Err(Errno::EAGAIN);
     }
 
-    let mut kbuf = alloc::vec![0u8; len.min(IO_CHUNK_SIZE)];
+    let mut kbuf = KernelIoBuffer::new(len.min(IO_CHUNK_SIZE), IoBufferKind::Read);
     let mut total = 0usize;
     while total < len {
         if file.get_flags().contains(OpenFlags::O_NONBLOCK) && !file.read_ready() {
@@ -431,7 +430,7 @@ pub fn sys_pread64(fd: usize, buf: *mut u8, len: usize, offset: isize) -> SysRes
         return Err(Errno::EBADF);
     }
     file.can_seek()?;
-    let mut kbuf = alloc::vec![0u8; len.min(IO_CHUNK_SIZE)];
+    let mut kbuf = KernelIoBuffer::new(len.min(IO_CHUNK_SIZE), IoBufferKind::Pread);
     let mut total = 0usize;
     let mut positioned_offset = offset as usize;
     while total < len {
@@ -485,7 +484,7 @@ pub fn sys_pwrite64(fd: usize, buf: *mut u8, len: usize, offset: isize) -> SysRe
 
     let file_flags = file.get_flags();
     let append = file_flags.contains(OpenFlags::O_APPEND);
-    let mut kbuf = alloc::vec![0u8; len.min(IO_CHUNK_SIZE)];
+    let mut kbuf = KernelIoBuffer::new(len.min(IO_CHUNK_SIZE), IoBufferKind::Pwrite);
     let mut total = 0usize;
     let mut positioned_offset = offset as usize;
     while total < len {
@@ -539,7 +538,7 @@ fn copy_file_data(
     output: &alloc::sync::Arc<dyn FileOp>,
     count: usize,
 ) -> SysResult<usize> {
-    let mut kbuf = alloc::vec![0u8; count.min(IO_CHUNK_SIZE)];
+    let mut kbuf = KernelIoBuffer::new(count.min(IO_CHUNK_SIZE), IoBufferKind::CopyFile);
     let mut total = 0usize;
     while total < count {
         if !output.write_ready() {
@@ -702,7 +701,7 @@ pub fn sys_write(fd: usize, buf: *mut u8, len: usize) -> SysResult<usize> {
         return Err(Errno::EBADF);
     }
 
-    let mut kbuf = alloc::vec![0u8; len.min(IO_CHUNK_SIZE)];
+    let mut kbuf = KernelIoBuffer::new(len.min(IO_CHUNK_SIZE), IoBufferKind::Write);
     let mut total = 0usize;
     while total < len {
         if file.get_flags().contains(OpenFlags::O_NONBLOCK) && !file.write_ready() {
@@ -887,7 +886,7 @@ fn splice_copy(
         }
     }
 
-    let mut kbuf = alloc::vec![0u8; len.min(IO_CHUNK_SIZE)];
+    let mut kbuf = KernelIoBuffer::new(len.min(IO_CHUNK_SIZE), IoBufferKind::Splice);
     let mut total = 0usize;
     while total < len {
         let mut chunk_len = (len - total).min(kbuf.len());
@@ -1065,7 +1064,7 @@ pub fn sys_tee(fd_in: usize, fd_out: usize, len: usize, flags: usize) -> SysResu
         }
     }
 
-    let mut kbuf = alloc::vec![0u8; len.min(IO_CHUNK_SIZE)];
+    let mut kbuf = KernelIoBuffer::new(len.min(IO_CHUNK_SIZE), IoBufferKind::Tee);
     let mut total = 0usize;
     while total < len {
         let writable = out_pipe.writable_bytes();

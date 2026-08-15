@@ -9,6 +9,7 @@
 mod address;
 mod frame_allocator;
 mod heap_allocator;
+mod io_buffer;
 mod memory_set;
 
 use crate::arch::mm::{PTEFlags, PageTable, PageTableEntry};
@@ -24,6 +25,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use frame_allocator::init_frame_allocator;
 pub use frame_allocator::{FrameTracker, frame_alloc};
 use heap_allocator::init_heap;
+pub use io_buffer::{IoBufferKind, KernelIoBuffer, drain_io_buffers};
 pub use memory_set::{KERNEL_SPACE, MapPermission, MemorySet};
 pub(crate) use memory_set::{
     MmapBacking, mmap_file_backing, overlay_shared_file_pages, shared_file_page_entry_count,

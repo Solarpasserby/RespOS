@@ -635,6 +635,22 @@ FdTable slot (FdEntry: descriptor flags)
   引用；也不能在 `Drop` 中直接取得 ext4 锁。当前 syscall 安全点把正常运行时的回收窗口限制到下一次
   syscall，但 lwext4 尚无完整 ext4 orphan-list 崩溃恢复，异常断电后的 nlink=0 inode 清理仍待实现。
 
+### 文件 syscall 的 bounce buffer 由有界 per-hart `KernelIoBuffer` 管理
+
+- `read/write/pread/pwrite`、`sendfile/copy_file_range`、`splice/tee` 仍通过最多 64 KiB
+  kernel slice 与现有 `FileOp` 交互；本边界未引入 user VA 直接解引用或页固定。
+- `mm::KernelIoBuffer` 在 `io_buffer_pool` 开启时每 hart 保留至多一个已初始化 `Vec`。
+  本 hart `SpinNoIrqLock<Option<Vec<u8>>>` 只保护所有权移动，不得在其内执行 user-copy、
+  fault、VFS/PageCache/lwext4 I/O 或调度。任务迁移可将 buffer 归还到新 hart；新槽已被占用时
+  直接丢弃本 buffer，不等待另一个缓存使用者。
+- 每个 buffer 容量超过 64 KiB 时不得进入 pool；当前 syscall chunk 本身也限制在 64 KiB。
+  RV64/LA64 最大保留量因此为 512/768 KiB。`drain_io_buffers()` 先推进 drain epoch
+  再释放空闲槽；所有在旧 epoch 借出的 buffer 归还时也必须直接释放，避免执行 drain
+  的 `/proc` write syscall 在返回后把自身 buffer 重新放回 pool。
+- 缓存字节不保证每次 checkout 为零；安全契约是所有字节始终处于 Rust 已初始化状态，
+  producer 只允许下游消费其返回的 `n` 字节。任何新 `FileOp`/pipe producer 若返回超过实际
+  写入的长度，都是会导致旧数据暴露的契约错误，不得依赖过去 `vec![0; len]` 掩盖。
+
 ### `splice` 在消费输入前按 FileOp 状态完成预检
 
 - 状态：AF_UNIX 输入错误语义已实现并完成双架构 SMP 专项

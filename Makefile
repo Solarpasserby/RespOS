@@ -73,6 +73,8 @@ RV_USER_FEATURES ?=
 LA_USER_FEATURES ?=
 RV_KERNEL_FEATURES ?=
 LA_KERNEL_FEATURES ?=
+RV_KERNEL_NO_DEFAULT_FEATURES ?= 0
+LA_KERNEL_NO_DEFAULT_FEATURES ?= 0
 
 REQUESTED_GOALS := $(if $(MAKECMDGOALS),$(MAKECMDGOALS),all)
 ifneq ($(filter all submit check-submit,$(REQUESTED_GOALS)),)
@@ -85,6 +87,9 @@ endif
 ifneq ($(strip $(RV_USER_FEATURES)$(LA_USER_FEATURES)$(RV_KERNEL_FEATURES)$(LA_KERNEL_FEATURES)),)
 $(error Submission entry does not accept user or kernel features)
 endif
+ifneq ($(filter 1,$(RV_KERNEL_NO_DEFAULT_FEATURES) $(LA_KERNEL_NO_DEFAULT_FEATURES)),)
+$(error Submission entry requires kernel default features)
+endif
 endif
 
 ifneq ($(strip $(RV_KERNEL_FEATURES)),)
@@ -92,6 +97,12 @@ ifneq ($(strip $(RV_KERNEL_FEATURES)),)
 endif
 ifneq ($(strip $(LA_KERNEL_FEATURES)),)
 	LA_KERNEL_FEATURE_ARGS := --features "$(LA_KERNEL_FEATURES)"
+endif
+ifeq ($(RV_KERNEL_NO_DEFAULT_FEATURES),1)
+	RV_KERNEL_DEFAULT_FEATURE_ARGS := --no-default-features
+endif
+ifeq ($(LA_KERNEL_NO_DEFAULT_FEATURES),1)
+	LA_KERNEL_DEFAULT_FEATURE_ARGS := --no-default-features
 endif
 
 ifeq ($(RV_MODE),debug)
@@ -166,7 +177,7 @@ build-rv: prepare-rv-cargo-config
 	$(MAKE) -C user build ARCH=riscv64 MODE=$(RV_MODE) FEATURES=$(RV_USER_FEATURES)
 	cd os && RESPOS_USER_PROFILE_DIR=$(RV_CARGO_TARGET_DIR) \
 		RESPOS_USER_TARGET=$(RV_TARGET) \
-		RESPOS_APP_REBUILD_STAMP=$$(date +%s%N) cargo build $(RV_CARGO_BUILD_ARG) $(RV_KERNEL_FEATURE_ARGS)
+		RESPOS_APP_REBUILD_STAMP=$$(date +%s%N) cargo build $(RV_CARGO_BUILD_ARG) $(RV_KERNEL_DEFAULT_FEATURE_ARGS) $(RV_KERNEL_FEATURE_ARGS)
 	rust-objcopy --set-start=0x80200000 $(RV_ELF) $(KERNEL_RV)
 	@rust-readobj -h -l $(KERNEL_RV) | awk '/Entry:/ || /VirtualAddress:/ || /PhysicalAddress:/ { print }'
 
@@ -174,7 +185,7 @@ build-la: prepare-la-cargo-config
 	$(MAKE) -C user build ARCH=loongarch64 MODE=$(LA_MODE) FEATURES=$(LA_USER_FEATURES)
 	cd os && RESPOS_USER_PROFILE_DIR=$(LA_CARGO_TARGET_DIR) \
 		RESPOS_USER_TARGET=$(LA_TARGET) \
-		RESPOS_APP_REBUILD_STAMP=$$(date +%s%N) cargo build $(LA_CARGO_BUILD_ARG) $(LA_KERNEL_FEATURE_ARGS)
+		RESPOS_APP_REBUILD_STAMP=$$(date +%s%N) cargo build $(LA_CARGO_BUILD_ARG) $(LA_KERNEL_DEFAULT_FEATURE_ARGS) $(LA_KERNEL_FEATURE_ARGS)
 	cp $(LA_ELF) $(KERNEL_LA)
 	@rust-readobj -h -l $(KERNEL_LA) | awk '/Entry:/ || /VirtualAddress:/ || /PhysicalAddress:/ { print }'
 

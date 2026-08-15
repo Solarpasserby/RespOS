@@ -1,5 +1,49 @@
 # RespOS 当前状态
 
+## 2026-08-15 P3 I/O buffer pool 后 RV64 完整 final BuildStorm（基于 `19e852b` 后工作树）
+
+- **命令与样本**：`make run-rv-final RV_FINAL_OUTPUT=/tmp/respos-rv-io-buffer-buildstorm-final.log`，
+  release default features（包含 `io_buffer_pool`，不含 `perf_counters`），QEMU RV64 virt、16 GiB/8 hart、
+  `-snapshot`。`kernel-rv` SHA-256 为 `348cfc5e...c069e`，公开根盘为
+  `d74e4365...9b334c`，日志为 `4b70fe74...99aca`。
+- **正确性**：CAgent 10/10 pass、脚本 exit 0；BuildStorm toolchain/minibuild 通过，timed build
+  输出 `BUILDSTORM_COMPILE mode=multi ok=true cores=8 bytes=1681000 arch=riscv64`，BuildStorm 脚本
+  exit 0，guest 主动关机。日志未命中 kernel panic、OOM、SIGBUS、segmentation fault 或非零脚本退出。
+- **耗时**：pre-build `tg-xtask` dev 阶段 11.72 s，timed 前 `tg-xtask` dev 构建 5.23 s；正式
+  Cargo release 为 `10m 34s`，axbuild 为 `641.47s`。日志 birth/mtime 跨度约 677.2 s，
+  包含启动、CAgent 和 BuildStorm 前后开销，不是平台计分时间。Cargo 打印的 last-use data/
+  `out of range integral type conversion attempted` 为非致命缓存警告，未阻断两次 dev 和最终 release 成功。
+- **归因边界**：该轮证明当前默认内核能完整通过 RV64 final，且相对此前当前机器记录处于
+  健康耗时区间；因未在同一工作树/宿主窗口运行关闭 pool 的完整 final，不将 641.47 s
+  单独归因于 `io_buffer_pool`。
+
+## 2026-08-15 P3 通用文件 I/O 中转缓冲复用（基于 `19e852b` 后工作树）
+
+- **设计边界**：新增 `mm::KernelIoBuffer`，统一承接 `read/write/pread/pwrite`、
+  `sendfile/copy_file_range`、`splice/tee` 的最多 64 KiB kernel bounce buffer。默认开启的
+  `io_buffer_pool` 每 hart 最多保留一个 `Vec`，RV64/LA64 常驻上限分别为 512/768 KiB；
+  只在取还所有权时持本 hart 关中断短锁，不跨 user-copy、fault、文件 I/O 或调度。
+  miss/迁移/同 hart 重叠使用只回退普通分配，正确性不依赖命中。
+- **数据安全**：缓存内存始终是 Rust 已初始化字节，扩容时初始化新区间，但不再每次对旧容量
+  全量清零。现有 `FileOp`/pipe 契约仍只将 producer 实际返回的 `n` 字节复制给用户或下游；
+  未改 EFAULT、short I/O、offset、COW/lazy mapping 或 lwext4/PageCache 语义。本轮不是零拷贝。
+- **诊断能力**：`perf_counters` 新增 acquire/requested bytes、hit/miss、grow bytes/ticks、
+  cached/dropped release 及按 syscall 路径分组；`/proc/respos_perf` 支持 `drain_io_buffers`。
+  Makefile 新增仅诊断用的 `RV_KERNEL_NO_DEFAULT_FEATURES`/
+  `LA_KERNEL_NO_DEFAULT_FEATURES`，`all/submit/check-submit` 拒绝关闭 default features。
+- **同序列 RV64 A/B**：4 GiB/2 hart、diagnostic x1，依次运行 `buildstorm_file_probe`、
+  `splice_socket_probe`、`cat /proc/respos_perf`，两轮 probe 均 PASS。off 为 265 acquires/265 misses/
+  3307 acquire ticks；on 为 265 acquires/263 hits/2 misses/1802 ticks，局部 acquire ticks 下降约
+  45.5%。日志为 `/tmp/respos-rv-io-buffer-{off,on}.log`。该小样本只证明分配源减少，
+  **不是**完整 BuildStorm 墙钟加速比。
+- **回归门禁**：`make all` 默认产物在 RV64/LA64 通过；池开启的 RV64/LA64 2 hart
+  `buildstorm_file_probe` 和 `splice_socket_probe` 通过，LA 计数为 265 acquires/263 hits/2 misses；
+  RV64 默认产物另通过 `fs_phase4_probe` 与 `fs_writeback_probe normal`。drain epoch 修正后
+  的最终 RV64 产物在 `/tmp/respos-rv-io-buffer-final.log` 中通过 `buildstorm_file_probe`，
+  `/bin/busybox echo drain_io_buffers > /proc/respos_perf` 返回 0，紧接的 `fs_phase4_probe` 仍 PASS。
+  完整 LA64 BuildStorm、内存压力下主动 drain 以及 P3-C user-iterator
+  均仍待验证/实现。
+
 ## 2026-08-15 Phase 5 LA64 SMP 冷启动 timeout 阻断（基于 `c5e51fa`）
 
 - **当前反证与根因纠正**：当前 HEAD 的 Linux 与 RV64 4 GiB/2 hart `socket_timeout_probe`

@@ -174,18 +174,22 @@
   mixed-layout/乱序释放/完全 coalesce 测试、双架构构建、1 GiB SMP probe 和真实 Cargo soak；不得用
   “更快但不合并”或无界 per-CPU cache 换取短窗口成绩。
 
-## 当前保留 copy_to/from_user 语义边界，不实施未经准备的零拷贝
+## 保留 copy_to/from_user 语义边界，以有界 I/O buffer pool 减少临时分配
 
-- 状态：已采用，随热点迁移复核
+- 状态：已采用，完整 BuildStorm 墙钟 A/B 待验证
 - 适用范围：read/write/pread/pwrite、socket I/O、lazy/COW user pages、EFAULT/partial I/O
-- 最后验证：2026-08-10
-- 证据：`os/src/mm/mod.rs`、`os/src/syscall/{fs,net}.rs`；RV64 120 秒 Cargo copy calls/bytes/ticks
+- 最后验证：2026-08-15
+- 证据：`os/src/mm/{mod,io_buffer}.rs`、`os/src/syscall/fs.rs`、`os/src/perf.rs`；RV64
+  `/tmp/respos-rv-io-buffer-{off,on}.log`，RV64/LA64 2 hart 专项
 - 内容：用户复制 helper 继续逐页验证 VMA 权限、resolve lazy/COW、翻译 PTE 后复制；不能直接解引用
   user VA。文件/socket syscall 的 bounce buffer 是潜在额外复制，但当前窗口 copy 总计仅约 0.424 CPU 秒，
-  不足以支持高风险接口重构。
+  不足以支持高风险接口重构。通用文件 I/O bounce buffer 现由 `KernelIoBuffer` 管理，
+  每 hart 最多缓存一个 64 KiB `Vec`，取还不跨 fault/I/O/调度，miss 仍回退普通分配。
+  这是减少 allocator 往返的通用资源管理，不是零拷贝，也不允许按进程/路径/测例分流。
 - 后续影响：若以后优化，先设计可复用的 prepared/pinned user-page span 和 scatter/gather FileOp/Socket
   接口，明确 fault-before-side-effect、共享 file offset、short I/O、并发 munmap/COW 和锁顺序；必须有
-  专项 ABI/竞态测试后才能替换 bounce buffer。
+  专项 ABI/竞态测试后才能替换 bounce buffer。调整 pool 大小或默认开关时必须同时报告
+  hit/miss/grow/acquire ticks 和完整 workload 墙钟，不得只用局部命中率宣称 BuildStorm 加速。
 
 ## ext4 stat 缓存同一 inode 快照，lookup 每次只做一次必要的路径解析
 

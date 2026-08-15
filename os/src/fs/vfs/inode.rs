@@ -16,6 +16,7 @@ pub trait InodeOp: Any + Send + Sync {
     fn node_type(&self) -> InodeType;
     fn stat(&self, path: &str) -> SysResult<KStat>;
 
+    /// 成功返回 `n` 时必须已初始化 `buf[..n]`，且 `n <= buf.len()`。
     fn read_at(&self, path: &str, off: usize, buf: &mut [u8]) -> SysResult<usize>;
     fn write_at(&self, path: &str, off: usize, buf: &[u8]) -> SysResult<usize>;
     fn truncate(&self, path: &str, size: usize) -> SysResult<usize>;

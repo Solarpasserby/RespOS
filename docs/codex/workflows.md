@@ -1365,6 +1365,31 @@ make build-la LA_USER_FEATURES= LA_KERNEL_FEATURES=
 报告 calls、bytes、ticks。仅观察到 syscall 使用 bounce buffer 不构成零拷贝依据，prepared user pages
 还需覆盖 EFAULT-before-side-effect、lazy/COW、short I/O、共享 offset 和并发 munmap。
 
+P3 `KernelIoBuffer` A/B 必须显式区分 Cargo default features。只写
+`RV_KERNEL_FEATURES=perf_counters` 会追加 feature，不会关闭默认的 `io_buffer_pool`。可复现的
+RV64 2 hart 对照为：
+
+```bash
+# baseline：关闭 default features，再显式补回除 pool 外的默认项
+make run-rv-diagnostic \
+  RV_KERNEL_NO_DEFAULT_FEATURES=1 \
+  RV_KERNEL_FEATURES='la_global_kernel perf_counters' \
+  RV_DIAGNOSTIC_SMP=2 \
+  RV_DIAGNOSTIC_OUTPUT=/tmp/respos-rv-io-buffer-off.log
+
+# candidate：保留 default io_buffer_pool，只追加计数
+make run-rv-diagnostic \
+  RV_KERNEL_FEATURES=perf_counters \
+  RV_DIAGNOSTIC_SMP=2 \
+  RV_DIAGNOSTIC_OUTPUT=/tmp/respos-rv-io-buffer-on.log
+```
+
+两轮 guest 必须以同顺序执行 `buildstorm_file_probe`、`splice_socket_probe`和
+`cat /proc/respos_perf`，先核对 `io_buffer_pool_enabled=0/1`。报告 acquires/requested bytes、
+hit/miss、grow bytes、acquire ticks 和 heap class；本 probe 不代替无 `perf_counters` 的完整
+BuildStorm 墙钟 A/B。开启 pool 时可向 `/proc/respos_perf` 写 `drain_io_buffers`，命令是尽力
+释放当前空闲槽，不等待正在使用的 buffer。
+
 allocator magazine 实验使用独立 `heap_magazine` feature；当前 A2 完整 A/B 未过门槛，必须默认关闭。
 诊断路径和生产 A/B
 必须分开构建：

@@ -461,6 +461,22 @@ counters!(
     copy_to_user_calls,
     copy_to_user_bytes,
     copy_to_user_ticks,
+    io_buffer_acquires,
+    io_buffer_requested_bytes,
+    io_buffer_cache_hits,
+    io_buffer_cache_misses,
+    io_buffer_grows,
+    io_buffer_grow_bytes,
+    io_buffer_acquire_ticks,
+    io_buffer_cached_releases,
+    io_buffer_dropped_releases,
+    io_buffer_read_acquires,
+    io_buffer_pread_acquires,
+    io_buffer_pwrite_acquires,
+    io_buffer_copy_file_acquires,
+    io_buffer_write_acquires,
+    io_buffer_splice_acquires,
+    io_buffer_tee_acquires,
 );
 
 #[cfg(feature = "perf_counters")]
@@ -682,6 +698,22 @@ increment_functions!(
     (ext4_lower_attributes_ticks, ext4_lower_attributes_ticks),
     (ext4_lower_superblock_call, ext4_lower_superblock_calls),
     (ext4_lower_superblock_ticks, ext4_lower_superblock_ticks),
+    (io_buffer_acquire, io_buffer_acquires),
+    (io_buffer_requested_bytes, io_buffer_requested_bytes),
+    (io_buffer_cache_hit, io_buffer_cache_hits),
+    (io_buffer_cache_miss, io_buffer_cache_misses),
+    (io_buffer_grow, io_buffer_grows),
+    (io_buffer_grow_bytes, io_buffer_grow_bytes),
+    (io_buffer_acquire_ticks, io_buffer_acquire_ticks),
+    (io_buffer_cached_release, io_buffer_cached_releases),
+    (io_buffer_dropped_release, io_buffer_dropped_releases),
+    (io_buffer_read_acquire, io_buffer_read_acquires),
+    (io_buffer_pread_acquire, io_buffer_pread_acquires),
+    (io_buffer_pwrite_acquire, io_buffer_pwrite_acquires),
+    (io_buffer_copy_file_acquire, io_buffer_copy_file_acquires),
+    (io_buffer_write_acquire, io_buffer_write_acquires),
+    (io_buffer_splice_acquire, io_buffer_splice_acquires),
+    (io_buffer_tee_acquire, io_buffer_tee_acquires),
 );
 
 #[inline(always)]
@@ -1479,6 +1511,31 @@ pub fn render() -> String {
         s.copy_to_user_calls,
         s.copy_to_user_bytes,
         s.copy_to_user_ticks
+    );
+    let _ = writeln!(
+        out,
+        "io_buffer_pool_enabled={} acquires={} requested_bytes={} cache_hits={} cache_misses={} grows={} grow_bytes={} acquire_ticks={} cached_releases={} dropped_releases={}",
+        usize::from(cfg!(feature = "io_buffer_pool")),
+        s.io_buffer_acquires,
+        s.io_buffer_requested_bytes,
+        s.io_buffer_cache_hits,
+        s.io_buffer_cache_misses,
+        s.io_buffer_grows,
+        s.io_buffer_grow_bytes,
+        s.io_buffer_acquire_ticks,
+        s.io_buffer_cached_releases,
+        s.io_buffer_dropped_releases
+    );
+    let _ = writeln!(
+        out,
+        "io_buffer_acquires_by_path_read={} pread={} pwrite={} copy_file={} write={} splice={} tee={}",
+        s.io_buffer_read_acquires,
+        s.io_buffer_pread_acquires,
+        s.io_buffer_pwrite_acquires,
+        s.io_buffer_copy_file_acquires,
+        s.io_buffer_write_acquires,
+        s.io_buffer_splice_acquires,
+        s.io_buffer_tee_acquires
     );
     out
 }

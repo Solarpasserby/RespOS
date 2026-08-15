@@ -53,11 +53,15 @@ struct FileInner {
 /// 文件操作 trait
 pub trait FileOp: Any + Send + Sync {
     fn as_any(&self) -> &dyn Any;
-    /// 读取数据到 buf 中，返回读取的字节数，同时更新文件偏移量
+    /// 读取数据到 buf 中，返回读取的字节数，同时更新文件偏移量。
+    ///
+    /// 成功返回 `n` 时，实现必须已初始化 `buf[..n]`，且 `n <= buf.len()`。
+    /// syscall 层可能复用未重复清零的内核中转缓冲，因此不得把未写入的区间计入 `n`。
     fn read<'a>(&'a self, buf: &'a mut [u8]) -> SysResult<usize>;
     /// 写入数据到 buf 中，返回写入的字节数，同时更新文件偏移量
     fn write<'a>(&'a self, buf: &'a [u8]) -> SysResult<usize>;
     /// 在指定位置读取，不读取或修改共享 open-file offset。
+    /// 成功返回 `n` 时遵守与 [`FileOp::read`] 相同的 `buf[..n]` 初始化契约。
     fn read_at_offset(&self, _offset: usize, _buf: &mut [u8]) -> SysResult<usize> {
         Err(Errno::ESPIPE)
     }

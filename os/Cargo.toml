@@ -5,11 +5,12 @@ edition = "2024"
 rust-version = "1.85"
 
 [features]
-default = ["la_global_kernel"]
+default = ["la_global_kernel", "io_buffer_pool"]
 log = []
 verbose_boot = []
 perf_counters = ["respos_buddy_allocator/perf_counters"]
 heap_magazine = []
+io_buffer_pool = []
 debug_traces = []
 fault_trace = []
 la_global_kernel = []
