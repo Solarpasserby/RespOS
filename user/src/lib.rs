@@ -322,6 +322,12 @@ pub fn getuid() -> isize {
 pub fn getgid() -> isize {
     sys_getgid()
 }
+pub fn setgid(gid: usize) -> isize {
+    sys_setgid(gid)
+}
+pub fn setuid(uid: usize) -> isize {
+    sys_setuid(uid)
+}
 pub fn utimens(path: &str, times: &[TimeSpec; 2]) -> isize {
     sys_utimensat(AT_FDCWD, path, times, 0)
 }

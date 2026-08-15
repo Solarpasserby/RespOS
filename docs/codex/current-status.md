@@ -1,24 +1,31 @@
 # RespOS 当前状态
 
-## 2026-08-15 Phase 5 SysV SHM 核心 metadata 独立门禁（基于 `60deddb`）
+## 2026-08-15 Phase 5 SysV SHM metadata 与非 owner 权限门禁（基于 `198e5ca`）
 
-- **独立契约**：新增 Linux/guest `sysv_shm_metadata_probe`，不创建工作 child，避免把 `shmctl`
-  metadata 与 LA64 多子进程 signal/reap 活性混在一起。4113-byte segment 必须保留原始 `shm_segsz`，
-  同时在 `SHM_INFO.shm_tot` 中计为 2 页；初始 owner/group、`0640` mode、creator pid、last-op pid、
-  attach 数和零 atime/dtime 必须符合 Linux。
+- **独立契约**：新增 Linux/guest `sysv_shm_metadata_probe`；核心状态向量不创建工作 child，权限向量只
+  创建一个 child 并立即 wait，避免把 `shmctl` metadata 与 LA64 多子进程 signal/reap 活性混在一起。
+  4113-byte segment 必须保留原始 `shm_segsz`，同时在 `SHM_INFO.shm_tot` 中计为 2 页；初始 owner/
+  group、`0640` mode、creator pid、last-op pid、attach 数和零 atime/dtime 必须符合 Linux。
 - **状态转换**：probe 通过 `SHM_STAT` index 和 `SHM_STAT_ANY` 找回同一 shmid；attach/detach 验证
   `shm_nattch=1->0`、`shm_lpid`、atime/dtime 的相对更新，`IPC_SET` 验证 mode 与 ctime，随后再次
   attach、`IPC_RMID`，要求最后 detach 前 `SHM_DEST` 可见且 `SHM_INFO` 仍计入 segment/页数，最后
   detach 后 shmid 返回 `EINVAL` 且全局计数恢复。
+- **权限契约**：[Linux `shmctl(2)`](https://man7.org/linux/man-pages/man2/shmctl.2.html) 要求无 read
+  permission 的 `IPC_STAT/SHM_STAT` 返回 `EACCES`，`SHM_STAT_ANY` 忽略 read mode；非 owner/creator
+  的 `IPC_SET/IPC_RMID` 返回 `EPERM`。[`shmat(2)`](https://man7.org/linux/man-pages/man2/shmat.2.html)
+  和 [`shmget(2)`](https://man7.org/linux/man-pages/man2/shmget.2.html) 同样要求所请求的 read/write 权限。
+  Linux probe 以 mode `0000` 验证无权限查询/attach 和 `SHM_STAT_ANY`；guest 由 root parent 创建后只
+  fork 一个 child，依次 `setgid/setuid(65534)`，再验证完整 `EACCES/EPERM` 矩阵并由 parent wait/清理。
 - **验证结果**：Linux 以 `-std=c11 -Wall -Wextra -Werror -O2` 编译并输出
-  `SYSV_SHM_METADATA_LINUX PASS index=<namespace-dependent> size=4113 pages=2`。release 初赛 snapshot、
-  4 GiB/2 hart 的
-  RV64/LA64 均输出 `SYSV_SHM_METADATA PASS index=0 size=4113 pages=2` 与 runner PASS，日志为
-  `/tmp/respos-{rv,la}-sysv-shm-metadata.log`；本轮无需修改内核。
+  `SYSV_SHM_METADATA_LINUX PASS index=<namespace-dependent> size=4113 pages=2 mode_access=pass`。release
+  初赛 snapshot、4 GiB/2 hart 的 RV64/LA64 均输出
+  `SYSV_SHM_METADATA PASS index=1 size=4113 pages=2 permission=pass` 与 runner PASS，日志为
+  `/tmp/respos-{rv,la}-sysv-shm-permission.log`；本轮内核无需修改，仅为 guest user library 增加直接
+  `setuid/setgid` syscall 薄封装。
 - **边界**：该结果独立确认核心 `IPC_STAT/IPC_SET/SHM_STAT/SHM_STAT_ANY/SHM_INFO/SHM_DEST` 状态，不
-  代表非 root permission denial、`SHM_STAT_ANY` 权限绕过、`SHM_LOCK/SHM_UNLOCK` capability 或时间戳
-  的绝对 realtime 基准已闭合。LA64 `shmctl01` 的 20-child signal/reap teardown 阻断也仍存在，但不能
-  再归因于本 probe 已覆盖的 metadata 返回值。
+  代表 user/IPC namespace capability、`SHM_LOCK/SHM_UNLOCK` 的 `CAP_IPC_LOCK`/`RLIMIT_MEMLOCK` 或
+  时间戳的绝对 realtime 基准已闭合。LA64 `shmctl01` 的 20-child signal/reap teardown 阻断也仍存在，
+  但不能再归因于本 probe 已覆盖的 metadata/基础权限返回值。
 
 ## 2026-08-15 Phase 5 SysV SHM size 与 `SHMMNI/SHMALL` 配额回收（基于 `9548ded`）
 

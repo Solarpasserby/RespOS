@@ -92,6 +92,8 @@ const SYSCALL_GETPPID: usize = 173;
 const SYSCALL_GETTID: usize = 178;
 const SYSCALL_GETUID: usize = 174;
 const SYSCALL_GETGID: usize = 176;
+const SYSCALL_SETGID: usize = 144;
+const SYSCALL_SETUID: usize = 146;
 const SYSCALL_SETFSUID: usize = 151;
 const SYSCALL_SETFSGID: usize = 152;
 const SYSCALL_GETGROUPS: usize = 158;
@@ -803,6 +805,14 @@ pub fn sys_getuid() -> isize {
 
 pub fn sys_getgid() -> isize {
     syscall(SYSCALL_GETGID, [0, 0, 0, 0, 0, 0])
+}
+
+pub fn sys_setgid(gid: usize) -> isize {
+    syscall(SYSCALL_SETGID, [gid, 0, 0, 0, 0, 0])
+}
+
+pub fn sys_setuid(uid: usize) -> isize {
+    syscall(SYSCALL_SETUID, [uid, 0, 0, 0, 0, 0])
 }
 
 pub fn sys_clone(flags: usize, stack: usize, ptid: usize, tls: usize, ctid: usize) -> isize {

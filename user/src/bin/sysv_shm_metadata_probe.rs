@@ -4,12 +4,16 @@
 #[macro_use]
 extern crate user_lib;
 
-use user_lib::{getgid, getpid, getuid, shmat, shmctl, shmdt, shmget};
+use user_lib::{
+    exit, fork, getgid, getpid, getuid, mmap_raw, munmap, setgid, setuid, shmat, shmctl, shmdt,
+    shmget, waitpid,
+};
 
 const PAGE_SIZE: usize = 4096;
 const SEGMENT_SIZE: usize = PAGE_SIZE + 17;
 const IPC_PRIVATE: isize = 0;
 const IPC_CREAT: usize = 0o1000;
+const IPC_EXCL: usize = 0o2000;
 const IPC_RMID: usize = 0;
 const IPC_SET: usize = 1;
 const IPC_STAT: usize = 2;
@@ -18,8 +22,13 @@ const SHM_STAT: usize = 13;
 const SHM_INFO: usize = 14;
 const SHM_STAT_ANY: usize = 15;
 const SHM_DEST: u32 = 0o1000;
+const SHM_RDONLY: usize = 0o10000;
 const EINVAL: isize = 22;
 const EACCES: isize = 13;
+const EEXIST: isize = 17;
+const EPERM: isize = 1;
+const PROT_READ_WRITE: usize = 0x1 | 0x2;
+const MAP_SHARED_ANONYMOUS: usize = 0x1 | 0x20;
 
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
@@ -72,6 +81,24 @@ struct ShmInfo {
     swap_successes: usize,
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+struct PermissionResults {
+    setgid: isize,
+    setuid: isize,
+    uid: isize,
+    gid: isize,
+    lookup_none: isize,
+    lookup_read: isize,
+    shmat_read: isize,
+    unexpected_detach: isize,
+    ipc_stat: isize,
+    shm_stat: isize,
+    shm_stat_any: isize,
+    ipc_set: isize,
+    ipc_rmid: isize,
+}
+
 fn read_stat(shmid: usize) -> ShmidDs {
     let mut ds = ShmidDs::default();
     let ds_ptr = &mut ds as *mut ShmidDs as usize;
@@ -103,6 +130,80 @@ fn find_index(shmid: usize) -> usize {
     panic!("created shmid was not reachable through SHM_STAT");
 }
 
+fn create_keyed_segment(mode: usize) -> (isize, usize) {
+    let mut key = 0x5300_0000isize ^ getpid();
+    for _ in 0..256 {
+        let shmid = shmget(key, PAGE_SIZE, IPC_CREAT | IPC_EXCL | mode);
+        if shmid > 0 {
+            return (key, shmid as usize);
+        }
+        assert_eq!(shmid, -EEXIST);
+        key += 1;
+    }
+    panic!("could not allocate a unique SysV SHM key");
+}
+
+fn verify_permission_matrix() -> bool {
+    let (key, shmid) = create_keyed_segment(0);
+    let index = find_index(shmid);
+    let control = mmap_raw(0, PAGE_SIZE, PROT_READ_WRITE, MAP_SHARED_ANONYMOUS, -1, 0);
+    assert!(control > 0, "permission control mmap failed: {}", control);
+    let control = control as usize;
+
+    let child = fork();
+    assert!(child >= 0, "permission fork failed: {}", child);
+    if child == 0 {
+        let results = unsafe { &mut *(control as *mut PermissionResults) };
+        results.setgid = setgid(65534);
+        results.setuid = setuid(65534);
+        results.uid = getuid();
+        results.gid = getgid();
+        results.lookup_none = shmget(key, 0, 0);
+        results.lookup_read = shmget(key, 0, 0o400);
+        results.shmat_read = shmat(shmid, 0, SHM_RDONLY);
+        results.unexpected_detach = if results.shmat_read > 0 {
+            shmdt(results.shmat_read as usize)
+        } else {
+            0
+        };
+
+        let mut ds = ShmidDs::default();
+        let ds_ptr = &mut ds as *mut ShmidDs as usize;
+        results.ipc_stat = shmctl(shmid, IPC_STAT, ds_ptr);
+        results.shm_stat = shmctl(index, SHM_STAT, ds_ptr);
+        results.shm_stat_any = shmctl(index, SHM_STAT_ANY, ds_ptr);
+        results.ipc_set = shmctl(shmid, IPC_SET, ds_ptr);
+        results.ipc_rmid = shmctl(shmid, IPC_RMID, 0);
+        let _ = exit(0);
+        return true;
+    }
+
+    let mut status = 0;
+    let waited = waitpid(child as usize, &mut status);
+    let results = unsafe { *(control as *const PermissionResults) };
+    let cleanup = shmctl(shmid, IPC_RMID, 0);
+    let unmap = munmap(control, PAGE_SIZE);
+
+    assert_eq!(waited, child);
+    assert_eq!(status, 0);
+    assert_eq!(results.setgid, 0);
+    assert_eq!(results.setuid, 0);
+    assert_eq!(results.uid, 65534);
+    assert_eq!(results.gid, 65534);
+    assert_eq!(results.lookup_none, shmid as isize);
+    assert_eq!(results.lookup_read, -EACCES);
+    assert_eq!(results.shmat_read, -EACCES);
+    assert_eq!(results.unexpected_detach, 0);
+    assert_eq!(results.ipc_stat, -EACCES);
+    assert_eq!(results.shm_stat, -EACCES);
+    assert_eq!(results.shm_stat_any, shmid as isize);
+    assert_eq!(results.ipc_set, -EPERM);
+    assert_eq!(results.ipc_rmid, -EPERM);
+    assert_eq!(cleanup, 0);
+    assert_eq!(unmap, 0);
+    false
+}
+
 fn read_byte(addr: usize) -> u8 {
     unsafe { core::ptr::read_volatile(addr as *const u8) }
 }
@@ -113,6 +214,10 @@ fn write_byte(addr: usize, value: u8) {
 
 #[unsafe(no_mangle)]
 fn main() -> i32 {
+    if verify_permission_matrix() {
+        return 0;
+    }
+
     let before = read_info();
     assert!(before.used_ids >= 0);
 
@@ -196,7 +301,7 @@ fn main() -> i32 {
     assert_eq!(after.shm_tot, before.shm_tot);
 
     println!(
-        "SYSV_SHM_METADATA PASS index={} size={} pages=2",
+        "SYSV_SHM_METADATA PASS index={} size={} pages=2 permission=pass",
         index, SEGMENT_SIZE
     );
     0

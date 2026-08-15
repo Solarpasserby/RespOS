@@ -500,17 +500,20 @@ cc -std=c11 -Wall -Wextra -Werror -O2 \
 
 TASK_A_SYSV_SHM_METADATA_PROBE=1 \
   make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
-  RV_PRE_OUTPUT=/tmp/respos-rv-sysv-shm-metadata.log
+  RV_PRE_OUTPUT=/tmp/respos-rv-sysv-shm-permission.log
 TASK_A_SYSV_SHM_METADATA_PROBE=1 \
   make run-la-pre PRE_MEM=4G PRE_SMP=2 \
-  LA_PRE_OUTPUT=/tmp/respos-la-sysv-shm-metadata.log
+  LA_PRE_OUTPUT=/tmp/respos-la-sysv-shm-permission.log
 ```
 
-Linux 必须输出 `SYSV_SHM_METADATA_LINUX PASS`；guest 必须输出 `SYSV_SHM_METADATA PASS` 与 runner
-PASS。probe 使用 4113-byte segment 同时验证 byte size 与 2-page accounting，覆盖 initial/attach/
+Linux 必须输出 `SYSV_SHM_METADATA_LINUX PASS ... mode_access=pass`；guest 必须输出
+`SYSV_SHM_METADATA PASS ... permission=pass` 与 runner PASS。probe 使用 4113-byte segment 同时验证
+byte size 与 2-page accounting，覆盖 initial/attach/
 detach/`IPC_SET`/marked-removed/最后回收状态，以及 `SHM_STAT` index、`SHM_STAT_ANY` 和 `SHM_INFO`。
-它不 fork 工作 child，可用于区分 metadata 回归和 LA64 `shmctl01` 的 signal/reap teardown 阻断；不得用
-本结果宣称非 root 权限、`SHM_LOCK` capability 或绝对 realtime timestamp 已通过。
+Linux mode `0000` 向量要求以无 `CAP_IPC_OWNER` 的普通用户运行；若实际 euid 为 root，probe 会 fork
+一个 UID/GID 65534 child 做完整 ownership denial。guest 同样只 fork 一个降权 child 并立即 wait，用于
+区分 metadata/权限回归和 LA64 `shmctl01` 的 20-child signal/reap teardown 阻断。不得用本结果宣称
+namespace capability、`SHM_LOCK` 或绝对 realtime timestamp 已通过。
 
 Phase 5 session/`getsid` Linux 对照：
 

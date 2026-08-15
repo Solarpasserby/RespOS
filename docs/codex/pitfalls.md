@@ -844,6 +844,18 @@
   观察两者；失败测试应断言精确 errno 和最终回收，不能只检查返回地址为正。当前双 attacher 与顺序
   回收循环结果不能外推到任意 N 路并发或资源上限耗尽；`SHM_REMAP` 的覆盖语义也需要单独验证。
 
+## `shmget(key, size, 0)` 没有隐含 read 请求
+
+- 状态：已由 Linux/RV64/LA64 probe 确认
+- 适用范围：existing-key `shmget`、SysV permission mode、`IPC_STAT/SHM_STAT/SHM_STAT_ANY`
+- 最后验证：2026-08-15；release、4 GiB/2 hart
+- 证据：Linux/guest `sysv_shm_metadata_probe`
+- 内容：`shmflg` 低 9 位表达调用者本次请求检查的权限；全部为 0 时只查询 id，即使 segment mode 为
+  `0000` 也可成功。只有明确请求 `0400/0200` 且对应 owner/group/other bit 不满足时才返回 `EACCES`。
+  这不同于 `IPC_STAT/SHM_STAT` 固定要求 read permission；`SHM_STAT_ANY` 又显式忽略 read mode。
+- 后续影响：不得把“mode 为 0000”实现为禁止所有 `shmget` lookup，也不得让 `SHM_STAT_ANY` 复用普通
+  stat 的权限拒绝；权限 probe 必须分别覆盖零请求、read 请求和 ownership-only 控制操作。
+
 ## QEMU 10.0.2 LoongArch `LDPTE` 会截掉 PTE 的 NR/NX 高位
 
 - 状态：已确认并为 `PROT_NONE` 增加兼容表示
