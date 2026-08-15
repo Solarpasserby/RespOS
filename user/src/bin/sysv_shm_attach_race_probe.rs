@@ -5,7 +5,10 @@
 extern crate user_lib;
 
 use core::sync::atomic::{AtomicU32, Ordering};
-use user_lib::{fork, getpid, mmap_raw, munmap, shmat, shmctl, shmdt, shmget, waitpid, yield_};
+use user_lib::{
+    O_WRONLY, close, fork, getpid, mmap_raw, munmap, open, shmat, shmctl, shmdt, shmget, waitpid,
+    write, yield_,
+};
 
 const PAGE_SIZE: usize = 4096;
 const IPC_PRIVATE: isize = 0;
@@ -20,6 +23,7 @@ const EIDRM: isize = 43;
 const ENOSPC: isize = 28;
 const EEXIST: isize = 17;
 const ENOENT: isize = 2;
+const EIO: isize = 5;
 const PROT_READ_WRITE: usize = 0x1 | 0x2;
 const MAP_SHARED_ANONYMOUS: usize = 0x1 | 0x20;
 const ATTACHERS: usize = 2;
@@ -99,6 +103,44 @@ fn write_word(addr: usize, value: u32) {
     unsafe { core::ptr::write_volatile(addr as *mut u32, value) }
 }
 
+fn write_usize_sysctl(path: &str, mut value: usize) -> isize {
+    let mut digits = [0u8; 32];
+    let mut start = digits.len() - 1;
+    digits[start] = b'\n';
+    loop {
+        start -= 1;
+        digits[start] = b'0' + (value % 10) as u8;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+
+    let fd = open(path, O_WRONLY, 0);
+    if fd < 0 {
+        return fd;
+    }
+    let result = write(fd as usize, &digits[start..]);
+    let close_result = close(fd as usize);
+    if result == (digits.len() - start) as isize && close_result == 0 {
+        0
+    } else if result < 0 {
+        result
+    } else if close_result < 0 {
+        close_result
+    } else {
+        -EIO
+    }
+}
+
+fn remove_if_created(shmid: isize) -> isize {
+    if shmid > 0 {
+        shmctl(shmid as usize, IPC_RMID, 0)
+    } else {
+        0
+    }
+}
+
 fn verify_size_limits() -> usize {
     let mut limits = ShmInfoLimits::default();
     let limits_ptr = &mut limits as *mut ShmInfoLimits as usize;
@@ -174,10 +216,55 @@ fn verify_shmmni_limit() -> usize {
     limits.shmmni
 }
 
+fn verify_shmall_limit() -> usize {
+    let mut limits = ShmInfoLimits::default();
+    let limits_ptr = &mut limits as *mut ShmInfoLimits as usize;
+    assert!(shmctl(0, IPC_INFO, limits_ptr) >= 0);
+    let original = limits.shmall;
+    assert!(original >= 2);
+    let reduce_result = write_usize_sysctl("/proc/sys/kernel/shmall\0", 2);
+
+    let mut reduced = ShmInfoLimits::default();
+    let reduced_ptr = &mut reduced as *mut ShmInfoLimits as usize;
+    let reduced_info = shmctl(0, IPC_INFO, reduced_ptr);
+    let first = shmget(IPC_PRIVATE, PAGE_SIZE, IPC_CREAT | 0o600);
+    let second = shmget(IPC_PRIVATE, PAGE_SIZE, IPC_CREAT | 0o600);
+    let overflow = shmget(IPC_PRIVATE, PAGE_SIZE, IPC_CREAT | 0o600);
+    let first_remove = remove_if_created(first);
+    let replacement = shmget(IPC_PRIVATE, PAGE_SIZE, IPC_CREAT | 0o600);
+    let cleanup = [second, overflow, replacement].map(remove_if_created);
+
+    let two_pages = shmget(IPC_PRIVATE, PAGE_SIZE * 2, IPC_CREAT | 0o600);
+    let after_two_pages = shmget(IPC_PRIVATE, PAGE_SIZE, IPC_CREAT | 0o600);
+    let two_page_cleanup = [two_pages, after_two_pages].map(remove_if_created);
+
+    let restore_result = write_usize_sysctl("/proc/sys/kernel/shmall\0", original);
+    let mut restored = ShmInfoLimits::default();
+    let restored_ptr = &mut restored as *mut ShmInfoLimits as usize;
+    let restored_info = shmctl(0, IPC_INFO, restored_ptr);
+
+    assert_eq!(reduce_result, 0);
+    assert!(reduced_info >= 0);
+    assert_eq!(reduced.shmall, 2);
+    assert!(first > 0 && second > 0);
+    assert_eq!(overflow, -ENOSPC);
+    assert_eq!(first_remove, 0);
+    assert!(replacement > 0);
+    assert!(cleanup.iter().all(|result| *result == 0));
+    assert!(two_pages > 0);
+    assert_eq!(after_two_pages, -ENOSPC);
+    assert!(two_page_cleanup.iter().all(|result| *result == 0));
+    assert_eq!(restore_result, 0);
+    assert!(restored_info >= 0);
+    assert_eq!(restored.shmall, original);
+    original
+}
+
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     let shmmax = verify_size_limits();
     let shmmni = verify_shmmni_limit();
+    let shmall = verify_shmall_limit();
 
     let control_addr = mmap_raw(0, PAGE_SIZE, PROT_READ_WRITE, MAP_SHARED_ANONYMOUS, -1, 0);
     assert!(control_addr > 0, "control mmap failed: {}", control_addr);
@@ -296,9 +383,10 @@ fn main() -> i32 {
     }
 
     println!(
-        "SYSV_SHM_ATTACH_RACE PASS shmmax={} shmmni={} pressure={} attempts={} invalid={} attached={}",
+        "SYSV_SHM_ATTACH_RACE PASS shmmax={} shmmni={} shmall={} pressure={} attempts={} invalid={} attached={}",
         shmmax,
         shmmni,
+        shmall,
         PRESSURE_ROUNDS,
         ROUNDS * ATTACHERS,
         invalid,

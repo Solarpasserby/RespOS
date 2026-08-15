@@ -1,6 +1,6 @@
 # RespOS 当前状态
 
-## 2026-08-15 Phase 5 SysV SHM size 边界与 `SHMMNI` 配额回收（基于 `e689182`）
+## 2026-08-15 Phase 5 SysV SHM size 与 `SHMMNI/SHMALL` 配额回收（基于 `9548ded`）
 
 - **size/lookup 契约**：Linux 要求新建 segment 的 size 0 和 `SHMMAX+1` 返回 `EINVAL`。已有 keyed
   segment 可用 size 0 或原大小查询；超过原大小返回 `EINVAL`，而同时指定 `IPC_CREAT|IPC_EXCL` 时
@@ -10,14 +10,21 @@
   `shmmni` 和已用 segment 数；补满可用槽位后，下一次 `shmget(IPC_PRIVATE)` 必须返回 `ENOSPC`。
   删除一个未 attach segment 后必须能立即创建 replacement，全部 `IPC_RMID` 后 `used_ids` 必须恢复
   到测试前数值。当前 Linux namespace 在 `shmmni=4096` 下通过，并继续通过原双 attacher/回收循环。
+- **`SHMALL` 契约**：[Linux `shmget(2)`](https://man7.org/linux/man-pages/man2/shmget.2.html) 规定申请
+  后总页数超过 `SHMALL` 返回 `ENOSPC`；[Linux sysctl 文档](https://www.kernel.org/doc/html/latest/admin-guide/sysctl/kernel.html#shmall)
+  明确额度按 IPC namespace 分别计数。本地容器的 `/proc/sys` 只读，未强行修改宿主；guest 在一次性
+  QEMU 实例内把 `/proc/sys/kernel/shmall` 临时降为 2，验证两个单页/一个双页恰好成功，额外一页
+  `ENOSPC`，删除单页后 replacement 成功，清理后恢复原值并以 `IPC_INFO` 复核。
 - **RespOS 验证**：guest probe 使用固定 4096 项栈上 ID 表，避免其小型用户堆无法一次分配 32 KiB
   动态数组。release 初赛 snapshot、4 GiB/2 hart 的 RV64/LA64 均输出
-  `SYSV_SHM_ATTACH_RACE PASS shmmax=18446744073692774399 shmmni=4096 pressure=128 attempts=64
-  invalid=0 attached=64` 与 runner PASS；最新日志为 `/tmp/respos-{rv,la}-sysv-shm-size-limits.log`。
+  `SYSV_SHM_ATTACH_RACE PASS shmmax=18446744073692774399 shmmni=4096 shmall=4503599627370495
+  pressure=128 attempts=64 invalid=0 attached=64` 与 runner PASS；最新日志为
+  `/tmp/respos-{rv,la}-sysv-shm-shmall-final.log`。
 - **实现结论与边界**：现有 `sys_shmget()` 已按 existing-key、创建必要性、size 范围的顺序返回上述
-  errno；`ShmTable::alloc_id()` 在达到运行时 `shmmni` 时返回 `ENOSPC`，`IPC_RMID` 会归还槽位，本轮
-  不需修改内核。当前关闭默认 size 边界和 `SHMMNI=4096` 单进程顺序耗尽/恢复；动态下调 sysctl 时
-  已有对象如何计入、并发创建、`SHMALL` 页额度、物理 `ENOMEM` 和单调 segment/attach ID 溢出仍未覆盖。
+  errno；`ShmTable::alloc_id()` 在达到运行时 `shmmni` 时返回 `ENOSPC`，页数总和按运行时 `shmall`
+  返回 `ENOSPC`，`IPC_RMID` 会归还两种额度，本轮不需修改内核。当前关闭默认 size、`SHMMNI=4096`
+  顺序耗尽，以及 clean-table 下调 `SHMALL=2` 的页计数/恢复；RespOS 尚无 IPC namespace，已有对象时
+  动态下调、并发创建、物理 `ENOMEM` 和单调 segment/attach ID 溢出仍未覆盖。
 
 ## 2026-08-15 Phase 5 SysV SHM 双 attacher 与回收循环门禁（基于 `1fc3915`）
 

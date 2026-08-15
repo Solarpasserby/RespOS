@@ -478,7 +478,9 @@ probe 先确认 `SHMMIN=1`、size 0/`SHMMAX+1` 新建、existing-key 的 size 0/
 `IPC_CREAT|IPC_EXCL` 的 `EEXIST` 优先级；随后以 `IPC_INFO/SHM_INFO` 读取当前配额和用量，补满
 `SHMMNI` 后要求额外 `shmget` 返回 `ENOSPC`，删除一个 segment 后要求 replacement 创建成功，最后
 用量恢复到测试前。默认 Linux/RespOS 配额为 4096。Linux 运行会短暂占满当前 IPC namespace，必须在
-隔离或无其他 SysV SHM workload 的环境中顺序执行。强制让出
+隔离或无其他 SysV SHM workload 的环境中顺序执行。guest 随后把 `/proc/sys/kernel/shmall` 临时设为
+2，验证两个单页和一个双页的额度边界、`ENOSPC`、删除后复用，再恢复原值并由 `IPC_INFO` 复核；任何
+新增失败出口也必须先恢复该全局值。强制让出
 构建用于稳定扩大 table reservation 与 VMA commit 之间的窗口；修复前
 `SYSV_SHM_ATTACH_RACE_EXPECTED_FAIL orphan=64` 是反证，修复后两架构必须输出
 `SYSV_SHM_ATTACH_RACE PASS shmmax=... shmmni=... pressure=128 attempts=64 ...` 与 runner PASS。当前门禁
@@ -486,8 +488,8 @@ probe 先确认 `SHMMIN=1`、size 0/`SHMMAX+1` 新建、existing-key 的 size 0/
 `invalid`/`attached` 比例不固定，但总和必须为 64 且不得出现 orphan。probe 还要求已占用的非空
 `shmaddr` 返回 `EINVAL`，并验证失败 attach 的 reservation 回滚。强制构建后必须不带
 `TASK_A_SYSV_SHM_ATTACH_TEST_YIELD` 依次重建和运行两架构，恢复默认 kernel；随后复跑 lifecycle、
-nattch 及 `shmat01,shmdt02,shmctl03`。本门禁不覆盖更宽 N 路并发、`SHMALL`/物理内存/ID 溢出等其他
-资源边界或 `SHM_REMAP` 并发覆盖。
+nattch 及 `shmat01,shmdt02,shmctl03`。本门禁不覆盖更宽 N 路并发、已有对象时动态 sysctl、IPC
+namespace、物理内存/ID 溢出等其他资源边界或 `SHM_REMAP` 并发覆盖。
 
 Phase 5 session/`getsid` Linux 对照：
 
