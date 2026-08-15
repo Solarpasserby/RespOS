@@ -14,5 +14,5 @@ pub const DENTRY_CACHE_CAPACITY: usize = 16 * 1024;
 
 /// 页缓存容量上限
 /// Frame-backed file cache budget. Cache data consumes physical frames rather
-/// than the fixed kernel heap; 32K pages retain a 128 MiB working set.
-pub const PAGE_CACHE_GLOBAL_MAX_PAGES: usize = 32 * 1024;
+/// than the fixed kernel heap; 128K pages retain a 512 MiB working set.
+pub const PAGE_CACHE_GLOBAL_MAX_PAGES: usize = 128 * 1024;

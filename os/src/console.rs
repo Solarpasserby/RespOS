@@ -2,10 +2,19 @@
 //!
 //! 内核控制台输出模块。
 
+use crate::mutex::SpinNoIrqLock;
 use crate::sbi::console_putchar;
 use core::fmt::{self, Arguments, Write};
 
 struct Stdout;
+
+/// Serializes accesses to the single physical console across harts.
+///
+/// The lock disables local interrupts because trap-time diagnostics use the
+/// same console. User writes are bounded below so a large write cannot keep
+/// interrupts disabled for an unbounded amount of time.
+static CONSOLE_OUTPUT_LOCK: SpinNoIrqLock<()> = SpinNoIrqLock::new(());
+const USER_OUTPUT_ATOMIC_CHUNK: usize = 512;
 
 /// 逐字符写入串口，同时用于用户态 `print!` 和内核日志。
 impl Write for Stdout {
@@ -19,7 +28,22 @@ impl Write for Stdout {
 
 /// 底层打印函数，所有输出宏最终都调用它。
 pub fn print(args: Arguments) {
+    let _guard = CONSOLE_OUTPUT_LOCK.lock();
     Stdout.write_fmt(args).unwrap();
+}
+
+/// Write user-provided bytes without interpreting them as UTF-8.
+///
+/// Writes up to `USER_OUTPUT_ATOMIC_CHUNK` stay intact relative to output
+/// from other harts. Larger writes may interleave only at chunk boundaries so
+/// timer interrupts are not masked for an arbitrary duration.
+pub fn write_user_bytes(bytes: &[u8]) {
+    for chunk in bytes.chunks(USER_OUTPUT_ATOMIC_CHUNK) {
+        let _guard = CONSOLE_OUTPUT_LOCK.lock();
+        for &byte in chunk {
+            console_putchar(byte as usize);
+        }
+    }
 }
 
 #[cfg(feature = "log")]
@@ -45,10 +69,10 @@ mod log_impl {
 
     /// 按颜色码输出一行带序号的日志。
     fn print_color(color: u8, seq: usize, args: Arguments) {
-        super::print(format_args!("\x1b[{}m", color)); // 设置颜色
-        super::print(format_args!("[log:{}] ", seq)); // 序号前缀
-        super::print(args); // 日志正文
-        super::print(format_args!("\x1b[0m\n")); // 重置颜色并换行
+        super::print(format_args!(
+            "\x1b[{}m[log:{}] {}\x1b[0m\n",
+            color, seq, args
+        ));
     }
 
     /// 内核日志入口。级别不够则直接返回。

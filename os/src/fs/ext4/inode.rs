@@ -911,27 +911,59 @@ impl InodeOp for Ext4Inode {
         crate::perf::inode_read_requested_bytes(buf.len());
 
         let started = crate::perf::now_ticks();
-        let read_size = {
+        let lower_result = {
             let guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Read);
             let file = &mut Ext4File::new(self.mount_point, self.ty.clone());
-            {
+            let open_result = {
                 let _lower = guard.profile_lower();
                 file.inode_open(self.ino as u32, bindings::O_RDONLY)
-                    .map_err(Self::map_lwext4_err)?;
-                file.file_seek(off as i64, bindings::SEEK_SET)
-                    .map_err(Self::map_lwext4_err)?;
-            }
-            // lwext4 advances across sparse extents but does not reliably
-            // write zeroes into every byte of the caller's buffer.  POSIX hole
-            // reads must return zero, and file-backed mmap depends on that.
-            buf.fill(0);
-            let read_size = {
-                let _lower = guard.profile_lower();
-                let read_size = file.file_read(buf).map_err(Self::map_lwext4_err)?;
-                file.file_close().map_err(Self::map_lwext4_err)?;
-                read_size
+                    .map_err(|error| ("open", error))
             };
-            read_size
+            open_result.and_then(|_| {
+                let seek_result = {
+                    let _lower = guard.profile_lower();
+                    file.file_seek(off as i64, bindings::SEEK_SET)
+                        .map_err(|error| ("seek", error))
+                };
+
+                let operation_result = seek_result.and_then(|_| {
+                    // lwext4 advances across sparse extents but does not reliably
+                    // write zeroes into every byte of the caller's buffer. POSIX hole
+                    // reads must return zero, and file-backed mmap depends on that.
+                    buf.fill(0);
+                    let _lower = guard.profile_lower();
+                    file.file_read(buf).map_err(|error| ("read", error))
+                });
+
+                // Once inode_open succeeds, close the lower handle on every path.
+                // Otherwise one transient seek/read error leaks lwext4 state and can
+                // turn an isolated I/O failure into a cascade under BuildStorm.
+                let close_result = {
+                    let _lower = guard.profile_lower();
+                    file.file_close().map_err(|error| ("close", error))
+                };
+
+                match operation_result {
+                    Err(error) => Err(error),
+                    Ok(read_size) => close_result.map(|_| read_size),
+                }
+            })
+        };
+        let read_size = match lower_result {
+            Ok(read_size) => read_size,
+            Err((stage, error)) => {
+                // Error-only provenance for platform-only SIGBUS failures. Keep
+                // normal reads silent and never retry or replace an EIO with data.
+                println!(
+                    "[ext4-read-error] stage={} ino={} off={} len={} errno={:?}",
+                    stage,
+                    self.ino,
+                    off,
+                    buf.len(),
+                    error
+                );
+                return Err(Self::map_lwext4_err(error));
+            }
         };
         // lwext4 may update atime while reading.  Invalidate only after the
         // global ext4 lock is released to preserve the cache/EXT4 lock order.

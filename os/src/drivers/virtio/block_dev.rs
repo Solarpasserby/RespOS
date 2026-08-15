@@ -58,6 +58,13 @@ impl<H: Hal + 'static, T: Transport + 'static> BlockDevice for VirtIoBlkDev<H, T
             crate::perf::block_read_request(1);
             crate::perf::block_read_bytes(buf.len());
             crate::perf::block_read_size(buf.len());
+        } else if let Err(error) = &result {
+            println!(
+                "[virtio-blk-error] op=read block={} bytes={} error={:?}",
+                block_id,
+                buf.len(),
+                error
+            );
         }
         result
     }
@@ -73,6 +80,13 @@ impl<H: Hal + 'static, T: Transport + 'static> BlockDevice for VirtIoBlkDev<H, T
             crate::perf::block_write_ticks(crate::perf::elapsed_since(started));
             crate::perf::block_write_request(1);
             crate::perf::block_write_bytes(buf.len());
+        } else if let Err(error) = &result {
+            println!(
+                "[virtio-blk-error] op=write block={} bytes={} error={:?}",
+                block_id,
+                buf.len(),
+                error
+            );
         }
         result
     }
@@ -81,6 +95,8 @@ impl<H: Hal + 'static, T: Transport + 'static> BlockDevice for VirtIoBlkDev<H, T
         let result = self.inner.lock().flush().map_err(as_dev_err);
         if result.is_ok() {
             crate::perf::block_flush(1);
+        } else if let Err(error) = &result {
+            println!("[virtio-blk-error] op=flush error={:?}", error);
         }
         result
     }

@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.85"
 
 [features]
+default = ["la_global_kernel"]
 log = []
 verbose_boot = []
 perf_counters = ["respos_buddy_allocator/perf_counters"]
