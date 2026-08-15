@@ -37,6 +37,8 @@ pub const AT_GID: usize = 13;
 pub const AT_EGID: usize = 14;
 /// 标识 CPU 平台的字符串指针
 pub const AT_PLATFORM: usize = 15;
+/// 架构相关的 CPU 能力位掩码
+pub const AT_HWCAP: usize = 16;
 /// times() 系统调用的时钟滴答频率
 pub const AT_CLKTCK: usize = 17;
 /// 16 字节随机数据的地址（用于栈保护 canary）

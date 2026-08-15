@@ -1,5 +1,7 @@
 // os/src/task/task.rs
 use super::INITPROC;
+#[cfg(target_arch = "loongarch64")]
+use super::aux::AT_HWCAP;
 use super::aux::{AT_EXECFN, AT_NULL, AT_PLATFORM, AT_RANDOM, AuxHeader};
 use super::context::TaskContext;
 use super::kstack::KernelStack;
@@ -2597,8 +2599,9 @@ fn init_user_stack(
         let addr = push_bytes_to_stack(memory_set, &[0], user_sp)?;
         *user_sp = addr - exe_path.len();
         memory_set.write_bytes_to_mapped_range(*user_sp, exe_path.as_bytes())?;
+        let execfn_addr = *user_sp;
         *user_sp = align_down(*user_sp);
-        *user_sp
+        execfn_addr
     };
 
     // —— 压入 AT_PLATFORM 字符串 ——
@@ -2627,6 +2630,11 @@ fn init_user_stack(
     memory_set.write_bytes_to_mapped_range(random_addr, &random)?;
 
     // —— 追加动态 aux 条目 ——
+    #[cfg(target_arch = "loongarch64")]
+    auxv.push(AuxHeader {
+        aux_type: AT_HWCAP,
+        value: crate::arch::elf_hwcap(),
+    });
     auxv.push(AuxHeader {
         aux_type: AT_PLATFORM,
         value: platform_addr,

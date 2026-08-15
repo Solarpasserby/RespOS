@@ -584,6 +584,19 @@ FdTable slot (FdEntry: descriptor flags)
 - 后续影响：诊断解释器地址附近的 store fault 时必须同时计算 SP、栈 VMA 与 guard 距离；扩大栈窗口
   时不能退回 eager 分配全部页面。
 
+### LoongArch ELF HWCAP 来自 CPUCFG 能力探测
+
+- 状态：已实现，嵌套 QEMU TCG 初始化通过
+- 适用范围：LoongArch exec auxv、glibc `getauxval()`、native QEMU/TCG
+- 最后验证：2026-08-15；LA64 4 GiB/2 hart diagnostic guest
+- 证据：`os/src/arch/loongarch64/mod.rs::elf_hwcap()`、
+  `os/src/task/{aux.rs,task.rs}`；guest `LD_SHOW_AUXV=1 /bin/true` 与 5 秒 native QEMU TCG 烟测
+- 内容：exec 读取 `CPUCFG(1)`，只在 `CPUCFG1.UAL` bit 20 存在时通过 `AT_HWCAP`
+  暴露 `HWCAP_LOONGARCH_UAL` bit 2。这与 Linux LoongArch 对 UAL 的探测契约一致，不会在
+  不支持非对齐访问的 CPU 上伪造能力。
+- 后续影响：不得为绕过用户程序检查而无条件硬编码 UAL；增加 FPU/LSX 等其他 HWCAP 前
+  必须同时核对 CPUCFG 与内核用户上下文保存能力。
+
 ### vfork 共享旧 MM，且父任务必须先登记 blocked 再发布子任务
 
 - 状态：已实现，双架构 clone/vfork 与 RV64 command/minibuild 已验证

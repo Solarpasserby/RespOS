@@ -18,7 +18,7 @@ pub mod task;
 pub mod timer;
 pub mod trap;
 
-use core::arch::global_asm;
+use core::arch::{asm, global_asm};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 pub use entry::enter_main;
@@ -26,6 +26,33 @@ pub use entry::enter_main;
 global_asm!(include_str!("tlb_refill.S"));
 
 static LOW_DIRECT_MAP_ACTIVE: AtomicBool = AtomicBool::new(true);
+
+const LOONGARCH_CPUCFG1: usize = 1;
+const CPUCFG1_UAL: usize = 1 << 20;
+const HWCAP_LOONGARCH_UAL: usize = 1 << 2;
+
+/// Return the Linux-compatible ELF hardware capability mask for user space.
+///
+/// Linux only advertises UAL after observing CPUCFG1.UAL.  In particular,
+/// native LoongArch QEMU's TCG backend relies on this bit before using
+/// unaligned host loads and stores.
+#[inline]
+pub fn elf_hwcap() -> usize {
+    let config: usize;
+    unsafe {
+        asm!(
+            "cpucfg {config}, {index}",
+            config = out(reg) config,
+            index = in(reg) LOONGARCH_CPUCFG1,
+            options(nomem, nostack)
+        );
+    }
+    if config & CPUCFG1_UAL != 0 {
+        HWCAP_LOONGARCH_UAL
+    } else {
+        0
+    }
+}
 
 // QEMU 启动时先依赖低地址 DMW 直映运行；进入高地址共享内核模型前，
 // 需要一份覆盖早期内核镜像和高端 256 MiB 内核堆的临时页表作为过渡。

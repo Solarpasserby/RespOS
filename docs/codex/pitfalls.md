@@ -901,6 +901,19 @@
   `V=0` 加 software-present/PROTNONE 避开该问题。execute-only/write-only 等仍依赖 NR/NX 的组合
   不应在 QEMU 10.0.2 上未经专项测试就宣称最小权限严格生效；升级模拟器也不能替代目标比赛环境回归。
 
+## LoongArch native QEMU 会在缺少 `HWCAP_LOONGARCH_UAL` 时拒绝启动 TCG
+
+- 状态：已确认并修复
+- 适用范围：LA64 BuildStorm runtime、ELF auxv、native `qemu-system-loongarch64`
+- 最后验证：2026-08-15；平台 BuildStorm 失败日志与本地 4 GiB/2 hart 定向复验
+- 内容：编译完成后出现 `TCG: unaligned access support required; exiting` 不是性能超时、
+  目标 ELF 错误或块设备失败，而是 QEMU 通过 `getauxval(AT_HWCAP)` 没看到 UAL。必须像 Linux
+  一样先检查 `CPUCFG1.UAL`，再暴露 HWCAP；不能无条件设 bit 2，也不应修改比赛脚本
+  跳过 runtime 验证。
+- 后续影响：复验先用 `LD_SHOW_AUXV=1 /bin/true` 确认 `AT_HWCAP: 4`，再按官方脚本的
+  loader/library path 做数秒 `qemu-system-loongarch64 -machine none -display none` 烟测；无需重跑
+  BuildStorm 编译。
+
 ## lazy VMA 销毁不能按虚拟跨度逐页扫描
 
 - 状态：回收复杂度已修复，完整 BuildStorm 仍待验证

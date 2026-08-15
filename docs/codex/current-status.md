@@ -324,6 +324,23 @@
   内核；它关闭的是两个同时在途 attacher 和 128 轮顺序回收循环，不代表任意 N 路并发、`SHMMNI`/
   `SHMALL`/attach-id 等资源上限耗尽或 `SHM_REMAP` 并发覆盖已经闭合。LA64 `shmctl01` 的多子进程
   signal/reap teardown 阻断也仍独立存在。
+
+## 2026-08-15 LA64 BuildStorm 嵌套 QEMU HWCAP 阻断修复（当前工作树）
+
+- **平台现象**：RV64 final 已通过；LA64 CAgent 10/10 通过，BuildStorm 主目标编译成功并生成
+  ELF/BIN（axbuild `2685.64s`），但在未计时的 runtime 启动阶段立即报
+  `qemu-system-loongarch64: TCG: unaligned access support required; exiting`，最终仅 `run=FAIL`。无
+  SIGBUS、ext4/VirtIO error marker、panic 或 OOM，因此这不是编译或 PageCache 回归。
+- **根因与修复**：原 exec auxv 没有 `AT_HWCAP`，而 LoongArch native QEMU TCG 要求
+  `HWCAP_LOONGARCH_UAL` (bit 2)。当前实现遵循 Linux 探测逻辑：每次 exec 读取
+  `CPUCFG(1).UAL` (bit 20)，仅在 CPU 真实报告 UAL 时生成 `AT_HWCAP=4`，不硬编码平台能力；
+  RV64 auxv 不变。同路径另修正 `AT_EXECFN` 误指向字符串前对齐填充的旧问题。
+- **定向验证**：LA64 4 GiB/2 hart diagnostic guest 内，`LD_SHOW_AUXV=1 /bin/true` 实测输出
+  `AT_HWCAP: 4`；使用官方脚本同一 loader/library path 启动 native
+  `qemu-system-loongarch64 -machine none -display none`，TCG 成功初始化并运行到 5 秒 timeout，
+  未再出现 UAL 拒绝。修正 `AT_EXECFN` 后 RV64/LA64 release 重建通过；其 guest 显示复验
+  仍标记 `待验证`。
+
 ## 2026-08-15 队友 Phase 5 合并后的 BuildStorm 短窗口与完整 final（当前 `fe95f0b5`）
 
 - **合并结果**：将性能提交 rebase 到队友 `1fc3915b`；仅 `current-status.md/decisions.md` 顶部追加记录冲突，
