@@ -58,9 +58,7 @@ impl InodeOp for TtyInode {
     }
 
     fn write_at(&self, _path: &str, _off: usize, buf: &[u8]) -> SysResult<usize> {
-        unsafe {
-            print!("{}", core::str::from_utf8_unchecked(buf));
-        }
+        crate::console::write_user_bytes(buf);
         Ok(buf.len())
     }
 

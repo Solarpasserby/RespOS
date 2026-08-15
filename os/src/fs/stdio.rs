@@ -92,9 +92,7 @@ impl FileOp for Stdout {
         panic!("Cannot read from stdout!");
     }
     fn write<'a>(&'a self, buf: &'a [u8]) -> SysResult<usize> {
-        unsafe {
-            print!("{}", core::str::from_utf8_unchecked(buf));
-        }
+        crate::console::write_user_bytes(buf);
         Ok(buf.len())
     }
     fn seek(&self, _offset: isize) -> SysResult<usize> {

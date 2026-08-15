@@ -324,6 +324,162 @@
   内核；它关闭的是两个同时在途 attacher 和 128 轮顺序回收循环，不代表任意 N 路并发、`SHMMNI`/
   `SHMALL`/attach-id 等资源上限耗尽或 `SHM_REMAP` 并发覆盖已经闭合。LA64 `shmctl01` 的多子进程
   signal/reap teardown 阻断也仍独立存在。
+## 2026-08-15 队友 Phase 5 合并后的 BuildStorm 短窗口与完整 final（当前 `fe95f0b5`）
+
+- **合并结果**：将性能提交 rebase 到队友 `1fc3915b`；仅 `current-status.md/decisions.md` 顶部追加记录冲突，
+  已按日期保留双方内容。自动合并的 ext4 inode 读失败清理与队友特殊 inode/rdev 元数据扩展可同时成立；
+  RV64/LA64 无 feature release 顺序构建通过。
+- **相同工作量窗口**：LA 8 GiB/12 hart、默认 Global-on、512 MiB PageCache、相同 pub root/diagnostic x1、
+  `-snapshot`、`NI=-10/CLS=TS`、`perf_counters`，固定 120 秒仍到达相同 23 个 `Compiling` marker。相对
+  既有 4096 样本，block read requests/bytes 变化约 -0.03%/-0.04%，PageCache fill bytes 约 -0.04%；
+  file close、stat/lookup/readdir/create/write 等操作计数一致，没有 I/O 工作量回退。
+- **可归因结构变化**：COW faults `32158 -> 10097`（约 -68.6%），local sfence calls
+  `647577 -> 609066`（约 -5.9%），与恢复 `CLONE_VFORK|CLONE_VM` 共享地址空间的源码方向一致；
+  最近稳定的合并前样本同样显示 context switch 无增加、ext4 hold 只变化约 +0.75%；短窗口不外推
+  最终加速比，完整结果见下项。
+- **完整 final**：同为 8 GiB/12 hart 的无 feature 当前轮 CAgent 10/10、BuildStorm 成功，axbuild
+  `721.22s`；相对上一轮 `714.24s` 为 `+6.98s`（约 +0.98%），整轮约 `753s` 对 `747s`
+  （约 +0.8%）。两轮平均 QEMU CPU 为 650.7%/649.5%，当前轮 swap-in/out 与 major fault 约
+  7.1 MiB/0/1875，基线约 7.3 MiB/10.8 MiB/2013；未见 panic、OOM、SIGBUS 或 I/O error marker。
+  单对约 1% 差值不足以证明代码回退，当前判断为性能基本持平。
+- **风险边界**：SysV SHM exec/exit 清理会多扫描一次当前 MM 的 VMA，但无 SHM 时在空 attach-id 列表处
+  立即返回；pwrite 重构主要影响 `O_APPEND pwrite`，普通 sequential write 仍走同一 PageCache 提交逻辑；
+  getdents 只为已删除 ext4 目录增加一次原子状态检查。新增嵌入式 probe 使静态 kernel 末端约增加
+  RV 1.8 MiB/LA 1.3 MiB，在比赛内存下不是主要压力。
+- **证据**：短窗口日志 `/tmp/respos-la-post-team-merge-120.log` 与时间线
+  `/tmp/respos-la-post-team-merge-120-timeline/`，perf kernel SHA-256 `949bcee9...4a09a`；完整
+  日志 `/tmp/respos-la-post-team-final.log` SHA-256 `91171b3d...5509`，时间线
+  `/tmp/respos-la-post-team-final-timeline/`。
+
+## 2026-08-15 lwext4 metadata cache 8192 容量实验（No-Go，已恢复 4096）
+
+- **口径**：LA 8 GiB/12 hart、默认 Global-on、512 MiB PageCache、相同 pub root/diagnostic x1、
+  `-snapshot`、`NI=-10/CLS=TS`、`perf_counters`，固定 120 秒 BuildStorm；与既有 4096 样本均到达
+  23 个 `Compiling` marker，file close、stat/lookup/readdir/create 等操作计数相同。
+- **结果**：4096 -> 8192 后 block read requests `26172 -> 26099`（-0.28%）、bytes
+  `411054080 -> 410828800`（-0.05%），PageCache fill bytes `367385404 -> 367442748`（+0.02%）；
+  均为噪声级变化。heap peak `64733652 -> 69838179`（约 +4.87 MiB），未换来可辨认的工作量收益。
+- **结论**：4096 已覆盖该阶段主要元数据工作集，8192 不满足 3%--5% 候选门槛，源码已恢复 4096；
+  不跑完整 BuildStorm。候选日志 `/tmp/respos-la-lwext4-cache8192-120.log`，时间线
+  `/tmp/respos-la-lwext4-cache8192-120-timeline/`。
+
+## 2026-08-15 LA64 8 GiB/12 hart 本地完整 final 通过（当前工作树）
+
+- **口径与结果**：当前默认 Global-on、512 MiB PageCache 的 `kernel-la`，公开 final root、独立 x1、
+  `-snapshot`、8 GiB/12 hart、QEMU `NI=-10/CLS=TS`，online mask `0xfff`。CAgent 10/10，
+  BuildStorm toolchain/minibuild 通过，axbuild `714.24s`，最终
+  `BUILDSTORM_COMPILE ok=true cores=12 bytes=1714568`；两个脚本和外层 make 均 exit 0，正常
+  poweroff。未见 SIGBUS/signal 7、Bus error、I/O error marker、panic 或 OOM。
+- **宿主与归因边界**：QEMU 时间线约 `745.14s`，最低 MemAvailable 约 7.56 GiB，swap-in/out 增量
+  约 7.3/10.8 MiB，major fault 增量 2013。相对历史 12 GiB Global-on axbuild `1418.31s` 接近减半，
+  但源码、PageCache、宿主、客体内存均不相同，不把全部差值归因于单项优化。相同短窗口中 128 MiB
+  -> 512 MiB PageCache 已独立确认 miss/fill bytes/block-read bytes 下降约 16.7%/16.6%/15.1%；
+  这是可归因的显著 I/O 工作量改善。
+- **证据**：`kernel-la` SHA-256 `93e86876...901`；日志
+  `/tmp/respos-la-current-final.log` SHA-256 `abf5e133...a2af`，宿主时间线在
+  `/tmp/respos-la-current-final-timeline/`。
+
+## 2026-08-15 RV64 8 GiB/8 hart 本地完整 final 通过（当前工作树）
+
+- **口径与结果**：平台同版 Rust 1.86 构建的当前 `kernel-rv`，公开 final root、独立 x1、
+  `-snapshot`、8 GiB/8 hart、QEMU `NI=-10/CLS=TS`。CAgent 10/10，BuildStorm toolchain/minibuild
+  通过，axbuild `606.46s`，最终 `BUILDSTORM_COMPILE ok=true cores=8 bytes=1681000`；两个脚本均
+  exit 0，launcher 正常 poweroff，外层 make exit 0。未见 SIGBUS/signal 7、Bus error、
+  `[ext4-read-error]`、`[virtio-blk-error]`、panic 或 OOM。
+- **宿主与适用边界**：QEMU 时间线约 `641.29s`，最低 MemAvailable 约 7.48 GiB，swap-in/out 增量约
+  29.8/34.7 MiB，major fault 增量 3752。本轮证明当前版本在本地 8 GiB 完整通过，不证明平台 16 GiB
+  偶发 SIGBUS 已根治，也不能与不同宿主/内存配置的历史 wall time 直接比较。
+- **证据**：`kernel-rv` SHA-256 `4359bd37...b2e`；日志
+  `/tmp/respos-rv-current-final.log` SHA-256 `304d8e4f...3f4b`，宿主时间线在
+  `/tmp/respos-rv-current-final-timeline/`。
+
+## 2026-08-15 P2：PageCache 512 MiB 容量收口（当前工作树）
+
+- **实现边界**：双架构 `PAGE_CACHE_GLOBAL_MAX_PAGES` 从 32K 提高到 128K，即按需上限从 128 MiB
+  提高到 512 MiB；不预分配内存，不改变 frame identity、writeback、truncate、mmap/COW 或 LRU。
+  `la_global_kernel` 现为 Cargo 默认 feature，但实现只在 LoongArch 目标生效，RV 行为不变。
+- **干净 A/B**：Rust 1.86、LA 8 GiB/12 hart、同一 snapshot、`NI=-10/CLS=TS`，128/256/512 MiB
+  各跑固定 120 秒。三轮都是 23 个 `Compiling` marker，最后为 `ax-posix-api`，工作量可比。
+  128 -> 256 MiB 的 miss/fill bytes/block-read bytes 分别下降 10.46%/13.49%/12.26%；256 -> 512 MiB
+  仍下降 6.99%/3.64%/3.26%。驻留页为 `32768/65536/93030`；512 MiB 轮 eviction 为 0 且未触及
+  128K 上限，因此 512 MiB 是该窗口饱和点，继续提高到 1 GiB 不会改善该窗口。
+- **宿主边界**：三轮分别只新增 `224/162/56` 页 swap-in、`235/177/56` 次 major fault，均无
+  swap-out。当前确认重复读取工作量下降，不宣称完整 BuildStorm wall 加速；正式平台仍为 `待验证`。
+- **门禁**：Rust 1.86 双架构无 feature 构建通过；LA 4 GiB/12 hart 通过 writeback、namespace、
+  BuildStorm file、shared-MM 100 轮和 Phase3 30 轮。RV 1 GiB/8 hart 两轮 frame-reclaim 64 MiB 后
+  `free_kb 767548 -> 766436`，无逐轮 64 MiB 泄漏，随后 BuildStorm file 通过。日志为
+  `/tmp/respos-{la,rv}-p2-pc512-probes.log`。
+- **PageCache 证据**：三轮日志 `/tmp/respos-la-p2-clean-pc{128,256,512}-120.log`。
+- **LA Global 包围 A/B**：在 512 MiB 基线上按 off -> on -> off2 各跑 120 秒，三轮都是 23 个
+  marker，file close、PageCache fill 和 block read 工作量相同。on 相对 off/off2 的 local sfence
+  ticks 分别下降 13.8%/13.3%，remote rfence wait 分别下降 16.2%/20.0%；调用次数保持约 64 万次
+  local flush 和 4 万个 remote target hart。首个 off 有 765 次 host major fault，on/off2 为
+  22/156，因此只确认 TLB 专属计数稳定正向，不宣称同百分比 wall 加速。日志为
+  `/tmp/respos-la-p2-pc512-global-ab-{off,on,off2}-120.log`。
+- **Global 默认门禁**：LA 4 GiB/12 hart 无 perf 的 Global-on 内核通过 writeback、namespace
+  race/d_type、BuildStorm file、shared-MM 100 轮和 Phase3 30 轮；`make all` 以 Rust 1.86 双架构
+  构建通过。最终 `kernel-rv/kernel-la` SHA-256 为 `3c4ba8e5...c84c`/`0cc52c02...c38f`。
+
+## 2026-08-15 P2：PageCache 256 MiB 与 LA Global 先前实验（历史记录）
+
+- **实现边界**：RV64/LA64 的 `PAGE_CACHE_GLOBAL_MAX_PAGES` 同步从 32K 提高到 64K，即按需保留的
+  file-page 上限从 128 MiB 提高到 256 MiB；没有预分配物理内存，也未改变 PageCache frame identity、
+  dirty owner、writeback、truncate、mmap/COW 或 LRU 淘汰规则。当时 `la_global_kernel` 仍 default-off。
+- **容量 A/B 口径**：当前工作树、平台同版 Rust 1.86、仅 `perf_counters`，LA 8 GiB/12 hart、
+  同一 pub root/diagnostic x1 snapshot、`NI=-10/CLS=TS`，各执行固定 120 秒 BuildStorm。128/256 MiB
+  两轮均输出 23 个 `Compiling` marker，最后都是 `ax-posix-api`，file close 为 12852，stat/create
+  为 22156x/413，允许比较客体逻辑工作量。基线/候选内核 SHA-256 为
+  `b74170ea...e44e`/`824bd6c4...c4af`，日志为
+  `/tmp/respos-la-p2-pc{128,256}-120.log`（`87d0fa10...6349`/`74bc583a...d1e1`）。
+- **相同进度结果**：PageCache miss `14633 -> 13079`（-10.62%）、eviction
+  `77697 -> 30770`（-60.40%）、fill bytes `440536358 -> 380771132`（-13.57%）；
+  block read request `28633 -> 27057`（-5.50%）、bytes `484098048 -> 424435712`（-12.32%）。
+  cache pages 到达 `32768/65536`，free frames `1842220/1807016`，额外常驻量约 137.5 MiB，
+  两轮 frame allocation failure 均为 0。这些 guest 逻辑计数不受宿主 backing-file page cache 命中伪造，
+  因而 P2 容量候选保留。
+- **计时边界**：inode-read ticks、ext4 wait/hold 在候选轮分别下降约 39.2%/53.5%/13.7%，但基线
+  宿主有约 12K/94K 页 swap-in/out 和 12.8K major fault，候选只有约 3.9K/78 和 3.9K；这些累计 ticks
+  不能全部归因于容量。当前只确认重复读取工作量下降，不宣称完整 BuildStorm wall 加速；正式 36 GiB
+  平台结果仍为 `待验证`。
+- **正确性门禁**：Rust 1.86 RV64/LA64 无 feature release 顺序构建通过；LA 4 GiB/12 hart 通过
+  writeback normal、metadata、namespace race/d_type、BuildStorm file、shared-MM 100 轮和 Phase3
+  30 轮；RV 1 GiB/8 hart 另通过 private-map 64 MiB/4 worker 及连续两轮 frame-reclaim 64 MiB。
+  双架构 1 GiB/2 hart 的 xattr 与 writeback phase3 也通过。日志为
+  `/tmp/respos-{la,rv}-p2-pc256-probes.log` 和对应 `*-xattr-phase3.log`。
+- **LA Global 独立复验**：在 256 MiB 容量上仅增加 `la_global_kernel`，同口径 120 秒仍到相同
+  23 个 marker；local INVTLB ticks `286688101 -> 234817050`（约 -18.1%），remote wait
+  `343371303 -> 262951530`（约 -23.4%）。on 轮宿主几乎无换页，而 off 仍有少量 swap-in，故只能
+  在当时只能维持“正向但待复现”，未默认启用。global-on 的 shared-MM 100 轮和 Phase3 30 轮通过；
+  实验内核/日志 SHA-256 为 `93db1457...a2ed`/`2ae18a63...ca87`。当时正式 `kernel-rv/kernel-la`
+  恢复为 PageCache 256 MiB、无 feature、Global-off；该结论已由顶部 512 MiB 包围 A/B 取代。
+
+## 2026-08-15 决赛平台失败分层与短门禁加固（当前工作树）
+
+- **平台现象与归因边界**：用户提供的本轮平台输出中，RV64 CAgent 10/10 完成，但 BuildStorm 在
+  build-std 前段出现多次 rustc signal 7/SIGBUS 和 `rm: Bus error`；LA64 的 CAgent 未全过，串口记录
+  存在多 hart 字节交错，BuildStorm 也未在平台窗口内完成。宿主变慢会改变 guest 并发和 fault 时序，
+  因而可能放大潜在竞态，但不能直接把一个成功的块读变成 guest SIGBUS；平台 RV 仍按
+  `lower EIO -> file-backed fault -> SIGBUS` 的内核错误链处理，根因标记为 `待验证`。
+- **健全性修改**：物理 console 现在由 IRQ-safe 全局锁串行；内核一次格式化输出保持完整，用户
+  stdout/tty 以 512-byte 有界块输出原始字节，删除了对任意用户缓冲执行
+  `from_utf8_unchecked` 的未定义行为。ext4 regular-file read 在 `inode_open` 成功后，无论
+  seek/read 成功或失败都执行 `file_close`，原始 operation error 优先返回，避免一次瞬时 I/O 错误
+  泄漏 lwext4 handle 并放大为后续级联。该修改不重试 EIO、不补造数据、不为 BuildStorm 特判。
+- **失败路径可观测性**：只有实际失败时才打印 `[ext4-read-error]` 的 stage/ino/off/len/raw errno，
+  以及 `[virtio-blk-error]` 的 op/block/bytes/error；打印发生在 ext4 全局锁或 VirtIO device mutex
+  释放之后。正常 I/O 路径无日志和格式化成本。下一次平台运行可据此区分设备返回 IOERR 与 lwext4
+  open/seek/read 逻辑错误，而不需要开启会改变布局的 `fault_trace`。
+- **短门禁**：平台同版 `rustc 1.86.0-nightly (2025-01-17)` 的 RV64/LA64 无 feature release
+  顺序构建通过，产物 SHA-256 分别为 `48628bee...b626`、`dc16c68b...ae6b`。RV64
+  4 GiB/8 hart、旧 pub root、双盘 snapshot 的冷 `/bin/true` exit 0；另一次读取
+  `/bin/bash` 1,145,864 bytes 成功，日志未出现两类新 error marker、SIGBUS 或 panic。Rust 1.86
+  烟测日志为 `/tmp/respos-rv-rust186-io-smoke.log`（`6a9cdde8...ae97`）。
+- **LA 证据与剩余门禁**：12 GiB/12 hart 的原始 CAgent 样本中 factorial 通过但 fs-usage 被 judge
+  拒绝；同一 console 候选用 `scripts/cagent_debug.sh` 连续四轮覆盖 10 项共 40/40 通过，说明平台
+  factorial 失败不是稳定的 factorial 专项错误，但官方 CAgent 尚未闭合。日志
+  `/tmp/respos-la-console-cagent.log`（`538c83ee...ade`）和
+  `/tmp/respos-la-cagent-diag.log`（`4b323da1...943`）。本轮没有跑完整 BuildStorm；本地旧 pub
+  镜像不能复现平台新镜像的早期 SIGBUS，下一次完整压力只在短门禁或平台日志提供新分层证据后进行。
 
 ## 2026-08-14 Phase 5 `O_APPEND pwrite` 整 syscall 原子性基线（基于 `8617f87`）
 
@@ -1193,14 +1349,14 @@
   `23m29s`/`1418.31s`，整轮约 `1455.74s`；日志 `/tmp/respos-la-clean-r2-on.log`，SHA-256
   `21afaae2...34b6`。on 的 axbuild 减少 `112.06s`（约 `7.32%`），整轮减少约 `115.93s`（约
   `7.38%`），超过候选门槛。
-- **复测资源边界与当前结论**：R1/off 时间线平均/峰值 QEMU CPU 为 `702.1%/1190.5%`，最低可用内存
+- **复测资源边界与当时结论**：R1/off 时间线平均/峰值 QEMU CPU 为 `702.1%/1190.5%`，最低可用内存
   约 `7.42 GiB`，swap-in/out 分别约 `64/217 MiB`，major fault 增量 `13111`；R2/on 为
   `657.8%/1191.1%`、最低约 `7.01 GiB`、swap-in/out 约 `25/0.5 MiB`、major fault `7939`。第二轮
   宿主换页明显更轻，故不能把全部 `7.32%` 归因于 Global；用户决定不跑包围它的 R3/off，本轮只有一对
-  样本。当前判定从 No-Go 调整为 **正向但待复现**：恢复 default-off 的 `la_global_kernel` feature、
-  4 KiB paired-leaf 遍历和启用点，仍不进入默认提交路径。通用 TLB 计数与 `map_huge_2m()` 对未经验证
-  Global 编码的拒绝继续保留；feature 开启时也不跳过 op=4，不改变 shootdown/frame completion，
-  huge/runtime mapping 不纳入 Global 域。
+  样本。当时判定从 No-Go 调整为 **正向但待复现**，保留 default-off feature；该策略已由 2026-08-15
+  顶部 512 MiB 的 off -> on -> off2 包围 A/B 和无计数门禁取代，现已默认启用。通用 TLB 计数与
+  `map_huge_2m()` 对未经验证 Global 编码的拒绝继续保留；默认开启也不跳过 op=4，不改变
+  shootdown/frame completion，huge/runtime mapping 仍不纳入 Global 域。
 
 ## 2026-08-14 LA `1/3/6/12` hart BuildStorm 缩放诊断（提交 `277ceaa8`）
 
@@ -1246,8 +1402,8 @@
   并执行 `tlbfill`，所以无效 PTE→有效 PTE 后当前 faulting hart 确实留有 negative TLB entry；直接跳过
   本地失效会重复 fault。op=5 又已被完整 final 的内存破坏单变量 A/B 否决。因此本轮只保留测量，不恢复
   op=5、不省略同步。该证据随后导向上节 4 KiB Global kernel mapping 实验；实验中 op=4 仍完整执行，
-  只让成对、共享且启动后不修改的叶项跨 ASID 保留。稳定宿主的一对 off/on 为正，但因换页差异和缺少
-  R3 仍保持 default-off；huge/runtime mapping 从未纳入 Global 域。
+  只让成对、共享且启动后不修改的叶项跨 ASID 保留。当时因换页差异和缺少 R3 保持 default-off；
+  该结论已由顶部 2026-08-15 包围 A/B 取代，huge/runtime mapping 始终未纳入 Global 域。
 
 ## 2026-08-13 allocator A1 per-hart 小对象 magazine（当前工作树，默认关闭）
 
@@ -1742,7 +1898,7 @@
 
 | 推进线 | 当前负责人 | 当前任务包 | 本地退出证据 | 平台恢复后的补验 |
 | --- | --- | --- | --- | --- |
-| 架构/性能线 | 学长 | LA Global mapping 保持 default-off 正向候选；保留 range+op=4 安全边界；转入 BuildStorm ext4 E2 审计；36 GiB 启动 | 双架构顺序构建，LA 12-hart shared-MM/Phase3/ASID churn、FS/写回专项、固定窗口 A/B 与完整 BuildStorm | LA `-m 36G -smp 12` 正式镜像和时限；必要时 RV64 正式回归 |
+| 架构/性能线 | 学长 | LA Global mapping 已默认启用；保留 range+op=4 安全边界；转入 BuildStorm ext4 E2 审计；36 GiB 启动 | 双架构顺序构建，LA 12-hart shared-MM/Phase3/ASID churn、FS/写回专项、固定窗口 A/B 与完整 BuildStorm | LA `-m 36G -smp 12` 正式镜像和时限；必要时 RV64 正式回归 |
 | Phase 线 | 当前维护者 | 继续 Phase 5，并独立维护 POSIX 语义覆盖任务；先收敛与架构代码低耦合的 IPC/network，再做 task/signal、基础 POSIX 缺口；待 TLB/MM 接口稳定后实现 mmap EOF/truncate/SIGBUS | POSIX 覆盖矩阵、Linux 对照 probe、RV64 专项与 SMP 回归、LA/RV 顺序构建；高风险修改补 shared-MM/资源闭环 | 正式镜像的完整 workload、LTP/比赛 runner 与平台计时 |
 
 默认文件边界如下：架构线拥有 `os/src/arch/**` 以及 LA SMP/TLB/ASID 的底层协议；Phase 线拥有

@@ -3,6 +3,21 @@
 这里只收录能解释当前代码形态或避免重复踩坑的决策。日期是当前证据最后核验时间，不一定是
 最初提出时间。
 
+## LA 启动期成对 4 KiB 内核叶默认使用 Global TLB 映射
+
+- 状态：已采用
+- 适用范围：LoongArch final kernel root、ASID 切换、软件 TLB refill；RV64 无行为变化
+- 最后验证：2026-08-15
+- 证据：`os/src/arch/loongarch64/mm/page_table.rs`、`os/src/mm/memory_set.rs`、
+  `os/Cargo.toml`；512 MiB PageCache 的 off -> on -> off2 固定 120 秒 A/B 和 LA 4 GiB/12 hart 门禁
+- 内容：Cargo 默认启用 `la_global_kernel`，但实际实现只在 LoongArch 编译。最终 kernel root 第一次
+  激活前，仅当同一 TLB pair 的偶/奇 4 KiB leaf 都有效时同时设置 G 位；单边 leaf 清 G。两组相同
+  工作量包围样本中，on 的 local sfence ticks 稳定下降约 13%，remote wait 下降约 16%--20%。
+  高端 RAM 的 2 MiB huge leaf 与运行期新增 kernel-stack leaf 保持 ASID-scoped。
+- 后续影响：不得为扩大 Global 覆盖猜测 huge-leaf G 位编码；普通 PTE writer、op=4 shootdown、
+  active-hart residency 与 retired-frame completion 必须继续执行。关闭对照需显式使用 Cargo
+  `--no-default-features`，不能把 RV 二进制哈希变化误报为 RV MM 行为变化。
+
 ## chroot 采用 Linux 的 pathname/permission 优先错误顺序
 
 - 状态：已采用
@@ -210,18 +225,19 @@
 
 ## lwext4 元数据 block cache 使用 4096 个 filesystem blocks
 
-- 状态：已采用，完整 BuildStorm 计时待验证
+- 状态：已采用；8192 容量候选已否决
 - 适用范围：lwext4 路径遍历、inode/extent 元数据、kernel heap 固定预算、BuildStorm Cargo 树
-- 最后验证：2026-08-10
+- 最后验证：2026-08-15
 - 证据：`vendor/lwext4_rust/c/lwext4/CMakeLists.txt`、`os/src/perf.rs`；RV64 8 核 16/1024/4096 项
-  固定 180 秒 A/B 和无 feature 文件/内存门禁
+  固定 180 秒 A/B 和无 feature 文件/内存门禁；LA 8 GiB/12 hart 4096/8192 固定 120 秒 A/B
 - 内容：将 `CONFIG_BLOCK_DEV_CACHE_SIZE` 从 16 增至 4096。4 KiB 文件系统下对应约 16 MiB，保存
   lwext4 元数据；普通文件 bulk data 继续走 direct multi-block 路径和内核 PageCache，不用该 cache
   再复制一份。选择 4096 是因为同窗口实际 file-data fill 比 1024 项多约 28%，而不是只按最低块读取量
-  选择容量。
+  选择容量。8192 在相同工作阶段只把块读请求/字节减少约 0.28%/0.05%，PageCache fill 变化约
+  +0.02%，未达到候选门槛，因而恢复 4096。
 - 后续影响：该容量从 256 MiB kernel heap 中常驻占用约 16 MiB；完整 BuildStorm 必须监控 heap peak。
   不得把它误当作可无限扩大的通用文件缓存。若以后为元数据建立独立缓存或复用打开 inode handle，应
-  重新测 256/1024/4096 容量曲线，并相应缩回固定 cache。
+  重新测容量曲线；没有新的 eviction/hit-rate 证据时不再直接扩大到 8192。
 
 ## signal wait 必须阻塞，并显式登记 sigtimedwait 目标集合
 
@@ -767,9 +783,9 @@
 - 后续影响：不得把 ASID rollover、boot/final root 过渡改为 op=4。启用 Global kernel PTE 前必须
   同时验证成对 G 位与 kernel 映射更新协议。不得把大范围展开为无界的逐页 op=5 循环。
 
-## LoongArch Global kernel mapping 保持 default-off 候选
+## LoongArch Global kernel mapping 的 default-off 阶段（历史决策）
 
-- 状态：默认不启用；稳定宿主单对复测正向，待独立复现
+- 状态：已由 2026-08-15 的包围 A/B 与默认启用决策取代
 - 适用范围：LA kernel leaf、ASID op=4、TLB residency、2 MiB direct map
 - 最后验证：2026-08-14
 - 证据：4 KiB paired-leaf shared-MM/Phase3 专项；12 GiB/12 hart BuildStorm on--off--on 完整日志
@@ -779,10 +795,10 @@
   `1560.36/1410.58/1634.28s`，两次 on 均未胜过 off。短窗口方向相反且 host backing-file cache/负载
   未被完全隔离，当时不足以满足稳定 `>=5%` 收益门槛。更稳定宿主的一对完整 off/on 为
   `1530.37/1418.31s`（约 `7.32%`），但两轮 swap-in/out 约为 `64/217 MiB` 与 `25/0.5 MiB`，且未跑
-  R3/off，不能做完全因果归因。feature、遍历和启用点已恢复但默认关闭；默认 kernel mapping 继续
-  ASID-scoped，op=4/shootdown/frame completion 不变。
-- 后续影响：不得依据单次短窗口或这一对长测默认启用 Global。重新评估必须控制宿主负载和 cache 顺序，再同时验证
-  4 KiB pair、动态 kernel mapping、跨 ASID/跨 hart 以及完整 final；huge leaf 在编码被架构证据和真实
+  R3/off，不能做完全因果归因，因此当时 feature 保持默认关闭；该结论已被 2026-08-15 的
+  off -> on -> off2 包围 A/B 取代。op=4/shootdown/frame completion 始终未改变。
+- 后续影响：历史反例仍要求后续平台结果同时记录宿主负载和 cache 顺序；4 KiB pair、动态 kernel
+  mapping、跨 ASID/跨 hart 继续作为门禁。huge leaf 在编码被架构证据和真实
   高端 RAM 访问独立证明前，仍由 `map_huge_2m()` 显式拒绝 Global。
 
 ## LoongArch 叶 PTE 修改由 PageTable 累积失效范围

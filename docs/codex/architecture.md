@@ -78,19 +78,21 @@
 
 - 状态：已实现并验证 4 GiB/12 GiB，36 GiB 平台实测待验证
 - 适用范围：LA early DMW、frame allocator、kernel direct map、procfs/sysinfo
-- 最后验证：2026-08-12
+- 最后验证：2026-08-15
 - 证据：`os/src/arch/loongarch64/config/board.rs`、
   `os/src/arch/loongarch64/{mm/page_table.rs,tlb_refill.S}`、`os/src/mm/memory_set.rs`；结果见
   [current-status.md](./current-status.md)。
 - 内容：boot hart 在关闭 DMW0 前从 QEMU virt `0x1e020000` fw_cfg MMIO 读取
   `FW_CFG_RAM_SIZE`，以 256 MiB low RAM 和 `0x80000000` high RAM 起点换算实际 high end。
-  正式页表保留 low RAM 的 4 KiB 权限映射，高 RAM 使用非 Global 的 PMD 2 MiB huge leaf；软件
-  refill 必须区分 table pointer 与 bit-6 huge leaf，后者不能执行 table-pointer 解码的 `-1`。
-  fw_cfg 无效时保留 12 GiB 兼容上限，发现值最高钳制到比赛 36 GiB。
+  正式页表保留 low RAM 的 4 KiB 权限映射；最终 root 首次激活前，已有 kernel half 仅对偶/奇两页
+  都有效的 4 KiB leaf 成对设置 Global。高 RAM 仍使用非 Global 的 PMD 2 MiB huge leaf；运行期新增
+  的 kernel-stack leaf 也保持 ASID-scoped。软件 refill 必须区分 table pointer 与 bit-6 huge leaf，
+  后者不能执行 table-pointer 解码的 `-1`。fw_cfg 无效时保留 12 GiB 兼容上限，发现值最高钳制到
+  比赛 36 GiB。
 - 后续影响：36 GiB 支持不能退回逐页 direct map；调整 RAM 上限时必须同时审计 39-bit VA、物理
   地址位宽、PMD 对齐和 frame allocator bitmap。fw_cfg 只在 DMW0 生效的 boot hart 早期读取，
-  secondary 不得重复访问或修改全局物理上限。用户 ASID 已启用，但 direct map 仍非 Global；Global
-  kernel 映射必须和软件 refill 的成对 G 位、huge leaf 及远端 shootdown 一起独立验证。
+  secondary 不得重复访问或修改全局物理上限。Global 只覆盖启动期已审计的成对 4 KiB leaf；不得
+  外推到 huge/runtime mapping，也不得绕过 op=4 本地/远端失效、residency mask 或帧退役完成协议。
 
 ### kernel heap 是启动期 RAM 预留区，不属于 ELF/BSS
 
