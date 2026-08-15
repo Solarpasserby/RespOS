@@ -89,7 +89,7 @@ Phase 6 的调度器、allocator、异步 I/O 和细粒度锁重构。
 | process-pending、`SA_NOCLDWAIT`、通用 restart | signal 首轮只闭合查询/exec；restart 仅覆盖 `wait4` | 已知差异 | 分主题 signal probe，不做全局一刀切 restart |
 | futex absolute timeout / precise wake | RV64 bitset/wake 与 LA64 wake 双 libc 通过；LA64 首组 musl monotonic wait 在 secondary 上线窗口稳定延迟约 0.87 s，后续 realtime/glibc 正常 | 已知差异 | 待确认：审计 LA64 secondary 启动与跨 hart 时间/调度，不放宽 timeout 阈值 |
 | mmap EOF/truncate/SIGBUS | Linux oracle 全通过；RV64/LA64 4 GiB/2 hart 均稳定复现相同七项 expected failure | 已知差异 | resident provenance、动态 EOF、truncate invalidation、fault 分类 |
-| `mmap/mprotect(PROT_NONE)` | LA64 software-present/hardware-invalid PTE；`mmap05` 与临时过滤的 `mprotect04` 双 libc 通过，RV64 回归通过 | 双架构已验证（当前范围） | 补 mprotect 失败原子性/并发 user-copy；旧 LA 模拟器上的 NR/NX 其他组合单列验证 |
+| `mmap/mprotect(PROT_NONE)` | LA64 software-present/hardware-invalid PTE；`mmap05` 与临时过滤的 `mprotect04` 双 libc 通过，RV64 回归通过；独立 Linux/RV64/LA64 probe 已覆盖未知 prot/未对齐 `EINVAL` 权限不变、只读 shared backing `EACCES` 不获写权限及 unmapped-hole `ENOMEM`，并校正 POSIX 允许非 `EINVAL` 失败部分修改 | 双架构已验证（当前 PROT_NONE 与参数/权限/映射缺口失败范围） | 补内存压力/VMA 上限失败与并发 user-copy；旧 LA 模拟器上的 NR/NX 其他组合单列验证 |
 | realtime/纳秒/atime、user/system CPU time | Phase 1 与 CPU clock 文档保留明确边界 | 待验证 | 跨重启时间 probe 与 clock/accounting 子项 |
 | musl `pathconf()` pathname 错误 | 当前 RV64/LA64 镜像的 musl 反汇编证实 `pathconf` 丢弃 path；musl `pathconf02` 五项失败而 glibc 全通过 | 已知差异 | 待确认：可复现 musl 构建/镜像替换与完整 musl 回归 |
 | LA64 musl `readlink*()` 零长度 | musl 1.2.5 wrapper 把 size 0 转成内部 size 1 调用；内核已对真实 size 0 返回 `EINVAL`，RV64 musl 1.2.0 与两架构 glibc 通过 | 已知差异 | 待确认：是否修改 musl runtime；不在内核特判 size 1 |

@@ -1,5 +1,25 @@
 # RespOS 当前状态
 
+## 2026-08-15 Phase 5 `mprotect()` 失败权限边界（基于 `de665eb`）
+
+- **契约校正**：[POSIX `mprotect()`](https://pubs.opengroup.org/onlinepubs/009696699/functions/mprotect.html) 明确规定，
+  除 `EINVAL` 外的失败可以已经改变范围内部分页面的权限；因此“任意失败都必须整段回滚”不是正确退出
+  门槛。[Linux `mprotect(2)`](https://man7.org/linux/man-pages/man2/mprotect.2.html) 则规定未知 `prot`/
+  未对齐地址返回 `EINVAL`，只读 backing 的共享映射不能升级写权限，范围包含 unmapped page 时返回
+  `ENOMEM`。
+- **独立门禁**：新增同向量 Linux/guest `mprotect_failure_probe`。先建立“第一页只读、第二页可写”的
+  匿名映射，分别以未知 protection bit 和未对齐地址触发 `EINVAL`，随后由 child 实际写入确认两页原
+  权限未变；再验证只读 fd 的单页 `MAP_SHARED` 升级写权限返回 `EACCES` 且写入仍触发 `SIGSEGV`；最后
+  验证跨 unmapped hole 返回 `ENOMEM`，但不对该非 `EINVAL` 失败强加整段回滚断言。
+- **验证结果**：Linux probe 以 `-std=c11 -Wall -Wextra -Werror -O2` 编译运行并输出
+  `MPROTECT_FAILURE_LINUX PASS einval_atomic=pass eacces_write=pass hole_enomem=pass`。release 初赛
+  snapshot、4 GiB/2 hart 的 RV64/LA64 均输出对应 `MPROTECT_FAILURE PASS ...` 与 runner PASS，日志
+  为 `/tmp/respos-{rv,la}-mprotect-failure.log`。
+- **实现结论与边界**：`sys_mprotect()` 已在改变 VMA/PTE 前校验 `prot`、地址和完整 mapped range，并在
+  shared file 升级写权限前检查 backing mode，本轮无需修改内核。该结果关闭当前参数/权限/映射缺口的
+  失败边界，不覆盖内存压力下 `privatize_one()` 中途失败、VMA 数量上限、并发 user-copy/mprotect 或
+  LA64 旧模拟器的 execute-only/write-only inhibit 组合。
+
 ## 2026-08-15 Phase 5 SysV SHM 固定配额下并发创建（基于 `81b60b1`）
 
 - **契约与线性化点**：[Linux `ipc/shm.c`](https://github.com/torvalds/linux/blob/master/ipc/shm.c) 标明
@@ -365,8 +385,9 @@
   `mprotect05` 在 LA64 双 libc 通过；RV64 回归 `mmap05,mprotect05` 双 libc 各
   `SUMMARY: 2 passed, 0 failed`，日志 `/tmp/respos-rv-protnone-regression.log`。
 - **剩余边界**：本轮只关闭 `PROT_NONE` 的 mmap/mprotect 可观察权限及恢复路径；mmap EOF/truncate/
-  `SIGBUS`、mprotect 失败原子性与并发 user-copy、LA64 QEMU 10.0.2 上单独依赖 NX/NR 的 execute-only/
-  write-only 最小权限仍需各自验证，不能由本轮结果外推为 MM Phase 5 全闭合。
+  `SIGBUS` 与并发 user-copy、LA64 QEMU 10.0.2 上单独依赖 NX/NR 的 execute-only/write-only 最小权限仍需
+  各自验证。参数/权限/映射缺口失败语义由上方后续专项关闭，但内存压力/VMA 上限失败仍未覆盖，不能由
+  本轮结果外推为 MM Phase 5 全闭合。
 
 ## 2026-08-14 Linux/POSIX Phase 5 musl `recvmmsg()` bad-vector wrapper 阻断（基于 `659eeb9`）
 

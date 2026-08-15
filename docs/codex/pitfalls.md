@@ -856,6 +856,19 @@
 - 后续影响：不得把“mode 为 0000”实现为禁止所有 `shmget` lookup，也不得让 `SHM_STAT_ANY` 复用普通
   stat 的权限拒绝；权限 probe 必须分别覆盖零请求、read 请求和 ownership-only 控制操作。
 
+## `mprotect()` 非 `EINVAL` 失败不保证整段权限回滚
+
+- 状态：规范边界已确认；当前参数/权限/映射缺口向量已双架构验证
+- 适用范围：`mprotect()`、VMA split、PTE permission、private-page allocation、file backing mode
+- 最后验证：2026-08-15
+- 证据：POSIX `mprotect()`；Linux/RV64/LA64 `mprotect_failure_probe`
+- 内容：POSIX 明确允许 `mprotect()` 因 `EACCES/ENOMEM` 等非 `EINVAL` 原因失败时，范围内一部分页面
+  权限已经改变。未知 prot 或未对齐地址的 `EINVAL` 应在修改前返回；当前 unmapped-hole probe 只验证
+  Linux errno，不把 RespOS 当前较强的整段预检查误写为标准强制事务性。
+- 后续影响：设计内存压力或 VMA 上限门禁时必须同时记录返回值与每段最终权限，但判断结果要服从规范
+  允许的部分修改。若项目主动选择更强的全回滚保证，应明确 prepare/commit 与资源预留机制，不能用
+  一条 hole 测试外推所有中途分配失败都原子。
+
 ## QEMU 10.0.2 LoongArch `LDPTE` 会截掉 PTE 的 NR/NX 高位
 
 - 状态：已确认并为 `PROT_NONE` 增加兼容表示

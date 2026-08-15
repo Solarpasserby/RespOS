@@ -202,6 +202,22 @@
   `V=0` 单独判断 lazy hole，也不能把 `PROTNONE` 用到中间页表项。其他无读/无执行组合仍由 NR/NX
   表达，是否需要针对旧模拟器增加更强隔离必须由独立契约和测试决定。
 
+### `mprotect` 在修改前完成参数、映射与 backing 权限校验
+
+- 状态：当前参数/权限/映射缺口失败路径已双架构验证
+- 适用范围：`sys_mprotect()`、`MemorySet::remap_area_with_overlap_range()`、file-backed VMA
+- 最后验证：2026-08-15
+- 证据：Linux/RV64/LA64 `mprotect_failure_probe`，日志
+  `/tmp/respos-{rv,la}-mprotect-failure.log`
+- 内容：未知 protection bit 与未对齐地址在进入 MemorySet 修改前返回 `EINVAL`；MemorySet 先遍历完整
+  VPN range，任一 unmapped page 使调用以 `ENOMEM` 返回，再对所有相交 shared file VMA 预检查写权限，
+  因此单页只读 backing 升级写权限返回 `EACCES` 且不会获得写权限。通过预检查后才切分 VMA、修改
+  resident PTE 与发布新 `map_perm`。
+- 后续影响：POSIX 允许非 `EINVAL` 失败已经改变部分页面，不能把当前较强的预校验行为扩张为所有
+  `mprotect` 失败必须事务回滚的架构承诺。未来仍需单测 `privatize_one()` 内存分配中途失败、VMA 数量
+  上限和并发 user-copy；涉及这类可失败提交点时，要么明确接受规范允许的部分结果，要么设计可回滚的
+  prepare/commit，不得仅凭现有 unmapped-hole probe 宣称全面失败原子性。
+
 ### RV64 `MemorySet` active CPU 与 shootdown
 
 - 状态：已实现，目标 QEMU/OpenSBI 专项压力已通过

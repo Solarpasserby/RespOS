@@ -55,6 +55,7 @@ const TASK_A_SOCKET_TIMEOUT_PROBE: bool = option_env!("TASK_A_SOCKET_TIMEOUT_PRO
 const TASK_A_SESSION_PROBE: bool = option_env!("TASK_A_SESSION_PROBE").is_some();
 const TASK_A_TASK_PHASE5_PROBE: bool = option_env!("TASK_A_TASK_PHASE5_PROBE").is_some();
 const TASK_A_MMAP_PHASE5_PROBE: bool = option_env!("TASK_A_MMAP_PHASE5_PROBE").is_some();
+const TASK_A_MPROTECT_FAILURE_PROBE: bool = option_env!("TASK_A_MPROTECT_FAILURE_PROBE").is_some();
 const TASK_A_SYSV_SHM_FUTEX_PROBE: bool = option_env!("TASK_A_SYSV_SHM_FUTEX_PROBE").is_some();
 const TASK_A_SYSV_SHM_LIFECYCLE_PROBE: bool =
     option_env!("TASK_A_SYSV_SHM_LIFECYCLE_PROBE").is_some();
@@ -1603,6 +1604,29 @@ fn run_task_a_mmap_phase5_probe() -> i32 {
     status
 }
 
+fn run_task_a_mprotect_failure_probe() -> i32 {
+    let pid = fork();
+    assert!(pid >= 0, "failed to fork mprotect_failure_probe");
+    if pid == 0 {
+        let argv = ["mprotect_failure_probe\0".as_ptr(), core::ptr::null()];
+        let ret = exec("mprotect_failure_probe\0", &argv);
+        println!("[testrunner] exec mprotect_failure_probe failed: {}", ret);
+        exit(-1);
+    }
+
+    let mut status = 0;
+    assert_eq!(waitpid(pid as usize, &mut status), pid);
+    if status == 0 {
+        println!("[testrunner] mprotect failure probe PASS");
+    } else {
+        println!(
+            "[testrunner] mprotect failure probe failed: status={}",
+            status
+        );
+    }
+    status
+}
+
 fn run_task_a_sysv_shm_futex_probe() -> i32 {
     let pid = fork();
     assert!(pid >= 0, "failed to fork sysv_shm_futex_probe");
@@ -1930,6 +1954,12 @@ fn main() -> i32 {
         poweroff();
         return if status == 0 { 0 } else { 1 };
     }
+    if TASK_A_MPROTECT_FAILURE_PROBE {
+        let status = run_task_a_mprotect_failure_probe();
+        println!("[testrunner] mprotect failure probe finished, powering off");
+        poweroff();
+        return if status == 0 { 0 } else { 1 };
+    }
     if TASK_A_SYSV_SHM_FUTEX_PROBE {
         let status = run_task_a_sysv_shm_futex_probe();
         println!("[testrunner] SysV SHM futex probe finished, powering off");
@@ -2130,6 +2160,12 @@ fn main() -> i32 {
     if TASK_A_MMAP_PHASE5_PROBE {
         let status = run_task_a_mmap_phase5_probe();
         println!("[testrunner] mmap Phase 5 probe finished, powering off");
+        poweroff();
+        return if status == 0 { 0 } else { 1 };
+    }
+    if TASK_A_MPROTECT_FAILURE_PROBE {
+        let status = run_task_a_mprotect_failure_probe();
+        println!("[testrunner] mprotect failure probe finished, powering off");
         poweroff();
         return if status == 0 { 0 } else { 1 };
     }

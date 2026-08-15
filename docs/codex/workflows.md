@@ -925,6 +925,26 @@ TASK_A_MMAP_PHASE5_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
 `MMAP_PHASE5 ALL PASS`，并复跑 `buildstorm_file_probe` 的 mmap 扩容/写回竞态。宿主 `make`/QEMU
 管线即使在 guest probe 非零后仍可能返回 0，因此必须以 guest marker 判定，不能只看宿主退出状态。
 
+Phase 5 `mprotect()` 失败权限边界：
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror -O2 scripts/mprotect_failure_probe_linux.c \
+  -o /tmp/mprotect_failure_probe_linux
+/tmp/mprotect_failure_probe_linux
+
+TASK_A_MPROTECT_FAILURE_PROBE=1 make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-mprotect-failure.log
+TASK_A_MPROTECT_FAILURE_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-mprotect-failure.log
+```
+
+Linux 必须输出 `MPROTECT_FAILURE_LINUX PASS einval_atomic=pass eacces_write=pass hole_enomem=pass`，
+guest 必须输出不带 `_LINUX` 的同组 marker 与 runner PASS。probe 用 fork child 实际尝试写入，不以
+`mprotect()` 返回值替代权限验证：未知 prot 与未对齐地址的 `EINVAL` 后，原只读/可写页面必须保持；
+只读 fd 的 `MAP_SHARED` 升级写权限返回 `EACCES` 且仍以 `SIGSEGV` 拒绝写；跨 unmapped hole 返回
+`ENOMEM`。POSIX 允许非 `EINVAL` 失败改变部分页面，因此 hole 向量只断言 errno，不添加整段回滚要求。
+两架构命令仍须顺序运行。
+
 Phase 5 signal ABI 对照：
 
 ```bash
