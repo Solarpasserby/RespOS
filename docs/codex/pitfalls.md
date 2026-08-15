@@ -1128,6 +1128,20 @@
 - 后续影响：新增写路径遵循“mutation/note 成功后、返回用户态前 register”；新增清理路径遵循
   “data 和 pending metadata 同时为空才 release”。同步 I/O 期间不得持有 owner registry 锁。
 
+## 动态下调 SysV SHM 配额不能驱逐已有 segment
+
+- 状态：当前 flat/global SHM table 已双架构验证
+- 适用范围：`/proc/sys/kernel/shmall`、`/proc/sys/kernel/shmmni`、`shmget`、`IPC_RMID`
+- 最后验证：2026-08-15
+- 证据：Linux `ipc/shm.c::newseg()`；RV64/LA64 `sysv_shm_attach_race_probe` 的
+  `dynamic_limits=pass`，日志 `/tmp/respos-{rv,la}-sysv-shm-dynamic-limits.log`
+- 内容：运行时限额是后续创建的准入条件，不是已有对象的回收指令。`SHMALL` 低于当前页数、或
+  `SHMMNI` 低于当前 segment 数时，已有 segment 仍须可查询/使用，新建返回 `ENOSPC`；只有显式
+  `IPC_RMID` 等生命周期操作降低用量后，创建才按新阈值恢复。
+- 后续影响：不得在 sysctl setter 中扫描或删除已有 segment，也不得通过把当前计数截断到新上限来
+  “修正”超额状态。若以后增加 IPC namespace 或并发 sysctl/create，必须保持相同准入语义，并为
+  namespace 锁序和创建线性化另立门禁。
+
 ## 历史测试成绩会快速过期
 
 - 状态：已确认

@@ -260,11 +260,128 @@ fn verify_shmall_limit() -> usize {
     original
 }
 
+fn verify_dynamic_limits() {
+    let mut limits = ShmInfoLimits::default();
+    let limits_ptr = &mut limits as *mut ShmInfoLimits as usize;
+    assert!(shmctl(0, IPC_INFO, limits_ptr) >= 0);
+    assert!(limits.shmall >= 2);
+    assert!(limits.shmmni >= 2);
+
+    let mut before = ShmInfo::default();
+    let before_ptr = &mut before as *mut ShmInfo as usize;
+    assert!(shmctl(0, SHM_INFO, before_ptr) >= 0);
+    assert_eq!(before.used_ids, 0);
+    assert_eq!(before.shm_tot, 0);
+
+    let two_page_id = shmget(IPC_PRIVATE, PAGE_SIZE * 2, IPC_CREAT | 0o600);
+    assert!(two_page_id > 0, "two-page shmget failed: {}", two_page_id);
+    let lower_shmall = write_usize_sysctl("/proc/sys/kernel/shmall\0", 1);
+
+    let mut lowered_shmall = ShmInfoLimits::default();
+    let lowered_shmall_ptr = &mut lowered_shmall as *mut ShmInfoLimits as usize;
+    let lowered_shmall_info = shmctl(0, IPC_INFO, lowered_shmall_ptr);
+    let mut over_shmall = ShmInfo::default();
+    let over_shmall_ptr = &mut over_shmall as *mut ShmInfo as usize;
+    let over_shmall_info = shmctl(0, SHM_INFO, over_shmall_ptr);
+    let mut two_page_ds = ShmidDs::default();
+    let two_page_ds_ptr = &mut two_page_ds as *mut ShmidDs as usize;
+    let existing_stat = shmctl(two_page_id as usize, IPC_STAT, two_page_ds_ptr);
+    let existing_attach = shmat(two_page_id as usize, 0, 0);
+    let mut existing_value = 0;
+    let existing_detach = if existing_attach > 0 {
+        write_word(existing_attach as usize, 0xd1a1_1e57);
+        existing_value = read_word(existing_attach as usize);
+        shmdt(existing_attach as usize)
+    } else {
+        0
+    };
+    let blocked_by_shmall = shmget(IPC_PRIVATE, PAGE_SIZE, IPC_CREAT | 0o600);
+    let remove_two_page = remove_if_created(two_page_id);
+    let at_shmall = shmget(IPC_PRIVATE, PAGE_SIZE, IPC_CREAT | 0o600);
+    let blocked_at_shmall = shmget(IPC_PRIVATE, PAGE_SIZE, IPC_CREAT | 0o600);
+    let shmall_cleanup = [blocked_by_shmall, at_shmall, blocked_at_shmall].map(remove_if_created);
+
+    let restore_shmall = write_usize_sysctl("/proc/sys/kernel/shmall\0", limits.shmall);
+    let mut restored_shmall = ShmInfoLimits::default();
+    let restored_shmall_ptr = &mut restored_shmall as *mut ShmInfoLimits as usize;
+    let restored_shmall_info = shmctl(0, IPC_INFO, restored_shmall_ptr);
+
+    assert_eq!(lower_shmall, 0);
+    assert!(lowered_shmall_info >= 0);
+    assert_eq!(lowered_shmall.shmall, 1);
+    assert!(over_shmall_info >= 0);
+    assert_eq!(over_shmall.used_ids, 1);
+    assert_eq!(over_shmall.shm_tot, 2);
+    assert_eq!(existing_stat, 0);
+    assert_eq!(two_page_ds.shm_segsz, PAGE_SIZE * 2);
+    assert!(existing_attach > 0);
+    assert_eq!(existing_value, 0xd1a1_1e57);
+    assert_eq!(existing_detach, 0);
+    assert_eq!(blocked_by_shmall, -ENOSPC);
+    assert_eq!(remove_two_page, 0);
+    assert!(at_shmall > 0);
+    assert_eq!(blocked_at_shmall, -ENOSPC);
+    assert!(shmall_cleanup.iter().all(|result| *result == 0));
+    assert_eq!(restore_shmall, 0);
+    assert!(restored_shmall_info >= 0);
+    assert_eq!(restored_shmall.shmall, limits.shmall);
+
+    let first = shmget(IPC_PRIVATE, PAGE_SIZE, IPC_CREAT | 0o600);
+    let second = shmget(IPC_PRIVATE, PAGE_SIZE, IPC_CREAT | 0o600);
+    assert!(first > 0 && second > 0);
+    let lower_shmmni = write_usize_sysctl("/proc/sys/kernel/shmmni\0", 1);
+
+    let mut lowered_shmmni = ShmInfoLimits::default();
+    let lowered_shmmni_ptr = &mut lowered_shmmni as *mut ShmInfoLimits as usize;
+    let lowered_shmmni_info = shmctl(0, IPC_INFO, lowered_shmmni_ptr);
+    let mut over_shmmni = ShmInfo::default();
+    let over_shmmni_ptr = &mut over_shmmni as *mut ShmInfo as usize;
+    let over_shmmni_info = shmctl(0, SHM_INFO, over_shmmni_ptr);
+    let mut first_ds = ShmidDs::default();
+    let first_ds_ptr = &mut first_ds as *mut ShmidDs as usize;
+    let first_stat = shmctl(first as usize, IPC_STAT, first_ds_ptr);
+    let mut second_ds = ShmidDs::default();
+    let second_ds_ptr = &mut second_ds as *mut ShmidDs as usize;
+    let second_stat = shmctl(second as usize, IPC_STAT, second_ds_ptr);
+    let blocked_by_shmmni = shmget(IPC_PRIVATE, PAGE_SIZE, IPC_CREAT | 0o600);
+    let remove_first = remove_if_created(first);
+    let blocked_at_shmmni = shmget(IPC_PRIVATE, PAGE_SIZE, IPC_CREAT | 0o600);
+    let remove_second = remove_if_created(second);
+    let below_shmmni = shmget(IPC_PRIVATE, PAGE_SIZE, IPC_CREAT | 0o600);
+    let shmmni_cleanup =
+        [blocked_by_shmmni, blocked_at_shmmni, below_shmmni].map(remove_if_created);
+
+    let restore_shmmni = write_usize_sysctl("/proc/sys/kernel/shmmni\0", limits.shmmni);
+    let mut restored_shmmni = ShmInfoLimits::default();
+    let restored_shmmni_ptr = &mut restored_shmmni as *mut ShmInfoLimits as usize;
+    let restored_shmmni_info = shmctl(0, IPC_INFO, restored_shmmni_ptr);
+
+    assert_eq!(lower_shmmni, 0);
+    assert!(lowered_shmmni_info >= 0);
+    assert_eq!(lowered_shmmni.shmmni, 1);
+    assert!(over_shmmni_info >= 0);
+    assert_eq!(over_shmmni.used_ids, 2);
+    assert_eq!(first_stat, 0);
+    assert_eq!(first_ds.shm_segsz, PAGE_SIZE);
+    assert_eq!(second_stat, 0);
+    assert_eq!(second_ds.shm_segsz, PAGE_SIZE);
+    assert_eq!(blocked_by_shmmni, -ENOSPC);
+    assert_eq!(remove_first, 0);
+    assert_eq!(blocked_at_shmmni, -ENOSPC);
+    assert_eq!(remove_second, 0);
+    assert!(below_shmmni > 0);
+    assert!(shmmni_cleanup.iter().all(|result| *result == 0));
+    assert_eq!(restore_shmmni, 0);
+    assert!(restored_shmmni_info >= 0);
+    assert_eq!(restored_shmmni.shmmni, limits.shmmni);
+}
+
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     let shmmax = verify_size_limits();
     let shmmni = verify_shmmni_limit();
     let shmall = verify_shmall_limit();
+    verify_dynamic_limits();
 
     let control_addr = mmap_raw(0, PAGE_SIZE, PROT_READ_WRITE, MAP_SHARED_ANONYMOUS, -1, 0);
     assert!(control_addr > 0, "control mmap failed: {}", control_addr);
@@ -383,7 +500,7 @@ fn main() -> i32 {
     }
 
     println!(
-        "SYSV_SHM_ATTACH_RACE PASS shmmax={} shmmni={} shmall={} pressure={} attempts={} invalid={} attached={}",
+        "SYSV_SHM_ATTACH_RACE PASS shmmax={} shmmni={} shmall={} dynamic_limits=pass pressure={} attempts={} invalid={} attached={}",
         shmmax,
         shmmni,
         shmall,

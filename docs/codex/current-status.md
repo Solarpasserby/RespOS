@@ -1,5 +1,28 @@
 # RespOS 当前状态
 
+## 2026-08-15 Phase 5 SysV SHM 已有对象时动态下调配额（基于 `1bb9752`）
+
+- **Linux 契约来源**：[Linux sysctl 文档](https://www.kernel.org/doc/html/latest/admin-guide/sysctl/kernel.html#shmall)
+  将 `shmall` 定义为 IPC namespace 内可用共享内存总页数，将 `shmmni` 定义为最大 segment 数；
+  [Linux `ipc/shm.c`](https://github.com/torvalds/linux/blob/master/ipc/shm.c) 的 `newseg()` 只在创建新
+  segment 时以当前 `shm_tot + numpages` 比较 `shm_ctlall`，并把当前 `shm_ctlmni` 交给 `ipc_addid()`。
+  由这条创建路径可推得：把限额降到当前用量以下不会驱逐已有 segment，但新建必须返回 `ENOSPC`，
+  直到已有用量降到新限额以下。宿主 `/proc/sys` 为只读，因此该动态状态机没有伪装成 Linux 可执行
+  oracle；Linux 部分以官方文档与源码为依据。
+- **guest 门禁**：扩展 `sysv_shm_attach_race_probe`。`SHMALL` 向量先创建双页 segment，再把限额降为
+  1，要求 `SHM_INFO` 仍报告 1 个 ID/2 页且已有对象可 `IPC_STAT`，同时新建单页返回 `ENOSPC`；删除
+  已有对象后可创建恰好一页，第二页仍失败。`SHMMNI` 向量先创建两个 segment，再把限额降为 1，要求
+  两个已有对象保留；删到恰好 1 个时新建仍失败，删到 0 个后恢复创建。两个 sysctl 都在断言前恢复
+  原值，并由 `IPC_INFO` 复核。
+- **验证结果**：release 初赛 snapshot、4 GiB/2 hart 的 RV64/LA64 均输出
+  `SYSV_SHM_ATTACH_RACE PASS shmmax=18446744073692774399 shmmni=4096 shmall=4503599627370495
+  dynamic_limits=pass pressure=128 attempts=64 invalid=0 attached=64` 与 runner PASS；日志为
+  `/tmp/respos-{rv,la}-sysv-shm-dynamic-limits.log`。同一执行也回归了 size、默认 `SHMMNI=4096` 耗尽、
+  clean-table `SHMALL=2`、128 轮顺序回收及 32 轮双 attacher；现有内核行为符合契约，本轮无需修改。
+- **边界**：本结果关闭 RespOS 当前 flat/global SHM table 上已有对象时的动态 `SHMALL/SHMMNI` 下调，
+  不代表 IPC namespace 隔离、并发修改 sysctl 与创建、物理 `ENOMEM` 或单调 segment/attach ID 溢出已
+  覆盖。
+
 ## 2026-08-15 Phase 5 SysV SHM metadata、权限与 lock 控制面（基于 `412158d`）
 
 - **独立契约**：新增 Linux/guest `sysv_shm_metadata_probe`；核心状态向量不创建工作 child，权限向量只
@@ -53,8 +76,8 @@
 - **实现结论与边界**：现有 `sys_shmget()` 已按 existing-key、创建必要性、size 范围的顺序返回上述
   errno；`ShmTable::alloc_id()` 在达到运行时 `shmmni` 时返回 `ENOSPC`，页数总和按运行时 `shmall`
   返回 `ENOSPC`，`IPC_RMID` 会归还两种额度，本轮不需修改内核。当前关闭默认 size、`SHMMNI=4096`
-  顺序耗尽，以及 clean-table 下调 `SHMALL=2` 的页计数/恢复；RespOS 尚无 IPC namespace，已有对象时
-  动态下调、并发创建、物理 `ENOMEM` 和单调 segment/attach ID 溢出仍未覆盖。
+  顺序耗尽，以及 clean-table 下调 `SHMALL=2` 的页计数/恢复；已有对象时动态下调由上方后续专项关闭。
+  RespOS 尚无 IPC namespace，并发 sysctl/create、物理 `ENOMEM` 和单调 segment/attach ID 溢出仍未覆盖。
 
 ## 2026-08-15 Phase 5 SysV SHM 双 attacher 与回收循环门禁（基于 `1fc3915`）
 

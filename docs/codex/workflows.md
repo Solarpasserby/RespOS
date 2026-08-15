@@ -480,16 +480,19 @@ probe 先确认 `SHMMIN=1`、size 0/`SHMMAX+1` 新建、existing-key 的 size 0/
 用量恢复到测试前。默认 Linux/RespOS 配额为 4096。Linux 运行会短暂占满当前 IPC namespace，必须在
 隔离或无其他 SysV SHM workload 的环境中顺序执行。guest 随后把 `/proc/sys/kernel/shmall` 临时设为
 2，验证两个单页和一个双页的额度边界、`ENOSPC`、删除后复用，再恢复原值并由 `IPC_INFO` 复核；任何
-新增失败出口也必须先恢复该全局值。强制让出
+新增失败出口也必须先恢复该全局值。随后 guest 在已有双页 segment 时把 `SHMALL` 降为 1，并在已有
+两个 segment 时把 `SHMMNI` 降为 1：已有对象必须继续由 `IPC_STAT/SHM_INFO` 可见，新建必须阻塞到
+用量低于新阈值，两个 sysctl 都须在断言前恢复并复核。强制让出
 构建用于稳定扩大 table reservation 与 VMA commit 之间的窗口；修复前
 `SYSV_SHM_ATTACH_RACE_EXPECTED_FAIL orphan=64` 是反证，修复后两架构必须输出
-`SYSV_SHM_ATTACH_RACE PASS shmmax=... shmmni=... pressure=128 attempts=64 ...` 与 runner PASS。当前门禁
+`SYSV_SHM_ATTACH_RACE PASS shmmax=... shmmni=... dynamic_limits=pass pressure=128 attempts=64 ...` 与
+runner PASS。当前门禁
 再做 128 轮顺序单页创建/删除/最后 detach 回收复用，再做 32 轮、每轮两个 child 同时 attach；
 `invalid`/`attached` 比例不固定，但总和必须为 64 且不得出现 orphan。probe 还要求已占用的非空
 `shmaddr` 返回 `EINVAL`，并验证失败 attach 的 reservation 回滚。强制构建后必须不带
 `TASK_A_SYSV_SHM_ATTACH_TEST_YIELD` 依次重建和运行两架构，恢复默认 kernel；随后复跑 lifecycle、
-nattch 及 `shmat01,shmdt02,shmctl03`。本门禁不覆盖更宽 N 路并发、已有对象时动态 sysctl、IPC
-namespace、物理内存/ID 溢出等其他资源边界或 `SHM_REMAP` 并发覆盖。
+nattch 及 `shmat01,shmdt02,shmctl03`。本门禁不覆盖更宽 N 路并发、并发 sysctl/create、IPC namespace、
+物理内存/ID 溢出等其他资源边界或 `SHM_REMAP` 并发覆盖。
 
 Phase 5 SysV SHM 核心 metadata（不进入多子进程 teardown）：
 
