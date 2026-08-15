@@ -305,6 +305,18 @@ fn write_sockaddr_for_domain(
     Ok(())
 }
 
+fn write_absent_sockaddr(addr: usize, addrlen_ptr: usize) -> SysResult {
+    if addr == 0 {
+        return Ok(());
+    }
+    if addrlen_ptr < core::mem::size_of::<u32>() {
+        return Err(Errno::EFAULT);
+    }
+    check_user_writable(addrlen_ptr as *mut u32, 1)?;
+    let zero = 0u32;
+    copy_to_user(addrlen_ptr as *mut u32, &zero as *const u32, 1).map(|_| ())
+}
+
 fn read_sockaddr_output_len(addrlen_ptr: usize) -> SysResult<u32> {
     if addrlen_ptr < core::mem::size_of::<u32>() {
         return Err(Errno::EFAULT);
@@ -952,7 +964,10 @@ pub fn sys_recvfrom(
         Ok((n, from_addr, sock.domain.clone()))
     })?;
     copy_to_user(buf, kernel_buf.as_ptr(), n.min(len))?;
-    write_sockaddr_for_domain(&domain, src_addr, addrlen, from_addr)?;
+    match from_addr {
+        Some(from_addr) => write_sockaddr_for_domain(&domain, src_addr, addrlen, from_addr)?,
+        None => write_absent_sockaddr(src_addr, addrlen)?,
+    }
     Ok(n.min(len))
 }
 
@@ -1001,7 +1016,10 @@ fn sys_recvmsg_into_hdr(fd: usize, hdr: &mut MsgHdr, flags: usize) -> SysResult<
         sock.recv_from(&mut data, flags.nonblocking, flags.peek, flags.waitall)
     })?;
     let copied = scatter_iov_bytes(&iovs, &data[..n.min(data.len())])?;
-    hdr.msg_namelen = write_sockaddr_value(hdr.msg_name, hdr.msg_namelen as usize, from_addr)?;
+    hdr.msg_namelen = match from_addr {
+        Some(from_addr) => write_sockaddr_value(hdr.msg_name, hdr.msg_namelen as usize, from_addr)?,
+        None => 0,
+    };
     hdr.msg_controllen = 0;
     hdr.msg_flags = 0;
     Ok(copied)

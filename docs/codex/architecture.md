@@ -777,8 +777,8 @@ FdTable slot (FdEntry: descriptor flags)
 
 ### UDP shutdown 由 socket 层半边标志同时驱动 I/O 与 readiness
 
-- 状态：connected loopback 基础收发半边及 poll/epoll readiness 已完成双架构专项
-- 适用范围：UDP `shutdown(SHUT_RD/SHUT_WR/SHUT_RDWR)`、空队列 EOF、`EPIPE`、HUP/RDHUP
+- 状态：connected loopback 基础收发半边、poll/epoll readiness 及 blocked recv EOF 已完成双架构专项
+- 适用范围：UDP `shutdown(SHUT_RD/SHUT_WR/SHUT_RDWR)`、空队列 EOF/来源地址、`EPIPE`、HUP/RDHUP
 - 最后验证：2026-08-15
 - 证据：`os/src/net/{udp.rs,socket.rs}`、`scripts/udp_shutdown_probe_linux.c`、
   `user/src/bin/udp_shutdown_probe.rs`；RV64/LA64 4 GiB/2 hart 日志
@@ -788,9 +788,12 @@ FdTable slot (FdEntry: descriptor flags)
   只在队列为空时返回 0。shutdown 不调用 smoltcp `close()`；Drop 才负责 close 和 remove
   handle，避免把单边状态折叠成整个 socket 关闭。readiness 复用同一对标志：
   recv shutdown 产生 read-ready/RDHUP，send shutdown 产生 write-ready，两者同时成立才产生无条件
-  HUP；这与 Linux `datagram_poll_queue()` 的 shutdown mask 观察点一致。
+  HUP；这与 Linux `datagram_poll_queue()` 的 shutdown mask 观察点一致。接收结果用
+  `Option<SocketAddr>` 区分带来源的数据报与不带来源的 shutdown EOF：零长数据报仍是
+  `Some(source)`，只有空队列 EOF 是 None，使 `recvfrom` 能只清零 addrlen 而不伪造地址。
 - 后续影响：不能套用 stream `SHUT_RD` 的“丢弃当前与未来数据”假设。本地 shutdown
-  标志已接入 UDP poll/epoll level readiness；ET/ONESHOT、并发阻塞 recv/send shutdown 竞争、
+  标志已接入 UDP poll/epoll level readiness，阻塞 recv 也会在 RD shutdown 后返回 EOF。
+  ET/ONESHOT、数据/timeout/signal/shutdown 竞争、并发阻塞 send shutdown 竞争、
   disconnect/reconnect、error queue 和非 loopback 网络需另立 Linux 对照。
 
 ### AF_UNIX RDHUP 复用既有 peer shutdown 状态与 waiter

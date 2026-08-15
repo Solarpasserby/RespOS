@@ -162,6 +162,57 @@ fn expect_blocking_poll_shutdown() {
     close_pair(pair);
 }
 
+fn sentinel_sockaddr() -> SockAddrIn {
+    SockAddrIn {
+        sin_family: 0xa5a5,
+        sin_port: 0xa5a5,
+        sin_addr: [0xa5; 4],
+        sin_zero: [0xa5; 8],
+    }
+}
+
+fn expect_zero_datagram_source() {
+    let pair = make_pair();
+    assert_eq!(sendto(pair.1, b"", 0, None), 0);
+    let mut byte = [0xccu8; 1];
+    let mut from = sentinel_sockaddr();
+    let mut from_len = core::mem::size_of::<SockAddrIn>() as u32;
+    assert_eq!(
+        recvfrom(pair.0, &mut byte, 0, Some((&mut from, &mut from_len))),
+        0
+    );
+    assert_eq!(byte[0], 0xcc);
+    assert_eq!(from_len as usize, core::mem::size_of::<SockAddrIn>());
+    assert_eq!(from.sin_family as usize, AF_INET);
+    assert_ne!(from.sin_port, 0);
+    close_pair(pair);
+}
+
+fn expect_blocked_recv_shutdown() {
+    let pair = make_pair();
+    let child = fork();
+    assert!(child >= 0);
+    if child == 0 {
+        delay_ms(100);
+        exit(if shutdown(pair.0, SHUT_RD) == 0 { 0 } else { 1 });
+    }
+
+    let mut byte = [0xccu8; 1];
+    let mut from = sentinel_sockaddr();
+    let mut from_len = core::mem::size_of::<SockAddrIn>() as u32;
+    assert_eq!(
+        recvfrom(pair.0, &mut byte, 0, Some((&mut from, &mut from_len))),
+        0
+    );
+    assert_eq!(byte[0], 0xcc);
+    assert_eq!(from_len, 0);
+    assert_eq!(from.sin_family, 0xa5a5);
+    let mut status = 0;
+    assert_eq!(waitpid(child as usize, &mut status), child);
+    assert_eq!(status, 0);
+    close_pair(pair);
+}
+
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     let unconnected = socket(AF_INET, SOCK_DGRAM, 0);
@@ -214,9 +265,11 @@ fn main() -> i32 {
     close_pair(pair);
 
     expect_blocking_poll_shutdown();
+    expect_zero_datagram_source();
+    expect_blocked_recv_shutdown();
 
     println!(
-        "UDP_SHUTDOWN PASS unconnected=pass shut_wr=pass shut_rd=pass shut_rdwr=pass readiness=pass blocking_poll=pass blocking_epoll=pass"
+        "UDP_SHUTDOWN PASS unconnected=pass shut_wr=pass shut_rd=pass shut_rdwr=pass readiness=pass blocking_poll=pass blocking_epoll=pass zero_datagram=pass blocked_recv=pass eof_addr=pass"
     );
     0
 }

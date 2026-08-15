@@ -1113,18 +1113,21 @@ impl Socket {
         per_call_nonblocking: bool,
         peek: bool,
         waitall: bool,
-    ) -> Result<(usize, SocketAddr), Errno> {
+    ) -> Result<(usize, Option<SocketAddr>), Errno> {
         let deadline_us = self.recv_deadline_us(per_call_nonblocking);
         match &self.inner {
             SocketInner::Udp(udp) => udp.recv_from(buf, per_call_nonblocking, deadline_us, peek),
             SocketInner::Tcp(tcp) => {
                 let len = tcp.recv(buf, per_call_nonblocking, deadline_us, peek, waitall)?;
                 let remote_addr = tcp.remote_addr().unwrap_or(UNSPECIFIED_ENDPOINT);
-                Ok((len, from_ipendpoint_to_socketaddr(remote_addr)))
+                Ok((len, Some(from_ipendpoint_to_socketaddr(remote_addr))))
             }
             SocketInner::Unix(unix) => {
                 let len = unix.read(buf, per_call_nonblocking, deadline_us, peek, waitall)?;
-                Ok((len, from_ipendpoint_to_socketaddr(UNSPECIFIED_ENDPOINT)))
+                Ok((
+                    len,
+                    Some(from_ipendpoint_to_socketaddr(UNSPECIFIED_ENDPOINT)),
+                ))
             }
         }
     }

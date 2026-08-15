@@ -1,5 +1,24 @@
 # RespOS 当前状态
 
+## 2026-08-15 Phase 5 UDP blocked recv 与 EOF 来源地址（基于 `1afa57e`）
+
+- **Linux oracle**：扩展 `udp_shutdown_probe_linux`。父进程在 connected UDP 空队列上阻塞
+  `recvfrom`，child 对 fork 共享 socket 延迟 `SHUT_RD` 后，调用必须返回 0；若提供
+  source buffer，Linux 将 `addrlen` 写为 0 且不修改 buffer。对照的零长 UDP 数据报同样
+  返回 0，但会写回 `addrlen=sizeof(sockaddr_in)` 和真实来源，因此不能以长度 0
+  单独推导 EOF。
+- **基线与修复**：修复前 RV64 已能从阻塞 recv 返回 0，但错误伪造 `0.0.0.0:0`
+  并将 `addrlen` 写为 16。UDP 接收结果现以 `Option<SocketAddr>` 显式表达来源：数据报（包括
+  零长数据报）返回 `Some(source)`，shutdown 空队列 EOF 返回 `None`。`recvfrom` 对 None
+  只写 0 到 `addrlen`，不触碰 source buffer；同一内部结果也防止 recvmsg 伪造地址。
+- **验证结果**：Linux 严格编译运行后 marker 增加
+  `zero_datagram=pass blocked_recv=pass eof_addr=pass`。release 初赛 snapshot、4 GiB/2 hart 的
+  RV64/LA64 均输出同一 guest marker 与 runner PASS，日志为
+  `/tmp/respos-{rv,la}-udp-blocked-recv-final.log`；双架构 `socket_flags_probe` 相邻回归通过。
+- **保留边界**：`recvmsg/recvmmsg` 在 UDP shutdown EOF 时的 name/name-length 还需独立 ABI 向量；
+  数据、shutdown、timeout 和 signal 同时到达的 single-winner/优先级，以及正在阻塞的 UDP send
+  与 `SHUT_WR` 竞争仍待验证。
+
 ## 2026-08-15 Phase 5 UDP shutdown poll/epoll readiness（基于 `5beecf7`）
 
 - **Linux oracle**：扩展 `udp_shutdown_probe_linux` 后严格编译运行通过。connected UDP 空队列
@@ -17,7 +36,7 @@
   日志为 `/tmp/respos-{rv,la}-udp-shutdown-readiness-final.log`。双架构 `socket_phase5_probe`
   相邻回归均输出 `SOCKET_PHASE5 ALL PASS`。
 - **保留边界**：UDP shutdown readiness 的 epoll ET/ONESHOT 去重与 rearm、另一线程正阻塞在
-  `recv/send` 时的 shutdown 竞争、EOF `recvfrom` 地址写回、disconnect/reconnect、error queue/ICMP
+  send 时的 shutdown 竞争、disconnect/reconnect、error queue/ICMP
   与非 loopback 网络仍待独立验证。
 
 ## 2026-08-15 Phase 5 UDP `shutdown` 收发半边（基于 `015c187`）
@@ -34,8 +53,8 @@
   `UDP_SHUTDOWN_LINUX PASS unconnected=pass shut_wr=pass shut_rd=pass shut_rdwr=pass`。release 初赛
   snapshot、4 GiB/2 hart 的 RV64/LA64 均输出对应 guest marker 与 runner PASS，日志为
   `/tmp/respos-{rv,la}-udp-shutdown-fixed.log`；两架构 `socket_flags_probe` 相邻回归也通过。
-- **保留边界**：并发阻塞 recv/send 与 shutdown、
-  `recvfrom` EOF 时地址输出、已连接 socket 显式 `sendto`、AF_UNSPEC disconnect/reconnect、错误队列/
+- **保留边界**：并发阻塞 send 与 shutdown、已连接 socket 显式 `sendto`、
+  AF_UNSPEC disconnect/reconnect、错误队列/
   ICMP 及非 loopback 网络仍待验证，不因本轮宣布网络 M1 退出。
 
 ## 2026-08-15 Phase 5 RDHUP blocking/edge/oneshot 模式（基于 `88ce7d2`）

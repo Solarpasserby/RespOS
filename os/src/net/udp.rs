@@ -18,8 +18,7 @@ use spin::{Mutex, RwLock};
 
 use crate::{
     net::addr::{
-        LOOP_BACK_IP, UNSPECIFIED_ENDPOINT, from_ipendpoint_to_socketaddr,
-        from_sockaddr_to_ipendpoint, is_unspecified,
+        LOOP_BACK_IP, from_ipendpoint_to_socketaddr, from_sockaddr_to_ipendpoint, is_unspecified,
     },
     syscall::{Errno, SysResult},
     task::{current_task, yield_current_task},
@@ -173,35 +172,30 @@ impl UdpSocket {
         per_call_nonblocking: bool,
         deadline_us: Option<usize>,
         peek: bool,
-    ) -> Result<(usize, SocketAddr), Errno> {
+    ) -> Result<(usize, Option<SocketAddr>), Errno> {
         let mut binding = vec![0; 1528];
         let kernel_buf = binding.as_mut_slice();
 
-        self.recv_impl(
-            per_call_nonblocking,
-            deadline_us,
-            (0, from_ipendpoint_to_socketaddr(UNSPECIFIED_ENDPOINT)),
-            |socket| {
-                let result = if peek {
-                    socket
-                        .peek_slice(kernel_buf)
-                        .map(|(len, meta)| (len, *meta))
-                } else {
-                    socket.recv_slice(kernel_buf)
-                };
-                match result {
-                    Ok((len, meta)) => {
-                        let copy_len = core::cmp::min(len, buf.len());
-                        buf[..copy_len].copy_from_slice(&kernel_buf[..copy_len]);
-                        Ok((copy_len, from_ipendpoint_to_socketaddr(meta.endpoint)))
-                    }
-                    Err(e) => match e {
-                        udp::RecvError::Exhausted => Err(Errno::EAGAIN),
-                        udp::RecvError::Truncated => Err(Errno::EAGAIN),
-                    },
+        self.recv_impl(per_call_nonblocking, deadline_us, (0, None), |socket| {
+            let result = if peek {
+                socket
+                    .peek_slice(kernel_buf)
+                    .map(|(len, meta)| (len, *meta))
+            } else {
+                socket.recv_slice(kernel_buf)
+            };
+            match result {
+                Ok((len, meta)) => {
+                    let copy_len = core::cmp::min(len, buf.len());
+                    buf[..copy_len].copy_from_slice(&kernel_buf[..copy_len]);
+                    Ok((copy_len, Some(from_ipendpoint_to_socketaddr(meta.endpoint))))
                 }
-            },
-        )
+                Err(e) => match e {
+                    udp::RecvError::Exhausted => Err(Errno::EAGAIN),
+                    udp::RecvError::Truncated => Err(Errno::EAGAIN),
+                },
+            }
+        })
     }
 
     /// 设置默认远程地址（connect 后可直接用 send/recv）。

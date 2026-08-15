@@ -138,6 +138,48 @@ static void expect_blocking_poll_shutdown(void)
     close_pair(pair);
 }
 
+static void expect_zero_datagram_source(void)
+{
+    struct udp_pair pair = make_pair();
+    assert(send(pair.right, "", 0, 0) == 0);
+    unsigned char byte = 0xcc;
+    struct sockaddr_in from;
+    memset(&from, 0xa5, sizeof(from));
+    socklen_t from_len = sizeof(from);
+    assert(recvfrom(pair.left, &byte, 1, 0,
+                    (struct sockaddr *)&from, &from_len) == 0);
+    assert(byte == 0xcc);
+    assert(from_len == sizeof(from));
+    assert(from.sin_family == AF_INET);
+    assert(from.sin_port != 0);
+    close_pair(pair);
+}
+
+static void expect_blocked_recv_shutdown(void)
+{
+    struct udp_pair pair = make_pair();
+    pid_t child = fork();
+    assert(child >= 0);
+    if (child == 0) {
+        usleep(100000);
+        _exit(shutdown(pair.left, SHUT_RD) == 0 ? 0 : 1);
+    }
+
+    unsigned char byte = 0xcc;
+    struct sockaddr_in from;
+    memset(&from, 0xa5, sizeof(from));
+    socklen_t from_len = sizeof(from);
+    assert(recvfrom(pair.left, &byte, 1, 0,
+                    (struct sockaddr *)&from, &from_len) == 0);
+    assert(byte == 0xcc);
+    assert(from_len == 0);
+    assert(from.sin_family == 0xa5a5);
+    int status = 0;
+    assert(waitpid(child, &status, 0) == child);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    close_pair(pair);
+}
+
 int main(void)
 {
     setbuf(stdout, NULL);
@@ -196,8 +238,10 @@ int main(void)
     close_pair(pair);
 
     expect_blocking_poll_shutdown();
+    expect_zero_datagram_source();
+    expect_blocked_recv_shutdown();
 
     alarm(0);
-    puts("UDP_SHUTDOWN_LINUX PASS unconnected=pass shut_wr=pass shut_rd=pass shut_rdwr=pass readiness=pass blocking_poll=pass blocking_epoll=pass");
+    puts("UDP_SHUTDOWN_LINUX PASS unconnected=pass shut_wr=pass shut_rd=pass shut_rdwr=pass readiness=pass blocking_poll=pass blocking_epoll=pass zero_datagram=pass blocked_recv=pass eof_addr=pass");
     return 0;
 }
