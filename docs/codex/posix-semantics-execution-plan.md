@@ -178,6 +178,8 @@ error，不能继续固定返回 0。refused、reset、timeout、unreachable 和
 socket 地址查询也沿用同一方法：先用 Linux 对照固定 fd、用户输出参数和各连接态组合的错误优先级，
 再提交成功写回；例如未连接 inet 的 `ENOTCONN` 先于非法长度，而 connected socketpair 才进入
 `EINVAL/EFAULT` 输出校验，不能用一条全局优先级替代状态矩阵。
+数据报 shutdown 也必须独立取 Linux oracle：当前已固定 connected UDP 的 `SHUT_WR`
+`EPIPE`、`SHUT_RD` 空队列 EOF 以及已排队/未来数据报仍可读；不得从 stream 半关闭直接外推。
 
 ### M1 退出门槛
 

@@ -1,5 +1,23 @@
 # RespOS 当前状态
 
+## 2026-08-15 Phase 5 UDP `shutdown` 收发半边（基于 `015c187`）
+
+- **Linux 契约与基线**：新增独立 Linux/guest `udp_shutdown_probe`。Linux 对未连接和仅 bind 的
+  UDP socket 在三种 `how` 下都返回 `ENOTCONN`，已连接 socket 的非法 `how` 返回 `EINVAL`。
+  `SHUT_WR` 后发送返回 `EPIPE`但反向接收仍可用；`SHUT_RD` 不丢弃已排队或后续到达的
+  数据报，只在队列为空时令 `recv` 返回 0，且发送半边仍可用。
+- **缺陷与最小修复**：修复前 RV64 对未连接 UDP `shutdown(SHUT_RD)` 错误返回 0，且任何合法
+  `how` 都直接 close 底层 smoltcp socket。`UdpSocket` 现仅增加共享的 recv/send shutdown 原子标志：
+  接收路径先取数据报，空队列再返回 EOF；发送路径返回 `EPIPE`。只有 Drop 仍 close 并
+  remove 底层 handle，未改 smoltcp 协议状态机。
+- **验证结果**：Linux 以 `-std=c11 -Wall -Wextra -Werror -O2` 编译运行并输出
+  `UDP_SHUTDOWN_LINUX PASS unconnected=pass shut_wr=pass shut_rd=pass shut_rdwr=pass`。release 初赛
+  snapshot、4 GiB/2 hart 的 RV64/LA64 均输出对应 guest marker 与 runner PASS，日志为
+  `/tmp/respos-{rv,la}-udp-shutdown-fixed.log`；两架构 `socket_flags_probe` 相邻回归也通过。
+- **保留边界**：`poll/epoll` 在 UDP 本地 shutdown 后的 readiness、并发阻塞 recv/send 与 shutdown、
+  `recvfrom` EOF 时地址输出、已连接 socket 显式 `sendto`、AF_UNSPEC disconnect/reconnect、错误队列/
+  ICMP 及非 loopback 网络仍待验证，不因本轮宣布网络 M1 退出。
+
 ## 2026-08-15 Phase 5 RDHUP blocking/edge/oneshot 模式（基于 `88ce7d2`）
 
 - **契约与门禁**：扩展 Linux/guest `socket_phase5_probe`。两个 fork child 分别延迟发布 buffered byte 与

@@ -290,7 +290,8 @@ runner 的前提下完成以下语义工作：
 3. 按 Linux 对照 probe 补齐 `MSG_DONTWAIT`、`MSG_PEEK`、`MSG_WAITALL`、`MSG_NOSIGNAL`
    的支持边界，不得继续静默忽略 flags；
 4. 明确 `shutdown`/close、peer EOF/reset、发送空间释放和 accept/connect 完成各自的唤醒
-   条件，包括 dup 后另一线程正在阻塞的情况；
+   条件，包括 dup 后另一线程正在阻塞的情况；UDP 需保留数据报特有的
+   `SHUT_RD` 空队列 EOF 及后续报文可读语义，不复用 stream 丢弃模型；
 5. 审查 signal interruption、`SA_RESTART`、部分 I/O 优先返回字节数与 `EINTR` 的边界；
 6. 对 `poll`/epoll readiness、TCP half-close、EOF、`EPIPE`/`SIGPIPE` 和错误消费建立
    Linux 对照矩阵。

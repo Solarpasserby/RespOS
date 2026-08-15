@@ -1204,6 +1204,20 @@
 - 后续影响：probe 应把规范明确且状态稳定的未连接、已连接非法 how、活跃 half-close 分开；listener、
   post-FIN、reset/linger 需先独立固定 Linux 状态时序，不能为了统一代码提前改 RespOS 错误优先级。
 
+## UDP `SHUT_RD` 不是 stream 的接收丢弃模型
+
+- 状态：Linux/RV64/LA64 probe 已确认并修复
+- 适用范围：connected UDP `shutdown()`、`recv/recvfrom`、数据报队列
+- 最后验证：2026-08-15
+- 证据：`scripts/udp_shutdown_probe_linux.c`、`user/src/bin/udp_shutdown_probe.rs`；日志
+  `/tmp/respos-{rv,la}-udp-shutdown-fixed.log`
+- 内容：Linux 上 connected UDP 执行 `SHUT_RD` 后，已排队的数据报仍可读，队列为空时
+  `recv` 返回 0；此后 peer 新发送的数据报仍会入队并能被下次 `recv` 取出。因此不能把
+  UDP `SHUT_RD` 实现成 close 底层 socket，也不能在 shutdown 标志置位后无条件拒绝所有数据报。
+- 后续影响：接收路径的顺序必须是“有数据报则消费，空队列才返回 shutdown EOF”。
+  poll/epoll readiness、并发阻塞唤醒与 EOF 时 `recvfrom` 地址写回尚未固定，需另立 oracle，
+  不能从本向量自动外推。
+
 ## RDHUP 观察 peer FIN，不能等接收缓冲读空
 
 - 状态：Linux/RV64/LA64 probe 已确认并修复

@@ -18,7 +18,8 @@ use spin::{Mutex, RwLock};
 
 use crate::{
     net::addr::{
-        LOOP_BACK_IP, from_ipendpoint_to_socketaddr, from_sockaddr_to_ipendpoint, is_unspecified,
+        LOOP_BACK_IP, UNSPECIFIED_ENDPOINT, from_ipendpoint_to_socketaddr,
+        from_sockaddr_to_ipendpoint, is_unspecified,
     },
     syscall::{Errno, SysResult},
     task::{current_task, yield_current_task},
@@ -42,6 +43,10 @@ pub struct UdpSocket {
     nonblock: AtomicBool,
     /// 是否允许端口复用（SO_REUSEADDR）。
     reuse_addr: AtomicBool,
+    /// shutdown(SHUT_RD) 后，空接收队列返回 EOF。
+    recv_shutdown: AtomicBool,
+    /// shutdown(SHUT_WR) 后，后续发送返回 EPIPE。
+    send_shutdown: AtomicBool,
 }
 
 // SAFETY: 单核协作式调度，字段访问在 block_on 内串行化。
@@ -59,6 +64,8 @@ impl UdpSocket {
             remote_addr: RwLock::new(None),
             nonblock: AtomicBool::new(false),
             reuse_addr: AtomicBool::new(false),
+            recv_shutdown: AtomicBool::new(false),
+            send_shutdown: AtomicBool::new(false),
         }
     }
 
@@ -170,26 +177,31 @@ impl UdpSocket {
         let mut binding = vec![0; 1528];
         let kernel_buf = binding.as_mut_slice();
 
-        self.recv_impl(per_call_nonblocking, deadline_us, |socket| {
-            let result = if peek {
-                socket
-                    .peek_slice(kernel_buf)
-                    .map(|(len, meta)| (len, *meta))
-            } else {
-                socket.recv_slice(kernel_buf)
-            };
-            match result {
-                Ok((len, meta)) => {
-                    let copy_len = core::cmp::min(len, buf.len());
-                    buf[..copy_len].copy_from_slice(&kernel_buf[..copy_len]);
-                    Ok((copy_len, from_ipendpoint_to_socketaddr(meta.endpoint)))
+        self.recv_impl(
+            per_call_nonblocking,
+            deadline_us,
+            (0, from_ipendpoint_to_socketaddr(UNSPECIFIED_ENDPOINT)),
+            |socket| {
+                let result = if peek {
+                    socket
+                        .peek_slice(kernel_buf)
+                        .map(|(len, meta)| (len, *meta))
+                } else {
+                    socket.recv_slice(kernel_buf)
+                };
+                match result {
+                    Ok((len, meta)) => {
+                        let copy_len = core::cmp::min(len, buf.len());
+                        buf[..copy_len].copy_from_slice(&kernel_buf[..copy_len]);
+                        Ok((copy_len, from_ipendpoint_to_socketaddr(meta.endpoint)))
+                    }
+                    Err(e) => match e {
+                        udp::RecvError::Exhausted => Err(Errno::EAGAIN),
+                        udp::RecvError::Truncated => Err(Errno::EAGAIN),
+                    },
                 }
-                Err(e) => match e {
-                    udp::RecvError::Exhausted => Err(Errno::EAGAIN),
-                    udp::RecvError::Truncated => Err(Errno::EAGAIN),
-                },
-            }
-        })
+            },
+        )
     }
 
     /// 设置默认远程地址（connect 后可直接用 send/recv）。
@@ -235,7 +247,7 @@ impl UdpSocket {
         deadline_us: Option<usize>,
     ) -> Result<usize, Errno> {
         let remote_endpoint = *self.remote_addr.read().as_ref().ok_or(Errno::ENOTCONN)?;
-        self.recv_impl(per_call_nonblocking, deadline_us, |socket| {
+        self.recv_impl(per_call_nonblocking, deadline_us, 0, |socket| {
             let (_, meta) = socket.peek_slice(&mut []).map_err(|e| match e {
                 udp::RecvError::Exhausted => Errno::EAGAIN,
                 udp::RecvError::Truncated => Errno::EAGAIN,
@@ -254,8 +266,22 @@ impl UdpSocket {
         })
     }
 
-    /// 关闭 socket。
-    pub fn shutdown(&self) {
+    /// 关闭 UDP 套接字的接收端、发送端或两端。
+    pub fn shutdown(&self, how: usize) -> SysResult {
+        if self.remote_addr.read().is_none() {
+            return Err(Errno::ENOTCONN);
+        }
+        if how == 0 || how == 2 {
+            self.recv_shutdown.store(true, Ordering::Release);
+        }
+        if how == 1 || how == 2 {
+            self.send_shutdown.store(true, Ordering::Release);
+        }
+        Ok(())
+    }
+
+    /// 关闭并释放底层 smoltcp socket，仅供析构使用。
+    fn close(&self) {
         let handle = unsafe { self.handle.get().read().unwrap() };
         socket_set()
             .lock()
@@ -289,10 +315,12 @@ impl UdpSocket {
         &self,
         per_call_nonblocking: bool,
         deadline_us: Option<usize>,
+        shutdown_result: T,
         mut op: F,
     ) -> Result<T, Errno>
     where
         F: FnMut(&mut udp::Socket) -> Result<T, Errno>,
+        T: Clone,
     {
         if self.local_addr.read().is_none() {
             return Err(Errno::ENOTCONN);
@@ -306,6 +334,8 @@ impl UdpSocket {
                         Err(Errno::ENOTCONN)
                     } else if socket.can_recv() {
                         op(socket)
+                    } else if self.recv_shutdown.load(Ordering::Acquire) {
+                        Ok(shutdown_result.clone())
                     } else {
                         Err(Errno::EAGAIN)
                     }
@@ -321,6 +351,9 @@ impl UdpSocket {
         per_call_nonblocking: bool,
         deadline_us: Option<usize>,
     ) -> Result<usize, Errno> {
+        if self.send_shutdown.load(Ordering::Acquire) {
+            return Err(Errno::EPIPE);
+        }
         if self.local_addr.read().is_none() {
             self.bind(from_ipendpoint_to_socketaddr(IpEndpoint::new(
                 LOOP_BACK_IP,
@@ -425,7 +458,7 @@ pub fn get_ephemeral_port() -> u16 {
 
 impl Drop for UdpSocket {
     fn drop(&mut self) {
-        self.shutdown();
+        self.close();
         let handle = unsafe { self.handle.get().read().unwrap() };
         socket_set().lock().remove(handle);
     }

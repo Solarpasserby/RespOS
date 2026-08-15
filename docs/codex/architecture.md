@@ -775,6 +775,22 @@ FdTable slot (FdEntry: descriptor flags)
 - 后续影响：close、`SHUT_RDWR` 与错误恢复不能把发送 half-close 提前升级为本地全关闭。当前证据不含
   `SHUT_RD` 丢弃、跨线程阻塞唤醒、reset/linger 或非 loopback 网络。
 
+### UDP shutdown 由 socket 层半边标志表达，不关闭协议 handle
+
+- 状态：connected loopback 基础收发半边已完成双架构专项
+- 适用范围：UDP `shutdown(SHUT_RD/SHUT_WR/SHUT_RDWR)`、空队列 EOF 与 `EPIPE`
+- 最后验证：2026-08-15
+- 证据：`os/src/net/{udp.rs,socket.rs}`、`scripts/udp_shutdown_probe_linux.c`、
+  `user/src/bin/udp_shutdown_probe.rs`；RV64/LA64 4 GiB/2 hart 日志
+- 内容：UDP 只有 connect 建立默认 peer 后才允许 shutdown；未连接或仅 bind 时返回
+  `ENOTCONN`。`recv_shutdown/send_shutdown` 存在共享 `UdpSocket` 上，因此 dup 观察同一状态。
+  `SHUT_WR` 令发送返回 `EPIPE`；`SHUT_RD` 时协议队列仍优先返回已排队或后续数据报，
+  只在队列为空时返回 0。shutdown 不调用 smoltcp `close()`；Drop 才负责 close 和 remove
+  handle，避免把单边状态折叠成整个 socket 关闭。
+- 后续影响：不能套用 stream `SHUT_RD` 的“丢弃当前与未来数据”假设。当前未将本地
+  shutdown 标志接入 UDP poll/epoll readiness；并发阻塞唤醒、disconnect/reconnect、error queue
+  和非 loopback 网络需另立 Linux 对照。
+
 ### AF_UNIX RDHUP 复用既有 peer shutdown 状态与 waiter
 
 - 状态：stream socketpair level/edge/oneshot 及 RDHUP-only blocking poll/epoll 已完成双架构 SMP 专项

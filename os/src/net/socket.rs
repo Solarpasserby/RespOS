@@ -1074,7 +1074,7 @@ impl Socket {
                 tcp.shutdown(how)?;
             }
             SocketInner::Udp(udp) => {
-                udp.shutdown();
+                udp.shutdown(how)?;
             }
             SocketInner::Unix(unix) => unix.shutdown(how)?,
         }
