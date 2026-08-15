@@ -335,11 +335,11 @@
   `HWCAP_LOONGARCH_UAL` (bit 2)。当前实现遵循 Linux 探测逻辑：每次 exec 读取
   `CPUCFG(1).UAL` (bit 20)，仅在 CPU 真实报告 UAL 时生成 `AT_HWCAP=4`，不硬编码平台能力；
   RV64 auxv 不变。同路径另修正 `AT_EXECFN` 误指向字符串前对齐填充的旧问题。
-- **定向验证**：LA64 4 GiB/2 hart diagnostic guest 内，`LD_SHOW_AUXV=1 /bin/true` 实测输出
-  `AT_HWCAP: 4`；使用官方脚本同一 loader/library path 启动 native
+- **定向验证**：比赛同版 Rust 1.86 的 `make all` 成功生成双架构内核和两份提交盘。
+  对该 `kernel-la` 使用 4 GiB/2 hart diagnostic guest，`LD_SHOW_AUXV=1 /bin/true` 实测输出
+  `AT_HWCAP: 4` 和 `AT_EXECFN: /usr/bin/true`；使用官方脚本同一 loader/library path 启动 native
   `qemu-system-loongarch64 -machine none -display none`，TCG 成功初始化并运行到 5 秒 timeout，
-  未再出现 UAL 拒绝。修正 `AT_EXECFN` 后 RV64/LA64 release 重建通过；其 guest 显示复验
-  仍标记 `待验证`。
+  未再出现 UAL 拒绝。日志为 `/tmp/respos-la-hwcap-rust186.log`。
 
 ## 2026-08-15 队友 Phase 5 合并后的 BuildStorm 短窗口与完整 final（当前 `fe95f0b5`）
 
