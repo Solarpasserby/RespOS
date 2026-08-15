@@ -21,6 +21,7 @@ const POLLIN: i16 = 0x0001;
 const POLLOUT: i16 = 0x0004;
 const POLLERR: i16 = 0x0008;
 const POLLHUP: i16 = 0x0010;
+const POLLRDHUP: i16 = 0x2000;
 const EPOLL_CTL_ADD: usize = 1;
 static SIGNAL_SEEN: AtomicUsize = AtomicUsize::new(0);
 
@@ -78,20 +79,48 @@ fn test_pathname_nonblock_eof(path: &str) {
 fn test_shutdown_and_poll() {
     let mut fds = [-1i32; 2];
     assert_eq!(socketpair(AF_UNIX, SOCK_STREAM, 0, &mut fds), 0);
+    assert_eq!(write(fds[0] as usize, b"b"), 1);
     assert_eq!(shutdown(fds[0] as usize, SHUT_WR), 0);
 
     let mut pollfds = [PollFd {
         fd: fds[1],
-        events: POLLIN | POLLOUT,
+        events: POLLIN | POLLOUT | POLLRDHUP,
         revents: 0,
     }];
     let timeout = user_lib::TimeSpec { sec: 0, nsec: 0 };
     assert_eq!(ppoll_raw(&mut pollfds, &timeout, core::ptr::null(), 0), 1);
     assert_ne!(pollfds[0].revents & POLLIN, 0);
     assert_ne!(pollfds[0].revents & POLLOUT, 0);
+    assert_ne!(pollfds[0].revents & POLLRDHUP, 0);
     assert_eq!(pollfds[0].revents & POLLHUP, 0);
 
+    let epfd = epoll_create1(0);
+    assert!(epfd >= 0);
+    let epfd = epfd as usize;
+    let mut interest = [0u8; 12];
+    interest[..4].copy_from_slice(&((POLLIN | POLLRDHUP) as u32).to_ne_bytes());
+    interest[4..].copy_from_slice(&0x5244485550u64.to_ne_bytes());
+    assert_eq!(
+        epoll_ctl(epfd, EPOLL_CTL_ADD, fds[1] as usize, interest.as_ptr()),
+        0
+    );
+    let mut ready = [0u8; 12];
+    assert_eq!(
+        epoll_pwait(epfd, ready.as_mut_ptr(), 1, 0, core::ptr::null(), 0),
+        1
+    );
+    let events = u32::from_ne_bytes(ready[..4].try_into().unwrap());
+    assert_ne!(events & POLLIN as u32, 0);
+    assert_ne!(events & POLLRDHUP as u32, 0);
+    assert_eq!(
+        u64::from_ne_bytes(ready[4..].try_into().unwrap()),
+        0x5244485550
+    );
+    assert_eq!(close(epfd), 0);
+
     let mut byte = [0u8; 1];
+    assert_eq!(read(fds[1] as usize, &mut byte), 1);
+    assert_eq!(byte[0], b'b');
     assert_eq!(read(fds[1] as usize, &mut byte), 0);
     assert_eq!(write(fds[0] as usize, b"x"), -EPIPE);
     assert_eq!(write(fds[1] as usize, b"y"), 1);
@@ -104,7 +133,7 @@ fn test_shutdown_and_poll() {
     assert_ne!(pollfds[0].revents & POLLIN, 0);
     assert_ne!(pollfds[0].revents & POLLHUP, 0);
     assert_eq!(close(fds[1] as usize), 0);
-    println!("SOCKET_PHASE5 shutdown_poll PASS");
+    println!("SOCKET_PHASE5 shutdown_poll_rdhup PASS");
 }
 
 fn test_blocking_poll_and_pipe_events() {

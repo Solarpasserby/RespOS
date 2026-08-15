@@ -77,15 +77,33 @@ static void test_shutdown_and_poll(void)
 {
     int sv[2];
     assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    assert(write(sv[0], "b", 1) == 1);
     assert(shutdown(sv[0], SHUT_WR) == 0);
 
-    struct pollfd pfd = {.fd = sv[1], .events = POLLIN | POLLOUT};
+    struct pollfd pfd = {.fd = sv[1], .events = POLLIN | POLLOUT | POLLRDHUP};
     assert(poll(&pfd, 1, 0) == 1);
     assert((pfd.revents & POLLIN) != 0);
     assert((pfd.revents & POLLOUT) != 0);
+    assert((pfd.revents & POLLRDHUP) != 0);
     assert((pfd.revents & POLLHUP) == 0);
 
+    int epfd = epoll_create1(0);
+    assert(epfd >= 0);
+    struct epoll_event interest = {
+        .events = EPOLLIN | EPOLLRDHUP,
+        .data.u64 = UINT64_C(0x5244485550),
+    };
+    assert(epoll_ctl(epfd, EPOLL_CTL_ADD, sv[1], &interest) == 0);
+    struct epoll_event ready = {0};
+    assert(epoll_wait(epfd, &ready, 1, 0) == 1);
+    assert((ready.events & EPOLLIN) != 0);
+    assert((ready.events & EPOLLRDHUP) != 0);
+    assert(ready.data.u64 == UINT64_C(0x5244485550));
+    assert(close(epfd) == 0);
+
     char byte = 0;
+    assert(read(sv[1], &byte, 1) == 1);
+    assert(byte == 'b');
     assert(read(sv[1], &byte, 1) == 0);
     errno = 0;
     assert(write(sv[0], "x", 1) == -1);
@@ -100,7 +118,7 @@ static void test_shutdown_and_poll(void)
     assert((pfd.revents & POLLIN) != 0);
     assert((pfd.revents & POLLHUP) != 0);
     assert(close(sv[1]) == 0);
-    puts("SOCKET_PHASE5_LINUX shutdown_poll PASS");
+    puts("SOCKET_PHASE5_LINUX shutdown_poll_rdhup PASS");
 }
 
 static void test_blocking_poll_and_pipe_events(void)

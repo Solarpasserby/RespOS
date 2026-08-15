@@ -773,7 +773,20 @@ FdTable slot (FdEntry: descriptor flags)
   smoltcp peer-FIN states，即使接收缓冲仍有未读数据也为 true；ppoll/epoll 只在 interest 中包含
   `POLLRDHUP/EPOLLRDHUP` 时返回该位，不把它合并成无条件 HUP。
 - 后续影响：close、`SHUT_RDWR` 与错误恢复不能把发送 half-close 提前升级为本地全关闭。当前证据不含
-  AF_UNIX 独立 RDHUP、`SHUT_RD` 丢弃、跨线程阻塞唤醒、reset/linger 或非 loopback 网络。
+  `SHUT_RD` 丢弃、跨线程阻塞唤醒、reset/linger 或非 loopback 网络。
+
+### AF_UNIX RDHUP 复用既有 peer shutdown 状态
+
+- 状态：stream socketpair level-triggered poll/epoll 已完成双架构 SMP 专项
+- 适用范围：AF_UNIX stream `SHUT_WR`、buffered data、`POLLRDHUP/EPOLLRDHUP`
+- 最后验证：2026-08-15
+- 证据：`os/src/net/socket.rs`、`scripts/socket_phase5_probe_linux.c`、
+  `user/src/bin/socket_phase5_probe.rs`；RV64/LA64 4 GiB/2 hart 与 RV64 16 GiB/8 hart 日志
+- 内容：建链时双方已互持 `peer_write_shutdown` 和 `peer_closed` 原子状态；SHUT_WR 发布前者，close 发布
+  后者，并通过 peer receive buffer 的既有 waiter 集合唤醒。`UnixSocket::poll_rdhup()` 只读取这两个状态，
+  因此 buffered data 提供 IN、peer half-close 同时提供 RDHUP，而只有 peer close 才继续提供 HUP。
+- 后续影响：不得为 RDHUP 再建一套 Unix lifecycle 或消费接收队列。edge/oneshot、只订阅 RDHUP 的阻塞
+  waiter、seqpacket/datagram 与 shutdown/close 竞态仍需独立验证。
 
 ### AF_UNIX 在建链提交点快照双方 raw 地址，查询时原子写回
 

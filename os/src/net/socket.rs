@@ -624,6 +624,18 @@ impl UnixSocket {
             .is_some_and(|closed| closed.load(Ordering::Acquire))
     }
 
+    fn poll_rdhup(&self) -> bool {
+        self.peer_closed
+            .lock()
+            .as_ref()
+            .is_some_and(|closed| closed.load(Ordering::Acquire))
+            || self
+                .peer_write_shutdown
+                .lock()
+                .as_ref()
+                .is_some_and(|closed| closed.load(Ordering::Acquire))
+    }
+
     fn register_poll_waiter(&self, tid: usize, events: PollEvents) {
         self.rx
             .lock()
@@ -1214,7 +1226,8 @@ impl FileOp for Socket {
     fn poll_rdhup(&self) -> bool {
         match &self.inner {
             SocketInner::Tcp(tcp) => tcp.peer_write_closed(),
-            SocketInner::Udp(_) | SocketInner::Unix(_) => false,
+            SocketInner::Unix(unix) => unix.poll_rdhup(),
+            SocketInner::Udp(_) => false,
         }
     }
 

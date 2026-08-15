@@ -1,5 +1,20 @@
 # RespOS 当前状态
 
+## 2026-08-15 Phase 5 AF_UNIX `POLLRDHUP/EPOLLRDHUP`（基于 `273c748`）
+
+- **契约与基线**：按 Linux stream RDHUP 契约扩展既有 `socket_phase5_probe`：socketpair 一端先写入
+  buffered byte 再 `SHUT_WR`，对端在读数据前必须由 poll/epoll 同时观察 `IN|RDHUP` 且没有 HUP。
+  Linux 同向量输出 `shutdown_poll_rdhup PASS`；修复前 RV64 只有 IN/OUT，RDHUP 为 0。
+- **最小修复**：AF_UNIX 原有建链状态已经共享 `peer_write_shutdown` 与 `peer_closed`，并在 shutdown/close
+  时通知现有 poll waiter。本轮只让 `UnixSocket::poll_rdhup()` 读取这两个既有原子状态，并接到上一专项
+  增加的 `FileOp::poll_rdhup()`；没有新增状态、队列、锁或唤醒路径，也没有改变 HUP/EOF/数据消费。
+- **验证结果**：Linux 严格编译运行输出 `SOCKET_PHASE5_LINUX ALL PASS`。release 初赛 snapshot、4 GiB/
+  2 hart 的 RV64/LA64 均输出 `shutdown_poll_rdhup PASS`、`SOCKET_PHASE5 ALL PASS` 和 runner PASS，日志为
+  `/tmp/respos-{rv,la}-unix-rdhup.log`；既有 RV64 16 GiB/8 hart 门禁也同样通过，日志为
+  `/tmp/respos-rv-unix-rdhup-smp8.log`。
+- **保留边界**：TCP/AF_UNIX level-triggered buffered RDHUP 已覆盖；edge-triggered/oneshot rearm、只订阅
+  RDHUP 后的跨线程阻塞唤醒、close/shutdown/reset 竞态、AF_UNIX seqpacket/datagram 和真实网络仍待验证。
+
 ## 2026-08-15 Phase 5 TCP `POLLRDHUP/EPOLLRDHUP`（基于 `1058e7d`）
 
 - **契约**：[Linux `poll(2)`](https://man7.org/linux/man-pages/man2/poll.2.html) 与
@@ -14,7 +29,7 @@
   2 hart 的 RV64/LA64 均输出 guest `... rdhup=pass` 与 runner PASS，日志为
   `/tmp/respos-{rv,la}-tcp-rdhup.log`。既有 `socket_phase5_probe` 同配置双架构回归输出
   `SOCKET_PHASE5 ALL PASS`，日志为 `/tmp/respos-{rv,la}-socket-phase5-after-rdhup.log`。
-- **保留边界**：本轮只下沉 TCP；AF_UNIX 的独立 RDHUP bit、edge-triggered/oneshot 重置矩阵、reset/
+- **保留边界**：AF_UNIX 独立 RDHUP 由本文件顶部后续专项关闭；edge-triggered/oneshot 重置矩阵、reset/
   linger、跨线程阻塞唤醒和真实非 loopback 网络仍待验证，不能据此宣布网络 M1 退出。
 
 ## 2026-08-15 Phase 5 TCP half-close 基础状态机（基于 `c2910ff`）
