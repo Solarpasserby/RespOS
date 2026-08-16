@@ -1,5 +1,45 @@
 # RespOS 当前状态
 
+## 2026-08-16 2025 Alpine 软件兼容性镜像已接入（当前工作树）
+
+- **获取入口**：`scripts/get_img.sh` 新增 `software [rv|la|both]` 组；无参数仍保持原 `standard`
+  行为，只处理初赛和当前决赛镜像。下载使用临时文件原子落盘，软件镜像按 Release API 的 SHA-256
+  校验并执行 XZ 完整性检查；`all` 才会包含全部三组镜像。
+- **压缩包证据**：RV64 asset 为 165,029,276 bytes，SHA-256
+  `0def50e343fa287b86c89346b53a835405c300fe45744a664833a4fbdb378a1c`；LA64 asset 为
+  142,062,144 bytes，SHA-256 `8516d117d7d0f95f407a92e05ec28f92cde6171cd4946302a677b0f94d8e8dfd`。
+  两者已从 `contest-images-2026` Release 实际下载、校验并解压。
+- **解压镜像证据**：两张 raw ext4 均为 723,517,440 bytes。RV64 SHA-256 为
+  `d547220caf7b3ce4c1d67560bbed66f4ee491d10718d1ea3e55741019aef5eb4`，superblock 为 `clean`；
+  LA64 SHA-256 为 `57c64d68d12aed1e503cc54753ea27f8c38936d6dde78d7c28dfc155763e25ca`，superblock
+  原始状态为 `not clean with errors`，但只读 `e2fsck -fn` 五阶段未发现结构错误。不得修改原始镜像；
+  LA64 运行前从压缩包或 raw 基线制作可追溯副本，只在副本上执行修复。
+- **软件盘点**：两架构均存在 `/usr/bin/{git,vim,gcc,rustc}`。RV64 为 Git 2.49.1、Vim 9.1.1566、
+  GCC 14.2.0、Rust 1.87.0、musl 1.2.5；LA64 为 Git 2.47.3、Vim 9.1.1105、GCC 14.2.0、
+  Rust 1.83.0、musl 1.2.5。两张镜像都没有 `/usr/bin/ssh` 和 `ssh-keygen`，Git SSH 需要另行注入
+  OpenSSH 用户态，不能把缺少可执行文件误诊为内核网络故障。
+- **双架构 guest 首轮**：父基线 `5fb0457d` 加本节软件入口提交内容，release、4 GiB/2 hart、`-snapshot`；
+  `make run-{rv,la}-software` 启动 diagnostic shell 后执行 `/bin/sh /respos/software-smoke.sh`。RV64 与
+  LA64 均输出 `git_local PASS`、`vim_batch PASS`、`gcc_compile_run PASS`、
+  `rustc_compile_run PASS` 和 `SOFTWARE_COMPAT ALL PASS`，shell child exit 0。日志分别为
+  `/tmp/respos-{rv,la}-software.log`；LA64 本轮修复副本 SHA-256 为
+  `6ecc09dc6b2cae449c5e663ef7bcbc18a4432ce67f2dc2a59a92265ea0c527a3`。
+- **官方离线口径对齐**：核对官方 `on-site-final-2025` 分支提交
+  `9ea291d8535774680e88f4e6bf725d7ba156e752` 后，最终脚本同时执行四个程序的 help 加载；Git 使用
+  `init`、创建 `README.md`、`add .`、`commit`、`status`、`log`；GCC 生成默认 `a.out` 并运行；rustc
+  生成默认 `helloworld` 并运行。Vim 使用 `-es` 完成真实文件修改和保存。最终 RV64/LA64 日志 SHA-256
+  分别为 `acd108bff628c55414539f2861b9377c0a40bd68b47f0ec492bf55f195592f37` 和
+  `9ee3c3c2445c5fc173d188dd1aaeabb594bbf4987613aaf6e31dbc77645cf549`，未出现 FAIL/panic/SIGSEGV。
+- **测试夹具校正**：首个 RV64 脚本把 `git status/log` 输出写入被测仓库，造成两个未跟踪文件和假
+  `git_local FAIL`；另因嵌入 shell 不提供环境，脚本未设置 `PATH`，rustc 找不到实际存在的 `cc -> gcc`
+  symlink。将输出移到仓库外并显式设置 Alpine PATH 后原命令通过；guest 内显式 linker 复核也已先行
+  成功。这两项不是内核或应用回归，最终日志只保留修正后的通过轮。
+- **诚实边界**：当前证明的是 Git `init/add/commit/status/log`、Vim 无交互批处理编辑保存、GCC/rustc
+  单文件编译链接和产物执行。交互式 Vim/PTY、Git 大仓库/并发/锁与 crash consistency、Git
+  HTTP(S)/SSH 尚未验证；两张镜像也缺 OpenSSH。RV64 软件版本不完全等同官方 2025 `soft-info.txt`，
+  后续结果必须继续绑定镜像 hash 和实际包版本。RV64 额外启动全屏 Vim 后已经画出界面，但 Codex PTY
+  没有回复 Vim 发出的终端能力查询，无法继续可靠注入按键；该项保持 `待真实终端复核`，不记为内核失败。
+
 ## 2026-08-16 现场赛路线切换：软件兼容性与真实网络双线（基线 `ae2f38ce`）
 
 - **最新目标**：当前主线继续真实软件兼容性，优先验证并修复 Git、Vim、GCC、rustc；队友负责

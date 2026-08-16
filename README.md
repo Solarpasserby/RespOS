@@ -49,10 +49,13 @@ make clean        # 清理构建产物
 第一次本地运行前可下载官方初赛和决赛镜像：
 
 ```bash
-bash scripts/get_img.sh
+bash scripts/get_img.sh                 # 保持原行为：初赛 + 当前决赛，两架构
+bash scripts/get_img.sh software rv     # 2025 软件兼容性 Alpine RV64 镜像
+bash scripts/get_img.sh software both   # 2025 软件兼容性 Alpine 双架构镜像
 ```
 
-脚本会把镜像放到 `img/` 并保留压缩包。初赛全量镜像用下面的命令恢复到不会和 128 MiB 决赛子集混淆的新名字：
+脚本会把镜像放到 `img/` 并保留压缩包；`all` 可一次获取全部三组镜像。软件兼容性镜像会校验 Release
+记录的 SHA-256。初赛全量镜像用下面的命令恢复到不会和 128 MiB 决赛子集混淆的新名字：
 
 ```bash
 make prepare-pre-images
@@ -67,6 +70,8 @@ make run-rv-final       # RISC-V 决赛 CAgent + BuildStorm
 make run-la-final       # LoongArch 决赛 CAgent + BuildStorm
 make run-rv-diagnostic  # 决赛镜像 + 交互式 shell
 make run-la-diagnostic
+make run-rv-software    # 2025 Alpine 软件兼容性镜像 + 专项辅助盘
+make run-la-software
 ```
 
 所有本地 QEMU 入口都使用 `-snapshot`。`make rv`/`make la` 暂时保留为初赛入口别名，

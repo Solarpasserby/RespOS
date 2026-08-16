@@ -58,7 +58,12 @@ mode=auto
 - 内容：
 
 ```bash
-bash scripts/get_img.sh
+bash scripts/get_img.sh                 # 默认 standard：初赛 + 当前决赛，两架构
+bash scripts/get_img.sh preliminary rv  # 只取 RV64 初赛镜像
+bash scripts/get_img.sh final la        # 只取 LA64 当前决赛镜像
+bash scripts/get_img.sh software rv     # 只取 2025 Alpine RV64 软件镜像
+bash scripts/get_img.sh software both   # 取 2025 Alpine 双架构软件镜像
+bash scripts/get_img.sh all both        # 取全部镜像
 ls -lh img/sdcard-rv.img img/sdcard-la.img \
   img/sdcard-rv-pub.img img/sdcard-la-pub.img
 ```
@@ -66,8 +71,44 @@ ls -lh img/sdcard-rv.img img/sdcard-la.img \
 脚本从上游 `pre-20250615` Release 获取 `sdcard-rv.img`、`sdcard-la.img`，并从 RespOS 的
 `contest-images-2026` Release 获取 `sdcard-rv-pub.img`、`sdcard-la-pub.img`。脚本优先复用
 `img/` 中已有的 `.xz`/`.gz` 压缩包；LA pub 的 `.gz` 在 Release 中分为两个 `.part`，脚本会
-下载并合并后再解压。解压时保留压缩包及分卷。运行中的内核会修改 ext4 镜像；需要干净基线
-时，应从保留的压缩包重新解压，而不是假定上一次运行后的镜像未变化。
+下载并合并后再解压。`software` 组从同一 RespOS Release 获取
+`alpine-linux-{riscv64,loongarch64}-ext4fs.img.xz`，下载后校验 Release API 提供的 SHA-256，再执行
+XZ 完整性检查和解压。无参数时仍保持原 `standard` 行为，不会额外占用软件镜像的解压空间；使用
+`all` 才会获取三组。所有组都保留压缩包及分卷。运行中的内核会修改 ext4 镜像；需要干净基线时，
+应从保留的压缩包重新解压，而不是假定上一次运行后的镜像未变化。
+
+2026-08-16 实际核验的软件镜像压缩包 SHA-256 为：
+
+```text
+0def50e343fa287b86c89346b53a835405c300fe45744a664833a4fbdb378a1c  alpine-linux-riscv64-ext4fs.img.xz
+8516d117d7d0f95f407a92e05ec28f92cde6171cd4946302a677b0f94d8e8dfd  alpine-linux-loongarch64-ext4fs.img.xz
+```
+
+RV64 解压镜像 superblock 为 clean。LA64 上传基线的 superblock 标记为 `not clean with errors`，虽然
+`e2fsck -fn` 未发现结构错误；不得原地修复或直接把状态清理后的 hash 当成上传基线。LA64 测试先复制
+raw 镜像或从保留的 `.xz` 重新展开，再只在副本上运行 `e2fsck`，同时记录修复后 hash。
+
+### 运行 Alpine 软件兼容性烟测
+
+```bash
+make run-rv-software
+# guest 出现 /> 后输入：
+/bin/sh /respos/software-smoke.sh
+
+make run-la-software
+# guest 出现 /> 后输入同一命令
+```
+
+两目标均使用 release、4 GiB/2 hart、`-snapshot`、`respos-software/profile` 的 diagnostic shell；输出默认
+写入 `/tmp/respos-{rv,la}-software.log`。辅助盘中的脚本依次验证 Git 本地仓库闭环、Vim 批处理编辑、
+GCC 和 rustc 单文件编译/运行，并以 `SOFTWARE_COMPAT ALL PASS` 与 shell child exit 0 为成功条件。
+LA 目标将上传 raw 基线复制到 `/tmp/respos-la-software-root.img`，只在该副本执行一次 `e2fsck -p`；
+只要源镜像 mtime 没有变化，后续运行复用同一 clean 副本和 hash。
+
+脚本当前对齐官方 `on-site-final-2025@9ea291d` 的离线命令：四个程序均执行 help 加载；Git 走
+`README.md → add . → commit → status/log`，GCC/rustc 使用各自默认输出名并运行，Vim 以 ex 模式真实
+修改和保存文件。全屏交互 Vim 需要宿主终端正确响应 cursor/terminal capability 查询；Codex PTY 下的
+控制序列停滞不能直接归因于 guest termios，必须在普通终端复核。
 
 - 后续影响：对比两次测试前记录镜像来源；不要把本地大镜像提交到 Git。
 

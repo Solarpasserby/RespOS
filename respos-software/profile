@@ -1,0 +1,2 @@
+# Archived Alpine software images use the embedded shell as their launcher.
+mode=diagnostic

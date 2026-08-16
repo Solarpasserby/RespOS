@@ -35,6 +35,9 @@ RV_PRE_FS_IMG ?= img/sdcard-rv-pre.img
 LA_PRE_FS_IMG ?= img/sdcard-la-pre.img
 RV_FINAL_FS_IMG ?= img/sdcard-rv-pub.img
 LA_FINAL_FS_IMG ?= img/sdcard-la-pub.img
+RV_SOFTWARE_FS_IMG ?= img/alpine-linux-riscv64-ext4fs.img
+LA_SOFTWARE_BASE_IMG ?= img/alpine-linux-loongarch64-ext4fs.img
+LA_SOFTWARE_FS_IMG ?= /tmp/respos-la-software-root.img
 
 RV_PRE_DISK_IMG ?= /tmp/respos-rv-preliminary.img
 LA_PRE_DISK_IMG ?= /tmp/respos-la-preliminary.img
@@ -42,6 +45,8 @@ RV_FINAL_DISK_IMG ?= /tmp/respos-rv-final.img
 LA_FINAL_DISK_IMG ?= /tmp/respos-la-final.img
 RV_DIAGNOSTIC_DISK_IMG ?= /tmp/respos-rv-diagnostic.img
 LA_DIAGNOSTIC_DISK_IMG ?= /tmp/respos-la-diagnostic.img
+RV_SOFTWARE_DISK_IMG ?= /tmp/respos-rv-software.img
+LA_SOFTWARE_DISK_IMG ?= /tmp/respos-la-software.img
 LOCAL_AUX_FS_SIZE ?= 16M
 
 # Local resource profiles.  The final defaults mirror the latest contest
@@ -56,6 +61,10 @@ RV_DIAGNOSTIC_MEM ?= 4G
 RV_DIAGNOSTIC_SMP ?= 1
 LA_DIAGNOSTIC_MEM ?= 12G
 LA_DIAGNOSTIC_SMP ?= 12
+RV_SOFTWARE_MEM ?= 4G
+RV_SOFTWARE_SMP ?= 2
+LA_SOFTWARE_MEM ?= 4G
+LA_SOFTWARE_SMP ?= 2
 
 RV_PRE_OUTPUT ?= rv-output.txt
 LA_PRE_OUTPUT ?= la-output.txt
@@ -63,6 +72,8 @@ RV_FINAL_OUTPUT ?= rv-final-output.txt
 LA_FINAL_OUTPUT ?= la-final-output.txt
 RV_DIAGNOSTIC_OUTPUT ?= /tmp/respos-rv-diagnostic.log
 LA_DIAGNOSTIC_OUTPUT ?= /tmp/respos-la-diagnostic.log
+RV_SOFTWARE_OUTPUT ?= /tmp/respos-rv-software.log
+LA_SOFTWARE_OUTPUT ?= /tmp/respos-la-software.log
 
 QEMU_RV ?= qemu-system-riscv64
 QEMU_LA ?= qemu-system-loongarch64
@@ -135,9 +146,11 @@ endif
 	build-rv build-la prepare-rv-cargo-config prepare-la-cargo-config \
 	prepare-pre-images check-rv-pre-image check-la-pre-image \
 	check-rv-final-image check-la-final-image \
+	prepare-la-software-root check-rv-software-image check-la-software-image \
 	build-rv-local-disk build-la-local-disk run-rv-qemu run-la-qemu \
 	run-rv-pre run-la-pre run-rv-final run-la-final \
-	run-rv-diagnostic run-la-diagnostic rv la run-rv-pub run-la-pub \
+	run-rv-diagnostic run-la-diagnostic run-rv-software run-la-software \
+	rv la run-rv-pub run-la-pub \
 	help clean
 
 # Online-platform entry.  Do not add QEMU runs, downloads, or local root-image
@@ -237,6 +250,35 @@ check-la-final-image:
 	}
 	@debugfs -R 'stat /glibc/buildstorm_testcode.sh' $(LA_FINAL_FS_IMG) 2>&1 | grep -q '^Inode:' || { \
 		echo "$(LA_FINAL_FS_IMG) has no BuildStorm script" >&2; exit 1; \
+	}
+
+check-rv-software-image:
+	@test -r $(RV_SOFTWARE_FS_IMG) || { echo "missing $(RV_SOFTWARE_FS_IMG); run scripts/get_img.sh software rv" >&2; exit 1; }
+	@for path in /usr/bin/git /usr/bin/vim /usr/bin/gcc /usr/bin/rustc /bin/sh; do \
+		debugfs -R "stat $$path" $(RV_SOFTWARE_FS_IMG) 2>&1 | grep -q '^Inode:' || { \
+			echo "$(RV_SOFTWARE_FS_IMG) is missing $$path" >&2; exit 1; \
+		}; \
+	done
+
+prepare-la-software-root: $(LA_SOFTWARE_FS_IMG)
+	@echo "Prepared LA software root copy: $(LA_SOFTWARE_FS_IMG)"
+	@sha256sum $(LA_SOFTWARE_FS_IMG)
+
+$(LA_SOFTWARE_FS_IMG): $(LA_SOFTWARE_BASE_IMG)
+	@mkdir -p $(@D)
+	cp --reflink=auto --sparse=always $< $@.tmp
+	@status=0; e2fsck -p $@.tmp || status=$$?; \
+		test $$status -le 1 || { echo "e2fsck failed for LA software image copy: $$status" >&2; exit $$status; }
+	mv -f $@.tmp $@
+
+check-la-software-image: prepare-la-software-root
+	@for path in /usr/bin/git /usr/bin/vim /usr/bin/gcc /usr/bin/rustc /bin/sh; do \
+		debugfs -R "stat $$path" $(LA_SOFTWARE_FS_IMG) 2>&1 | grep -q '^Inode:' || { \
+			echo "$(LA_SOFTWARE_FS_IMG) is missing $$path" >&2; exit 1; \
+		}; \
+	done
+	@tune2fs -l $(LA_SOFTWARE_FS_IMG) 2>/dev/null | grep -q '^Filesystem state:[[:space:]]*clean[[:space:]]*$$' || { \
+		echo "$(LA_SOFTWARE_FS_IMG) is not clean after e2fsck" >&2; exit 1; \
 	}
 
 build-rv-local-disk:
@@ -340,6 +382,24 @@ run-la-diagnostic: LA_SMP = $(LA_DIAGNOSTIC_SMP)
 run-la-diagnostic: LA_OUTPUT = $(LA_DIAGNOSTIC_OUTPUT)
 run-la-diagnostic: build-la check-la-final-image build-la-local-disk run-la-qemu
 
+# Software compatibility: mount the archived Alpine root under -snapshot and
+# expose a deterministic smoke script through the diagnostic auxiliary disk.
+run-rv-software: RV_FS_IMG = $(RV_SOFTWARE_FS_IMG)
+run-rv-software: RV_DISK_IMG = $(RV_SOFTWARE_DISK_IMG)
+run-rv-software: AUX_FS_DIR = respos-software
+run-rv-software: MEM = $(RV_SOFTWARE_MEM)
+run-rv-software: SMP = $(RV_SOFTWARE_SMP)
+run-rv-software: RV_OUTPUT = $(RV_SOFTWARE_OUTPUT)
+run-rv-software: build-rv check-rv-software-image build-rv-local-disk run-rv-qemu
+
+run-la-software: LA_FS_IMG = $(LA_SOFTWARE_FS_IMG)
+run-la-software: LA_DISK_IMG = $(LA_SOFTWARE_DISK_IMG)
+run-la-software: AUX_FS_DIR = respos-software
+run-la-software: LA_MEM = $(LA_SOFTWARE_MEM)
+run-la-software: LA_SMP = $(LA_SOFTWARE_SMP)
+run-la-software: LA_OUTPUT = $(LA_SOFTWARE_OUTPUT)
+run-la-software: build-la check-la-software-image build-la-local-disk run-la-qemu
+
 # Backward-compatible aliases.  New scripts and documentation should use the
 # explicit names above.
 rv:
@@ -381,6 +441,9 @@ help:
 	@echo "Interactive diagnostics:"
 	@echo "  make run-rv-diagnostic"
 	@echo "  make run-la-diagnostic"
+	@echo "Alpine software compatibility:"
+	@echo "  make run-rv-software  default: 4 GiB / 2 harts"
+	@echo "  make run-la-software  default: 4 GiB / 2 harts; repairs only a /tmp copy"
 
 clean:
 	rm -f $(KERNEL_RV) $(KERNEL_LA) $(SUBMIT_RV_DISK_IMG) $(SUBMIT_LA_DISK_IMG)
