@@ -16,6 +16,7 @@ LA_TARGET := loongarch64-unknown-none
 
 KERNEL_RV := kernel-rv
 KERNEL_LA := kernel-la
+KERNEL_LA_LS2K1000 := respos-ls2k1000.bin
 RV_ELF = os/target/$(RV_TARGET)/$(RV_CARGO_TARGET_DIR)/os
 LA_ELF = os/target/$(LA_TARGET)/$(LA_CARGO_TARGET_DIR)/os
 
@@ -132,7 +133,7 @@ else
 endif
 
 .PHONY: all submit check-submit validate-submit-profile build-submit-disks build-disks \
-	build-rv build-la prepare-rv-cargo-config prepare-la-cargo-config \
+	build-rv build-la build-la-ls2k1000 prepare-rv-cargo-config prepare-la-cargo-config \
 	prepare-pre-images check-rv-pre-image check-la-pre-image \
 	check-rv-final-image check-la-final-image \
 	build-rv-local-disk build-la-local-disk run-rv-qemu run-la-qemu \
@@ -188,6 +189,17 @@ build-la: prepare-la-cargo-config
 		RESPOS_APP_REBUILD_STAMP=$$(date +%s%N) cargo build $(LA_CARGO_BUILD_ARG) $(LA_KERNEL_DEFAULT_FEATURE_ARGS) $(LA_KERNEL_FEATURE_ARGS)
 	cp $(LA_ELF) $(KERNEL_LA)
 	@rust-readobj -h -l $(KERNEL_LA) | awk '/Entry:/ || /VirtualAddress:/ || /PhysicalAddress:/ { print }'
+
+# LoongArch64 → 龙芯 2K1000LA 真机（Stage 1）。生成供 U-Boot TFTP + `go` 的 raw binary。
+# 与 `build-la` 互斥（共享同一 Cargo target 目录），不得并行运行。
+build-la-ls2k1000: prepare-la-cargo-config
+	$(MAKE) -C user build ARCH=loongarch64 MODE=$(LA_MODE) FEATURES=$(LA_USER_FEATURES)
+	cd os && RESPOS_USER_PROFILE_DIR=$(LA_CARGO_TARGET_DIR) \
+		RESPOS_USER_TARGET=$(LA_TARGET) \
+		RESPOS_APP_REBUILD_STAMP=$$(date +%s%N) \
+		cargo build $(LA_CARGO_BUILD_ARG) $(LA_KERNEL_DEFAULT_FEATURE_ARGS) --features board_ls2k1000
+	rust-objcopy -O binary --strip-all $(LA_ELF) $(KERNEL_LA_LS2K1000)
+	@ls -l $(KERNEL_LA_LS2K1000)
 
 $(RV_PRE_FS_IMG): $(RV_PRE_ARCHIVE)
 	@mkdir -p $(@D)

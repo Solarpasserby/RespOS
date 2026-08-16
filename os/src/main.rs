@@ -54,9 +54,21 @@ pub fn rust_main() -> ! {
     clear_bss();
     config::init_physical_memory_end();
 
-    arch::enable_boot_paging();
-    unsafe {
-        arch::jump_to_high_half(rust_main_high as usize);
+    #[cfg(feature = "board_ls2k1000")]
+    {
+        // Stage 1 里程碑：先验证 entry + early UART。
+        // MMU / heap / interrupt / timer / FS / SMP 均未初始化，打印后停在此处；
+        // 后续 stage 再逐层接入 MMU、timer、LIOINTC 等。
+        sbi::early_print("Hello RespOS on Loongson 2K1000LA\n");
+        arch::idle()
+    }
+
+    #[cfg(not(feature = "board_ls2k1000"))]
+    {
+        arch::enable_boot_paging();
+        unsafe {
+            arch::jump_to_high_half(rust_main_high as usize);
+        }
     }
 }
 
@@ -81,6 +93,7 @@ fn rust_secondary_main_high() -> ! {
     task::run_tasks();
 }
 
+#[cfg(any(target_arch = "riscv64", not(feature = "board_ls2k1000")))]
 fn rust_main_high() -> ! {
     #[cfg(target_arch = "loongarch64")]
     arch::enable_kernel_extensions();

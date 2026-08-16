@@ -41,6 +41,27 @@ pub fn console_putchar(c: usize) {
     }
 }
 
+/// Stage-1 早期控制台：只写 NS16550 THR，不依赖锁、格式化或 MMU 状态。
+///
+/// 仅在进入完整 driver framework / MMU 之前使用；此时 entry 建立的 DMW0 identity
+/// 使物理地址可直接访问。UART_BASE 对 QEMU virt 与 2K1000LA 相同（0x1fe0_01e0）。
+#[cfg(feature = "board_ls2k1000")]
+pub fn early_putchar(c: u8) {
+    unsafe {
+        // 等待发送寄存器为空，再写入一个字节。
+        while (core::ptr::read_volatile(UART_LSR as *const u8) & LSR_TX_EMPTY) == 0 {}
+        core::ptr::write_volatile(UART_THR as *mut u8, c);
+    }
+}
+
+/// 逐字节输出字符串（Stage-1 启动诊断用，不解释 UTF-8）。
+#[cfg(feature = "board_ls2k1000")]
+pub fn early_print(s: &str) {
+    for &b in s.as_bytes() {
+        early_putchar(b);
+    }
+}
+
 /// 从控制台读取一个字符（无数据时返回 0）
 pub fn console_getchar() -> usize {
     unsafe {
