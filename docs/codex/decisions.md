@@ -1031,20 +1031,21 @@ parent、最后只 handoff”的提交顺序；handoff 不重写状态，以保�
   才能发布 Zombie，wait copyout 后才 Reaped。共享 handler/resource owner 与旧身份
   双写还要继续迁移，删除兼容字段前必须清点所有读取点并保持双架构专项。
 
-## controlling tty 和 termios 由 terminal 对象共享持有
+## controlling tty、termios 和输入 line discipline 由 terminal 对象共享持有
 
-- 状态：已采用，M2.2 terminal 与孤儿组转换通过双架构专项
+- 状态：已采用，M2.2 terminal/line discipline 与孤儿组转换通过双架构专项和全屏 Vim
 - 适用范围：console stdio、`/dev/tty`、session/pgrp、tty ioctl、job-control signal
-- 最后验证：2026-08-15
+- 最后验证：2026-08-16
 - 证据：`os/src/fs/tty.rs`、`user/src/bin/job_control_phase5_probe.rs`、
   `scripts/job_control_phase5_probe_linux.c`
 - 决策：terminal 持有 controlling SID、foreground PGID 和 termios；`ProcessState` 只记录关联标记。
   所有 console fd 通过同一 terminal 状态执行 `TIOC*`、`TC*` 及后台读写检查。孤儿组形成属于稳定
   ProcessState 关系变化：`setpgid/setsid/exit+reparent` 提交前后比较 orphan 状态，含 stopped member 的
-  新孤儿组统一收到 `SIGHUP` 后 `SIGCONT`。
+  新孤儿组统一收到 `SIGHUP` 后 `SIGCONT`。stdio stdin 与 `/dev/tty` 不得各自读取固件串口，必须共享
+  canonical/raw 队列；控制字符抽取还必须存在于无 tty reader 的 timer safe point。
 - 原因：controlling terminal 和前台组是 session/terminal 关系，不是某个 fd 或某个 leader TCB 的属性；
   按 fd/syscall 分散保存会令 dup/open、leader exit 和 non-leader exec 观察到互相矛盾的前台状态。
-- 后续影响：PTY 和 line discipline 应实例化/扩展 terminal 对象；完整 hangup、forced steal 与并发
+- 后续影响：PTY 应实例化同一 terminal/line-discipline 状态机；完整 hangup、flow control、forced steal 与并发
   setpgid/exit 线性化未闭合前，不将本决策解释为完整 POSIX tty 支持。
 
 ## 默认忽略与显式 SIG_IGN 不得共用同一 signal action

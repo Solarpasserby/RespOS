@@ -1,8 +1,10 @@
 use crate::mm::{copy_from_user, copy_to_user};
 use crate::mutex::SpinNoIrqLock;
+use crate::sbi::console_getchar;
 use crate::signal::{SiField, Sig, SigInfo};
 use crate::syscall::{Errno, SysResult};
-use crate::task::{PROCESS_MANAGER, ProcessLifecycle, current_task};
+use crate::task::{PROCESS_MANAGER, ProcessLifecycle, current_task, yield_current_task};
+use alloc::collections::VecDeque;
 use lazy_static::lazy_static;
 
 pub const TIOCSCTTY: usize = 0x540e;
@@ -16,7 +18,52 @@ pub const TIOCNOTTY: usize = 0x5422;
 pub const TIOCGSID: usize = 0x5429;
 
 const CAP_SYS_ADMIN: usize = 21;
+const IGNCR: u32 = 0x80;
+const INLCR: u32 = 0x40;
+const ICRNL: u32 = 0x100;
+const ISTRIP: u32 = 0x20;
+const OPOST: u32 = 0x1;
+const ONLCR: u32 = 0x4;
+const ISIG: u32 = 0x1;
+const ICANON: u32 = 0x2;
+const ECHO: u32 = 0x8;
+const ECHOE: u32 = 0x10;
+const ECHOK: u32 = 0x20;
+const ECHONL: u32 = 0x40;
+const NOFLSH: u32 = 0x80;
 const TOSTOP: u32 = 0x100;
+const ECHOCTL: u32 = 0x200;
+const IEXTEN: u32 = 0x8000;
+
+const VINTR: usize = 0;
+const VQUIT: usize = 1;
+const VERASE: usize = 2;
+const VKILL: usize = 3;
+const VEOF: usize = 4;
+const VTIME: usize = 5;
+const VMIN: usize = 6;
+const VSUSP: usize = 10;
+const VEOL: usize = 11;
+const VEOL2: usize = 16;
+
+const fn default_control_chars() -> [u8; 19] {
+    let mut cc = [0; 19];
+    cc[VINTR] = 3;
+    cc[VQUIT] = 28;
+    cc[VERASE] = 127;
+    cc[VKILL] = 21;
+    cc[VEOF] = 4;
+    cc[VTIME] = 0;
+    cc[VMIN] = 1;
+    cc[8] = 17; // VSTART
+    cc[9] = 19; // VSTOP
+    cc[VSUSP] = 26;
+    cc[12] = 18; // VREPRINT
+    cc[13] = 15; // VDISCARD
+    cc[14] = 23; // VWERASE
+    cc[15] = 22; // VLNEXT
+    cc
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -35,9 +82,9 @@ impl KernelTermios {
             iflag: 0x100,             // ICRNL
             oflag: 0x1 | 0x4,         // OPOST | ONLCR
             cflag: 0xf | 0x30 | 0x80, // B38400 | CS8 | CREAD
-            lflag: 0x1 | 0x2 | 0x8 | 0x10 | 0x20 | 0x8000,
+            lflag: 0x1 | 0x2 | 0x8 | 0x10 | 0x20 | 0x200 | 0x8000,
             line: 0,
-            cc: [0; 19],
+            cc: default_control_chars(),
         }
     }
 }
@@ -47,6 +94,36 @@ struct TerminalState {
     session_id: usize,
     foreground_pgid: usize,
     termios: KernelTermios,
+}
+
+struct ConsoleInputState {
+    edit: alloc::vec::Vec<u8>,
+    ready: VecDeque<u8>,
+    /// Remaining byte count for each canonical record. A zero-length record
+    /// represents VEOF at the start of a line.
+    records: VecDeque<usize>,
+}
+
+impl ConsoleInputState {
+    fn new() -> Self {
+        Self {
+            edit: alloc::vec::Vec::new(),
+            ready: VecDeque::new(),
+            records: VecDeque::new(),
+        }
+    }
+
+    fn flush(&mut self) {
+        self.edit.clear();
+        self.ready.clear();
+        self.records.clear();
+    }
+
+    fn commit_record(&mut self) {
+        let len = self.edit.len();
+        self.ready.extend(self.edit.drain(..));
+        self.records.push_back(len);
+    }
 }
 
 lazy_static! {
@@ -60,6 +137,270 @@ lazy_static! {
             foreground_pgid: 1,
             termios: KernelTermios::console_default(),
         });
+    static ref CONSOLE_INPUT: SpinNoIrqLock<ConsoleInputState> =
+        SpinNoIrqLock::new(ConsoleInputState::new());
+}
+
+#[derive(Clone, Copy)]
+pub enum ConsoleReadKind {
+    Stdin,
+    DevTty,
+}
+
+fn record_read_yield(kind: ConsoleReadKind) {
+    crate::perf::fs_yield(1);
+    match kind {
+        ConsoleReadKind::Stdin => crate::perf::stdio_yield(1),
+        ConsoleReadKind::DevTty => crate::perf::tty_yield(1),
+    }
+}
+
+fn control_char(termios: KernelTermios, index: usize, byte: u8) -> bool {
+    termios.cc[index] != 0 && termios.cc[index] == byte
+}
+
+fn echo_control(byte: u8, termios: KernelTermios) {
+    if termios.lflag & ECHO == 0 {
+        return;
+    }
+    if termios.lflag & ECHOCTL != 0 && (byte < b' ' || byte == 0x7f) {
+        let shown = if byte == 0x7f { b'?' } else { byte ^ 0x40 };
+        crate::console::write_user_bytes(&[b'^', shown]);
+    }
+}
+
+fn echo_byte(byte: u8, termios: KernelTermios) {
+    if termios.lflag & ECHO != 0 || (byte == b'\n' && termios.lflag & ECHONL != 0) {
+        if byte == b'\n' && termios.oflag & OPOST != 0 && termios.oflag & ONLCR != 0 {
+            crate::console::write_user_bytes(b"\r\n");
+        } else {
+            crate::console::write_user_bytes(&[byte]);
+        }
+    }
+}
+
+fn terminal_signal(byte: u8, termios: KernelTermios) -> Option<Sig> {
+    if termios.lflag & ISIG == 0 {
+        return None;
+    }
+    if control_char(termios, VINTR, byte) {
+        Some(Sig::SIGINT)
+    } else if control_char(termios, VQUIT, byte) {
+        Some(Sig::SIGQUIT)
+    } else if control_char(termios, VSUSP, byte) {
+        Some(Sig::SIGTSTP)
+    } else {
+        None
+    }
+}
+
+/// Pull all currently available firmware-console bytes through the shared
+/// line discipline.
+fn pump_console_input() {
+    let termios = CONSOLE_TERMINAL.lock().termios;
+    let terminal = *CONSOLE_TERMINAL.lock();
+    loop {
+        let raw = console_getchar();
+        if raw == 0 || raw > u8::MAX as usize {
+            break;
+        }
+        let mut byte = raw as u8;
+        if termios.iflag & ISTRIP != 0 {
+            byte &= 0x7f;
+        }
+        if byte == b'\r' {
+            if termios.iflag & IGNCR != 0 {
+                continue;
+            }
+            if termios.iflag & ICRNL != 0 {
+                byte = b'\n';
+            }
+        } else if byte == b'\n' && termios.iflag & INLCR != 0 {
+            byte = b'\r';
+        }
+
+        if let Some(sig) = terminal_signal(byte, termios) {
+            echo_control(byte, termios);
+            if termios.lflag & NOFLSH == 0 {
+                CONSOLE_INPUT.lock().flush();
+            }
+            signal_process_group(terminal.session_id, terminal.foreground_pgid, &[sig]);
+            continue;
+        }
+
+        let mut input = CONSOLE_INPUT.lock();
+        if termios.lflag & ICANON == 0 {
+            input.ready.push_back(byte);
+            drop(input);
+            echo_byte(byte, termios);
+            continue;
+        }
+
+        if control_char(termios, VERASE, byte) {
+            if input.edit.pop().is_some() && termios.lflag & ECHO != 0 {
+                if termios.lflag & ECHOE != 0 {
+                    crate::console::write_user_bytes(b"\x08 \x08");
+                } else {
+                    echo_control(byte, termios);
+                }
+            }
+            continue;
+        }
+        if control_char(termios, VKILL, byte) {
+            input.edit.clear();
+            drop(input);
+            if termios.lflag & ECHO != 0 {
+                if termios.lflag & ECHOK != 0 {
+                    echo_byte(b'\n', termios);
+                } else {
+                    echo_control(byte, termios);
+                }
+            }
+            continue;
+        }
+        if control_char(termios, VEOF, byte) {
+            input.commit_record();
+            continue;
+        }
+
+        let is_delimiter = byte == b'\n'
+            || control_char(termios, VEOL, byte)
+            || (termios.lflag & IEXTEN != 0 && control_char(termios, VEOL2, byte));
+        input.edit.push(byte);
+        if is_delimiter {
+            input.commit_record();
+        }
+        drop(input);
+        echo_byte(byte, termios);
+    }
+}
+
+/// Service physical-console input from the global timer safe point. Terminal
+/// control characters must generate signals even when no process is reading
+/// the tty (for example, Ctrl-C while the foreground job sleeps).
+pub fn poll_console_input() {
+    pump_console_input();
+}
+
+fn drain_ready(buf: &mut [u8], canonical: bool) -> usize {
+    let mut input = CONSOLE_INPUT.lock();
+    let limit = if canonical {
+        match input.records.front().copied() {
+            Some(0) => {
+                input.records.pop_front();
+                return 0;
+            }
+            Some(len) => len.min(buf.len()),
+            None => return 0,
+        }
+    } else {
+        input.ready.len().min(buf.len())
+    };
+    for slot in &mut buf[..limit] {
+        *slot = input.ready.pop_front().unwrap();
+    }
+    if canonical {
+        let remaining = input.records.front_mut().unwrap();
+        *remaining -= limit;
+        if *remaining == 0 {
+            input.records.pop_front();
+        }
+    }
+    limit
+}
+
+pub fn console_read_ready() -> bool {
+    pump_console_input();
+    let termios = CONSOLE_TERMINAL.lock().termios;
+    let input = CONSOLE_INPUT.lock();
+    if termios.lflag & ICANON != 0 {
+        !input.records.is_empty()
+    } else {
+        !input.ready.is_empty()
+    }
+}
+
+pub fn console_available_bytes() -> usize {
+    pump_console_input();
+    CONSOLE_INPUT.lock().ready.len()
+}
+
+pub fn read_console(buf: &mut [u8], kind: ConsoleReadKind) -> SysResult<usize> {
+    check_background_read()?;
+    if buf.is_empty() {
+        return Ok(0);
+    }
+    let termios = CONSOLE_TERMINAL.lock().termios;
+    let canonical = termios.lflag & ICANON != 0;
+    if canonical {
+        loop {
+            pump_console_input();
+            if current_task().is_some_and(|task| task.check_signal_interrupt()) {
+                return Err(Errno::EINTR);
+            }
+            if !CONSOLE_INPUT.lock().records.is_empty() {
+                return Ok(drain_ready(buf, true));
+            }
+            record_read_yield(kind);
+            yield_current_task();
+        }
+    }
+
+    let minimum = usize::from(termios.cc[VMIN]).min(buf.len());
+    let timeout_us = usize::from(termios.cc[VTIME]).saturating_mul(100_000);
+    let mut deadline = if minimum == 0 && timeout_us != 0 {
+        Some(crate::arch::timer::get_timeout_us().saturating_add(timeout_us))
+    } else {
+        None
+    };
+    let mut last_available = 0usize;
+    loop {
+        pump_console_input();
+        if current_task().is_some_and(|task| task.check_signal_interrupt()) {
+            return Err(Errno::EINTR);
+        }
+        let available = CONSOLE_INPUT.lock().ready.len();
+        if minimum == 0 && timeout_us == 0 {
+            return Ok(drain_ready(buf, false));
+        }
+        if minimum == 0 && available != 0 {
+            return Ok(drain_ready(buf, false));
+        }
+        if minimum != 0 && available >= minimum {
+            return Ok(drain_ready(buf, false));
+        }
+        if minimum != 0 && timeout_us != 0 && available != 0 && available != last_available {
+            deadline = Some(crate::arch::timer::get_timeout_us().saturating_add(timeout_us));
+        }
+        last_available = available;
+        if deadline.is_some_and(|end| crate::arch::timer::get_timeout_us() >= end) {
+            return Ok(drain_ready(buf, false));
+        }
+        record_read_yield(kind);
+        yield_current_task();
+    }
+}
+
+pub fn write_console(buf: &[u8]) {
+    let termios = CONSOLE_TERMINAL.lock().termios;
+    if termios.oflag & OPOST == 0 || termios.oflag & ONLCR == 0 {
+        crate::console::write_user_bytes(buf);
+        return;
+    }
+    let mut start = 0;
+    for (index, &byte) in buf.iter().enumerate() {
+        if byte != b'\n' {
+            continue;
+        }
+        if start < index {
+            crate::console::write_user_bytes(&buf[start..index]);
+        }
+        crate::console::write_user_bytes(b"\r\n");
+        start = index + 1;
+    }
+    if start < buf.len() {
+        crate::console::write_user_bytes(&buf[start..]);
+    }
 }
 
 fn controls_console(process: &crate::task::ProcessState, terminal: TerminalState) -> bool {
@@ -263,6 +604,9 @@ pub fn console_ioctl(request: usize, arg: usize) -> SysResult<usize> {
                 1,
             )?;
             CONSOLE_TERMINAL.lock().termios = termios;
+            if request == TCSETSF {
+                CONSOLE_INPUT.lock().flush();
+            }
             Ok(0)
         }
         TIOCGSID => {

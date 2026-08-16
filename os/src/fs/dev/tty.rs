@@ -3,15 +3,10 @@
 use super::super::KStat;
 use super::super::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
 use super::{DEVFS_DEV, TTY_INO, TTY_RDEV};
-use crate::sbi::console_getchar;
 use crate::syscall::{Errno, SysResult};
-use crate::task::yield_current_task;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
-
-const LF: usize = 0x0a;
-const CR: usize = 0x0d;
 
 pub(super) struct TtyInode;
 
@@ -33,35 +28,17 @@ impl InodeOp for TtyInode {
     }
 
     fn read_at(&self, _path: &str, _off: usize, buf: &mut [u8]) -> SysResult<usize> {
-        crate::fs::tty::check_background_read()?;
-        let mut count = 0;
-        while count < buf.len() {
-            let c = console_getchar();
-            match c {
-                0 | 256.. => {
-                    crate::perf::fs_yield(1);
-                    crate::perf::tty_yield(1);
-                    yield_current_task();
-                    continue;
-                }
-                CR | LF => {
-                    buf[count] = LF as u8;
-                    count += 1;
-                    break;
-                }
-                _ => {
-                    buf[count] = c as u8;
-                    count += 1;
-                }
-            }
-        }
-        Ok(count)
+        crate::fs::tty::read_console(buf, crate::fs::tty::ConsoleReadKind::DevTty)
     }
 
     fn write_at(&self, _path: &str, _off: usize, buf: &[u8]) -> SysResult<usize> {
         crate::fs::tty::check_background_write()?;
-        crate::console::write_user_bytes(buf);
+        crate::fs::tty::write_console(buf);
         Ok(buf.len())
+    }
+
+    fn read_ready(&self) -> bool {
+        crate::fs::tty::console_read_ready()
     }
 
     fn truncate(&self, _path: &str, _size: usize) -> SysResult<usize> {

@@ -2610,6 +2610,10 @@ pub fn sys_ioctl(fd: usize, request: usize, arg: usize) -> SysResult<usize> {
                 let nbytes = pipe.available_bytes() as i32;
                 copy_to_user(arg as *mut i32, &nbytes as *const i32, 1)?;
                 Ok(0)
+            } else if fd_entry.file.is_tty() {
+                let nbytes = crate::fs::tty::console_available_bytes() as i32;
+                copy_to_user(arg as *mut i32, &nbytes as *const i32, 1)?;
+                Ok(0)
             } else {
                 Err(Errno::ENOTTY)
             }

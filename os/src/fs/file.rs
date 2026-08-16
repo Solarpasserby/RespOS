@@ -1111,6 +1111,10 @@ impl FileOp for File {
         !flags.contains(OpenFlags::O_PATH) && !flags.contains(OpenFlags::O_WRONLY)
     }
 
+    fn read_ready(&self) -> bool {
+        self.inode.read_ready()
+    }
+
     fn writable(&self) -> bool {
         let flags = self.get_flags();
         !flags.contains(OpenFlags::O_PATH)

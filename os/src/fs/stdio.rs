@@ -3,13 +3,8 @@
 use super::KStat;
 use super::vfs::InodeType;
 use super::{FileOp, OpenFlags};
-use crate::sbi::console_getchar;
 use crate::syscall::{Errno, SysResult};
-use crate::task::yield_current_task;
 use core::any::Any;
-
-const LF: usize = 0x0a;
-const CR: usize = 0x0d;
 
 ///Standard input
 pub struct Stdin;
@@ -26,31 +21,7 @@ impl FileOp for Stdin {
         self
     }
     fn read<'a>(&'a self, buf: &'a mut [u8]) -> SysResult<usize> {
-        crate::fs::tty::check_background_read()?;
-        // 尝试支持读取多个字符
-        let mut count: usize = 0;
-        while count < buf.len() {
-            let c = console_getchar();
-            match c {
-                // `c > 255`是为了兼容OPENSBI，OPENSBI未获取字符时会返回-1
-                0 | 256.. => {
-                    crate::perf::fs_yield(1);
-                    crate::perf::stdio_yield(1);
-                    yield_current_task();
-                    continue;
-                }
-                CR | LF => {
-                    buf[count] = LF as u8;
-                    count += 1;
-                    break;
-                }
-                _ => {
-                    buf[count] = c as u8;
-                    count += 1;
-                }
-            }
-        }
-        Ok(count)
+        crate::fs::tty::read_console(buf, crate::fs::tty::ConsoleReadKind::Stdin)
     }
     fn write(&self, _buf: &[u8]) -> SysResult<usize> {
         panic!("Cannot write to stdin!");
@@ -66,6 +37,9 @@ impl FileOp for Stdin {
     }
     fn readable(&self) -> bool {
         true
+    }
+    fn read_ready(&self) -> bool {
+        crate::fs::tty::console_read_ready()
     }
     fn writable(&self) -> bool {
         false
@@ -94,7 +68,7 @@ impl FileOp for Stdout {
     }
     fn write<'a>(&'a self, buf: &'a [u8]) -> SysResult<usize> {
         crate::fs::tty::check_background_write()?;
-        crate::console::write_user_bytes(buf);
+        crate::fs::tty::write_console(buf);
         Ok(buf.len())
     }
     fn seek(&self, _offset: isize) -> SysResult<usize> {

@@ -259,6 +259,7 @@ pub use time::{
 
 pub fn check_all_task_timers() {
     crate::timer::reset_task_timer_requests();
+    crate::fs::tty::poll_console_input();
     crate::task::check_futex_timeouts();
     check_nanosleep_timeouts();
     check_timerfd_expirations();

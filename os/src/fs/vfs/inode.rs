@@ -21,6 +21,12 @@ pub trait InodeOp: Any + Send + Sync {
     fn write_at(&self, path: &str, off: usize, buf: &[u8]) -> SysResult<usize>;
     fn truncate(&self, path: &str, size: usize) -> SysResult<usize>;
 
+    /// Whether a read can complete without waiting. Character devices may
+    /// override this so poll(2) and O_NONBLOCK observe device state.
+    fn read_ready(&self) -> bool {
+        true
+    }
+
     /// Deallocate full filesystem blocks and zero partial blocks without
     /// changing the logical file size.
     fn punch_hole(&self, _path: &str, _offset: usize, _len: usize) -> SysResult<usize> {

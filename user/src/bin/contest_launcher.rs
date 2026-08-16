@@ -25,6 +25,7 @@ enum ContestMode {
     Preliminary,
     Final,
     Diagnostic,
+    Software,
 }
 
 fn contest_mode() -> ContestMode {
@@ -56,6 +57,7 @@ fn contest_mode() -> ContestMode {
             "mode=final" | "final" => return ContestMode::Final,
             "mode=preliminary" | "preliminary" => return ContestMode::Preliminary,
             "mode=diagnostic" | "diagnostic" => return ContestMode::Diagnostic,
+            "mode=software" | "software" => return ContestMode::Software,
             _ => {}
         }
     }
@@ -78,6 +80,23 @@ fn run_diagnostic() -> i32 {
     let argv = ["user_shell\0".as_ptr(), core::ptr::null()];
     let ret = exec("user_shell\0", &argv);
     println!("[contest_launcher] cannot exec user_shell: {}", ret);
+    let _ = exit(127);
+    127
+}
+
+fn run_software() -> i32 {
+    println!("[contest_launcher] software mode: starting Alpine /bin/sh");
+    let argv = ["sh\0".as_ptr(), "-i\0".as_ptr(), core::ptr::null()];
+    let envp = [
+        "HOME=/tmp\0".as_ptr(),
+        "TMPDIR=/tmp\0".as_ptr(),
+        "TERM=xterm\0".as_ptr(),
+        "LC_ALL=C\0".as_ptr(),
+        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\0".as_ptr(),
+        core::ptr::null(),
+    ];
+    let ret = execve("/bin/sh\0", &argv, &envp);
+    println!("[contest_launcher] cannot exec /bin/sh: {}", ret);
     let _ = exit(127);
     127
 }
@@ -170,5 +189,6 @@ fn main() -> i32 {
         ContestMode::Preliminary => run_preliminary(),
         ContestMode::Final => run_final(),
         ContestMode::Diagnostic => run_diagnostic(),
+        ContestMode::Software => run_software(),
     }
 }

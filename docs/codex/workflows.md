@@ -92,14 +92,15 @@ raw 镜像或从保留的 `.xz` 重新展开，再只在副本上运行 `e2fsck`
 
 ```bash
 make run-rv-software
-# guest 出现 /> 后输入：
-/bin/sh /respos/software-smoke.sh
+# guest 直接出现 Alpine 的 / # 后输入：
+sh /respos/software-smoke.sh
 
 make run-la-software
 # guest 出现 /> 后输入同一命令
 ```
 
-两目标均使用 release、4 GiB/2 hart、`-snapshot`、`respos-software/profile` 的 diagnostic shell；输出默认
+两目标均使用 release、4 GiB/2 hart、`-snapshot`、`respos-software/profile` 的 software mode；launcher
+直接进入 Alpine `/bin/sh -i` 并设置 PATH/HOME/TERM/LC_ALL。输出默认
 写入 `/tmp/respos-{rv,la}-software.log`。辅助盘中的脚本依次验证 Git 本地仓库闭环、Vim 批处理编辑、
 GCC 和 rustc 单文件编译/运行，并以 `SOFTWARE_COMPAT ALL PASS` 与 shell child exit 0 为成功条件。
 LA 目标将上传 raw 基线复制到 `/tmp/respos-la-software-root.img`，只在该副本执行一次 `e2fsck -p`；
@@ -107,8 +108,9 @@ LA 目标将上传 raw 基线复制到 `/tmp/respos-la-software-root.img`，只�
 
 脚本当前对齐官方 `on-site-final-2025@9ea291d` 的离线命令：四个程序均执行 help 加载；Git 走
 `README.md → add . → commit → status/log`，GCC/rustc 使用各自默认输出名并运行，Vim 以 ex 模式真实
-修改和保存文件。全屏交互 Vim 需要宿主终端正确响应 cursor/terminal capability 查询；Codex PTY 下的
-控制序列停滞不能直接归因于 guest termios，必须在普通终端复核。
+修改和保存文件。全屏交互验证可执行 `vim -Nu NONE -n /tmp/test.txt`，完成插入、`:wq`，再用 `cat`
+检查落盘；2026-08-16 已在 Codex PTY 下完成 RV64/LA64 闭环。日志中出现 cursor/terminal capability
+查询本身不是失败，必须同时检查 Vim 是否响应按键、能否退出和文件内容。
 
 - 后续影响：对比两次测试前记录镜像来源；不要把本地大镜像提交到 Git。
 

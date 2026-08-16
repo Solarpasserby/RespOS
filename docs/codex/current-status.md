@@ -1,5 +1,34 @@
 # RespOS 当前状态
 
+## 2026-08-16 Alpine 交互 shell、console line discipline 与全屏 Vim（当前工作树）
+
+- **启动入口**：`respos-software/profile` 改为 `mode=software`；`contest_launcher` 直接
+  `execve("/bin/sh", ["sh", "-i"], envp)`，固定 `HOME=/tmp`、`TMPDIR=/tmp`、`TERM=xterm`、
+  `LC_ALL=C` 与 Alpine PATH。软件镜像不再先进入无环境的内嵌诊断 shell。
+- **共享 line discipline**：stdio stdin 与 `/dev/tty` 统一进入 `os/src/fs/tty.rs` 的 console 输入状态机。
+  当前覆盖 ICRNL/INLCR/IGNCR/ISTRIP、canonical 行提交、erase/kill/EOF、echo/ECHOCTL、raw
+  `VMIN/VTIME` 四种组合、OPOST+ONLCR、`FIONREAD` 和 poll/O_NONBLOCK readiness；`TCSETSF` 会清空
+  未决输入。默认 `c_cc` 与 Linux asm-generic 的 19-byte termios ABI 对齐。
+- **异步控制字符**：全局 timer safe point 每 tick 抽取一次物理 console，VINTR/VQUIT/VSUSP 即使当前
+  前台作业不读 tty 也立即发送到 foreground pgrp；已经阻塞的 tty read 只在当前线程实际收到未屏蔽
+  signal 后返回 `EINTR`。RV64/LA64 均实测 `sleep 10` 被 Ctrl-C 立即中断，Ctrl-Z 立即停止并由 Alpine ash 报告
+  `Stopped` 后恢复 prompt。
+- **Vim 暴露的 timer 缺口**：musl 的 `SIGEV_THREAD` 用户态实现会向内核提交
+  `SIGEV_THREAD_ID`。POSIX timer 现接受 `SIGEV_SIGNAL`、`SIGEV_NONE`、`SIGEV_THREAD_ID`，后者验证
+  target TID 属于调用进程并持有 weak task identity，到期以 `SI_TIMER` 定向投递；不再把退出线程的
+  timer 错投给进程内其他线程。修复前 Vim 显示 `E1286: Could not set timeout: Invalid argument`，修复后
+  双架构均不再出现。
+- **双架构实测**：release、4 GiB/2 hart、Alpine software 镜像与 `-snapshot` 下，RV64/LA64 全屏 Vim
+  均完成 `before`→`final/loong` 编辑、`:wq` 保存并回到 shell；两边随后运行软件脚本，Git/Vim batch/
+  GCC/rustc 均输出 `SOFTWARE_COMPAT ALL PASS`。同一内核上的 `job_control_phase5_probe` 两架构仍输出
+  `JOB_CONTROL_RESPOS ALL PASS`。完整软件轮交互日志为 `/tmp/respos-{rv,la}-tty-final.log`，最终
+  最终工作树的 Vim/Ctrl-C 复核为 `/tmp/respos-{rv,la}-tty-final-current.log`，job-control
+  日志为 `/tmp/respos-{rv,la}-job-control-regression.log`；最终工作树另通过 `make build-rv` 与
+  `make build-la`。
+- **保留边界**：当前仍只有单一物理 console，没有 PTY、IXON/IXOFF、UTF-8 erase、完整 Linux N_TTY
+  4096-byte buffer/wakeup、水位控制、hangup 后 I/O、`TIOCSWINSZ/SIGWINCH`。本轮可声明物理 console
+  上的基础 canonical/raw 与交互 Vim 闭环，不应外推为完整 Linux tty 子系统。
+
 ## 2026-08-16 2025 Alpine 软件兼容性镜像已接入（当前工作树）
 
 - **获取入口**：`scripts/get_img.sh` 新增 `software [rv|la|both]` 组；无参数仍保持原 `standard`
@@ -37,8 +66,8 @@
 - **诚实边界**：当前证明的是 Git `init/add/commit/status/log`、Vim 无交互批处理编辑保存、GCC/rustc
   单文件编译链接和产物执行。交互式 Vim/PTY、Git 大仓库/并发/锁与 crash consistency、Git
   HTTP(S)/SSH 尚未验证；两张镜像也缺 OpenSSH。RV64 软件版本不完全等同官方 2025 `soft-info.txt`，
-  后续结果必须继续绑定镜像 hash 和实际包版本。RV64 额外启动全屏 Vim 后已经画出界面，但 Codex PTY
-  没有回复 Vim 发出的终端能力查询，无法继续可靠注入按键；该项保持 `待真实终端复核`，不记为内核失败。
+  后续结果必须继续绑定镜像 hash 和实际包版本。本节首轮仅画出全屏 Vim 界面，尚未可靠注入按键；该
+  历史边界已由上节后续 line-discipline 修复后的 RV64/LA64 编辑、保存、退出实测关闭。
 
 ## 2026-08-16 现场赛路线切换：软件兼容性与真实网络双线（基线 `ae2f38ce`）
 

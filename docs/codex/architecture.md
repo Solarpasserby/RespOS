@@ -364,11 +364,11 @@
   leader tombstone。共享 handler/resource owner 与兼容身份双写仍需继续迁移，不能从
   当前 M2.1 结果外推完整 signal/job-control 支持。
 
-### controlling tty 状态属于 terminal，进程只保存关联关系
+### controlling tty 与 line discipline 状态属于 terminal，进程只保存关联关系
 
-- 状态：M2.2 terminal 状态与孤儿组转换已实现并通过 Linux/RV64/LA64 专项
+- 状态：M2.2 terminal、物理 console line discipline 与孤儿组转换已实现并通过双架构专项/全屏 Vim
 - 适用范围：stdio、`/dev/tty`、session/pgrp、termios、job-control signal、wait stopped/continued
-- 最后验证：2026-08-15
+- 最后验证：2026-08-16
 - 证据：`os/src/fs/tty.rs`、`user/src/bin/job_control_phase5_probe.rs`、
   `scripts/job_control_phase5_probe_linux.c`；`/tmp/respos-{rv,la}-job-control-orphan-stress8.log`
 - 内容：单一 console terminal 保存 controlling session、foreground PGID 与共享 termios；每个
@@ -376,9 +376,12 @@
   terminal 对象提交前台组切换或 session release。stdio 和 `/dev/tty` 的读写在进入物理 console 前
   统一执行后台组检查，不能让每个 fd 或 `sys_ioctl` 各自维护状态。孤儿组判定扫描稳定 ProcessState；
   `setpgid/setsid/exit+reparent` 在关系提交前后检测非孤儿→孤儿转换，且只有存在 stopped member 才按
-  `SIGHUP`、`SIGCONT` 顺序通知整个存活进程组。
-- 后续影响：增加 PTY 时每个 terminal 实例必须独立持有相同状态机；line discipline、hangup I/O、
-  forced steal 副作用及并发关系变更的统一锁域仍需扩展，不能塞回单个 ioctl 分支。
+  `SIGHUP`、`SIGCONT` 顺序通知整个存活进程组。stdio stdin 和 `/dev/tty` 还必须共享 canonical edit/
+  ready record/raw queue；物理 console 由 timer safe point 主动抽取控制字符，使不读 tty 的前台作业也能
+  及时收到 VINTR/VQUIT/VSUSP；阻塞 read 只检查当前线程实际可投递的 pending signal，不能用 terminal
+  全局 generation 错误中断同进程内未被选中的 reader thread。
+- 后续影响：增加 PTY 时每个 terminal 实例必须独立持有相同状态机；hangup I/O、flow control、
+  SIGWINCH、forced steal 副作用及并发关系变更的统一锁域仍需扩展，不能塞回单个 ioctl 分支。
 
 ### 调度状态只有一个所有者提交
 

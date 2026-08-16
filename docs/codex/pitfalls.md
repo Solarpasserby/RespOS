@@ -1610,3 +1610,16 @@ socket 直接返回 `EAGAIN` 是可见 ABI 错误。accept 取走 endpoint 后�
 - 后续影响：新增 special file mmap 时应以 inode/file capability 表达语义，不以 size 或
   pathname 猜测。修改 trap frame、VMA split/merge 或 copyin/copyout fault 路径时，必须复跑 `mmap18`
   的成功与 blocker 两类用例。
+
+## 物理 console 的控制字符不能只在 read 路径处理
+
+- 适用范围：console line discipline、VINTR/VQUIT/VSUSP、job control、阻塞 syscall
+- 现象：前台程序读 tty 时 Ctrl-C 正常，但 `sleep 10` 等不读 tty 的程序直到自然结束后才显示并处理
+  `^C`；看起来像 signal 或 foreground pgrp 错误。
+- 根因：固件串口是轮询输入，若只有 stdin/`/dev/tty` 的 `read/read_ready` 调用 line discipline，就没有
+  读者替不读 tty 的前台作业消费控制字符。
+- 处理：由唯一 global timer service hart 在 timer safe point 抽取 console；已阻塞的 tty read 检查
+  当前线程实际可投递的 pending signal 后返回 `EINTR`。不要用 terminal 全局 generation 中断所有 reader，
+  也不要在每个 hart 或任意持锁 kernel trap 中直接轮询并投递，否则会重复消费字符或重入
+  task/signal registry。
+- 最后验证：2026-08-16，RV64/LA64 Alpine ash 下 `sleep 10` 的 Ctrl-C/Ctrl-Z 均立即生效。

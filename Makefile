@@ -383,7 +383,7 @@ run-la-diagnostic: LA_OUTPUT = $(LA_DIAGNOSTIC_OUTPUT)
 run-la-diagnostic: build-la check-la-final-image build-la-local-disk run-la-qemu
 
 # Software compatibility: mount the archived Alpine root under -snapshot and
-# expose a deterministic smoke script through the diagnostic auxiliary disk.
+# expose a deterministic smoke script through an interactive Alpine shell.
 run-rv-software: RV_FS_IMG = $(RV_SOFTWARE_FS_IMG)
 run-rv-software: RV_DISK_IMG = $(RV_SOFTWARE_DISK_IMG)
 run-rv-software: AUX_FS_DIR = respos-software

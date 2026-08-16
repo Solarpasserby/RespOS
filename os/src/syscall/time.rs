@@ -6,8 +6,8 @@ use crate::mm::{copy_from_user, copy_to_user};
 use crate::mutex::SpinLock;
 use crate::signal::{SiField, Sig, SigInfo};
 use crate::task::{
-    CpuClockHandle, current_task, prepare_current_task_blocked, switch_to_next_task,
-    yield_current_task,
+    current_task, prepare_current_task_blocked, switch_to_next_task, yield_current_task,
+    CpuClockHandle, TASK_MANAGER,
 };
 use crate::timer::{TimeSpec, get_accounting_clock_freq, get_time, get_timeout_us};
 use alloc::collections::BTreeMap;
@@ -84,6 +84,8 @@ struct PosixTimer {
     owner: Weak<crate::task::ProcessState>,
     clock_id: usize,
     cpu_clock: Option<CpuClockHandle>,
+    notify: bool,
+    target: Option<Weak<crate::task::TaskControlBlock>>,
     signo: i32,
     deadline_ms: usize,
     interval_ms: usize,
@@ -616,25 +618,43 @@ pub fn sys_timer_create(
     sevp: *const SigEvent,
     timerid: *mut i32,
 ) -> SysResult<usize> {
+    const SIGEV_SIGNAL: i32 = 0;
+    const SIGEV_NONE: i32 = 1;
+    const SIGEV_THREAD_ID: i32 = 4;
+
     if !is_posix_timer_clock(clock_id) {
         return Err(Errno::EINVAL);
     }
 
-    let signo = if sevp.is_null() {
-        Sig::SIGALRM.raw()
+    let task = current_task().expect("no current task");
+    let (notify, signo, target) = if sevp.is_null() {
+        (true, Sig::SIGALRM.raw(), None)
     } else {
         let mut event = SigEvent::default();
         copy_from_user(&mut event as *mut SigEvent, sevp, 1)?;
-        if event.notify != 0 {
-            return Err(Errno::EINVAL);
+        match event.notify {
+            SIGEV_NONE => (false, 0, None),
+            SIGEV_SIGNAL => {
+                if !Sig::from(event.signo).is_valid() {
+                    return Err(Errno::EINVAL);
+                }
+                (true, event.signo, None)
+            }
+            SIGEV_THREAD_ID => {
+                if !Sig::from(event.signo).is_valid() || event.pad[0] <= 0 {
+                    return Err(Errno::EINVAL);
+                }
+                let tid = event.pad[0] as usize;
+                let target = TASK_MANAGER.get(tid).ok_or(Errno::EINVAL)?;
+                if target.tgid() != task.tgid() {
+                    return Err(Errno::EINVAL);
+                }
+                (true, event.signo, Some(Arc::downgrade(&target)))
+            }
+            _ => return Err(Errno::EINVAL),
         }
-        if !Sig::from(event.signo).is_valid() {
-            return Err(Errno::EINVAL);
-        }
-        event.signo
     };
 
-    let task = current_task().expect("no current task");
     let cpu_clock = match clock_id {
         CLOCK_PROCESS_CPUTIME_ID => Some(task.process_cpu_clock()),
         CLOCK_THREAD_CPUTIME_ID => Some(task.thread_cpu_clock()),
@@ -647,6 +667,8 @@ pub fn sys_timer_create(
         owner: Arc::downgrade(&owner),
         clock_id,
         cpu_clock,
+        notify,
+        target,
         signo,
         deadline_ms: 0,
         interval_ms: 0,
@@ -783,7 +805,12 @@ pub fn check_posix_timers() {
             if timer.deadline_ms == 0 || now_ms < timer.deadline_ms {
                 continue;
             }
-            expired.push((timer.owner.clone(), timer.signo));
+            expired.push((
+                timer.owner.clone(),
+                timer.notify,
+                timer.target.clone(),
+                timer.signo,
+            ));
             timer.deadline_ms = if timer.interval_ms == 0 {
                 0
             } else {
@@ -792,12 +819,19 @@ pub fn check_posix_timers() {
         }
     }
 
-    for (owner, signo) in expired {
+    for (owner, notify, target, signo) in expired {
+        if !notify {
+            continue;
+        }
         let sig = Sig::from(signo);
         if sig.is_valid() {
-            if let Some(task) = owner.upgrade().and_then(|process| process.signal_target()) {
+            let target = match target {
+                Some(target) => target.upgrade(),
+                None => owner.upgrade().and_then(|process| process.signal_target()),
+            };
+            if let Some(task) = target {
                 if !task.is_exited() {
-                    let siginfo = SigInfo::new(sig.raw(), SigInfo::KERNEL, SiField::None);
+                    let siginfo = SigInfo::new(sig.raw(), SigInfo::TIMER, SiField::None);
                     task.receive_siginfo(siginfo, false);
                 }
             }

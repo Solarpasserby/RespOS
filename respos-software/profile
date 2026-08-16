@@ -1,2 +1,2 @@
-# Archived Alpine software images use the embedded shell as their launcher.
-mode=diagnostic
+# Archived Alpine software images enter the root filesystem's interactive shell.
+mode=software
