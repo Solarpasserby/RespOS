@@ -1,5 +1,24 @@
 # RespOS 当前状态
 
+## 2026-08-16 virtio-net 与内核内 HTTP 服务器（基于 `cce99e0`，分支 `feat/http`）
+
+- **内容**：新增 `drivers/virtio/net_dev.rs`（VirtIoNetDev，复用既有 DMA bounce/HAL），RV64 从
+  virtio-mmio 扫描 Network 设备、LA64 统一 PCI 枚举（block/net 共享确定性 BAR 分配）后接入
+  `net/ethernet.rs`（smoltcp Ethernet Device）。`net/http.rs` 在真实网卡上绑定 `0.0.0.0:80`，
+  实时渲染 uptime/memory/tasks/CPU/PageCache；空闲循环按 10ms 节流驱动网络与 HTTP。以太网接口
+  先于回环 poll，保证非回环 socket 正确 drain 发送缓冲。
+- **启动栈修复**：原 64 KiB/hart 启动栈在 virtio-net + smoltcp 接口初始化时越界覆盖 `.data`
+  （表现为 `physical_memory_end`/`PER_CPUS` 被随机值破坏，debug 下 `attempt to add with overflow`
+  panic）。RV64/LA64 启动栈扩到 256 KiB/hart。
+- **验证**：RV64/LA64 release 构建通过；`make run-{rv,la}-diagnostic` 后宿主
+  `curl http://127.0.0.1:8080/`（hostfwd 8080->80，免 root）双架构均返回 `200`，RV64
+  `size=1274`、LA64 `size=1281`，正文含 `<title>RespOS 内核内 HTTP 服务器</title>`。串口出现
+  `[net] virtio-net up, mac=..., guest ip=10.0.2.15` 与 `[net] in-kernel HTTP server listening on
+  port 80`；LA64 `[smp] LA online mask=0x3`。
+- **边界**：HTTP 服务是 RX/TX、listen/accept、ARP/TCP 的阶段性诊断工具，不替代 Git HTTP(S)/SSH
+  网络门禁；真实网络验收仍按 [software-compatibility-network-plan.md](./software-compatibility-network-plan.md)
+  主线 B 推进。LA64 debug 内核在本环境启动期无串口输出（release 正常），未归因于本轮改动。
+
 ## 2026-08-16 2025 Alpine 软件兼容性镜像已接入（当前工作树）
 
 - **获取入口**：`scripts/get_img.sh` 新增 `software [rv|la|both]` 组；无参数仍保持原 `standard`

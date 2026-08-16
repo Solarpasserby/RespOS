@@ -302,6 +302,48 @@ QEMU 必须附 `-snapshot`，并保存完整串口日志。`task_a_futex_cmp_req
   HART、256M 内存加载 `img/sdcard-rv-pub.img`，并显示 `Rust user shell` 的 `/>` 提示符；
   未进入 `testrunner`。LA 入口已做同样的配置检查，但尚未完成本轮启动验证。
 
+### virtio-net 与内核内 HTTP 服务器演示
+
+- 状态：已验证（RV64/LA64 双架构 HTTP 200）
+- 适用范围：真实网卡链路 bring-up、答辩现场“内核内网页”演示
+- 最后验证：2026-08-16，基于 `cce99e0`
+- 内容：`make run-{rv,la}-diagnostic`（或任意 QEMU 入口）已挂载 `virtio-net`，内核在
+  `net::init()` 阶段发现网卡并初始化 smoltcp 以太网接口（guest IP 10.0.2.15/24），随后在
+  内核态绑定 `0.0.0.0:80` 的 HTTP 服务。顶层 Makefile 的 `-netdev user` 已加
+  `hostfwd=tcp::8080-:80`，宿主机免 root：
+
+```bash
+make -C os build ARCH=riscv64 MODE=release        # 或 ARCH=loongarch64
+make run-rv-diagnostic RV_DIAGNOSTIC_MEM=4G       # 进入 Rust user shell 后保持运行
+# 另一终端：
+curl -s http://127.0.0.1:8080/ -o /tmp/respos-http.html -w '%{http_code}\n'
+# 预期输出 200；页面含 /proc 同源的 uptime/memory/tasks/CPU/PageCache 实时状态
+```
+
+快速诊断也可用最小镜像 + 诊断辅助盘直接起 QEMU（`-snapshot`，`respos-diagnostic/profile`
+为 `mode=diagnostic`）：
+
+```bash
+truncate -s 16M /tmp/respos-http.img && mkfs.ext4 -q -F -d respos-diagnostic /tmp/respos-http.img
+qemu-system-riscv64 -machine virt -kernel os/target/riscv64gc-unknown-none-elf/release/os \
+  -m 512M -nographic -snapshot -smp 2 -bios default \
+  -drive file=img/sdcard-rv.img,if=none,format=raw,id=x0 \
+  -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 -no-reboot \
+  -device virtio-net-device,netdev=net -netdev user,id=net,hostfwd=tcp::8080-:80 -rtc base=utc \
+  -drive file=/tmp/respos-http.img,if=none,format=raw,id=x1 \
+  -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1
+# LA64 把 virtio-blk-device/virtio-net-device 换成 virtio-blk-pci/virtio-net-pci，
+# kernel 换成 os/target/loongarch64-unknown-none/release/os
+```
+
+- 判据：串口出现 `[net] virtio-net up, mac=..., guest ip=10.0.2.15` 与
+  `[net] in-kernel HTTP server listening on port 80`；宿主 `curl` 返回 `200` 且正文含
+  `<title>RespOS 内核内 HTTP 服务器</title>`。2026-08-16 实测 RV64 `code=200 size=1274`、
+  LA64 `code=200 size=1281`。
+- 边界：该 HTTP 服务是 RX/TX、listen/accept 与 ARP/TCP 的阶段性诊断工具，不替代通用 HTTP
+  服务器或 Git HTTP(S)/SSH 网络门禁；详见 [software-compatibility-network-plan.md](./software-compatibility-network-plan.md)
+  主线 B。真实网络进度仍由非 loopback 的收发日志与外部端点确认，不能只连接 `127.0.0.1`。
+
 ### 文件元数据 Linux/POSIX 对照
 
 Linux 参考程序不依赖 RespOS 私有输出：
