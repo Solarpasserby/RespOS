@@ -23,8 +23,9 @@
 //! - `LOOPBACK_IFACE` / `LOOPBACK_DEV` — 回环接口及设备
 //! - `LISTEN_TABLE` — TCP 端口监听表
 
-use alloc::{collections::BTreeSet, string::String, vec};
+use alloc::{collections::BTreeSet, string::String, sync::Arc, vec};
 use core::fmt::Write;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use lazy_static::lazy_static;
 use smoltcp::{
     iface::{Config, Interface, SocketHandle, SocketSet},
@@ -33,19 +34,30 @@ use smoltcp::{
     socket::{AnySocket, tcp::SocketBuffer, udp::PacketBuffer},
     storage::PacketMetadata,
     time::Instant as SmolInstant,
-    wire::{HardwareAddress, IpAddress, IpCidr, IpEndpoint},
+    wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, IpEndpoint},
 };
 
 use crate::arch::timer::get_time_ms;
+use crate::drivers::NetDeviceImpl;
 use crate::mutex::SpinLock;
 use crate::syscall::Errno;
 
 mod addr;
+mod ethernet;
+mod http;
 mod listen;
 mod loopback;
 pub mod socket;
 pub mod tcp;
 pub mod udp;
+
+use ethernet::EthernetDevice;
+use http::HttpServer;
+
+/// Guest IP address used by QEMU user (slirp) networking.
+pub const GUEST_IP_OCTETS: [u8; 4] = [10, 0, 2, 15];
+/// Guest network prefix length (QEMU user network default).
+const GUEST_IP_PREFIX: u8 = 24;
 
 pub use addr::{
     LOOP_BACK_ENDPOINT, LOOP_BACK_IP, UNSPECIFIED_ENDPOINT, UNSPECIFIED_IP,
@@ -83,6 +95,25 @@ lazy_static! {
         SpinLock::new(create_loopback_iface());
 }
 
+lazy_static! {
+    /// 真实网卡设备（virtio-net），不存在时为 `None`。
+    static ref ETH_DEV: SpinLock<Option<EthernetDevice>> = SpinLock::new(None);
+    /// 真实网络接口（smoltcp Interface），不存在时为 `None`。
+    static ref ETH_IFACE: SpinLock<Option<Interface>> = SpinLock::new(None);
+    /// In-kernel HTTP 服务器，仅在网卡存在时初始化。
+    static ref HTTP_SERVER: SpinLock<Option<HttpServer>> = SpinLock::new(None);
+}
+
+/// Guest IP address as a dotted-quad string.
+pub fn guest_ip() -> &'static str {
+    "10.0.2.15"
+}
+
+/// The MAC address of the virtio-net device, if present.
+pub fn eth_mac() -> Option<[u8; 6]> {
+    ETH_DEV.lock().as_ref().map(|dev| dev.mac_address())
+}
+
 /// 对外暴露给 listen.rs / tcp.rs / udp.rs 使用。
 pub(crate) fn socket_set() -> &'static SpinLock<SocketSetWrapper<'static>> {
     &SOCKET_SET_INNER
@@ -102,6 +133,29 @@ fn create_loopback_iface() -> Interface {
     iface
 }
 
+/// 创建并配置真实网络接口（guest ip = 10.0.2.15，QEMU user networking）。
+fn create_ethernet_iface(dev: &mut EthernetDevice, mac: [u8; 6]) -> Interface {
+    let config = Config::new(HardwareAddress::Ethernet(EthernetAddress::from_bytes(
+        &mac,
+    )));
+    let timestamp = SmolInstant::from_micros((get_time_ms() * 1000) as i64);
+    let mut iface = Interface::new(config, dev, timestamp);
+    iface.update_ip_addrs(|addrs| {
+        addrs
+            .push(IpCidr::new(
+                IpAddress::v4(
+                    GUEST_IP_OCTETS[0],
+                    GUEST_IP_OCTETS[1],
+                    GUEST_IP_OCTETS[2],
+                    GUEST_IP_OCTETS[3],
+                ),
+                GUEST_IP_PREFIX,
+            ))
+            .unwrap();
+    });
+    iface
+}
+
 /// 初始化网络栈（在 `mm::init()` 之后调用）。
 ///
 /// lazy_static 变量在首次访问时自动初始化，这里 force touch 确保它们在启动阶段被初始化。
@@ -110,6 +164,34 @@ pub fn init() {
     let _ = &*LISTEN_TABLE;
     let _ = &*LOOPBACK_DEV;
     let _ = &*LOOPBACK_IFACE;
+    init_ethernet();
+}
+
+/// Try to bring up the virtio-net device, the Ethernet smoltcp interface, and
+/// the in-kernel HTTP server. Missing hardware is non-fatal: the loopback-only
+/// stack keeps working unchanged.
+fn init_ethernet() {
+    let device = match NetDeviceImpl::new_device() {
+        Ok(device) => device,
+        Err(_) => {
+            println!("[net] virtio-net not present; real network + HTTP server disabled");
+            return;
+        }
+    };
+    let mac = device.mac_address();
+    let mut dev = EthernetDevice::new(Arc::new(device));
+    let iface = create_ethernet_iface(&mut dev, mac);
+
+    *ETH_DEV.lock() = Some(dev);
+    *ETH_IFACE.lock() = Some(iface);
+    *HTTP_SERVER.lock() = HttpServer::new();
+
+    println!("[net] virtio-net up, mac={:?}, guest ip={}", mac, guest_ip());
+    if HTTP_SERVER.lock().is_none() {
+        println!("[net] in-kernel HTTP server failed to bind port {}", http::HTTP_PORT);
+    } else {
+        println!("[net] in-kernel HTTP server listening on port {}", http::HTTP_PORT);
+    }
 }
 
 // ——— SocketSetWrapper ———
@@ -171,12 +253,23 @@ impl<'a> SocketSetWrapper<'a> {
         drop(socket);
     }
 
-    /// 驱动回环接口的收发：调用 smoltcp `Interface::poll()`。
+    /// 驱动回环与真实网卡接口的收发：调用 smoltcp `Interface::poll()`。
+    ///
+    /// The same socket set is polled by both interfaces so a single listener
+    /// (e.g. the HTTP server on 0.0.0.0:80) can serve loopback and Ethernet
+    /// traffic alike. The Ethernet interface is polled first so a socket that
+    /// belongs to a non-loopback address drains its transmit buffer before the
+    /// loopback interface (which has no route for it) is consulted.
     pub fn poll_interfaces(&self) {
         let timestamp = SmolInstant::from_micros((get_time_ms() * 1000) as i64);
         let mut iface = LOOPBACK_IFACE.lock();
         let mut dev = LOOPBACK_DEV.lock();
+        let mut eth_iface = ETH_IFACE.lock();
+        let mut eth_dev = ETH_DEV.lock();
         let mut sockets = self.0.lock();
+        if let (Some(eth), Some(ethdev)) = (eth_iface.as_mut(), eth_dev.as_mut()) {
+            eth.poll(timestamp, &mut *ethdev, &mut sockets);
+        }
         iface.poll(timestamp, &mut *dev, &mut sockets);
     }
 
@@ -240,6 +333,37 @@ fn wake_tcp_waiters() {
     for tid in tids {
         crate::task::wakeup_task(tid);
     }
+}
+
+/// Advance the in-kernel HTTP server state machine.
+///
+/// Must run after [`poll_interfaces`] so newly received packets and completed
+/// handshakes are already reflected in socket states.
+pub fn poll_http() {
+    if let Some(server) = HTTP_SERVER.lock().as_mut() {
+        server.poll();
+    }
+}
+
+/// Background network driver for the timer-service hart's idle loop.
+///
+/// Polls both interfaces and the HTTP server, throttled so a busy CPU never
+/// spins on the network device. Returns immediately when no Ethernet device is
+/// present: the loopback stack is already driven by socket syscalls.
+pub fn poll_background() {
+    if ETH_IFACE.lock().is_none() {
+        return;
+    }
+    const POLL_INTERVAL_MS: usize = 10;
+    static LAST_POLL_MS: AtomicUsize = AtomicUsize::new(0);
+    let now = get_time_ms();
+    let last = LAST_POLL_MS.load(Ordering::Relaxed);
+    if now.saturating_sub(last) < POLL_INTERVAL_MS {
+        return;
+    }
+    LAST_POLL_MS.store(now, Ordering::Relaxed);
+    poll_interfaces();
+    poll_http();
 }
 
 /// Consume deferred global timer work from a network retry safe point.

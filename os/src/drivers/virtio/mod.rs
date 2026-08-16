@@ -1,8 +1,10 @@
 // os/src/drivers/virtio.rs
 
 mod block_dev;
+mod net_dev;
 
 pub use block_dev::VirtIoBlkDev;
+pub use net_dev::VirtIoNetDev;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;

@@ -27,12 +27,12 @@ _start:
     addi.d   $t0, $zero, 0x11      # VSEG=0, PSEG=0, MAT=1(CC), PLV0=1
     csrwr    $t0, CSR_DMW0
 
-    # CPU0 使用第一个 64 KiB early stack。使用 CPUNUM 而不是共享变量，
+    # CPU0 使用第一个 256 KiB early stack。使用 CPUNUM 而不是共享变量，
     # 这样 secondary 从 mailbox 进入时也能无锁选择自己的栈。
     csrrd    $t1, 0x20
     andi     $t1, $t1, 0x3ff
     addi.d   $t1, $t1, 1
-    slli.d   $t1, $t1, 16
+    slli.d   $t1, $t1, 18
     la.local $sp, boot_stack_lower_bound
     add.d    $sp, $sp, $t1
     bl       enter_main
@@ -51,7 +51,7 @@ _start_secondary_phys:
     csrrd    $t1, 0x20
     andi     $t1, $t1, 0x3ff
     addi.d   $t1, $t1, 1
-    slli.d   $t1, $t1, 16
+    slli.d   $t1, $t1, 18
     la.local $sp, boot_stack_lower_bound
     add.d    $sp, $sp, $t1
     bl       enter_secondary
@@ -59,6 +59,6 @@ _start_secondary_phys:
     .section .bss.stack
     .globl boot_stack_lower_bound
 boot_stack_lower_bound:
-    .space 4096 * 16 * 12
+    .space 4096 * 64 * 12
     .globl boot_stack_top
 boot_stack_top:

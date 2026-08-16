@@ -160,6 +160,8 @@ pub const VIRTIO_MMIO: &[(usize, usize)] = &[
 
 pub const MMIO: &[(usize, usize)] = &[
     (0x0010_1000, 0x00_1000), // QEMU goldfish RTC
-    (0x1000_1000, 0x00_1000), // virtio-mmio-bus.0
-    (0x1000_2000, 0x00_1000), // virtio-mmio-bus.1
+    // QEMU riscv virt exposes up to 8 virtio-mmio slots at 0x10001000 +
+    // n*0x1000. Map the whole window so block, net and any future device are
+    // all reachable through the kernel direct map.
+    (0x1000_1000, 0x00_8000), // virtio-mmio-bus.0..7
 ];

@@ -37,17 +37,31 @@ impl PciMemory32Allocator {
 }
 
 pub fn find_virtio_blk_transport(index: usize) -> DevResult<PciTransport> {
+    find_virtio_transport(DeviceType::Block, index)
+}
+
+pub fn find_virtio_net_transport() -> DevResult<PciTransport> {
+    find_virtio_transport(DeviceType::Network, 0)
+}
+
+/// Enumerate the PCI bus once and return the transport for the `index`-th
+/// virtio device of `device_type`.
+///
+/// BARs are assigned to *every* virtio device in bus order — not just the
+/// requested type — so that block and net discovery both derive the same
+/// deterministic, non-overlapping BAR layout regardless of which is run first.
+fn find_virtio_transport(device_type: DeviceType, index: usize) -> DevResult<PciTransport> {
     let ecam = (PCI_ECAM_BASE + KERNEL_BASE) as *mut u8;
     let cam = unsafe { MmioCam::new(ecam, Cam::Ecam) };
     let mut root = PciRoot::new(cam);
 
     let mut allocator = PciMemory32Allocator::new(PCI_MMIO_BASE, PCI_MMIO_SIZE);
-    let mut block_index = 0;
+    let mut matched = 0;
     for (device_function, info) in root.enumerate_bus(0) {
-        if virtio_device_type(&info) != Some(DeviceType::Block) {
+        let Some(dev_type) = virtio_device_type(&info) else {
             continue;
-        }
-        // Assign every preceding block device as well so repeated indexed
+        };
+        // Assign every preceding virtio device as well so repeated indexed
         // discovery produces the same non-overlapping BAR layout.
         for (bar_index, info) in root
             .bars(device_function)
@@ -78,11 +92,13 @@ pub fn find_virtio_blk_transport(index: usize) -> DevResult<PciTransport> {
             device_function,
             Command::MEMORY_SPACE | Command::BUS_MASTER | Command::INTERRUPT_DISABLE,
         );
-        if block_index == index {
-            return PciTransport::new::<VirtIoHalImpl, _>(&mut root, device_function)
-                .map_err(|_| DevError::BadState);
+        if dev_type == device_type {
+            if matched == index {
+                return PciTransport::new::<VirtIoHalImpl, _>(&mut root, device_function)
+                    .map_err(|_| DevError::BadState);
+            }
+            matched += 1;
         }
-        block_index += 1;
     }
     Err(DevError::BadState)
 }

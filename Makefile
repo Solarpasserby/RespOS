@@ -305,7 +305,7 @@ run-rv-qemu:
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 		-no-reboot \
 		-device virtio-net-device,netdev=net \
-		-netdev user,id=net \
+		-netdev user,id=net,hostfwd=tcp::8080-:80 \
 		-rtc base=utc \
 		-drive file=$(RV_DISK_IMG),if=none,format=raw,id=x1 \
 		-device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 |& tee $(RV_OUTPUT)
@@ -323,7 +323,7 @@ run-la-qemu:
 		-device virtio-blk-pci,drive=x0 \
 		-no-reboot \
 		-device virtio-net-pci,netdev=net0 \
-		-netdev user,id=net0,hostfwd=tcp::5555-:5555,hostfwd=udp::5555-:5555 \
+		-netdev user,id=net0,hostfwd=tcp::8080-:80,hostfwd=tcp::5555-:5555,hostfwd=udp::5555-:5555 \
 		-rtc base=utc \
 		-drive file=$(LA_DISK_IMG),if=none,format=raw,id=x1 \
 		-device virtio-blk-pci,drive=x1 |& tee $(LA_OUTPUT)
