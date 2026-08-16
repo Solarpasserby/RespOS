@@ -65,7 +65,19 @@ pub struct Processor {
     /// A running task that has already switched to this CPU's idle context,
     /// but has not yet been published to the global ready queue.  Keeping the
     /// Arc here makes the context-save → ready-publication handoff explicit.
-    handoff: Option<Arc<TaskControlBlock>>,
+    handoff: Option<TaskHandoff>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ContextSwitchKind {
+    None,
+    Voluntary,
+    Involuntary,
+}
+
+struct TaskHandoff {
+    task: Arc<TaskControlBlock>,
+    switch_kind: ContextSwitchKind,
 }
 
 #[inline]
@@ -110,17 +122,20 @@ impl Processor {
         self.current = Some(task);
     }
 
-    fn handoff_current(&mut self, current: &Arc<TaskControlBlock>) {
+    fn handoff_current(&mut self, current: &Arc<TaskControlBlock>, switch_kind: ContextSwitchKind) {
         let running = self.current.take().expect("handoff without current task");
         assert!(
             Arc::ptr_eq(&running, current),
             "handoff task differs from this CPU current task"
         );
         assert!(self.handoff.is_none(), "nested task handoff on one CPU");
-        self.handoff = Some(running);
+        self.handoff = Some(TaskHandoff {
+            task: running,
+            switch_kind,
+        });
     }
 
-    fn take_handoff(&mut self) -> Option<Arc<TaskControlBlock>> {
+    fn take_handoff(&mut self) -> Option<TaskHandoff> {
         self.handoff.take()
     }
 }
@@ -149,7 +164,10 @@ pub fn current_user_token() -> usize {
 /// CPU has finished `__switch`.  Instead `__switch` first saves the task and
 /// restores the per-CPU idle context; `run_tasks()` then publishes the saved
 /// task from that idle context.
-pub fn handoff_current_to_idle(current: Arc<TaskControlBlock>) {
+pub(crate) fn handoff_current_to_idle(
+    current: Arc<TaskControlBlock>,
+    switch_kind: ContextSwitchKind,
+) {
     let idle_task = current_idle_task();
     let idle_kstack = idle_task.kstack();
     assert_ne!(idle_kstack, 0, "idle context was not initialized");
@@ -157,18 +175,19 @@ pub fn handoff_current_to_idle(current: Arc<TaskControlBlock>) {
     idle_task.set_saved_mmu_token(crate::mm::kernel_mmu_token());
     {
         let mut processor = current_processor().lock();
-        processor.handoff_current(&current);
+        processor.handoff_current(&current, switch_kind);
     }
     unsafe {
         __switch(idle_kstack, Arc::as_ptr(&current) as usize);
     }
 }
 
-fn publish_saved_handoff() {
+fn publish_saved_handoff() -> Option<TaskHandoff> {
     #[cfg(target_arch = "loongarch64")]
     crate::mm::ensure_kernel_space_active();
     let handoff = current_processor().lock().take_handoff();
-    if let Some(task) = handoff {
+    if let Some(handoff) = handoff.as_ref() {
+        let task = &handoff.task;
         // __switch has restored this CPU's idle context and kernel satp before
         // returning here, so the outgoing address space is no longer active.
         task.clear_memory_set_current_hart_active();
@@ -182,6 +201,21 @@ fn publish_saved_handoff() {
         task.release_cpu_owner(current_cpu_id());
         crate::arch::smp::kick_one_idle_hart_in(task.cpu_affinity_mask());
     }
+    handoff
+}
+
+fn account_completed_handoff(handoff: Option<&TaskHandoff>, next: Option<&Arc<TaskControlBlock>>) {
+    let Some(handoff) = handoff else {
+        return;
+    };
+    if next.is_some_and(|next| Arc::ptr_eq(next, &handoff.task)) {
+        return;
+    }
+    match handoff.switch_kind {
+        ContextSwitchKind::None => {}
+        ContextSwitchKind::Voluntary => handoff.task.note_voluntary_context_switch(),
+        ContextSwitchKind::Involuntary => handoff.task.note_involuntary_context_switch(),
+    }
 }
 
 /// 运行任务
@@ -193,11 +227,19 @@ pub fn run_tasks() -> ! {
         crate::mm::ensure_kernel_space_active();
         // This executes only after the outgoing task's __switch has saved its
         // context and stopped executing it on this CPU.
-        publish_saved_handoff();
+        let handoff = publish_saved_handoff();
         // The outgoing context is now on this CPU's idle stack, so deferred
         // TCBs can be dropped even if no user task will ever wake again.
         cleanup_dead_tasks();
+        if crate::arch::smp::is_timer_service_hart() {
+            crate::fs::ext4::flush_expired_lazytime_inodes_if_needed();
+        }
         let mut next_task = fetch_task();
+        // Linux charges nvcsw/nivcsw only when scheduling selects a task other
+        // than prev.  RespOS always crosses its per-CPU idle stack to publish a
+        // saved context safely; selecting the same Arc again is an internal
+        // handoff, not an observable task context switch.
+        account_completed_handoff(handoff.as_ref(), next_task.as_ref());
         if next_task.is_none() {
             crate::arch::smp::enter_idle();
 

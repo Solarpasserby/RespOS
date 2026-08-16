@@ -309,7 +309,125 @@ missing_double_omit=pass permission=pass|skip`，guest 必须输出对应无 `_L
 并落在按文件系统精度容许的 realtime 窗口内；任一普通 `tv_nsec` 为 `1000000000` 或 `-1` 时，两个字段及 ctime 均
 保持不变并返回 `EINVAL`。降权向量对 pathname 和继承 fd 验证：双 OMIT 始终成功；双 NOW 在 mode
 `0666` 时成功、在 `0000` 时返回 `EACCES`；显式时间和 `NOW+OMIT` 均返回 `EPERM`。该门禁不用于宣称
-ext4 已持久化纳秒或负秒；两架构仍须顺序运行。
+ext4 已持久化纳秒或负秒；两架构仍须顺序运行。扩展时间戳持久化使用下面的独立跨启动门禁关闭。
+
+ext4 负秒、2-bit epoch、纳秒与自动 realtime 跨启动门禁：
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror -O2 scripts/ext4_timestamp_phase5_probe_linux.c \
+  -o /tmp/ext4_timestamp_phase5_probe_linux
+/tmp/ext4_timestamp_phase5_probe_linux
+
+# 分别用目标架构构建，环境变量会把两阶段 probe 嵌入 testrunner。
+TASK_A_EXT4_TIMESTAMP_PERSIST_PROBE=1 RUSTUP_TOOLCHAIN=nightly-2025-01-18 make build-rv
+TASK_A_EXT4_TIMESTAMP_PERSIST_PROBE=1 RUSTUP_TOOLCHAIN=nightly-2025-01-18 make build-la
+```
+
+每个架构必须使用私有 root 镜像副本与同一可写辅助 ext4 镜像连续启动两次，且 QEMU 命令不得带
+`-snapshot`；第一轮保留 `EXT4_TIMESTAMP_PERSIST PREPARE PASS` 日志，第二轮保留
+`VERIFY PASS negative_sec=pass epoch=pass nsec=pass clamp=pass automatic_realtime=pass`。不得直接写官方 root/pub
+镜像；可使用 `cp --reflink=auto` 的 `/tmp` raw 副本或私有 qcow2 overlay。当前证据日志为
+`/tmp/respos-{rv,la}-ext4-persist-{prepare,verify}.log`。
+
+128-byte 无 extra-field inode 使用独立私有辅助盘，不能用默认 `mkfs.ext4` 镜像代替：
+
+```bash
+truncate -s 32M /tmp/respos-rv-legacy-aux.img
+mkfs.ext4 -q -F -I 128 /tmp/respos-rv-legacy-aux.img
+dumpe2fs -h /tmp/respos-rv-legacy-aux.img 2>/dev/null | rg 'Inode size:\s+128'
+
+TASK_A_EXT4_TIMESTAMP_PERSIST_PROBE=1 TASK_A_EXT4_LEGACY_LAYOUT=1 make build-rv
+TASK_A_EXT4_TIMESTAMP_PERSIST_PROBE=1 TASK_A_EXT4_LEGACY_LAYOUT=1 make build-la
+```
+
+随后各架构仍按上面的私有 root、同一辅助盘、无 `-snapshot` 方法连续启动两次。第一轮 marker 为
+`EXT4_TIMESTAMP_LEGACY PREPARE PASS signed32_clamp=pass seconds_granularity=pass
+automatic_realtime=pass`，第二轮把 `PREPARE` 换为 `VERIFY`；当前日志为
+`/tmp/respos-{rv,la}-ext4-legacy-{prepare,verify}.log`。该门禁同时检查新 inode 自动时间与显式越界值的
+立即 stat，不能只保留第二轮重读断言，否则抓不到 Rust cache 与 lower layout 不一致。
+
+即时专项与相邻 LTP：
+
+```bash
+TASK_A_UTIMENS_SPECIAL_PROBE=1 make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-ext4-timestamp-immediate.log
+TASK_A_UTIMENS_SPECIAL_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-ext4-timestamp-immediate.log
+
+TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=utimensat01,statx02,statx03 \
+  make run-rv-pre PRE_MEM=4G PRE_SMP=2 RV_PRE_OUTPUT=/tmp/respos-rv-ext4-timestamp-ltp.log
+TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=utimensat01,statx02,statx03 \
+  make run-la-pre PRE_MEM=4G PRE_SMP=2 LA_PRE_OUTPUT=/tmp/respos-la-ext4-timestamp-ltp.log
+```
+
+RTC 修改还必须双架构运行 `TASK_A_CLOCK_PROBE=1` 各 20 轮，并看到
+`realtime calendar epoch PASS`；只通过 realtime/monotonic independence 不足以证明平台 RTC 已初始化。
+
+RTC read/set、libc hwclock 与 reset persistence 门禁：
+
+```bash
+TASK_A_RTC_SET_PROBE=1 make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-rtc-set-phase5-current.log
+TASK_A_RTC_SET_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-rtc-set-phase5-current.log
+
+TASK_A_RTC_SET_PROBE=1 TASK_A_RTC_RESET_PERSIST_PROBE=1 make build-rv
+TASK_A_RTC_SET_PROBE=1 TASK_A_RTC_RESET_PERSIST_PROBE=1 make build-la
+```
+
+普通门禁必须同时看到 musl/glibc BusyBox `hwclock -r` 的日期输出，以及
+`RTC_SET_PHASE5 PASS hardware_read_write=pass clock_domains=pass validation=pass permission=pass restore=pass
+hwclock=pass`。reset 门禁必须手工运行对应 QEMU 命令并移除 `-no-reboot`，保留同一个 QEMU 进程和辅助盘；
+`-snapshot` 可以使用，因为临时 overlay 会跨 system reset 保持、只在 QEMU 退出时丢弃。日志必须在一次
+进程内先后出现 `RTC_RESET_PERSIST PREPARE PASS`、第二次架构启动 marker 和
+`VERIFY PASS device_reset=pass boot_reinitialize=pass restore=pass`。当前日志为
+`/tmp/respos-{rv,la}-rtc-reset-persist-phase5.log`。若退出并启动新的 `-rtc base=utc` QEMU，设备会从宿主
+时间重新 realize，不能把该结果记为跨进程电池后备持久化。
+
+regular-file/directory atime policy 门禁：
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror -O2 scripts/atime_phase5_probe_linux.c \
+  -o /tmp/atime_phase5_probe_linux
+/tmp/atime_phase5_probe_linux
+
+TASK_A_ATIME_PHASE5_PROBE=1 make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-atime-dirtytime-eviction-phase5.log
+TASK_A_ATIME_PHASE5_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-atime-dirtytime-eviction-phase5.log
+
+TASK_A_ATIME_PHASE5_PROBE=1 make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_KERNEL_FEATURES=perf_counters \
+  RV_PRE_OUTPUT=/tmp/respos-rv-atime-dirtytime-eviction-phase5-perf.log
+TASK_A_ATIME_PHASE5_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_KERNEL_FEATURES=perf_counters \
+  LA_PRE_OUTPUT=/tmp/respos-la-atime-dirtytime-eviction-phase5-perf.log
+```
+
+Linux marker 固定 regular/directory default relatime 抑制/触发、重复 read/readdir、ctime 不变和 owner
+`O_NOATIME`；guest 还会对辅助 ext4 mount 依次 remount default、`MS_STRICTATIME`、`MS_NOATIME`、
+`MS_NODIRATIME`、`MS_LAZYTIME` 并恢复 default，且验证 nodiratime 不影响 regular file。guest 通过推进
+system realtime 隔离只由 24 小时阈值触发的 relatime；lazytime 在普通构建验证立即 stat 可见以及
+`fsync/sync` 成功，在 `perf_counters` 构建额外断言 lazy read 后 lower `atime_updates=0`、对应同步后恰为
+1；还把 `/proc/sys/vm/dirtytime_expire_seconds` 依次设为 0/1，验证 monotonic background expiry 不落盘/
+恰落盘一次，并在 close 后强制 dentry cleanup，fresh stat 验证 eviction 已提交 lower atime。通过 marker 为
+`ATIME_PHASE5 PASS relatime=pass relatime_24h=pass repeated=pass strictatime=pass mount_noatime=pass
+open_noatime=pass directory=pass nodiratime=pass lazytime=pass lazytime_background=pass
+lazytime_eviction=pass ctime=pass`。
+
+lazytime 无显式 sync crash-image 门禁使用 `TASK_A_LAZYTIME_PERSIST_PROBE=1` 构建两架构，并为每架构准备
+独立、可写且不会被 `make build-*-local-disk` 重建的 auxiliary raw image。QEMU 命令以 Makefile 对应架构
+模板为基线，但必须移除 `-snapshot`，把 x1 指向该 private image：
+
+1. 首次冷启动等待 `LAZYTIME_CRASH_IMAGE PREPARE PASS background_without_fsync=pass`；probe 已完成后台
+   expiry，但不会调用 fsync/sync/unmount/reboot/poweroff。
+2. marker 出现后由宿主向 QEMU 进程发送 SIGKILL。不得通过 guest 关机代替，否则会走正常同步边界。
+3. 使用同一 x1 raw image 启动一个全新的 QEMU 进程；必须出现
+   `LAZYTIME_CRASH_IMAGE VERIFY PASS persisted_background_atime=pass`，随后 probe 会清理文件并正常同步。
+
+2026-08-16 双架构证据分别为
+`/tmp/respos-{rv,la}-lazytime-crash-{prepare,verify}.log`。该流程验证 QEMU/VirtIO/ext4 的进程级 crash image，
+不等价于真实断电或设备 volatile write cache 保证。
 
 namespace identity/rename/unlink 对照：
 
@@ -366,6 +484,27 @@ TASK_A_TASK_PHASE5_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
 修复前入口会在 probe 非零后打印 status 并安全 poweroff；判断必须看 guest marker，不能因宿主 QEMU/make
 返回 0 就误判通过。修复后两份日志都必须出现 `TASK_PHASE5 ALL PASS`，且不得出现
 `TASK_PHASE5_EXPECTED_FAIL` 或 `CURRENT DIFFERENCES CONFIRMED`。
+
+Phase 5 controlling tty/job-control 对照与双架构入口：
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror -O2 scripts/job_control_phase5_probe_linux.c \
+  -o /tmp/job_control_phase5_probe_linux
+/tmp/job_control_phase5_probe_linux
+
+TASK_A_JOB_CONTROL_PROBE=1 make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-job-control-stop.log
+TASK_A_JOB_CONTROL_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-job-control-stop.log
+```
+
+Linux oracle 使用 PTY；guest 使用唯一物理 console。三者必须输出对应的 `JOB_CONTROL_* ALL PASS`，并
+覆盖 controlling tty/foreground pgrp、默认 `SIGTTIN` stop + `WUNTRACED`、`SIGCONT` +
+`WCONTINUED`、ignored `SIGTTIN` 的 `EIO`、termios `TOSTOP` round-trip/ignored `SIGTTOU` 写和
+`TIOCNOTTY`，以及停止子组因桥接父退出/reparent 形成孤儿后的 `SIGHUP`→`SIGCONT`。涉及 exit/reparent
+时序时两架构各连续运行 8 轮，日志为 `/tmp/respos-{rv,la}-job-control-orphan-stress8.log`。修改该状态机
+后还须顺序复跑双架构 `TASK_A_TASK_PHASE5_PROBE=1` 与
+`TASK_A_SESSION_PROBE=1`；本专项不覆盖 PTY 实现、canonical/echo/control chars 或完整 hangup I/O。
 
 Phase 5 `CLONE_VFORK|CLONE_VM` 共享可见性：
 
@@ -970,12 +1109,15 @@ timeout 240s env TASK_A_NETWORK_ORDER_PROBE=1 \
 RV64 2 hart 与 LA64 1 hart 通过；LA64 2 hart 连续两轮停在 musl BASIC_UDP 后的 BASIC_TCP connect，
 当前预期暴露未闭合阻断，不能以单核结果关闭 M1。
 
-Phase 5 mmap EOF/SIGBUS Linux 对照：
+Phase 5 mmap EOF/truncate/punch/SIGBUS Linux 对照：
 
 ```bash
 cc -std=c11 -Wall -Wextra -Werror -O2 scripts/mmap_phase5_probe_linux.c \
   -o /tmp/mmap_phase5_probe_linux
 /tmp/mmap_phase5_probe_linux
+
+# 可选：在调用者明确准备的 disposable small filesystem 上运行宿主满盘 SIGBUS 项
+RESPOS_MMAP_ENOSPC_DIR=/mnt/disposable-small-ext4 /tmp/mmap_phase5_probe_linux
 
 TASK_A_MMAP_PHASE5_PROBE=1 make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
   RV_PRE_OUTPUT=/tmp/respos-rv-mmap-phase5.log
@@ -987,10 +1129,51 @@ TASK_A_MMAP_PHASE5_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
 上述 `testrunner` 入口运行 `mmap_phase5_probe`。修复前预期打印 shared/private 的
 `MMAP_PHASE5_EXPECTED_FAIL` 和 `MMAP_PHASE5 CURRENT DIFFERENCES CONFIRMED`，并以非零状态退出；它们
 覆盖初始 EOF 整页 SIGBUS、truncate 后 resident PTE 失效、未 COW EOF 部分页清零、已 COW private
-部分页保留匿名字节，以及 mmap 后动态扩容。完成 MM 修复后必须同时出现 `MMAP_PHASE5 shared PASS`、
-`MMAP_PHASE5 private PASS`、`MMAP_PHASE5 private_cow_truncate PASS` 与
-`MMAP_PHASE5 ALL PASS`，并复跑 `buildstorm_file_probe` 的 mmap 扩容/写回竞态。宿主 `make`/QEMU
+部分页保留匿名字节、mmap 后动态扩容、独立 truncator 对 resident/unfaulted mapper 的跨 MemorySet
+失效、16 轮 truncate-vs-fault/store 竞态，以及 partial/full punch、物理块释放、cache eviction 后 lower
+零读、跨进程 shared/clean-private 失效、private-COW 保留和 punch 错误矩阵。完成 MM 修复后必须同时出现
+`MMAP_PHASE5 shared PASS`、`MMAP_PHASE5 private PASS`、`MMAP_PHASE5 private_cow_truncate PASS`、
+`MMAP_PHASE5 cross_process_truncate PASS`、`MMAP_PHASE5 cross_process_fault_store_race PASS` 与
+`MMAP_PHASE5 punch_hole PASS`、`MMAP_PHASE5 cross_process_punch_hole PASS`、
+`MMAP_PHASE5 punch_hole_errors PASS`、`MMAP_PHASE5 punch_msync_race PASS`、
+`MMAP_PHASE5 shared_write_enospc_sigbus PASS`、
+`MMAP_PHASE5 ALL PASS`，并复跑 `buildstorm_file_probe` 的 mmap
+扩容/写回竞态及 fadvise 专项。宿主 `make`/QEMU
 管线即使在 guest probe 非零后仍可能返回 0，因此必须以 guest marker 判定，不能只看宿主退出状态。
+
+当前另有自动相邻门禁：
+
+```bash
+TASK_A_BUILDSTORM_FILE_PROBE=1 make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-mmap-buildstorm-private-final.log
+TASK_A_BUILDSTORM_FILE_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-mmap-buildstorm-cross-process.log
+```
+
+该入口顺序运行 `buildstorm_file_probe` 与 RV64 64 MiB/4-worker `buildstorm_private_map_probe`（LA64
+按既有规则跳过后者）；前者验证
+mmap 扩容/写回，后者验证 clean private sharing、mprotect 后私有写和多进程 page walk。修改
+file-backed fault/COW 后还须双架构运行 `LTP_CASE_FILTER=mmap05`，防止把普通 mmap 的 live EOF 错用于
+ELF fixed `PT_LOAD` 并污染 loader BSS。
+
+`LTP_CASE_FILTER=fallocate04` 是普通预分配测试；在 default/KEEP_SIZE 仍不支持时预期为 skip，不能作为
+punch-hole 门禁，也不能将其 skip 记作 punch 失败。punch 证据以 Linux oracle、guest 专项中的
+`st_blocks` 下降和 eviction 后 lower 零读为准。
+
+ENOSPC 项必须使用 disposable 小文件系统，先预建 sparse target，再由 filler+fsync 压满；断言 child
+首次 shared store 收到 SIGBUS，随后释放 filler 并验证新映射 store/msync/lower read 恢复。宿主没有
+mount capability 时 Linux oracle 会明确打印 SKIP；双架构正式门禁使用 make 自动创建的 16 MiB
+`/respos` auxiliary ext4，不依赖根盘剩余空间。
+
+LTP `mmap16` 不是当前自动门禁：它仍在 `user/oscomp_ltp_list.txt` 注释。临时启用后可用
+`LTP_CASE_FILTER=mmap16` 聚焦。2026-08-16 的 RV64 双 libc trace 已证明首个 checkpoint/futex wake
+成功，child 也完成首次 page-mkwrite、ftruncate 和 mremap；parent 随后卡在 buffered `write()` 填盘
+循环，因为后台/阈值 writeback 的 `ENOSPC` 未关联并反馈给后续 write，因而没有发出第二次 checkpoint
+wake。需要复查同步/后台写回错误的记录、消费和每个 open file description 的可见性，不能用自定义
+page-mkwrite probe 替代 `mmap16` TPASS，也不能再把该 TBROK 归因于 checkpoint 或 mremap。
+
+需要复核 checkpoint 时可在 `debug_traces` 构建中设置 `TASK_A_FUTEX_TRACE=1`；默认 release 构建不会
+产生该诊断输出。证据应同时核对 wake/wait 的 scope、uaddr 和发生顺序。
 
 Phase 5 `mprotect()` 失败权限边界：
 
@@ -1021,9 +1204,133 @@ cc -std=c11 -Wall -Wextra -Werror -O2 scripts/signal_phase5_probe_linux.c \
 ```
 
 无 feature guest 中运行 `signal_phase5_probe`，以 `SIGNAL_PHASE5 ALL PASS` 为通过标志。它覆盖
-query-only `rt_sigprocmask`、`rt_sigaction` size/EFAULT、`rt_sigqueueinfo(sig=0)` 和 pending signal
-跨 exec。修改 signal wait/timer 唤醒后还应复跑 `task_a_clock_probe` 与
+query-only `rt_sigprocmask`、`rt_sigaction` size/EFAULT、`rt_sigqueueinfo(sig=0)`、pending signal
+跨 exec，以及默认 SIGCHLD wait、显式 `SIG_IGN` 自动回收、`SA_NOCLDWAIT` handler + `ECHILD`。
+probe 还要求 `SA_NOCLDSTOP` 在抑制 handler 的同时不隐藏 `wait4(WUNTRACED)` stop status，并覆盖
+标准信号合并保留首个 queued value、实时信号同号三实例 FIFO、`RLIMIT_SIGPENDING=2` 填满返回
+`EAGAIN` 及消费后额度恢复。它还以空/满 pipe 阻塞标量及向量 read/write，覆盖无 `SA_RESTART` 的
+`EINTR`、有标志的自动重启、默认忽略信号不中断和 partial-result 优先级；feature runner 连续运行 8 轮
+以门禁 stop/wait 和 signal/data SMP 时序。它还覆盖 null-timeout
+`FUTEX_WAIT/FUTEX_WAIT_BITSET` 的普通 handler/`SA_RESTART`/默认忽略三态；带 timeout 的非重启边界用
+`TASK_A_FUTEX_RACE_PROBE=1 make run-{rv,la}-pre PRE_MEM=4G PRE_SMP=2` 验证 wake-first、signal-first
+`EINTR` 与 timeout-first `ETIMEDOUT`，runner 固定连续 20 轮。
+配额路径同时运行
+`TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=tgkill02 make run-{rv,la}-pre PRE_MEM=4G PRE_SMP=2`。
+双架构 guest 命令为 `TASK_A_SIGNAL_PHASE5_PROBE=1 make run-{rv,la}-pre PRE_MEM=4G PRE_SMP=2`；修改
+child exit/wait 优先级后还必须复跑 `TASK_A_WAIT4_PROBE=1` 与 `TASK_A_TASK_PHASE5_PROBE=1`。修改
+signal wait/timer 唤醒后还应复跑 `task_a_clock_probe` 与
 `/glibc/busybox timeout 1 /glibc/busybox sleep 10`；只通过 ABI 探针不能替代阻塞路径门禁。
+当前 futex/wait 修复证据为 `/tmp/respos-{rv,la}-signal-futex-waitfix-stress8.log`、
+`/tmp/respos-{rv,la}-futex-timed-norestart-waitfix.log` 与
+`/tmp/respos-{rv,la}-wait4-child-generation-gate.log`。
+
+修改 CPU accounting、trap mode transition、process exit snapshot 或 wait child usage 时，先运行 Linux
+对照，再顺序运行双架构 wait4 与 CPU total clock 门禁：
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror -O2 -pthread scripts/cpu_accounting_phase5_probe_linux.c \
+  -o /tmp/cpu_accounting_phase5_probe_linux
+/tmp/cpu_accounting_phase5_probe_linux
+
+TASK_A_WAIT4_PROBE=1 make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-cpu-accounting-phase5.log
+TASK_A_WAIT4_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-cpu-accounting-phase5.log
+```
+
+必须出现 `[task-a-wait4] user/system accounting PASS`、既有 rusage retry/accounting 与 `ALL PASS`；
+随后按 clock 章节让 `TASK_A_CLOCK_PROBE=1` 双架构各完成 20/20；当前日志为
+`/tmp/respos-{rv,la}-rusage-fields-phase5-final.log`。probe 的 user burn 与 syscall burn
+分别要求 utime/stime 有独立增量，且 `times` 字段在一个 100 Hz tick 内匹配 getrusage；不能只断言两字段
+都非零，因为这无法识别把同一 total 复制两次的旧实现。Linux pthread 与 guest clone 向量还要求
+`RUSAGE_THREAD` 分离 main/worker，并核对 process aggregate；每个线程独立运行到跨过至少一个 100 Hz
+导出 tick，避免用亚 10 ms 固定工作量制造假失败。
+
+修改 rusage 非时间字段时，同一 20 轮 probe 还必须逐轮出现
+`rusage fault/rss/context-switch PASS`、`rusage actual-switch accounting PASS`、
+`rusage Linux-zero legacy fields PASS`、`rusage wait4/children fields PASS` 与
+`raw waitid rusage/children fields PASS`；当前还应出现 `rusage block-io/cold-major PASS`。匿名逐页触碰用于
+验证 thread/process minor-fault 增量和 KiB
+maxrss high-water，yield/timer 用于区分 voluntary/involuntary；wait4 与 raw waitid 必须核对 reap 后
+CHILDREN 求和及 maxrss 取最大值。block-I/O fixture 写两个页并确认首次 dirty 增加 `oublock`、重复写同一
+dirty page 不增加，随后 `fsync + fadvise64(POSIX_FADV_DONTNEED)`；首个 private-file access 必须同时增加
+`majflt/inblock`，相邻 readahead cache hit 只增加 minor。20/20 日志为
+`/tmp/respos-{rv,la}-rusage-actual-switch-phase5.log`。actual-switch 向量先把唯一 runnable child 固定到一个
+CPU，跨过多个 timer tick 后要求 `nivcsw` 不变；再用 pipe gate 发布固定同 CPU 的 competitor，要求真实
+timer switch 增加 involuntary。无竞争 yield 必须保持 voluntary 不变；children voluntary 使用真实
+`nanosleep` block，不能恢复旧的“yield 一定计数”假设。相邻 `TASK_A_WAIT4_PROBE=1` 双架构日志当前为
+`/tmp/respos-{rv,la}-rusage-actual-switch-wait4.log`，用于守住 bad status/rusage copyout retry；修改 cache
+eviction/fault 分类后还必须运行 `TASK_A_MMAP_PHASE5_PROBE=1`，当前日志为
+`/tmp/respos-{rv,la}-rusage-io-mmap-regression.log`。
+
+完整 `posix_fadvise` 修改先运行 Linux oracle，再顺序跑双架构专项与 LTP（构建会共享 `.cargo/config`，
+不得并行两架构）：
+
+```bash
+cc -std=c11 -O2 -Wall -Wextra -Werror scripts/fadvise_phase5_probe_linux.c \
+  -o /tmp/fadvise_phase5_probe_linux
+/tmp/fadvise_phase5_probe_linux
+
+TASK_A_FADVISE_PHASE5_PROBE=1 make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-fadvise-phase5.log
+TASK_A_FADVISE_PHASE5_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-fadvise-phase5.log
+
+TASK_A_LTP_ONLY=1 \
+  LTP_CASE_FILTER=posix_fadvise01,posix_fadvise01_64,posix_fadvise02,posix_fadvise02_64,posix_fadvise03,posix_fadvise03_64,posix_fadvise04,posix_fadvise04_64 \
+  make run-rv-pre PRE_MEM=4G PRE_SMP=2 RV_PRE_OUTPUT=/tmp/respos-rv-fadvise-phase5-ltp.log
+TASK_A_LTP_ONLY=1 \
+  LTP_CASE_FILTER=posix_fadvise01,posix_fadvise01_64,posix_fadvise02,posix_fadvise02_64,posix_fadvise03,posix_fadvise03_64,posix_fadvise04,posix_fadvise04_64 \
+  make run-la-pre PRE_MEM=4G PRE_SMP=2 LA_PRE_OUTPUT=/tmp/respos-la-fadvise-phase5-ltp.log
+```
+
+专项必须连续 8/8 并包含五组 `FADVISE_PHASE5 ... PASS`；两套 libc 都必须为 `8 passed, 0 failed`。
+修改 PageCache window/eviction/writeback 后还要运行 `TASK_A_MMAP_PHASE5_PROBE=1` 与
+`TASK_A_CLOCK_PROBE=1` 双架构门禁，当前日志为
+`/tmp/respos-{rv,la}-fadvise-{mmap,rusage}-regression.log`，后者必须 20/20 且逐轮包含
+`rusage block-io/cold-major PASS`。Linux WILLNEED 是异步 best effort，不用立即 `mincore` residency 作
+oracle；DONTNEED 则要分别覆盖部分页保留、完整页失效、脏页数据不丢与 mmap pin。
+
+修改 signal accounting 或 `struct rusage` 字段时，还要运行
+`TASK_A_SIGNAL_PHASE5_PROBE=1 make run-{rv,la}-pre PRE_MEM=4G PRE_SMP=2`。当前 Linux 契约和 RespOS probe
+要求完整 signal suite 后 `ru_nsignals == 0`，双架构 8/8 日志为
+`/tmp/respos-{rv,la}-rusage-actual-switch-signal.log`；不能把“收到几个信号”直接写入该 Linux-zero ABI
+字段。修改 processor handoff 后还必须复跑 `TASK_A_TASK_PHASE5_PROBE=1`，当前双架构日志为
+`/tmp/respos-{rv,la}-rusage-actual-switch-task-phase5.log`。
+
+最后运行双 libc LTP：
+
+```bash
+TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=getrusage01,getrusage02,times01,times03 \
+  make run-rv-pre PRE_MEM=4G PRE_SMP=2 RV_PRE_OUTPUT=/tmp/respos-rv-rusage-actual-switch-ltp.log
+TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=getrusage01,getrusage02,times01,times03 \
+  make run-la-pre PRE_MEM=4G PRE_SMP=2 LA_PRE_OUTPUT=/tmp/respos-la-rusage-actual-switch-ltp.log
+```
+
+musl/glibc 各必须为 `4 passed, 0 failed`；尤其检查 `times03` 的 utime/stime 增长和 wait 后
+cutime/cstime 非零，而不只看 runner 宿主退出码。
+
+同一 signal probe 还必须覆盖 400 ms 的 `nanosleep/ppoll/pselect6/epoll_pwait` 及 relative/absolute
+`clock_nanosleep`：普通与 `SA_RESTART`
+handler 均在 signal 后返回 `EINTR`，默认忽略 `SIGWINCH` 等到 timeout；relative nanosleep/clock_nanosleep
+校验 remainder，absolute clock_nanosleep 保持 remainder sentinel 不变。
+epoll guest 向量需注册保持未就绪的 pipe 读端，不能用空 interest 集合的主动让步路径替代真实阻塞。
+`SA_NOCLDSTOP` 子项先用 pipe handshake 确认 child 已首次运行，Linux/guest 保持同一前置条件。当前最终
+证据为 `/tmp/respos-{rv,la}-signal-clock-nanosleep-stress8.log`（RV64 `-s` 只开未连接 listener）；修改
+signal wake hint 或 stop/continue 发布顺序后还须复跑双架构
+wait4、task Phase 5 与 socket 8 轮门禁。
+
+阻塞 `accept/accept4` restart 修改还须严格编译运行 `scripts/socket_phase5_probe_linux.c`，并在双架构
+release、4 GiB、2 hart 下运行
+`TASK_A_SOCKET_PHASE5_PROBE=1 make run-{rv,la}-pre PRE_MEM=4G PRE_SMP=2`。probe 用三个独立 AF_UNIX
+listener 覆盖普通 handler 返回 `EINTR`、`SA_RESTART` 后由稍后连接完成、默认忽略 `SIGWINCH` 后继续等待；
+同轮还以空/满 AF_UNIX socketpair 覆盖 `recvfrom/sendto/sendmsg/recvmsg/sendmmsg/recvmmsg` 的三种信号
+路径，并验证 `recvmsg(MSG_WAITALL)` 的 partial-result 与 `recvmmsg` 的 partial-count 优先级。当前
+`recvmmsg` 还覆盖非空 timeout：超期后 message 才到达时仍返回 count 且 remainder=0；普通 EINTR 不改
+timespec；SA_RESTART 后成功、partial-count、默认 ignored signal 与 `MSG_WAITFORONE` 首条后 nonblock
+都必须通过。不要写“完全无消息等 timeout 返回”的 Linux oracle，因为该调用不会由 timeout 自行唤醒；
+必须用有界 sender/signal 保证退出。涉及 wait/signal 时序的变更应各连续运行 8 轮，当前最终日志为
+`/tmp/respos-{rv,la}-socket-recvmmsg-timeout-stress8.log`。
 
 CPU clock/CPU timer 专项使用无 feature release；两架构必须顺序构建：
 
@@ -1077,7 +1384,11 @@ cc -std=c11 -Wall -Wextra -Werror -O2 scripts/socket_phase5_probe_linux.c \
 RV64 no-feature release、`-m 16G -smp 8 -snapshot` guest 中运行 `socket_phase5_probe`，以
 `SOCKET_PHASE5 ALL PASS` 为通过标志。它覆盖 pathname accept/connect、非阻塞 accept、EOF/EPIPE、
 AF_UNIX buffered shutdown 的 poll/epoll `IN|RDHUP`、阻塞 ppoll 数据唤醒、pipe 的无条件 HUP/ERR、
-epoll HUP 和 accept EINTR。Linux/guest 还必须分别输出 `shutdown_poll_rdhup PASS` 与
+epoll HUP 和 accept EINTR。restart 簇还会用非阻塞 clients 动态填满 accept queue，验证阻塞 connect
+普通 handler=`EINTR`、`SA_RESTART`/默认忽略后由 accept 释放槽位完成。accept/recvfrom/sendto/connect
+还设置 `SO_RCVTIMEO/SO_SNDTIMEO` 并要求带 `SA_RESTART` 仍返回 `EINTR`；feature runner 固定连续 8 轮，
+当前双架构日志为 `/tmp/respos-{rv,la}-socket-restart-entry-snapshot-stress8.log`。Linux/guest 还必须分别输出
+`shutdown_poll_rdhup PASS` 与
 `rdhup_blocking_edge_oneshot PASS`；后者覆盖只订阅 RDHUP 的阻塞 ppoll/epoll、ET 去重、ONESHOT
 禁用及 `EPOLL_CTL_MOD` rearm。修改
 Unix buffer/waiter 后还必须复跑 `unix_socket_block_probe` 的 128 KiB 满缓冲区传输；宿主 QEMU

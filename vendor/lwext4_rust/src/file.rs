@@ -35,14 +35,8 @@ impl Ext4File {
 
     /// Initialize this descriptor from a stable inode number instead of a path.
     pub fn inode_open(&mut self, inode: u32, flags: u32) -> Result<usize, i32> {
-        let r = unsafe {
-            ext4_inode_open(
-                &mut self.file_desc,
-                self.file_path.as_ptr(),
-                inode,
-                flags,
-            )
-        };
+        let r =
+            unsafe { ext4_inode_open(&mut self.file_desc, self.file_path.as_ptr(), inode, flags) };
         if r != EOK as i32 {
             error!("ext4_inode_open: inode={}, rc={}", inode, r);
             return Err(r);
@@ -263,6 +257,16 @@ impl Ext4File {
         let r = unsafe { ext4_ftruncate(&mut self.file_desc, size) };
         if r != EOK as i32 {
             error!("ext4_ftruncate: rc = {}", r);
+            return Err(r);
+        }
+        Ok(EOK as usize)
+    }
+
+    pub fn file_punch_hole(&mut self, offset: u64, size: u64) -> Result<usize, i32> {
+        trace!("file_punch_hole offset={}, size={}", offset, size);
+        let r = unsafe { ext4_fpunch_hole(&mut self.file_desc, offset, size) };
+        if r != EOK as i32 {
+            error!("ext4_fpunch_hole: rc = {}", r);
             return Err(r);
         }
         Ok(EOK as usize)

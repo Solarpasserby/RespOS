@@ -94,6 +94,7 @@ struct UnixListener {
     pending: SpinLock<UnixPending>,
     poll_waiters: Arc<PollWaiters>,
     credentials: UnixPeerCredentials,
+    closed: AtomicBool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,6 +114,7 @@ struct UnixBuffer {
 struct UnixPending {
     sockets: VecDeque<UnixSocket>,
     accept_waiters: VecDeque<usize>,
+    connect_waiters: VecDeque<usize>,
 }
 
 impl UnixBuffer {
@@ -132,9 +134,11 @@ impl UnixListener {
             pending: SpinLock::new(UnixPending {
                 sockets: VecDeque::new(),
                 accept_waiters: VecDeque::new(),
+                connect_waiters: VecDeque::new(),
             }),
             poll_waiters: Arc::new(PollWaiters::new()),
             credentials,
+            closed: AtomicBool::new(false),
         }
     }
 }
@@ -476,40 +480,66 @@ impl UnixSocket {
             .find(|(item_key, _)| item_key.as_slice() == key)
             .map(|(_, listener)| listener.clone())
             .ok_or(Errno::ECONNREFUSED)?;
+        let task = current_task().ok_or(Errno::ESRCH)?;
 
-        let server = UnixSocket::new();
-        *server.bound_key.lock() = Some(key.to_vec());
-        *server.peer_key.lock() = connector_key;
-        *self.peer_key.lock() = Some(key.to_vec());
-        *server.peer_rx.lock() = Some(self.rx.clone());
-        *self.peer_rx.lock() = Some(server.rx.clone());
-        *server.peer_closed.lock() = Some(self.closed.clone());
-        *self.peer_closed.lock() = Some(server.closed.clone());
-        *server.peer_read_shutdown.lock() = Some(self.read_shutdown.clone());
-        *self.peer_read_shutdown.lock() = Some(server.read_shutdown.clone());
-        *server.peer_write_shutdown.lock() = Some(self.write_shutdown.clone());
-        *self.peer_write_shutdown.lock() = Some(server.write_shutdown.clone());
-        *server.peer_credentials.lock() = Some(connector_credentials);
-        *self.peer_credentials.lock() = Some(listener.credentials);
-
-        let mut pending = listener.pending.lock();
-        if pending.sockets.len() >= UNIX_LISTEN_QUEUE_LIMIT {
-            *self.peer_rx.lock() = None;
-            *self.peer_closed.lock() = None;
-            *self.peer_read_shutdown.lock() = None;
-            *self.peer_write_shutdown.lock() = None;
-            *self.peer_credentials.lock() = None;
-            *self.peer_key.lock() = None;
-            return Err(Errno::EAGAIN);
+        loop {
+            let mut pending = listener.pending.lock();
+            if listener.closed.load(Ordering::Acquire) {
+                return Err(Errno::ECONNREFUSED);
+            }
+            if pending.sockets.len() < UNIX_LISTEN_QUEUE_LIMIT {
+                let server = UnixSocket::new();
+                *server.bound_key.lock() = Some(key.to_vec());
+                *server.peer_key.lock() = connector_key.clone();
+                *self.peer_key.lock() = Some(key.to_vec());
+                *server.peer_rx.lock() = Some(self.rx.clone());
+                *self.peer_rx.lock() = Some(server.rx.clone());
+                *server.peer_closed.lock() = Some(self.closed.clone());
+                *self.peer_closed.lock() = Some(server.closed.clone());
+                *server.peer_read_shutdown.lock() = Some(self.read_shutdown.clone());
+                *self.peer_read_shutdown.lock() = Some(server.read_shutdown.clone());
+                *server.peer_write_shutdown.lock() = Some(self.write_shutdown.clone());
+                *self.peer_write_shutdown.lock() = Some(server.write_shutdown.clone());
+                *server.peer_credentials.lock() = Some(connector_credentials);
+                *self.peer_credentials.lock() = Some(listener.credentials);
+                pending.sockets.push_back(server);
+                let wake_accept = pending.accept_waiters.pop_front();
+                drop(pending);
+                if let Some(tid) = wake_accept {
+                    wakeup_task(tid);
+                }
+                listener.poll_waiters.notify(POLL_READ);
+                return Ok(());
+            }
+            if self.is_nonblocking() {
+                return Err(Errno::EAGAIN);
+            }
+            task.set_interruptible(true);
+            task.check_real_timer();
+            if task.check_signal_interrupt() || task.is_interrupted() {
+                task.clear_interrupted();
+                task.set_interruptible(false);
+                return Err(Errno::EINTR);
+            }
+            pending.connect_waiters.push_back(task.tid());
+            if !prepare_current_task_blocked() {
+                task.set_interruptible(false);
+                pending.connect_waiters.retain(|tid| *tid != task.tid());
+                return Err(Errno::ESRCH);
+            }
+            let interrupted = task.check_signal_interrupt() || task.is_interrupted();
+            drop(pending);
+            if interrupted {
+                wakeup_task(task.tid());
+            }
+            let result = self.finish_interruptible_wait(None);
+            listener
+                .pending
+                .lock()
+                .connect_waiters
+                .retain(|tid| *tid != task.tid());
+            result?;
         }
-        pending.sockets.push_back(server);
-        let wake_accept = pending.accept_waiters.pop_front();
-        drop(pending);
-        if let Some(tid) = wake_accept {
-            wakeup_task(tid);
-        }
-        listener.poll_waiters.notify(POLL_READ);
-        Ok(())
     }
 
     fn accept(&self, deadline_us: Option<usize>) -> SysResult<UnixSocket> {
@@ -518,6 +548,11 @@ impl UnixSocket {
         loop {
             let mut pending = listener.pending.lock();
             if let Some(socket) = pending.sockets.pop_front() {
+                let wake_connect = pending.connect_waiters.pop_front();
+                drop(pending);
+                if let Some(tid) = wake_connect {
+                    wakeup_task(tid);
+                }
                 return Ok(socket);
             }
             if self.is_nonblocking() {
@@ -671,6 +706,15 @@ impl UnixSocket {
         UNIX_LISTENERS
             .lock()
             .retain(|(_, item)| !Arc::ptr_eq(item, &listener));
+        listener.closed.store(true, Ordering::Release);
+        let mut pending = listener.pending.lock();
+        let mut wake = core::mem::take(&mut pending.accept_waiters);
+        wake.append(&mut pending.connect_waiters);
+        drop(pending);
+        listener.poll_waiters.notify(POLL_HUP);
+        for tid in wake {
+            wakeup_task(tid);
+        }
     }
 }
 

@@ -2,13 +2,13 @@
 
 ## 状态与适用范围
 
-- 状态：`待确认`，尚未进入内核实现
+- 状态：核心步骤 1--3 已实现并通过双架构 2/8 hart 专项；步骤 4--5 继续推进
 - 适用范围：线程组 leader 原始 `exit`、最后线程 zombie、non-leader `execve`、process-directed
   signal、wait/session/pgrp 与进程级资源回收
-- 当前证据 commit：`75216ffc287908492e6daa8bfe455dc5aac3444a` 加 2026-08-14 当前工作树
+- 当前证据基线：`44f93db` 加 2026-08-15 当前工作树
 - Linux 对照：`scripts/task_phase5_probe_linux.c` 三项全通过
-- RespOS 反证：RV64/LA64、4 GiB/2 hart 的 `TASK_A_TASK_PHASE5_PROBE=1` 都稳定出现四个
-  `TASK_PHASE5_EXPECTED_FAIL`；日志为 `/tmp/respos-{rv,la}-task-phase5-identity-gate.log`
+- RespOS 修复后证据：RV64/LA64、4 GiB、2/8 hart 的 `TASK_A_TASK_PHASE5_PROBE=1` 均输出八项
+  `PASS` 和 `TASK_PHASE5 ALL PASS`；日志为 `/tmp/respos-{rv,la}-process-identity-{race,smp8}.log`
 
 本方案只定义 Phase 5 正确性状态所有权，不进入 Phase 6 的 scheduler/per-CPU 性能重构。
 
@@ -31,7 +31,7 @@ signal 找错目标以及 de-thread 后 `getpid() != gettid()`。保留一个已
 新增稳定的 `ProcessState`，每个进程一个，由同线程组所有 TCB 和父进程 children 表共同持有：
 
 ```text
-ProcessTable[tgid] ── Arc<ProcessState>
+ProcessTable[tgid] ── Weak<ProcessState>
                          ├── immutable tgid
                          ├── pgid / sid / credentials / process flags
                          ├── parent: Weak<ProcessState>
@@ -40,7 +40,7 @@ ProcessTable[tgid] ── Arc<ProcessState>
                          ├── lifecycle: Running | Exiting | Zombie | Reaped
                          ├── exit cause / wait event / child accounting
                          ├── process-directed pending signals
-                         └── process-shared handler/timer/resource handles
+                         └── process-shared handler/resource handles（下一步迁移）
 
 TaskManager[tid] ── Arc<TaskControlBlock>
                          ├── current tid
@@ -52,7 +52,8 @@ TaskManager[tid] ── Arc<TaskControlBlock>
 
 `ProcessTable` 与 `TaskManager` 分工固定：前者按 PID/TGID 查进程，后者按 TID 查线程。进程对象在最后
 线程退出后变为 Zombie 并继续存在，直到父进程成功 copyout wait 结果后提交 Reaped；不依赖任何已退出
-TCB 存活。
+TCB 存活。当前 `ProcessTable` 是非拥有型 Weak 索引；live member 或 parent children 表负责强持有，
+避免全局表让已回收进程永久存活。
 
 第一阶段应迁移所有影响生命周期正确性的 process 字段：TGID、PGID、SID、parent/children、
 exited-child notification、group-exit owner、exit cause/wait event、process-directed pending 和共享
@@ -146,8 +147,12 @@ ProcessTable -> parent ProcessState -> child ProcessState -> members snapshot
 
 完整初赛/LTP 和 job-control 仍是后续 M2 门禁，不能用三项 probe 代替。
 
-## 需要确认的变更授权
+## 当前实现边界
 
-该方案会改变 task/process 核心所有权、PID 查询、wait/signal 与 exec 提交协议，属于 Phase 5 必要但
-高风险的架构修改。确认后按上述五个可回滚步骤实施；未确认前只保留 probe、设计和修复前证据，不用
-leader tombstone 或 affinity 等兼容性特判绕过门禁。
+稳定 TGID/PGID/SID、parent/children/wait/zombie、leader 原始退出、non-leader de-thread、进程定向
+signal 查找与 POSIX timer owner 已迁移。exec 在拆除 sibling 前完成可失败映像准备；成功后调用者接管
+TGID，并清理旧映像 robust-list/clear-child-tid 元数据。两个并发 exec 由 lifecycle CAS 单赢家提交。
+
+process-directed pending queue 已迁移并覆盖跨 member-exit/exec；尚未迁移共享 signal handler/resource owner。完整 job control、
+exec-vs-exit_group 扩大压力、资源基线与完整初赛/LTP 仍是 M2 后续门禁。兼容的 TCB tgid/pgid/sid
+原子字段暂保留双写断言，待剩余读取点迁净后删除。

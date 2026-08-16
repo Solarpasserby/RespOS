@@ -92,6 +92,7 @@ impl InodeOp for DevDirInode {
             "cpu_dma_latency" => Ok(Arc::new(CpuDmaLatencyInode)),
             "shm" => Ok(shm_dir()),
             "misc" => Ok(Arc::new(MiscDirInode)),
+            "rtc" | "rtc0" => Ok(Arc::new(RtcInode)),
             "loop-control" => Ok(Arc::new(LoopControlInode)),
             "loop0" => Ok(Arc::new(LoopInode::new(0))),
             "vda" => Ok(Arc::new(VirtBlkInode::new(VDA_INO, VDA_RDEV))),
@@ -126,6 +127,8 @@ impl InodeOp for DevDirInode {
             entry(LOOP0_INO, InodeType::BlockDevice, 12, b"loop0\0"),
             entry(VDA_INO, InodeType::BlockDevice, 13, b"vda\0"),
             entry(VDA2_INO, InodeType::BlockDevice, 14, b"vda2\0"),
+            entry(RTC_INO, InodeType::CharDevice, 15, b"rtc\0"),
+            entry(RTC_INO, InodeType::CharDevice, 16, b"rtc0\0"),
         ])
     }
 

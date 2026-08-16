@@ -1,5 +1,5 @@
-use super::super::KStat;
 use super::super::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
+use super::super::KStat;
 use super::dirs::{proc_dev, proc_respos_perf_ino};
 use crate::syscall::{Errno, SysResult};
 use alloc::sync::Arc;
@@ -56,6 +56,11 @@ impl InodeOp for PerfStatsInode {
         #[cfg(feature = "io_buffer_pool")]
         if command.trim() == "drain_io_buffers" {
             let _ = crate::mm::drain_io_buffers();
+            return Ok(buf.len());
+        }
+        if command.trim() == "drop_dentry_cache" {
+            crate::fs::dentry_cache::clean_dentry_cache();
+            crate::fs::ext4::clean_inode_cache();
             return Ok(buf.len());
         }
         if command.trim() != "reset" {

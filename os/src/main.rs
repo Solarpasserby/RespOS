@@ -90,6 +90,7 @@ fn rust_main_high() -> ! {
 
     trap::init();
     mm::init();
+    syscall::init_realtime_from_rtc();
     net::init();
     task::add_initproc();
     #[cfg(any(target_arch = "riscv64", target_arch = "loongarch64"))]

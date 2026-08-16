@@ -45,6 +45,7 @@
 #include <ext4_trans.h>
 #include <ext4_blockdev.h>
 #include <ext4_fs.h>
+#include <ext4_extent.h>
 #include <ext4_dir.h>
 #include <ext4_inode.h>
 #include <ext4_super.h>
@@ -1725,6 +1726,197 @@ int ext4_ftruncate(ext4_file *f, uint64_t size)
 	return r;
 }
 
+static int ext4_fpunch_zero_partial(struct ext4_inode_ref *ref,
+				    ext4_lblk_t iblock, uint32_t offset,
+				    uint32_t size, const void *zeroes)
+{
+	ext4_fsblk_t fblock;
+	uint32_t block_size = ext4_sb_get_block_size(&ref->fs->sb);
+	int r;
+
+	if (!size)
+		return EOK;
+	r = ext4_fs_get_inode_dblk_idx(ref, iblock, &fblock, true);
+	if (r != EOK || !fblock)
+		return r;
+	return ext4_block_writebytes(ref->fs->bdev,
+				     fblock * block_size + offset,
+				     zeroes, size);
+}
+
+static int ext4_fpunch_remove_extent_blocks(struct ext4_inode_ref *ref,
+					     ext4_lblk_t first,
+					     ext4_lblk_t end)
+{
+	/* Walk backwards so removing one allocated run cannot invalidate the
+	 * logical indexes still to be inspected.  A range may begin in a sparse
+	 * hole, which ext4_extent_remove_space() alone does not advance across. */
+	ext4_lblk_t cursor = end;
+	while (cursor > first) {
+		ext4_fsblk_t fblock;
+		ext4_lblk_t run_end;
+		int r;
+
+		cursor--;
+		r = ext4_fs_get_inode_dblk_idx(ref, cursor, &fblock, true);
+		if (r != EOK)
+			return r;
+		if (!fblock)
+			continue;
+		run_end = cursor;
+		while (cursor > first) {
+			ext4_fsblk_t previous;
+			r = ext4_fs_get_inode_dblk_idx(ref, cursor - 1,
+						       &previous, true);
+			if (r != EOK)
+				return r;
+			if (!previous)
+				break;
+			cursor--;
+		}
+		r = ext4_extent_remove_space(ref, cursor, run_end);
+		if (r != EOK)
+			return r;
+	}
+	return EOK;
+}
+
+int ext4_fpunch_hole(ext4_file *file, uint64_t offset, uint64_t size)
+{
+	struct ext4_inode_ref ref;
+	struct ext4_sblock *sb;
+	uint8_t *zeroes = NULL;
+	uint64_t end;
+	uint64_t file_size;
+	uint32_t block_size;
+	ext4_lblk_t first_full;
+	ext4_lblk_t end_full;
+	bool writeback_enabled = false;
+	int r;
+
+	ext4_assert(file && file->mp);
+	if (file->mp->fs.read_only)
+		return EROFS;
+	if (file->flags & O_RDONLY)
+		return EPERM;
+	if (!size)
+		return EINVAL;
+	if (UINT64_MAX - offset < size)
+		return EINVAL;
+
+	EXT4_MP_LOCK(file->mp);
+	ext4_trans_start(file->mp);
+	r = ext4_fs_get_inode_ref(&file->mp->fs, file->inode, &ref);
+	if (r != EOK)
+		goto FinishTransaction;
+
+	sb = &file->mp->fs.sb;
+	file_size = ext4_inode_get_size(sb, ref.inode);
+	file->fsize = file_size;
+	if (offset >= file_size) {
+		r = EOK;
+		goto FinishRef;
+	}
+	end = offset + size;
+	if (end > file_size)
+		end = file_size;
+	block_size = ext4_sb_get_block_size(sb);
+	zeroes = ext4_calloc(1, block_size);
+	if (!zeroes) {
+		r = ENOMEM;
+		goto FinishRef;
+	}
+
+	r = ext4_block_cache_write_back(file->mp->fs.bdev, 1);
+	if (r != EOK)
+		goto FinishRef;
+	writeback_enabled = true;
+
+	first_full = (ext4_lblk_t)(offset / block_size +
+				    (offset % block_size != 0));
+	end_full = (ext4_lblk_t)(end / block_size);
+
+	if (offset / block_size == (end - 1) / block_size) {
+		uint32_t in_block = (uint32_t)(offset % block_size);
+		r = ext4_fpunch_zero_partial(&ref,
+					      (ext4_lblk_t)(offset / block_size),
+					      in_block, (uint32_t)(end - offset),
+					      zeroes);
+		if (r != EOK)
+			goto FinishRef;
+	} else {
+		if (offset % block_size) {
+			uint32_t in_block = (uint32_t)(offset % block_size);
+			r = ext4_fpunch_zero_partial(
+				&ref, (ext4_lblk_t)(offset / block_size), in_block,
+				block_size - in_block, zeroes);
+			if (r != EOK)
+				goto FinishRef;
+		}
+
+		if (end % block_size) {
+			r = ext4_fpunch_zero_partial(
+				&ref, (ext4_lblk_t)(end / block_size), 0,
+				(uint32_t)(end % block_size), zeroes);
+			if (r != EOK)
+				goto FinishRef;
+		}
+	}
+
+	if (end_full > first_full) {
+#if CONFIG_EXTENT_ENABLE && CONFIG_EXTENTS_ENABLE
+		if (ext4_sb_feature_incom(sb, EXT4_FINCOM_EXTENTS) &&
+		    ext4_inode_has_flag(ref.inode, EXT4_INODE_FLAG_EXTENTS)) {
+			r = ext4_fpunch_remove_extent_blocks(&ref, first_full,
+							 end_full);
+		} else
+#endif
+		{
+			ext4_lblk_t iblock;
+			for (iblock = first_full; iblock < end_full; ++iblock) {
+				ext4_fsblk_t fblock;
+				r = ext4_fs_get_inode_dblk_idx(&ref, iblock, &fblock,
+							       true);
+				if (r != EOK)
+					break;
+				if (!fblock)
+					continue;
+				r = ext4_fs_release_inode_block(&ref, iblock);
+				if (r != EOK)
+					break;
+			}
+		}
+		if (r != EOK)
+			goto FinishRef;
+	}
+	ref.dirty = true;
+	r = EOK;
+
+FinishRef:
+	/* Publish the dirty inode while write-back cache mode is still active.
+	 * Otherwise a following setattr transaction can reload the old i_blocks
+	 * value and overwrite the block release performed above. */
+	{
+		int put_r = ext4_fs_put_inode_ref(&ref);
+		if (r == EOK)
+			r = put_r;
+	}
+	if (writeback_enabled) {
+		int stop_r = ext4_block_cache_write_back(file->mp->fs.bdev, 0);
+		if (r == EOK)
+			r = stop_r;
+	}
+	if (zeroes)
+		ext4_free(zeroes);
+FinishTransaction:
+	if (r != EOK)
+		ext4_trans_abort(file->mp);
+	else
+		ext4_trans_stop(file->mp);
+	EXT4_MP_UNLOCK(file->mp);
+	return r;
+}
+
 int ext4_fread(ext4_file *file, void *buf, size_t size, size_t *rcnt)
 {
 	uint32_t unalg;
@@ -1920,7 +2112,8 @@ int ext4_fwrite(ext4_file *file, const void *buf, size_t size, size_t *wcnt)
 
 	struct ext4_inode_ref ref;
 	const uint8_t *u8_buf = buf;
-	int r, rr = EOK;
+	int r, rr = EOK, put_r;
+	bool write_back = false;
 
 	ext4_assert(file && file->mp);
 
@@ -1988,6 +2181,7 @@ int ext4_fwrite(ext4_file *file, const void *buf, size_t size, size_t *wcnt)
 	r = ext4_block_cache_write_back(file->mp->fs.bdev, 1);
 	if (r != EOK)
 		goto Finish;
+	write_back = true;
 
 	fblock_start = 0;
 	fblock_count = 0;
@@ -2047,7 +2241,10 @@ int ext4_fwrite(ext4_file *file, const void *buf, size_t size, size_t *wcnt)
 	}
 
 	/*Stop write back cache mode*/
-	ext4_block_cache_write_back(file->mp->fs.bdev, 0);
+	rr = ext4_block_cache_write_back(file->mp->fs.bdev, 0);
+	write_back = false;
+	if (r == EOK && rr != EOK)
+		r = rr;
 
 	if (r != EOK)
 		goto Finish;
@@ -2084,12 +2281,25 @@ out_fsize:
 	}
 
 Finish:
-	r = ext4_fs_put_inode_ref(&ref);
+	if (write_back) {
+		rr = ext4_block_cache_write_back(file->mp->fs.bdev, 0);
+		write_back = false;
+		if (r == EOK && rr != EOK)
+			r = rr;
+	}
+	/* Preserve the operation error (notably ENOSPC after a partial write).
+	 * ext4_fs_put_inode_ref() reports only the inode-ref submission result;
+	 * overwriting r here made a short ENOSPC write look successful to callers.
+	 * Commit any already allocated blocks/updated size when the inode ref was
+	 * submitted successfully, while still returning the original write error. */
+	put_r = ext4_fs_put_inode_ref(&ref);
 
-	if (r != EOK)
+	if (put_r != EOK) {
 		ext4_trans_abort(file->mp);
-	else
+		r = put_r;
+	} else {
 		ext4_trans_stop(file->mp);
+	}
 
 	EXT4_MP_UNLOCK(file->mp);
 	return r;
@@ -2209,7 +2419,8 @@ int ext4_raw_inode_fill(const char *path, uint32_t *ret_ino,
 }
 
 int ext4_raw_inode_fill_ino(const char *mount_point, uint32_t inode,
-			    struct ext4_inode *raw_inode)
+			    struct ext4_inode *raw_inode,
+			    uint64_t *blocks_count)
 {
 	struct ext4_mountpoint *mp = ext4_get_mount(mount_point);
 	struct ext4_inode_ref ref;
@@ -2221,6 +2432,9 @@ int ext4_raw_inode_fill_ino(const char *mount_point, uint32_t inode,
 	r = ext4_fs_get_inode_ref(&mp->fs, inode, &ref);
 	if (r == EOK) {
 		memcpy(raw_inode, ref.inode, sizeof(struct ext4_inode));
+		if (blocks_count)
+			*blocks_count = ext4_inode_get_blocks_count(&mp->fs.sb,
+							     ref.inode);
 		r = ext4_fs_put_inode_ref(&ref);
 	}
 	EXT4_MP_UNLOCK(mp);
@@ -2529,13 +2743,59 @@ Finish:
 	return r;
 }
 
+struct ext4_encoded_time {
+	uint32_t sec;
+	uint32_t extra;
+	bool has_extra;
+};
+
+static int ext4_encode_inode_time(struct ext4_sblock *sb,
+				  struct ext4_inode *inode, size_t extra_end,
+				  int64_t sec, uint32_t nsec,
+				  struct ext4_encoded_time *encoded)
+{
+	uint16_t inode_size = ext4_get16(sb, inode_size);
+	uint16_t extra_isize = ext4_inode_get_extra_isize(sb, inode);
+	int64_t signed_low;
+	int64_t epoch;
+
+	if (nsec >= 1000000000U)
+		return EINVAL;
+	encoded->has_extra = inode_size >= extra_end &&
+		EXT4_GOOD_OLD_INODE_SIZE + extra_isize >= extra_end;
+	if (!encoded->has_extra) {
+		if (sec < -2147483648LL)
+			sec = -2147483648LL;
+		else if (sec > 2147483647LL)
+			sec = 2147483647LL;
+		encoded->sec = (uint32_t)sec;
+		encoded->extra = 0;
+		return EOK;
+	}
+	if (sec < -2147483648LL)
+		sec = -2147483648LL;
+	else if (sec > 15032385535LL)
+		sec = 15032385535LL;
+	if (sec == -2147483648LL || sec == 15032385535LL)
+		nsec = 0;
+	encoded->sec = (uint32_t)sec;
+	signed_low = (int64_t)(int32_t)encoded->sec;
+	epoch = (sec - signed_low) >> 32;
+	encoded->extra = (nsec << 2) | ((uint32_t)epoch & 3U);
+	return EOK;
+}
+
 int ext4_setattr_ino(const char *mount_point, uint32_t inode,
 		     uint32_t mask, uint32_t mode, uint32_t uid,
-		     uint32_t gid, uint32_t atime, uint32_t mtime,
-		     uint32_t ctime)
+		     uint32_t gid, int64_t atime_sec, uint32_t atime_nsec,
+		     int64_t mtime_sec, uint32_t mtime_nsec,
+		     int64_t ctime_sec, uint32_t ctime_nsec)
 {
 	struct ext4_mountpoint *mp = ext4_get_mount(mount_point);
 	struct ext4_inode_ref ref;
+	struct ext4_encoded_time atime = {0};
+	struct ext4_encoded_time mtime = {0};
+	struct ext4_encoded_time ctime = {0};
 	uint32_t orig_mode;
 	int r;
 
@@ -2554,6 +2814,27 @@ int ext4_setattr_ino(const char *mount_point, uint32_t inode,
 		EXT4_MP_UNLOCK(mp);
 		return r;
 	}
+	if (mask & 4U) {
+		r = ext4_encode_inode_time(&mp->fs.sb, ref.inode,
+			offsetof(struct ext4_inode, atime_extra) + sizeof(uint32_t),
+			atime_sec, atime_nsec, &atime);
+		if (r != EOK)
+			goto Abort;
+	}
+	if (mask & 8U) {
+		r = ext4_encode_inode_time(&mp->fs.sb, ref.inode,
+			offsetof(struct ext4_inode, mtime_extra) + sizeof(uint32_t),
+			mtime_sec, mtime_nsec, &mtime);
+		if (r != EOK)
+			goto Abort;
+	}
+	if (mask & 16U) {
+		r = ext4_encode_inode_time(&mp->fs.sb, ref.inode,
+			offsetof(struct ext4_inode, ctime_extra) + sizeof(uint32_t),
+			ctime_sec, ctime_nsec, &ctime);
+		if (r != EOK)
+			goto Abort;
+	}
 	if (mask & 1U) {
 		orig_mode = ext4_inode_get_mode(&mp->fs.sb, ref.inode);
 		orig_mode = (orig_mode & ~0xFFF) | (mode & 0xFFF);
@@ -2563,18 +2844,33 @@ int ext4_setattr_ino(const char *mount_point, uint32_t inode,
 		ext4_inode_set_uid(ref.inode, uid);
 		ext4_inode_set_gid(ref.inode, gid);
 	}
-	if (mask & 4U)
-		ext4_inode_set_access_time(ref.inode, atime);
-	if (mask & 8U)
-		ext4_inode_set_modif_time(ref.inode, mtime);
-	if (mask & 16U)
-		ext4_inode_set_change_inode_time(ref.inode, ctime);
+	if (mask & 4U) {
+		ext4_inode_set_access_time(ref.inode, atime.sec);
+		if (atime.has_extra)
+			ref.inode->atime_extra = to_le32(atime.extra);
+	}
+	if (mask & 8U) {
+		ext4_inode_set_modif_time(ref.inode, mtime.sec);
+		if (mtime.has_extra)
+			ref.inode->mtime_extra = to_le32(mtime.extra);
+	}
+	if (mask & 16U) {
+		ext4_inode_set_change_inode_time(ref.inode, ctime.sec);
+		if (ctime.has_extra)
+			ref.inode->ctime_extra = to_le32(ctime.extra);
+	}
 	ref.dirty = true;
 	r = ext4_fs_put_inode_ref(&ref);
 	if (r != EOK)
 		ext4_trans_abort(mp);
 	else
 		ext4_trans_stop(mp);
+	EXT4_MP_UNLOCK(mp);
+	return r;
+
+Abort:
+	ext4_fs_put_inode_ref(&ref);
+	ext4_trans_abort(mp);
 	EXT4_MP_UNLOCK(mp);
 	return r;
 }

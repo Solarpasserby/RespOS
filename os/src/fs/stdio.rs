@@ -26,6 +26,7 @@ impl FileOp for Stdin {
         self
     }
     fn read<'a>(&'a self, buf: &'a mut [u8]) -> SysResult<usize> {
+        crate::fs::tty::check_background_read()?;
         // 尝试支持读取多个字符
         let mut count: usize = 0;
         while count < buf.len() {
@@ -92,6 +93,7 @@ impl FileOp for Stdout {
         panic!("Cannot read from stdout!");
     }
     fn write<'a>(&'a self, buf: &'a [u8]) -> SysResult<usize> {
+        crate::fs::tty::check_background_write()?;
         crate::console::write_user_bytes(buf);
         Ok(buf.len())
     }

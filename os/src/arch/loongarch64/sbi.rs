@@ -84,3 +84,14 @@ pub fn shutdown(failure: bool) -> ! {
     }
     register::idle()
 }
+
+/// Reset the LoongArch virtual platform through the ACPI GED reset register.
+pub fn restart() -> ! {
+    unsafe {
+        core::ptr::write_volatile(
+            mmio_addr(ACPI_GED_REG_RESET) as *mut u8,
+            ACPI_GED_RESET_VALUE,
+        );
+    }
+    register::idle()
+}

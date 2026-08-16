@@ -6,10 +6,10 @@ use crate::mm::{copy_from_user, copy_to_user};
 use crate::mutex::SpinLock;
 use crate::signal::{SiField, Sig, SigInfo};
 use crate::task::{
-    CpuClockHandle, TASK_MANAGER, current_task, prepare_current_task_blocked, switch_to_next_task,
+    CpuClockHandle, current_task, prepare_current_task_blocked, switch_to_next_task,
     yield_current_task,
 };
-use crate::timer::{TimeSpec, get_timeout_us};
+use crate::timer::{TimeSpec, get_accounting_clock_freq, get_time, get_timeout_us};
 use alloc::collections::BTreeMap;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -81,7 +81,7 @@ pub struct SigEvent {
 #[derive(Clone, Default)]
 struct PosixTimer {
     owner_tgid: usize,
-    owner: Weak<crate::task::TaskControlBlock>,
+    owner: Weak<crate::task::ProcessState>,
     clock_id: usize,
     cpu_clock: Option<CpuClockHandle>,
     signo: i32,
@@ -209,22 +209,37 @@ lazy_static! {
 
 static NEXT_POSIX_TIMER_ID: AtomicUsize = AtomicUsize::new(1);
 
+pub fn init_realtime_from_rtc() {
+    let Some(epoch_ns) = crate::timer::rtc_epoch_ns() else {
+        warn!("[time] RTC unavailable; CLOCK_REALTIME starts at the Unix epoch");
+        return;
+    };
+    let Ok(epoch_us) = isize::try_from(epoch_ns / 1_000) else {
+        warn!("[time] RTC value is outside the CLOCK_REALTIME range");
+        return;
+    };
+    *REALTIME_OFFSET_US.lock() = epoch_us.saturating_sub(monotonic_us() as isize);
+    info!("[time] CLOCK_REALTIME initialized from RTC");
+}
+
 /// 系统调用 sys-times。
 ///
-/// User/system time are not split yet, but the total is now derived from
-/// scheduler runtime rather than wall-clock lifetime.
 pub fn sys_times(buf: *mut Tms) -> SysResult<usize> {
     let task = current_task().expect("no current task");
-    let ticks = task.elapsed_ticks();
+    let (user_ticks, system_ticks) = task.process_accounting_ticks();
     let (child_utime, child_stime) = task.child_ticks();
     let tms = Tms {
-        tms_utime: ticks,
-        tms_stime: ticks,
+        tms_utime: user_ticks,
+        tms_stime: system_ticks,
         tms_cutime: child_utime,
         tms_cstime: child_stime,
     };
     copy_to_user(buf, &tms as *const Tms, 1)?;
-    Ok(ticks)
+    let now = get_time();
+    let frequency = get_accounting_clock_freq();
+    Ok((now / frequency)
+        .saturating_mul(CLK_TCK)
+        .saturating_add((now % frequency).saturating_mul(CLK_TCK) / frequency))
 }
 
 pub fn sys_gettimeofday(tv: *mut TimeVal, tz: *mut TimeZone) -> SysResult<usize> {
@@ -303,10 +318,14 @@ fn monotonic_us() -> usize {
     get_timeout_us()
 }
 
-fn realtime_us() -> usize {
+pub(crate) fn realtime_us() -> usize {
     (monotonic_us() as isize)
         .saturating_add(*REALTIME_OFFSET_US.lock())
         .max(0) as usize
+}
+
+pub fn realtime_timespec() -> TimeSpec {
+    timespec_from_us(realtime_us())
 }
 
 fn timespec_from_us(us: usize) -> TimeSpec {
@@ -621,9 +640,7 @@ pub fn sys_timer_create(
         CLOCK_THREAD_CPUTIME_ID => Some(task.thread_cpu_clock()),
         _ => None,
     };
-    let owner = TASK_MANAGER
-        .get(task.tgid())
-        .unwrap_or_else(|| Arc::clone(&task));
+    let owner = task.process();
     let id = NEXT_POSIX_TIMER_ID.fetch_add(1, Ordering::Relaxed) as i32;
     let timer = PosixTimer {
         owner_tgid: task.tgid(),
@@ -778,9 +795,11 @@ pub fn check_posix_timers() {
     for (owner, signo) in expired {
         let sig = Sig::from(signo);
         if sig.is_valid() {
-            if let Some(task) = owner.upgrade().filter(|task| !task.is_exited()) {
-                let siginfo = SigInfo::new(sig.raw(), SigInfo::KERNEL, SiField::None);
-                task.receive_siginfo(siginfo, false);
+            if let Some(task) = owner.upgrade().and_then(|process| process.signal_target()) {
+                if !task.is_exited() {
+                    let siginfo = SigInfo::new(sig.raw(), SigInfo::KERNEL, SiField::None);
+                    task.receive_siginfo(siginfo, false);
+                }
             }
         }
     }

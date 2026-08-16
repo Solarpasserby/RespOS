@@ -2,15 +2,15 @@
 
 use crate::arch::interrupt::InterruptGuard;
 use crate::config::{
-    KERNEL_BASE, KERNEL_HEAP_PHYS_START, KERNEL_HEAP_SIZE, PAGE_SIZE, physical_memory_end,
+    physical_memory_end, KERNEL_BASE, KERNEL_HEAP_PHYS_START, KERNEL_HEAP_SIZE, PAGE_SIZE,
 };
 use core::alloc::{GlobalAlloc, Layout};
 use core::mem::size_of;
 use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
-use respos_buddy_allocator::{Heap, bitmap_words};
+use respos_buddy_allocator::{bitmap_words, Heap};
 #[cfg(feature = "heap_magazine")]
-use respos_buddy_allocator::{MIN_ORDER, Magazine, layout_order};
+use respos_buddy_allocator::{layout_order, Magazine, MIN_ORDER};
 use spin::Mutex;
 
 #[cfg(feature = "heap_magazine")]

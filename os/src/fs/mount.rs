@@ -41,6 +41,7 @@ pub const MS_BIND: i32 = 4096;
 pub const MS_MOVE: i32 = 8192;
 pub const MS_PRIVATE: i32 = 1 << 18;
 pub const MS_STRICTATIME: i32 = 1 << 24;
+pub const MS_LAZYTIME: i32 = 1 << 25;
 const ST_NOSYMFOLLOW: i32 = 0x2000;
 static MOUNT_BACKING_ID: AtomicUsize = AtomicUsize::new(0);
 
@@ -234,6 +235,7 @@ pub fn root_path() -> Arc<Path> {
 
 pub fn sync_filesystem(filesystem: &Arc<dyn SuperBlockOp>) -> SysResult {
     crate::fs::sync_dirty_owners_for(filesystem)?;
+    filesystem.flush_lazy_metadata()?;
     filesystem.sync()
 }
 
@@ -253,6 +255,10 @@ pub fn sync_all_filesystems() -> SysResult {
         filesystems
     };
     for filesystem in filesystems {
+        if let Err(error) = filesystem.flush_lazy_metadata() {
+            first_error.get_or_insert(error);
+            continue;
+        }
         if let Err(error) = filesystem.sync() {
             first_error.get_or_insert(error);
         }
@@ -307,6 +313,9 @@ pub fn do_mount(_source: &str, target: &str, fstype: &str, flags: usize) -> SysR
         let mount = get_mount_by_dentry(&target_path.dentry).ok_or(Errno::EINVAL)?;
         if flags & MS_RDONLY as usize != 0 {
             return Err(Errno::EBUSY);
+        }
+        if mount.vfs_mount.has_flag(MS_LAZYTIME) && flags & MS_LAZYTIME as usize == 0 {
+            sync_filesystem(&mount.vfs_mount.fs)?;
         }
         mount.vfs_mount.set_flags(flags as i32);
         return Ok(0);

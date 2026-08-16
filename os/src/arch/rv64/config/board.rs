@@ -157,3 +157,9 @@ pub const VIRTIO_MMIO: &[(usize, usize)] = &[
     (0x1000_1000, 0x00_1000), // virtio-mmio-bus.0
     (0x1000_2000, 0x00_1000), // virtio-mmio-bus.1
 ];
+
+pub const MMIO: &[(usize, usize)] = &[
+    (0x0010_1000, 0x00_1000), // QEMU goldfish RTC
+    (0x1000_1000, 0x00_1000), // virtio-mmio-bus.0
+    (0x1000_2000, 0x00_1000), // virtio-mmio-bus.1
+];

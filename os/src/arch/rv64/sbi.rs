@@ -117,3 +117,11 @@ pub fn shutdown(failure: bool) -> ! {
     }
     unreachable!()
 }
+
+/// Reset the virtual machine while preserving device state that survives a
+/// platform reset, such as the RTC's programmed offset.
+pub fn restart() -> ! {
+    use sbi_rt::{ColdReboot, NoReason, system_reset};
+    system_reset(ColdReboot, NoReason);
+    unreachable!()
+}

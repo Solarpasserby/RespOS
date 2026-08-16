@@ -1,5 +1,504 @@
 # RespOS 当前状态
 
+## 2026-08-16 shared mmap ENOSPC write-fault/SIGBUS 闭合（当前 Phase 5 工作树）
+
+- **page-mkwrite 边界**：writable shared file PTE 初始只读；首次 store fault 在仍持有稳定 VMA/frame
+  provenance 时调用 backing 的 `reserve_shared_mmap_write`，只有真实 lower backing 建立成功才开放该页
+  WRITE。当前 lwext4 没有 unwritten-extent 入口，因此 ext4 File 以“写回该页当前可见字节”物化 sparse
+  block，不改变 size/offset/content；内存文件默认无需磁盘预留。`mprotect` 重新授予 shared write 时也恢复
+  write-protect，truncate/punch 后 refault 同样重新经过该边界。
+- **错误与竞态**：lower `ENOSPC` 从 page fault 返回，RV64/LA64 trap 都投递 `SIGBUS`，不再拖到
+  `msync/fsync`。File state lock 串行 lower reservation 与 truncate 的 lower-size/PageCache-size 提交，避免
+  预留把并发 shrink 反向扩容；既有 16 轮 truncate-vs-fault/store 仍通过。lwext4 `ext4_fwrite` 现在保留
+  operation error，不再被 `ext4_fs_put_inode_ref` 的成功覆盖，并保证所有错误出口配对退出 block-cache
+  write-back mode；已经完成的 partial allocation/size 事务仍提交，同时向上返回原始 `ENOSPC`。
+- **双架构真实满盘证据**：guest 在 16 MiB `/respos` auxiliary ext4 上先创建一页 sparse target，再用
+  filler+fsync 压到真实 `ENOSPC`；child 首次 shared store 必须因 `SIGBUS` 退出。释放 filler 后重新映射、
+  store、munmap/fsync 和 lower pread 又成功，证明错误不是永久 poisoned 状态。RV64/LA64 release、4 GiB、
+  2 hart 均输出 `MMAP_PHASE5 shared_write_enospc_sigbus PASS` 与 `MMAP_PHASE5 ALL PASS`，日志为
+  `/tmp/respos-{rv,la}-mmap-enospc-phase5-final.log`。
+- **相邻回归**：双架构双 libc `mmap05` 各 `1 passed, 0 failed`；BuildStorm file 双架构通过，RV64
+  64 MiB/4-worker private-map 通过。日志为 `/tmp/respos-{rv,la}-mmap-enospc-{mmap05-ltp,buildstorm-file}.log`。
+  Linux oracle 提供 `RESPOS_MMAP_ENOSPC_DIR` 可选小文件系统入口；当前容器无 loop-mount capability，默认
+  严格运行明确 SKIP 该项而其余全通过，不能将此 SKIP 伪报为宿主满盘实测。
+- **punch 并发门禁**：Linux oracle 与 RV64/LA64 各新增 16 轮独立 mapper/puncher 同时起跑；mapper
+  store+`MS_SYNC` 与整页 punch 均必须成功且无死锁，lower 最终字节只能是合法线性化结果 0 或 mapper
+  新值。三方均输出 `punch_msync_race PASS`，双架构日志为
+  `/tmp/respos-{rv,la}-mmap-punch-msync-race-final.log`。
+- **LTP `mmap16` 当前阻断**：重新临时纳入后，RV64 musl/glibc 均 TBROK。带
+  `TASK_A_FUTEX_TRACE=1` 的 `debug_traces` 运行证明 child 对首个 checkpoint 的 wake 与 parent 的
+  `wait-timed-woken` 使用完全相同的 scope/uaddr；child 也已完成首次 page-mkwrite、`ftruncate(8192)` 和
+  `mremap(...,8192)`。parent 随后进入 buffered `write()` 填盘循环，但 RespOS 在后台/阈值 writeback
+  得到 `ENOSPC` 后仍持续接受 cache write，循环始终观察不到 `write() == -1, errno == ENOSPC`，因而没有
+  发出第二次 checkpoint wake，child 最终超时。普通日志为
+  `/tmp/respos-rv-mmap16-enospc-phase5-final.log`，诊断日志为 `/tmp/respos-rv-mmap16-futex-trace.log`。
+  因此仍从默认列表排除；这是 buffered writeback error 关联/反馈缺口，不是 futex、mremap 或已闭合的
+  shared-mmap page-mkwrite/SIGBUS 路径失败。
+- **剩余边界**：M3 核心语义已闭合；更宽 mmap LTP 的当前首要阻断是上述 buffered-write `ENOSPC`
+  传播，另需 page-mkwrite 性能评估。DAX、huge page、远程/异步分配文件系统不在当前 ext4 范围。
+
+## 2026-08-16 mmap `PUNCH_HOLE` 与跨映射失效闭合（当前 Phase 5 工作树）
+
+- **真实 ext4 打洞**：`FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE` 现在在 lwext4 事务内将边界非整块
+  清零、释放完整物理块，并保持文件长度和 open-file offset 不变。修正了 extent 中段 split 只改树、不
+  释放物理块的问题；ext4 `stat.st_blocks` 改为报告 inode 的实际 `i_blocks`，不再由逻辑长度推算。三页
+  文件的专项观测为 `st_blocks=24->16`，cache eviction 后从 lower 重读 hole 仍全零。
+- **PageCache 与映射一致性**：打洞前同步目标 cache 范围并先提交旧的 delayed timestamp，再在 PageCache
+  writeback exclusion 内修改 lower extent 和缓存页；释放 File lock 后按稳定 `(dev, ino)` 扫描唯一
+  `MemorySet`。shared 与 clean private resident 页失效后 refault 为零；已经 COW 的 private 匿名页保留，
+  包括另一进程预 fault 的映射。
+- **错误语义与证据**：Linux oracle 和 RV64/LA64 release、4 GiB/2 hart 专项均通过 partial/full hole、
+  边界数据、size/offset/blocks、cross-process shared/clean-private/private-COW、cache eviction，以及缺少
+  `KEEP_SIZE`、零长度、负 offset、EOF 外范围的错误矩阵，均输出 `MMAP_PHASE5 ALL PASS`。日志为
+  `/tmp/respos-{rv,la}-mmap-punch-phase5-errors.log`。双架构双 libc `mmap05` 各
+  `1 passed, 0 failed`，BuildStorm file 双架构通过且 RV64 private-map 通过，8 轮 fadvise 专项双架构通过；
+  日志为 `/tmp/respos-{rv,la}-mmap-punch-{mmap05-ltp,buildstorm-file,fadvise}.log`。
+- **诚实边界**：`fallocate04` 测的是普通预分配，两架构双 libc 当前均 skip；这不是 punch-hole 失败，也
+  不能作为 punch 证据。default/`KEEP_SIZE` 真实预分配仍需 unwritten extent。存储耗尽 shared write
+  fault 的 `SIGBUS` 与 16 轮 punch-vs-store/msync 已由上节关闭；`mmap16` buffered-write `ENOSPC`
+  反馈和更宽 mmap LTP 仍待推进。
+
+## 2026-08-16 lazytime background/eviction/crash-image 闭合（当前 Phase 5 工作树）
+
+- **单调 aging 与 sysctl**：pending atime 同时记录首次 dirty 的 monotonic 时间；同一 generation 后续读取
+  只更新可见 atime，不重置 aging。`/proc/sys/vm/dirtytime_expire_seconds` 默认 43,200 秒，写 0 禁止
+  background expiry，重新写非零值立即唤醒扫描。该默认值对齐 Linux `dirtytime_expire_interval` 的 12 小时
+  阈值；Linux 周期 worker 的“最坏约 24 小时”是扫描相位上界，不应误写成每个 inode 固定等待 24 小时。
+- **后台与失败规则**：timer-service hart 的 idle 路径每批最多处理 8 个到期 inode；flush 复用 pending
+  generation，成功只清对应 generation，失败保留 registry 强引用并安排短延迟重试。aging 不使用
+  `CLOCK_REALTIME`，因此 `clock_settime` 不能提前或延后 dirtytime 到期。
+- **安全逐出**：dentry capacity eviction 和显式 cache cleanup 都先释放 dentry-cache 锁，再在最后一个真实
+  dentry/file owner 消失时提交 pending atime；lower I/O 不在 cache 锁内执行。registry 的保活引用不再把
+  inode 永久伪装成“仍被使用”。逐出失败继续保活并交给 background retry。
+- **双架构门禁**：RV64/LA64 release 与 `perf_counters` 构建均输出完整
+  `ATIME_PHASE5 PASS ... lazytime_background=pass lazytime_eviction=pass ...`。perf probe 证明 expiry=0 时
+  1.2 秒内 lower update 保持 0、改为 1 后恰好提交 1 次，并证明 close + dentry cleanup 后 fresh stat 读取
+  lower 已持久化 atime。日志为
+  `/tmp/respos-{rv,la}-atime-dirtytime-eviction-phase5{,-perf}.log`。相邻 BuildStorm file 双架构通过，RV64
+  同轮 64 MiB/4-worker private-map 通过，日志 `/tmp/respos-{rv,la}-lazytime-eviction-buildstorm-file.log`。
+- **无显式同步 crash-image**：`lazytime_persist_probe` 在 private auxiliary image 上等待 background expiry，
+  输出 PREPARE marker 后由宿主 SIGKILL QEMU，全程不调用 fsync/sync/unmount/reboot/poweroff；同一 raw image
+  由新 QEMU 冷启动后直接从 lower inode 读回目标 atime。RV64/LA64 的 PREPARE/VERIFY 均通过，日志为
+  `/tmp/respos-{rv,la}-lazytime-crash-{prepare,verify}.log`。
+- **剩余边界**：该证据关闭当前 QEMU VirtIO/ext4 的 background、eviction 和进程级 crash-image 范围；
+  真实硬件断电、设备 volatile write cache、lower I/O failure injection、超大 registry soak 与 birthtime 仍需
+  独立验证。
+
+## 2026-08-16 完整 `posix_fadvise` advice 与 PageCache 行为闭合（当前 Phase 5 工作树）
+
+- **open-file-description 状态**：regular-file `FileInner` 持有共享于 dup/fork 的 readahead 与 NOREUSE
+  状态。NORMAL 恢复 16 页并清 NOREUSE，RANDOM 降为单页，SEQUENTIAL 提升为 32 页；NOREUSE 不再把
+  cache hit 提升为热页，后续 NORMAL 恢复正常 LRU promotion。buffered read、pread 与 file-backed mmap
+  fault 共用这一状态。
+- **范围 advice**：WILLNEED 尽力预取覆盖范围内的所有页（含部分页），底层读取失败不作为 syscall 错误
+  返回。DONTNEED 先同步目标范围但忽略 writeback 错误，再只驱逐 advice 完整覆盖的 clean、unmapped、
+  unpinned 页；范围到达 EOF 时允许驱逐末尾部分页。dirty 或仍被 mmap/frame 引用的页保持缓存。tmpfile
+  没有可重读 lower storage，不驱逐其权威数据。
+- **ABI 与 Linux 对照**：六种 advice 均接受；负 offset/len 与未知 advice 返回 `EINVAL`，坏 fd 返回
+  `EBADF`，pipe 返回 `ESPIPE`。`scripts/fadvise_phase5_probe_linux.c` 以 `-Werror` 通过。Linux 的 WILLNEED
+  是异步尽力预读，oracle 不把 syscall 返回时的瞬时 `mincore` residency 当成 ABI；RespOS 当前同步预取
+  仍由 guest 的后续 cache-hit/I/O 观测固定。
+- **双架构证据**：RV64/LA64 release、4 GiB、2 hart 的 `TASK_A_FADVISE_PHASE5_PROBE=1` 各连续 8/8，
+  日志 `/tmp/respos-{rv,la}-fadvise-phase5.log`。两架构 musl/glibc 的
+  `posix_fadvise01{,_64}`--`posix_fadvise04{,_64}` 均为 `8 passed, 0 failed`，日志
+  `/tmp/respos-{rv,la}-fadvise-phase5-ltp.log`。PageCache 相邻 mmap/SIGBUS 回归均 `ALL PASS`，clock/rusage
+  冷 major/block-I/O 回归均 20/20，日志分别为
+  `/tmp/respos-{rv,la}-fadvise-{mmap,rusage}-regression.log`。
+- **剩余边界**：DONTNEED 当前因没有专用 async flusher 而同步发起范围写回；background writeback/error
+  时序、极大 WILLNEED 范围的节流以及完整 BuildStorm soak 仍需独立验证。
+
+## 2026-08-16 `getrusage` fault/RSS/context-switch/block-I/O 字段闭合（当前 Phase 5 工作树）
+
+- **统一资源快照**：新增 thread、process 与 reaped-children 三层资源计数。`RUSAGE_THREAD` 返回调用线程的
+  `minflt/majflt/nvcsw/nivcsw` 和进程级 `maxrss`；`RUSAGE_SELF` 保留已退出线程累计；Zombie 持有最终
+  process snapshot，只有 `wait4`/非 `WNOWAIT` 的 `waitid` 成功 copyout 并完成 reap 后才纳入
+  `RUSAGE_CHILDREN`。子进程 fault/switch 计数求和，`maxrss` 取历史子进程最大值。
+- **缺页与 RSS**：用户硬件缺页现在返回 `Minor/Major/Retry` 分类；anonymous/COW/page-cache hit 为 minor，
+  需要 lower file fill 的 private-file fault 为 major，已许可 PTE 的 stale-TLB retry 不重复计数。内核
+  user-copy 主动补页不冒充用户 fault。`MemorySet` 的 resident user frame 数在用户 fault、getrusage 和
+  最终退出回收前更新进程高水位，ABI 以 KiB 导出且 unmap 后不回退。
+- **切换语义**：scheduler handoff 携带 `None/Voluntary/Involuntary` 原因，直到 outgoing context 已发布且
+  next task 已选定后才提交计数；只有 `prev != next` 才增加 `nvcsw/nivcsw`。因此单 task 的 timer tick 或
+  `sched_yield` 虽会经过 RespOS 的 per-CPU idle stack，却不再伪装为 Linux task switch；固定同一 CPU 的
+  竞争 child 仍产生 involuntary，blocked wait/sleep 切向 idle/其他 task 仍产生 voluntary。thread counter
+  同步累加到稳定 `ProcessState`，非 leader thread 退出不会丢失进程统计。
+- **块 I/O 与冷文件 major fault**：成功提交到 VirtIO block device 的当前任务读请求按 512-byte block
+  累计 `ru_inblock`，包括 data、metadata 与 partial-write read-modify-write；disk-backed PageCache page
+  第一次由 clean 变 dirty 时按页累计 `ru_oublock`，同一 dirty page 的重复写不重复累计。当前
+  `fadvise64(POSIX_FADV_DONTNEED)` 只驱逐指定范围内 clean 且未映射/未被持有的 file-cache page，保留
+  dirty/mapped page；专项据此在 `fsync` 后稳定构造真实 lower-file fill，首个 private-file fault 同时增加
+  `ru_majflt/ru_inblock`，相邻 readahead hit 只增加 `ru_minflt`。
+- **Linux-zero ABI 边界**：Linux 当前 `getrusage` 实现不填
+  `ru_ixrss/ru_idrss/ru_isrss/ru_nswap/ru_msgsnd/ru_msgrcv/ru_nsignals`，清零后的 ABI 字段保持 0；RespOS
+  明确保持同一可观察语义。clock probe 对 THREAD/SELF/CHILDREN/wait4 snapshot 逐字段验证，signal probe
+  又在完整投递、pending、restart 与 SIGCHLD 场景后验证 `ru_nsignals == 0`；这些不是“尚未接线的计数器”。
+- **Linux 与双架构证据**：`scripts/cpu_accounting_phase5_probe_linux.c` 以 `-Werror -pthread` 通过匿名
+  minor fault、cold file major fault、sticky maxrss、voluntary switch、block I/O、全部 Linux-zero legacy 字段、
+  thread/process 与 wait4 children oracle。RV64/LA64 release、4 GiB、2 hart 的 `TASK_A_CLOCK_PROBE=1`
+  各 20/20，逐轮通过 actual-switch、Linux-zero legacy、block-I/O/cold-major、wait4 children 和 raw waitid
+  第五参数 rusage，日志 `/tmp/respos-{rv,la}-rusage-actual-switch-phase5.log`。修改 scheduler handoff 后，
+  signal 8/8、wait4 与 task identity/leader-exit/non-leader-exec 相邻回归双架构通过，日志分别为
+  `/tmp/respos-{rv,la}-rusage-actual-switch-{signal,wait4,task-phase5}.log`。聚焦 LTP 的 musl/glibc
+  `getrusage01,getrusage02,times01,times03` 在两架构均为 `4 passed, 0 failed`，日志
+  `/tmp/respos-{rv,la}-rusage-actual-switch-ltp.log`。
+- **剩余边界**：full `posix_fadvise` advice 已由上节关闭；更宽 LTP rusage 簇与 CPU hotplug accounting
+  仍待补齐，当前字段闭合不外推为所有 Unix 的非 Linux 统计口径。
+
+## 2026-08-16 `RUSAGE_THREAD` user/system 记账闭合（当前 Phase 5 工作树）
+
+- **线程独立记账**：`ThreadCpuClock` 从单一 total 改为 user/system 两项，并与 process clock 使用同一份
+  scheduler begin/end 和 user-trap mode transition 时间点；POSIX thread CPU clock 仍返回两项之和。
+  `getrusage(RUSAGE_THREAD)` 只快照调用线程，不误用 thread-group aggregate；非法 `who` 仍为 `EINVAL`。
+- **Linux 与双架构证据**：Linux pthread oracle 分离 main/worker thread usage 并核对
+  `RUSAGE_SELF >= main + worker`，严格 `-Werror -pthread` 通过。RV64/LA64 release、4 GiB、2 hart 的
+  `task_a_clock_probe` 各 20/20，逐轮输出 `process aggregation/RUSAGE_THREAD PASS`，日志为
+  `/tmp/respos-{rv,la}-rusage-thread-phase5.log`。
+- **相邻回归**：双架构 `task_a_wait4_probe` 均通过 self user/system、bad rusage copyout retry、reaped
+  children 累计与 restart，日志 `/tmp/respos-{rv,la}-rusage-thread-wait4-regression.log`。
+- **精度边界**：rusage 继续按 `CLK_TCK=100` 导出。专项会让 main/worker 各自运行到至少跨过一个 rusage
+  tick；短于 10 ms 的合法 CPU 消耗可能仍显示 0，不能据此判定线程记账丢失。
+- **后续状态**：`ru_maxrss`、fault 与 context-switch 字段已由上节关闭当前范围；I/O/signal 字段、CPU
+  hotplug 与更宽 LTP rusage 簇仍待实现和验证。
+
+## 2026-08-16 24-hour relatime 与 lazytime 闭合（当前 Phase 5 工作树）
+
+- **纯 24 小时触发**：专项先把 atime 设为严格新于 mtime/ctime，再推进 system realtime，使读取时只满足
+  `now - atime >= 24h`；RV64/LA64 均观察到 atime 更新且 ctime 不变，排除了由
+  `atime <= mtime/ctime` 顺带触发的假覆盖。
+- **lazytime 状态模型**：`MS_LAZYTIME` 下自动 atime 先发布到共享 ext4 inode metadata cache，保持 stat
+  立即可见，不直接提交 lower inode。强引用 registry 保证 pending inode 在 durability boundary 前不会
+  丢失；同 inode `fsync/fdatasync` 提交自身，`sync/syncfs/unmount/reboot` 和关闭 lazytime 的 remount 在
+  dirty data/mtime/ctime 顺序写回后提交对应 filesystem 的全部 lazy atime，再做底层 barrier。
+- **共享 identity 修正**：普通 ext4 文件不再把自动 atime 保存在 open-file override。pathname
+  `utimensat`、其他 fd 和当前 fd 现在共同观察 inode 级时间；open-file override 只保留给没有 lower inode
+  可提交的 tmpfile，避免旧 fd 用陈旧 atime 做 relatime 决策。
+- **双架构证据**：RV64/LA64 release、4 GiB、2 hart 均输出
+  `ATIME_PHASE5 PASS relatime=pass relatime_24h=pass ... lazytime=pass ctime=pass`，日志为
+  `/tmp/respos-{rv,la}-atime-lazytime-phase5-final.log`。同配置加 `perf_counters` 后，probe 在 lazy read 后
+  断言 lower `atime_updates=0`，在 `fsync` 与 `sync` 后分别断言恰为 1；日志为
+  `/tmp/respos-{rv,la}-atime-lazytime-perf-phase5-final.log`。
+- **后续状态**：lazytime background aging、eviction 与无显式 sync crash-image 已由顶部更新闭合当前
+  QEMU/ext4 范围；真实硬件断电/volatile device cache、failure injection、超大 registry soak 与 birthtime
+  仍待验证。
+
+## 2026-08-16 RTC read/set、reboot reset persistence 与 hwclock 闭合（当前 Phase 5 工作树）
+
+- **RTC 与 system clock 分域**：`RTC_RD_TIME` 改为直接读取 RV64 goldfish/LA64 LS7A 硬件 RTC，不再错误
+  返回 system realtime offset；`RTC_SET_TIME` 按 `CAP_SYS_TIME`、日历校验和失败原子性写硬件，但不改
+  system clock。反向的 `clock_settime(CLOCK_REALTIME)` 只改 system clock，不写 RTC。
+- **平台写回**：RV64 按 Linux goldfish driver 的 high-then-low 顺序写 64-bit epoch ns；LA64 通过安全的
+  January 1 中间态依次写 TOY year/calendar，避免 leap/non-leap 年切换时 QEMU 规范化中间 February 29。
+  两边写后都读回确认。
+- **ABI 与工具链**：`/dev/rtc`、`/dev/rtc0` 与 `/dev/misc/rtc` 指向同一设备；`sys_ioctl` 在入口把 command
+  规范化为 Linux 的 32-bit `unsigned int`，修复 RV64 musl 把 `0x80247009` 符号扩展为
+  `0xffffffff80247009` 后误报 `ENOTTY`。原先对 BusyBox `hwclock` 的无条件成功归一化已删除。
+- **普通启动证据**：RV64/LA64 release、4 GiB、2 hart 均输出
+  `RTC_SET_PHASE5 PASS hardware_read_write=pass clock_domains=pass validation=pass permission=pass restore=pass
+  hwclock=pass`，且同轮 musl/glibc `hwclock -r` 都真实退出 0。日志为
+  `/tmp/respos-{rv,la}-rtc-set-phase5-current.log`。
+- **reset persistence 证据**：reboot syscall 现在校验 Linux magic、command 与 `CAP_SYS_BOOT`，RV64 走 SBI
+  cold reboot，LA64 走 ACPI GED reset。专项在同一 QEMU 设备实例内先保存原 RTC、写目标值并整机 reset；
+  第二次内核启动验证 RTC offset 保持且 system realtime 从它重新初始化，最后恢复原 RTC。两架构日志
+  `/tmp/respos-{rv,la}-rtc-reset-persist-phase5.log` 均含 `RTC_RESET_PERSIST PREPARE PASS` 与
+  `VERIFY PASS device_reset=pass boot_reinitialize=pass restore=pass`。
+- **范围边界**：QEMU RTC offset 属于设备实例/迁移状态；`-rtc base=utc` 启动的新 QEMU 进程会重新以宿主
+  时间创建 RTC，不能把同实例 reset persistence 外推为跨 QEMU 进程的电池后备 NVRAM。
+
+## 2026-08-15 M4 realtime 与 ext4 扩展时间戳跨重启闭合（当前 Phase 5 工作树）
+
+- **realtime 来源**：启动完成正式 MMIO 映射后，RV64 从 QEMU goldfish RTC 读取 64-bit epoch ns；LA64
+  先启用 LS7A `EO|TOYEN`，再稳定读取 TOY year/calendar 字段。两者都用 RTC epoch 减 monotonic 建立
+  `CLOCK_REALTIME` offset；filesystem `UTIME_NOW`、自动 inode 时间和 SysV IPC 时间统一改用 realtime，
+  uptime/timeout 仍使用 monotonic。`RTC_RD_TIME` 后续已拆回硬件 RTC 域，见上节。
+- **on-disk 编码**：lwext4 setattr ABI 现在传递 signed 64-bit 秒和纳秒；写入 ext4 低 32-bit 秒、
+  `*_extra = nsec << 2 | epoch`，raw inode 读取按 signed low word + 2-bit epoch 解码。依据 Linux
+  `timestamp_truncate()`，extra inode 将时间截断到 `[-2147483648,15032385535]`，命中端点时 nsec 归零；
+  无 extra 字段退化为 signed 32-bit 秒级。创建 regular/dir/special/symlink 后也在发布缓存前持久化三项
+  realtime。Rust cache 发布现在按 inode 的 atime/mtime/ctime extra-field 能力采用同一 clamp，避免
+  128-byte inode 在当前进程可见扩展值、重启后才退化的分裂。
+- **Linux/即时/跨重启证据**：严格 Linux oracle 输出
+  `EXT4_TIMESTAMP_LINUX PASS negative_sec=pass epoch=pass nsec=pass reopen=pass`；RV64/LA64
+  `utimens_special_probe` 均通过 `-1.123456789` 与 `2147483648.987654321`。使用私有 root raw 副本和
+  同一可写辅助盘连续冷启动两次，两架构均先输出 `PREPARE PASS`，再输出
+  `VERIFY PASS ... clamp=pass automatic_realtime=pass`。日志为
+  `/tmp/respos-{rv,la}-ext4-persist-{prepare,verify}.log` 与
+  `/tmp/respos-{rv,la}-ext4-timestamp-immediate.log`。
+- **旧 inode 跨重启证据**：在 `mkfs.ext4 -I 128` 的私有 32 MiB 辅助盘上，两架构均连续冷启动两次；
+  第一轮同时验证自动 realtime 立即为秒级、显式越界立即 clamp，第二轮从 raw inode 重读相同结果。
+  两架构均输出 `EXT4_TIMESTAMP_LEGACY PREPARE/VERIFY PASS signed32_clamp=pass
+  seconds_granularity=pass automatic_realtime=pass`，日志为
+  `/tmp/respos-{rv,la}-ext4-legacy-{prepare,verify}.log`。
+- **相邻回归**：双架构 clock probe 各 20/20 且明确断言 calendar epoch，日志
+  `/tmp/respos-{rv,la}-rtc-clock-phase5.log`；musl/glibc 的
+  `utimensat01,statx02,statx03` 在两架构均为 `SUMMARY: 3 passed, 0 failed, 0 skipped`，日志
+  `/tmp/respos-{rv,la}-ext4-timestamp-ltp.log`。
+- **atime 事件矩阵**：严格 Linux oracle 固定 regular/directory 默认 relatime 的抑制/触发、重复读取
+  不再写 metadata、自动 atime 不改 ctime 及 owner `O_NOATIME`；RV64/LA64 release、4 GiB、2 hart
+  进一步验证 regular/directory 的默认 relatime 与 `MS_STRICTATIME`、mount `MS_NOATIME`、open
+  `O_NOATIME`、directory `MS_NODIRATIME`，并断言 `MS_NODIRATIME` 不抑制 regular-file atime。两架构
+  均输出 `ATIME_PHASE5 PASS ... directory=pass nodiratime=pass ctime=pass`，日志
+  `/tmp/respos-{rv,la}-atime-directory-phase5.log`。
+- **剩余边界**：birthtime 仍待关闭；24-hour-only relatime 与 lazytime 显式同步边界见上节。
+
+## 2026-08-15 M2.3 `recvmmsg` 非空 timeout 与 `MSG_WAITFORONE` 闭合（当前 Phase 5 工作树）
+
+- **Linux 可观察 timeout 模型**：非空 `recvmmsg` timeout 不是独立唤醒 deadline；完全无消息时即使
+  timeout 已过也继续阻塞，只有 message 或 signal 才使调用继续。timeout 只在每条 message 成功接收后
+  写回：超期后才到达的 message 仍计入返回值并把 remainder 写零。RespOS 保留该 Linux ABI 行为，
+  没有用理想化 timer 改写它。
+- **signal/restart/partial**：普通 handler 在零进展时返回 `EINTR` 且 timeout 原值不变；`SA_RESTART`
+  重新执行带 timeout 的 syscall，之后成功 message 按本次重执行的起点写 remainder；默认 ignored signal
+  不打断。第一条 message 完成、第二条等待时收到 signal，优先返回 count `1`，timeout 保留第一条成功后
+  最近一次写回的 remainder。
+- **批量控制**：新增 `MSG_WAITFORONE` 解析；首条 message 成功后，后续 receive 自动加入
+  `MSG_DONTWAIT`，无第二条时立即返回 partial count，并保留首条接收后的 remainder。未知 flag 的失败仍
+  在任何 message/timeout 写回前完成。
+- **实现与 restart 分类**：`sys_recvmmsg` 在 syscall 入场快照 relative deadline，但不注册独立 timer；
+  每次成功后按当前 monotonic time 写回。restart classifier 不再因 timeout pointer 非空排除 recvmmsg，
+  仍服从 socket `SO_RCVTIMEO` 的接收方向非重启规则。
+- **证据**：严格 `-Werror` Linux oracle 输出 `recvmmsg_timeout_modes PASS`；RV64/LA64 release、4 GiB、
+  2 hart 的完整 socket Phase 5 probe 各连续 8/8，日志为
+  `/tmp/respos-{rv,la}-socket-recvmmsg-timeout-stress8.log`。
+- **剩余边界**：Linux time64/compat ABI、timeout user-copy fault 与 `SO_RCVTIMEO` 同时到达的更宽错误矩阵
+  尚未单独覆盖；当前原生 64-bit ABI 的 timeout/restart/partial/WAITFORONE 主线已闭合。
+
+## 2026-08-15 M2.3 timeout wait 非重启契约与 signal wake hint 竞态（当前 Phase 5 工作树）
+
+- **timeout wait 契约**：Linux oracle 与 guest probe 现同时覆盖 `nanosleep`、空 `ppoll`、空
+  `pselect6`、注册未就绪 pipe 读端的 `epoll_pwait`，以及 relative/absolute `clock_nanosleep`。普通
+  handler 与 `SA_RESTART` handler 都必须在
+  signal 到达时返回 `EINTR`；默认忽略的 `SIGWINCH` 不打断等待并等到 timeout。`nanosleep` 另验证
+  relative remaining time 与已等待时间之和合理；relative `clock_nanosleep` 同样写 remainder，absolute
+  形式保持 remainder 不变。这六类继续明确排除在 restart-class 表外。
+- **过期 wake hint 修复**：SMP 下发送核可能先把 signal 入队，等待核据此返回 `EINTR` 并消费 signal，
+  发送核随后才写 `interrupted=true`，使下一次无 pending signal 的阻塞 syscall 假 `EINTR`。
+  `TaskControlBlock::mark_signal_interrupted()` 现发布 hint 后重新检查任务仍处于 interruptible 状态且仍有
+  可递送 signal；否则撤销 hint。完整 signal probe 曾直接观察到 `epoll_pwait` 正确 `EINTR` 后 cleanup
+  `wait4` 被同一过期 hint 再次打断，修复后未复现。
+- **探针前置条件**：`SA_NOCLDSTOP` 子项以 pipe handshake 确认 fork child 已首次运行后再发 `SIGSTOP`，
+  Linux/guest 使用相同结构；epoll 子项注册真实未就绪 fd，避免空 interest 集合在当前实现中走主动让步
+  路径而把调度延迟误判为 timeout/restart 错误。
+- **stop/continue 发布竞态**：GDB 捕获一次无输出 hang 时两 hart 均在 `run_tasks` idle，排除锁/TLB
+  stall。根因是 stop handler 先通知父进程再写 `Stopped`；父进程在窗口内发送 `SIGCONT` 时仍看到
+  `Running`，不执行 stopped-task wake，child 随后永久停住。现先发布 `Stopped`，再发布 wait/SIGCHLD
+  事件，最后 handoff 不再覆盖并发 `SIGCONT` 已提交的 `Ready`。修复前普通 release 多轮稳定触发，修复后
+  双架构完整 signal 各 8/8，job-control 专项双架构通过。
+- **双架构证据**：RV64/LA64 release、4 GiB、2 hart 的 signal probe（含 clock_nanosleep）各连续
+  8 轮通过，日志为 `/tmp/respos-{rv,la}-signal-clock-nanosleep-stress8.log`（RV64 `-s` 仅开启未连接的
+  debug listener）。相邻 wait4、八项 task Phase 5 均双架构
+  `ALL PASS`，日志为 `/tmp/respos-{rv,la}-{wait4,task-phase5}-after-signal-wake-fix.log`；socket restart
+  簇双架构各 8/8，日志为 `/tmp/respos-{rv,la}-socket-after-signal-wake-fix-stress8.log`；CPU clock 相邻
+  门禁双架构各 20/20，日志为 `/tmp/respos-{rv,la}-clock-after-signal-wake-fix.log`。
+- **剩余边界**：`recvmmsg` 非空 timeout 已由顶部更新闭合当前原生 ABI；其他尚未盘点的
+  timeout-bearing syscall 仍不能由本结果外推为完成。
+
+## 2026-08-15 M2.3 阻塞 I/O restart 与 child-event lost-wakeup 修复（当前 Phase 5 工作树）
+
+- **restart class 扩展**：RV64/LA64 trap 不再硬编码仅 `wait4`，而是查询显式 restart-class 表；当前表
+  包含已有证据的
+  `wait4/read/write/readv/writev/accept/accept4/connect/sendto/recvfrom/sendmsg/recvmsg/sendmmsg/recvmmsg`，以及
+  `FUTEX_WAIT/FUTEX_WAIT_BITSET` 的 null-timeout 形式。
+  syscall 零进展返回 `EINTR` 后，只有实际递送的用户 handler 带
+  `SA_RESTART` 才在 signal frame 中恢复原 arg0 并回退 syscall PC；poll/sleep 与 timeout-bearing 类
+  不在表中；futex 表项只覆盖 null timeout，`recvmmsg` 已覆盖 null/non-null timeout。所有 socket 表项
+  还按方向查询 fd：
+  accept/recv/read 排除 `SO_RCVTIMEO`，connect/send/write 排除 `SO_SNDTIMEO`。
+- **Linux/guest 契约**：`signal_phase5_probe` 以空/满 pipe 覆盖标量和向量 read/write 的普通 handler、
+  `SA_RESTART` 和默认忽略三分支；已有进展优先返回字节数。`readv` 在前一 iovec 恰好填满后先检查
+  readiness，避免为了下一 iovec 重新阻塞。`socket_phase5_probe` 同样覆盖阻塞
+  `accept/recvfrom/sendto/sendmsg/recvmsg` 的三分支；restart/默认忽略的 accept/recv 由稍后到达的 AF_UNIX
+  连接/数据完成，send 则先填满 peer buffer、收到信号后由 peer 排空数据完成。`recvmsg(MSG_WAITALL)`
+  已收到部分数据再被 signal 打断时，即使 `SA_RESTART` 也优先返回已有字节。`sendmmsg/recvmmsg` 同样
+  覆盖三种 disposition；`recvmmsg` 第一条完成、第二条被 signal 打断时返回 message count `1`，不进入
+  零进展 restart。两组严格编译 Linux oracle 均通过。
+- **阻塞 connect**：AF_UNIX accept queue 满时，阻塞 socket 现在在 listener pending lock 下登记
+  interruptible connect waiter；accept 释放槽位或 listener close 后唤醒，非阻塞 socket 仍返回 `EAGAIN`。
+  Linux/guest probe 动态填满队列，覆盖普通 handler=`EINTR`、`SA_RESTART` 后释放槽位完成、默认忽略继续
+  等待。accept/recvfrom/sendto/connect 还分别设置方向对应的 socket timeout，证明即使 action 带
+  `SA_RESTART` 仍返回 `EINTR`。
+- **相邻竞态修复**：新增 read 向量改变 SMP 时序后，原 `SA_NOCLDSTOP` stop/wait 测试稳定暴露
+  scan-child → register-waiter 窗口丢 stop event。`ProcessState` 现发布单调 child-event generation；
+  wait4/waitid 在扫描前取代际，登记并发布 Blocked 后若代际变化立即撤销 sleep 并重扫。该机制同时覆盖
+  stop/continue/exit，不靠调试输出或 yield 掩盖竞态。
+- **pid-specific wait 活性修复**：登记 Blocked 后的竞态复查不再把任意已有 `exited_child_ids` 当成当前
+  wait 条件已变化；否则等待 child A 时，尚未回收的 child B 会让 wait4 永久忙重扫。LA64 内核态关闭
+  中断使该忙循环进一步阻止远端 TLB shootdown ACK，最终卡住 child A 的退出回收。权威判据仍是
+  scan 前后的 child-event generation，下一轮 children scan 再按 pid/pgrp/options 过滤。
+- **双架构证据**：RV64/LA64 release、4 GiB、2 hart 的完整 signal probe 各连续 8 轮通过，最终日志为
+  `/tmp/respos-{rv,la}-signal-rwv-restart-stress8.log`；含 connect/timeout 边界的完整 socket restart 簇
+  各连续 8 轮通过，最终日志为 `/tmp/respos-{rv,la}-socket-restart-entry-snapshot-stress8.log`。原
+  `task_a_wait4_probe` 双架构仍输出
+  `ALL PASS`，最新日志为 `/tmp/respos-{rv,la}-wait4-child-generation-gate.log`。null-timeout futex
+  restart 的完整 signal probe 各 8/8 通过，日志为
+  `/tmp/respos-{rv,la}-signal-futex-waitfix-stress8.log`；timeout-bearing futex 的 wake/signal/timeout
+  三向竞态各 20/20 通过，日志为 `/tmp/respos-{rv,la}-futex-timed-norestart-waitfix.log`。相邻八项
+  Phase 5 task probe 双架构仍为 `TASK_PHASE5 ALL PASS`。
+- **剩余边界**：`nanosleep/ppoll/pselect6/epoll_pwait/clock_nanosleep` 已明确验证为 timeout 非重启类；
+  `recvmmsg` 非空 timeout 则按 Linux restart 行为由顶部更新闭合。其他调用不得由此外推。
+
+## 2026-08-15 M2.3 标准/实时 pending queue 与 `RLIMIT_SIGPENDING` 首轮闭合（当前 Phase 5 工作树）
+
+- **队列模型**：`SigPending` 继续用 bitmap 做最低信号号选择，但每个信号号保存 FIFO；1--32 在 pending
+  期间合并且保留首条 `siginfo`，33--64 同号多实例逐条排队，只有最后一个实例被消费后才清 pending 位。
+  `rt_sigtimedwait` 的 peek/copy/consume 协议因此可逐条返回 `SI_QUEUE` value，copyout 失败仍不误消费。
+- **配额与回收**：稳定 `ProcessState` 原子持有进程内实时 pending 数，thread/process 两级队列共用
+  `RLIMIT_SIGPENDING` soft limit；`tkill/tgkill/rt_sigqueueinfo` 配额耗尽返回 `EAGAIN`，消费或线程退出丢弃
+  thread-pending 后归还额度。当前凭据层尚无全局 UID 对象，计数范围是单个进程，不是 Linux 的 real-UID
+  跨进程总量；该差异保留为后续边界。
+- **对照与专项证据**：严格编译的 Linux oracle 验证标准信号两次 `sigqueue` 只返回首值、实时信号三值
+  FIFO；RV64/LA64 release、4 GiB、2 hart guest 还覆盖 limit=2 的填满 `EAGAIN`、消费后额度恢复，并与
+  SIGCHLD/exec 既有向量同轮输出 `SIGNAL_PHASE5 ALL PASS`。最终 guest 日志为
+  `/tmp/respos-{rv,la}-signal-rtqueue-quota.log`。
+- **LTP 与相邻门禁**：`tgkill02` 的 limit=0 场景在 RV64/LA64 musl/glibc 均为
+  `1 passed, 0 failed`，日志为 `/tmp/respos-{rv,la}-signal-rtqueue-tgkill02.log`；修改队列消费路径后，
+  双架构 `task_a_clock_probe` 各 20 轮通过，日志为 `/tmp/respos-{rv,la}-signal-rtqueue-clock.log`。
+- **剩余边界**：real-UID 跨进程计数、POSIX timer overrun/内核实时信号配额策略，以及
+  timeout-bearing restart classes 尚未闭合，M2.3 保持进行中；null-timeout futex 已见本文顶部更新。
+
+## 2026-08-15 M3 mmap EOF/truncate/SIGBUS 核心与跨进程竞态闭合（当前 Phase 5 工作树）
+
+- **live EOF fault**：普通 file mmap 的整页 fault 每次读取当前文件长度；整页起点越 EOF 返回 `EIO` 并
+  由 trap 分类为 `SIGBUS`，映射后扩容则可 fault-in 新文件页。共享映射只预装初始 EOF 内的 PTE，
+  不再把预分配的零 frame 暴露为越界页。
+- **truncate invalidation**：File 完成 truncate/PageCache 尾部清零并释放 File lock 后，两阶段扫描所有
+  唯一 live MemorySet；先在 read lock 下收集 file handle、无 MemorySet lock 做 stat，再以 write lock
+  对匹配 inode 移除新 EOF 外的 resident PTE/frame 并执行既有 TLB flush/shootdown。避免形成
+  File-lock→MemorySet-lock 与 fault 的反向锁序。
+- **private provenance**：clean MAP_PRIVATE file page 先共享 PageCache frame并以只读+COW PTE 映射；首个
+  store 必须复制为匿名 private page。truncate 对 partial tail 清零仍可作用于 clean page，而已经 COW
+  的 private bytes 保留；新 EOF 外的整页无论是否 COW 都失效并在下次访问 SIGBUS。
+- **普通 mmap 与 ELF 分型**：普通 mmap 使用动态 EOF；ELF `PT_LOAD` 保持固定 file-backed prefix，段尾
+  BSS 为匿名零页，固定 prefix 的 partial last page 只复制有效字节。首轮把 live EOF 错用于 ELF 后，
+  RV64 `mmap05` 两套 libc 在 loader 阶段 139；分型修复后 RV64/LA64 musl/glibc 均为
+  `SUMMARY: 1 passed, 0 failed`。
+- **证据**：Linux oracle 与 RV64/LA64 release、4 GiB、2 hart 最终均输出 shared/private/
+  private_cow_truncate 及 `MMAP_PHASE5 ALL PASS`，guest 日志为
+  `/tmp/respos-{rv,la}-mmap-phase5-final.log`；2026-08-15 新增独立 truncator、已驻留/未 fault mapper
+  以及 16 轮 truncate-vs-fault/store 竞态后，Linux 严格 oracle 与同配置双架构均输出
+  `cross_process_truncate PASS`、`cross_process_fault_store_race PASS` 和 `ALL PASS`，日志为
+  `/tmp/respos-{rv,la}-mmap-cross-process.log`；`mmap05` 日志为
+  `/tmp/respos-{rv,la}-mmap05-fixed-partial.log`。RV64
+  `buildstorm_file_probe` 与 64 MiB/4-worker `buildstorm_private_map_probe` 同轮通过；新增竞态后再次运行，
+  RV64 两项均通过，LA64 的 file probe 通过且 private-map 按既有 RV64-only 规则跳过，日志为
+  `/tmp/respos-{rv,la}-mmap-buildstorm-cross-process.log`。
+- **竞态收敛口径**：两个 mapper 分别覆盖 truncate 前已驻留 PTE 与尚未 fault 的文件页；第三个持 fd
+  的进程完成 shrink 后，两者访问均须 `SIGBUS`。另 16 轮同时释放 mapper store/fault 与 truncator：
+  store 若先发生，可暂时成功，但 truncate-done barrier 后的第二次访问必须 `SIGBUS`；truncate 若先发生，
+  首次 store 即 `SIGBUS`。两种合法调度最终状态一致，不以固定抢占顺序制造脆弱测试。
+- **剩余边界**：文件 punch-hole、存储耗尽 SIGBUS、DAX/huge page 不在当前范围；更宽 mmap LTP 簇仍待
+  分批验证。
+
+## 2026-08-15 M4 `times/getrusage` user/system CPU 记账拆分（当前 Phase 5 工作树）
+
+- **状态所有者**：线程组共享的 process CPU clock 仍按 hart 保存 live interval，但每个 slot 现在同时
+  保存当前 user/system mode。调度切入从 task 持久 mode 恢复；user trap 入口先提交 user interval 并转
+  system，返回用户前提交 system interval并转回 user；阻塞/抢占发生在 system mode 时，恢复后继续
+  计入 system，直到真正返回用户态。
+- **可观察语义**：`times()`、`getrusage(RUSAGE_SELF)`、`/proc/*/stat` 分别导出拆分后的 utime/stime；
+  process exit 将两项独立冻结到稳定 `ProcessState`，`wait4(..., rusage)` 成功 copyout 后再分别累计到
+  `RUSAGE_CHILDREN`/`tms_cutime,tms_cstime`。`times()` 返回值改为 accounting clock 的 elapsed ticks，
+  不再错误返回当前进程 CPU total。
+- **Linux 与双架构证据**：新增 `scripts/cpu_accounting_phase5_probe_linux.c`，严格编译并通过 user burn、
+  raw syscall system burn、`times` 对齐和已回收 child 累计。guest 将同组断言加入
+  `task_a_wait4_probe`；RV64/LA64 release、4 GiB、2 hart 均通过，250 ms user burn 计入约 240 ms
+  user，syscall 压力分别产生约 70/40 ms system，日志
+  `/tmp/respos-{rv,la}-cpu-accounting-phase5.log`。
+- **相邻回归**：双架构 `task_a_clock_probe` 各 20/20，证明 thread/process total CPU clock 与 SMP
+  aggregation 未回退；双架构八项 task lifecycle 全过，signal Phase 5 各 8/8。日志分别为
+  `/tmp/respos-{rv,la}-{clock,task,signal}-after-cpu-accounting.log`。
+- **libc/LTP**：RV64/LA64 的 musl/glibc `getrusage01,getrusage02,times01,times03` 均为
+  `SUMMARY: 4 passed, 0 failed, 0 skipped`；`times03` 实际验证 user/system 分别增长及 wait 后
+  cutime/cstime 分别累计。日志 `/tmp/respos-{rv,la}-cpu-accounting-ltp.log`。
+- **剩余边界**：当前精度按 ABI `CLK_TCK=100` 导出；`RUSAGE_THREAD` 见上节。maxrss/fault/context-switch
+  等非时间字段、CPU hotplug 与更宽 LTP `times/getrusage` 簇仍待验证。
+
+## 2026-08-15 M2.3 `SA_NOCLDWAIT` 与显式 `SIGCHLD` ignore 自动回收（当前 Phase 5 工作树）
+
+- **默认与显式 ignore 分离**：signal action 初始化保持 `SIG_DFL`，由默认 action table 决定即时忽略；
+  不再把默认忽略的 `SIGCHLD` 折叠为显式 `SIG_IGN`。因此默认 disposition 仍保留 Zombie，显式
+  `SIG_IGN` 才自动回收且不投递 signal。
+- **自动回收契约**：父进程设置 `SA_NOCLDWAIT` 时 child 在退出发布点从 children/ProcessTable 移除并
+  进入 Reaped，`wait4` 返回 `ECHILD`；若安装了 handler，仍投递一次 `SIGCHLD`。普通 wait/waitid 成功
+  Reaped 后也显式删除 ProcessTable 索引，不再让 deferred TCB 暂时延长可查 PID。
+- **wait 优先级**：handler 唤醒 wait 时先重扫 child state；已自动回收返回 `ECHILD`，普通 Zombie 返回
+  child status，只有无 child 状态变化的 signal 才返回 `EINTR`。这修复了首轮 guest 对照暴露的
+  `SA_NOCLDWAIT` 错误 `EINTR`。
+- **证据**：扩展后的 Linux/RV64/LA64 `signal_phase5_probe` 覆盖默认 wait、显式 ignore 自动回收及
+  `SA_NOCLDWAIT` handler + `ECHILD`，均输出 `SIGNAL_PHASE5* ALL PASS`；guest 日志为
+  `/tmp/respos-{rv,la}-sigchld-autoreap-final.log`。双架构 wait4 与八项 task Phase 5 相邻回归通过，日志为
+  `/tmp/respos-{rv,la}-sigchld-{wait4,task}-regression.log`。
+- **停止通知**：Linux/RV64/LA64 同一 probe 还验证 `SA_NOCLDSTOP` 抑制 stop 的 SIGCHLD handler，
+  但 `wait4(WUNTRACED)` 仍观察到正确 stop status；最终双架构日志为
+  `/tmp/respos-{rv,la}-sigchld-final.log`。
+- **剩余边界**：实时信号多实例排队已在后续工作闭合当前进程内范围；real-UID 全局配额与
+  timeout-bearing restart classes 仍未闭合，M2.3 保持进行中；null-timeout futex 已见本文顶部更新。
+
+## 2026-08-15 M2.2 controlling tty、孤儿组与 job-control 状态机（基于当前 Phase 5 工作树）
+
+- **状态所有权**：新增共享 console terminal 对象，统一保存 controlling session、foreground PGID 和
+  termios；stdio 与 `/dev/tty` 的所有打开实例观察同一状态。`ProcessState` 保存是否关联 controlling tty，
+  fork 继承，`setsid()` 脱离，session leader 的 `TIOCNOTTY`/退出释放终端。
+- **ABI 与信号链路**：实现 `TIOCSCTTY/TIOCGSID/TIOCGPGRP/TIOCSPGRP/TIOCNOTTY` 和
+  `TCGETS/TCSETS/TCSETSW/TCSETSF`。后台读在 `SIGTTIN` ignored/blocked 或孤儿组时返回 `EIO`，否则向
+  进程组发 `SIGTTIN`；`TOSTOP` 后台写及后台终端属性/前台组变更同理使用 `SIGTTOU`。终端释放向原前台
+  组发送 `SIGHUP`、`SIGCONT`。
+- **孤儿组转换**：`setpgid()`、`setsid()` 与进程退出/reparent 在关系提交前后快照同 session 的受影响
+  pgrp；仅当组从非孤儿变为孤儿且仍含 stopped member 时，按 POSIX 顺序向组内存活进程发送 `SIGHUP`
+  后 `SIGCONT`。判定引用稳定 `ProcessState.parent/pgid/sid/lifecycle`，不依赖 leader TCB 存活。
+- **三方专项证据**：严格编译的 Linux PTY oracle 与 RV64/LA64 release、4 GiB、2 hart guest 均覆盖
+  controlling tty/前台组、默认 `SIGTTIN` stop + `WUNTRACED`、`SIGCONT` + `WCONTINUED`、ignored
+  `SIGTTIN` 的 `EIO`、termios `TOSTOP` round-trip/ignored `SIGTTOU` 写、detach，以及停止子组在桥接父
+  进程退出后收到 `SIGHUP` 并被 `SIGCONT` 唤醒，最终输出 `JOB_CONTROL_{LINUX,RESPOS} ALL PASS`。
+  更新后的 guest 各连续 8 轮通过，日志为 `/tmp/respos-{rv,la}-job-control-orphan-stress8.log`。
+- **相邻回归**：同一最终代码的八项 task Phase 5 与 session Phase 5 均在 RV64/LA64 2 hart 通过，日志为
+  `/tmp/respos-{rv,la}-job-control-TASK_A_{TASK_PHASE5,SESSION}_PROBE.log`。
+- **保留边界**：当前只有单一物理 console；尚未实现 PTY、canonical input/echo/control-character line
+  discipline、hangup 后 I/O、并发 setpgid/exit 的全局线性化，以及强制 steal controlling tty 的 Linux
+  完整副作用。termios 目前是共享属性与 TOSTOP policy，不表示完整 tty 语义；M2.2 尚未关闭。
+
+## 2026-08-15 Phase 5 稳定进程身份、leader exit 与 non-leader exec（基于 `44f93db` 后工作树）
+
+- **所有权重构**：新增独立 `ProcessState` 与非拥有型 `ProcessTable[tgid]`，稳定持有 TGID/PGID/SID、
+  members、parent/children、wait/zombie 状态及进程 CPU 记账。PID/session/prlimit/priority、process-directed
+  signal 和 POSIX timer owner 已改按稳定进程身份查找；`tgkill` 仍按 TID 查线程。
+- **退出与 wait**：leader 的原始 `SYS_exit` 现在只退出该线程；最后 member 或 `exit_group` 的唯一 CAS
+  owner 才释放进程级资源并发布一次 Zombie/SIGCHLD。`wait4/waitid` 从 child `ProcessState` 取状态，
+  copyout 成功后才提交 Reaped；普通非末线程退出不再写进程级 wait status。
+- **de-thread**：non-leader `execve` 先完成所有可失败映像准备，再取得 exec transition、quiesce sibling、
+  清理旧映像的 robust-list/clear-child-tid，并让调用者接管数值 TGID。新增失败原子性和双 worker 并发
+  exec 门禁；竞态中一方成功，另一方返回 `EAGAIN` 后由 de-thread 收敛。
+- **双架构证据**：RV64/LA64 release、4 GiB、2 hart 的八项 `task_phase5_probe` 均输出
+  `TASK_PHASE5 ALL PASS`，日志为 `/tmp/respos-{rv,la}-process-identity-race.log`；同组 8 hart 也通过，
+  日志为 `/tmp/respos-{rv,la}-process-identity-smp8.log`。两架构 futex exit 各 20 轮通过，日志为
+  `/tmp/respos-{rv,la}-process-identity-futex-exit.log`；最终 session 回归均输出
+  `SESSION_PHASE5_RESPOS ALL PASS`，日志为 `/tmp/respos-{rv,la}-process-identity-session-final.log`。
+- **相邻回归**：最终实现路径上的 wait4、signal Phase 5、musl/glibc `clone05` 已双架构通过；对应日志为
+  `/tmp/respos-{rv,la}-process-identity-{wait4,signal,clone05}.log`。RV64/LA64 顺序 release 构建通过。
+- **剩余边界**：共享 signal handler/resource owner、完整 job control 与 restart class 尚未迁移；
+  兼容 tgid/pgid/sid 字段仍双写。exec-vs-exit_group 扩大竞态、完整资源基线及
+  初赛/LTP 仍需补证，因此本结果只关闭 M2.1 核心路径，不表示整个 M2 完成。
+
+## 2026-08-15 process-directed pending 与 zombie PID signal 语义（基于同一工作树）
+
+- **pending 所有权**：process-directed signal 先进入 `ProcessState` 队列，递送时才结合具体线程 mask
+  从 thread/process 两级队列选择最低信号；线程退出不会丢失尚未消费的进程信号。fork 创建空进程队列，
+  exec 保留 process pending、清理 sibling thread pending；`rt_sigpending` 和 `rt_sigtimedwait` 同时观察
+  两级队列，后者在 copyout 后用 signal/info 身份复核，避免竞态中消费更新的同号信号。
+- **稳定凭据与 zombie**：real/effective/saved uid 随进程身份保存，`kill` 权限不依赖 live TCB。
+  Zombie 在 wait/reap 前仍是存在的 PID，授权 `kill(pid, 0)` 或普通 signal 返回成功但不排队；这关闭了
+  LTP helper 已退出为 zombie 时清理 `kill(SIGTERM)` 错误返回 `ESRCH` 的差异。
+- **专项证据**：新增 `process_pending_survives_selected_thread_exit`：信号在所有线程阻塞时入队，原 leader
+  随后退出，worker 解阻塞后仍收到 handler；RV64/LA64 2 hart 均随完整 task Phase 5 probe 通过，日志为
+  `/tmp/respos-{rv,la}-process-pending-member-exit.log`。signal Phase 5 的 pending-across-exec 双架构通过，
+  日志为 `/tmp/respos-{rv,la}-process-pending-signal.log`。
+- **8 hart 收口**：包含 process-pending 新向量、leader exit、exec 失败原子性与并发 exec 的完整 probe
+  在 RV64/LA64 4 GiB/8 hart 再次输出 `TASK_PHASE5 ALL PASS`，日志为
+  `/tmp/respos-{rv,la}-process-pending-smp8-final.log`。
+- **LTP**：LA64 musl/glibc `sigpending02,sigwait01` 均为 `2 passed, 0 failed`，日志为
+  `/tmp/respos-la-process-pending-ltp.log`；RV64 `sigwait01` 修复后两套 libc均为
+  `1 passed, 0 failed`，日志为 `/tmp/respos-rv-process-pending-sigwait-fixed.log`，此前同工作树的
+  `sigpending02` 两套 libc 四项断言均通过。完整 signal 簇与实时信号多实例排队仍需后续验证。
+
 ## 2026-08-15 `/proc/uptime` 恢复 BuildStorm 真实客体计时（基于 `3ccdbee`）
 
 - **根因与影响**：官方 BuildStorm 脚本在 timed build 前后读取 `/proc/uptime`；
@@ -1069,12 +1568,10 @@
   worker 已被杀死，TGID 后续 `kill(pid)`、process-directed signal 和 worker PID/TID 不变量均无法进入。
   最新日志为 `/tmp/respos-{rv,la}-task-phase5-identity-gate.log`，均打印
   `TASK_PHASE5 CURRENT DIFFERENCES CONFIRMED`；这不是通过结果。
-- **拟定方案**：新增 [process-identity-phase5-design.md](./process-identity-phase5-design.md)，规定独立
+- **当时拟定方案**：新增 [process-identity-phase5-design.md](./process-identity-phase5-design.md)，规定独立
   `ProcessState/ProcessTable`、最后线程 Zombie、wait copyout 后 Reaped，以及 non-leader exec 的
-  sibling quiescence 和 TID 接管顺序。方案状态为 `待确认`；未采用保留 exited leader TCB 的 tombstone
-  兼容方案，也尚未修改 task 生命周期实现。
-- **协商点**：该方案会同时改变 task/process owner、wait、process signal、session 查询与 exec 提交，
-  应按设计文档五个可回滚步骤逐项实现并逐项提交。获得确认前不以局部特判消除 expected-fail marker。
+  sibling quiescence 和 TID 接管顺序。当时状态为 `待确认`；该历史修复前结论已由本文顶部
+  2026-08-15 的实现与双架构通过证据取代，仍保留用于说明反证基线。
 
 ## 2026-08-14 Linux/POSIX Phase 5 nonblocking connect、`SO_ERROR` 与失败后重连（当前工作树）
 

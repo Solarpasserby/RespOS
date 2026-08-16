@@ -2,7 +2,6 @@ use super::{Errno, SysResult};
 use crate::config::PAGE_SIZE;
 use crate::mm::{FrameTracker, MapPermission, MmapBacking, VirtAddr, copy_from_user, copy_to_user};
 use crate::task::{TASK_MANAGER, current_task, yield_current_task};
-use crate::timer::get_time_ms;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -212,7 +211,7 @@ pub(crate) fn set_shmall_value(value: usize) -> SysResult<()> {
 }
 
 fn now_sec() -> isize {
-    (get_time_ms() / 1000) as isize
+    crate::syscall::realtime_timespec().sec
 }
 
 fn current_ids() -> (u32, u32, i32) {

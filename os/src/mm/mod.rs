@@ -23,14 +23,15 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use frame_allocator::init_frame_allocator;
-pub use frame_allocator::{FrameTracker, frame_alloc};
+pub use frame_allocator::{frame_alloc, FrameTracker};
 use heap_allocator::init_heap;
-pub use io_buffer::{IoBufferKind, KernelIoBuffer, drain_io_buffers};
-pub use memory_set::{KERNEL_SPACE, MapPermission, MemorySet};
+pub use io_buffer::{drain_io_buffers, IoBufferKind, KernelIoBuffer};
 pub(crate) use memory_set::{
-    MmapBacking, mmap_file_backing, overlay_shared_file_pages, shared_file_page_entry_count,
-    truncate_shared_file_pages, update_shared_file_pages, writeback_file_pages,
+    mmap_file_backing, overlay_shared_file_pages, punch_file_mappings, punch_shared_file_pages,
+    shared_file_page_entry_count, truncate_file_mappings, truncate_shared_file_pages,
+    update_shared_file_pages, writeback_file_pages, MmapBacking,
 };
+pub use memory_set::{MapPermission, MemorySet, PageFaultOutcome, KERNEL_SPACE};
 
 static KERNEL_MMU_TOKEN: AtomicUsize = AtomicUsize::new(0);
 

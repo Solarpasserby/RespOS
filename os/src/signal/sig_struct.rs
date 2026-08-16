@@ -1,6 +1,7 @@
 use super::sig_info::{LinuxSigInfo, SigInfo};
 use super::sig_stack::{SigContext, UContext};
 use alloc::collections::btree_map::BTreeMap;
+use alloc::collections::vec_deque::VecDeque;
 use bitflags::bitflags;
 pub const MAX_SIGNUM: usize = 64;
 
@@ -47,7 +48,11 @@ pub struct SigRTFrame {
 pub struct SigPending {
     pub pending: SigSet, // 接收信号位图
     pub mask: SigSet,    // 信号掩码
-    pub info: BTreeMap<i32, SigInfo>,
+    /// Linux standard signals coalesce while pending, preserving the first
+    /// siginfo. Real-time signals (33..=64) retain every instance FIFO for a
+    /// given signal number. The pending bitmap remains set until that queue is
+    /// empty, while signal selection still prefers the lowest signal number.
+    pub info: BTreeMap<i32, VecDeque<SigInfo>>,
 }
 
 impl SigPending {
@@ -80,19 +85,41 @@ impl SigPending {
 
     // 添加一个新信号
     // 用作任务收到信号
-    pub fn add_signal(&mut self, siginfo: SigInfo) {
+    /// Queue a signal and report whether this created a new pending instance.
+    /// Standard-signal coalescing therefore returns false after the first
+    /// instance, whereas every real-time signal returns true.
+    pub fn add_signal(&mut self, siginfo: SigInfo) -> bool {
         let sig = Sig::from(siginfo.signo); // 把i32 → 转换成 Sig 类型的信号
         self.pending.add_signal(sig);
-        self.info.insert(siginfo.signo, siginfo);
+        let queue = self.info.entry(siginfo.signo).or_default();
+        if sig.raw() > Sig::SIGLEGACYMAX.raw() || queue.is_empty() {
+            queue.push_back(siginfo);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn realtime_count(&self) -> usize {
+        self.info
+            .range((Sig::SIGLEGACYMAX.raw() + 1)..)
+            .map(|(_, queue)| queue.len())
+            .sum()
     }
 
     // 获得信号信息
     pub fn get_info(&self, sig: Sig) -> Option<&SigInfo> {
-        self.info.get(&sig.raw())
+        self.info.get(&sig.raw()).and_then(VecDeque::front)
     }
 
     // 从当前待处理集合中选出最小的一个信号，但并不修改
     pub fn find_signal(&self) -> Option<Sig> {
+        self.find_signal_with_mask(self.mask)
+    }
+
+    /// Find the lowest-numbered deliverable signal using a caller-supplied
+    /// thread mask. Process-pending queues have no mask of their own.
+    pub fn find_signal_with_mask(&self, mask: SigSet) -> Option<Sig> {
         let mut temp_pending = self.pending.bits();
         loop {
             let pos: u32 = temp_pending.trailing_zeros();
@@ -103,7 +130,7 @@ impl SigPending {
             } else {
                 temp_pending &= !(1 << pos);
                 // 没有被屏蔽且无法屏蔽
-                if !self.mask.contain_signal(sig)
+                if !mask.contain_signal(sig)
                     || pos == Sig::SIGKILL.index() as u32
                     || pos == Sig::SIGSTOP.index() as u32
                 {
@@ -117,8 +144,7 @@ impl SigPending {
     pub fn fetch_signal(&mut self) -> Option<(Sig, SigInfo)> {
         if let Some(sig) = self.find_signal() {
             debug!("[fetch_signal] fetch signal {}", sig.raw());
-            self.pending.remove_signal(sig);
-            Some((sig, self.info.remove(&sig.raw()).unwrap()))
+            Some((sig, self.pop_signal_info(sig)))
         } else {
             None
         }
@@ -154,11 +180,28 @@ impl SigPending {
     /// 从给定集合中取出并消费未决信号
     pub fn fetch_signal_from_set(&mut self, set: SigSet) -> Option<(Sig, SigInfo)> {
         if let Some(sig) = self.find_signal_in_set(set) {
-            self.pending.remove_signal(sig);
-            Some((sig, self.info.remove(&sig.raw()).unwrap()))
+            Some((sig, self.pop_signal_info(sig)))
         } else {
             None
         }
+    }
+
+    fn pop_signal_info(&mut self, sig: Sig) -> SigInfo {
+        let (siginfo, empty) = {
+            let queue = self
+                .info
+                .get_mut(&sig.raw())
+                .expect("pending bit without siginfo queue");
+            let siginfo = queue
+                .pop_front()
+                .expect("pending bit with empty siginfo queue");
+            (siginfo, queue.is_empty())
+        };
+        if empty {
+            self.info.remove(&sig.raw());
+            self.pending.remove_signal(sig);
+        }
+        siginfo
     }
 }
 

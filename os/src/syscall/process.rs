@@ -2,29 +2,30 @@
 
 use super::time::TimeVal;
 use super::{Errno, SysResult};
-use crate::config::CLK_TCK;
+use crate::config::{CLK_TCK, PAGE_SIZE};
 use crate::fs::mount::MS_NOEXEC;
 use crate::fs::vfs::InodeType;
 use crate::fs::{
-    AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW, File, FileOp, OpenFlags, filename_lookup,
-    path_open,
+    filename_lookup, path_open, File, FileOp, OpenFlags, AT_EMPTY_PATH, AT_FDCWD,
+    AT_SYMLINK_NOFOLLOW,
 };
 use crate::loader::get_app_data_by_name;
 use crate::mm::{
-    MapPermission, VPNRange, VirtAddr, copy_cstr_from_user, copy_from_user, copy_to_user,
-    extract_cstrings_from_user,
+    copy_cstr_from_user, copy_from_user, copy_to_user, extract_cstrings_from_user, MapPermission,
+    VPNRange, VirtAddr,
 };
 use crate::signal::{LinuxSigInfo, SigInfo};
 use crate::task::{
-    CloneFlags, TASK_MANAGER, TaskControlBlock, WaitOption, add_task, current_task, do_futex,
-    exit_and_run_next, exit_group_and_run_next, prepare_current_task_blocked, remove_task,
-    requeue_ready_task, switch_to_next_task, yield_current_task,
+    add_task, current_task, do_futex, exit_and_run_next, exit_group_and_run_next,
+    prepare_current_task_blocked, remove_task, requeue_ready_task, switch_to_next_task,
+    yield_current_task, CloneFlags, ResourceUsageSnapshot, TaskControlBlock, WaitOption,
+    PROCESS_MANAGER, TASK_MANAGER,
 };
 use crate::timer::TimeSpec;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{Ordering, fence};
+use core::sync::atomic::{fence, Ordering};
 
 #[cfg(all(target_arch = "loongarch64", feature = "debug_traces"))]
 const LOONGARCH_PTHREAD_TRACE: bool = false;
@@ -99,8 +100,16 @@ fn shebang_busybox_path(script_path: &str) -> &'static str {
 }
 
 fn process_leader(task: &Arc<TaskControlBlock>) -> Arc<TaskControlBlock> {
-    task.op_thread_group(|tg| tg.iter().find(|task| task.tid() == task.tgid()))
+    task.process()
+        .signal_target()
         .unwrap_or_else(|| task.clone())
+}
+
+fn process_task(pid: usize) -> SysResult<Arc<TaskControlBlock>> {
+    PROCESS_MANAGER
+        .get(pid)
+        .and_then(|process| process.signal_target())
+        .ok_or(Errno::ESRCH)
 }
 
 fn set_process_pgid(task: &Arc<TaskControlBlock>, pgid: usize) {
@@ -120,7 +129,7 @@ fn set_process_sid(task: &Arc<TaskControlBlock>, sid: usize) {
 }
 
 /// Sleep in wait(2) and report whether a deliverable signal prevented sleep.
-fn wait_block_current(task: &Arc<TaskControlBlock>) -> bool {
+fn wait_block_current(task: &Arc<TaskControlBlock>, observed_child_event: usize) -> bool {
     // wait(2) is an interruptible sleep.  In particular, userspace timeout
     // implementations arm ITIMER_REAL and then wait for their child; leaving
     // this task uninterruptible makes SIGALRM unable to wake the wait.
@@ -137,8 +146,11 @@ fn wait_block_current(task: &Arc<TaskControlBlock>) -> bool {
         // A signal can arrive between the first check and publishing Blocked.
         // It then records `interrupted` before there is a blocked-queue entry
         // to wake, so consume that race here instead of sleeping indefinitely.
+        // Only a child-event generation change is evidence that the scan
+        // above became stale.  A pre-existing event from an unrelated child
+        // must not make a pid-specific wait spin forever.
         if task.is_ready()
-            || !task.exited_child_ids().is_empty()
+            || task.process().child_event_generation() != observed_child_event
             || task.is_interrupted()
             || task.check_signal_interrupt()
         {
@@ -296,19 +308,43 @@ fn rusage_from_ticks(utime: usize, stime: usize) -> RUsage {
     }
 }
 
+fn rusage_from_snapshot(utime: usize, stime: usize, resources: ResourceUsageSnapshot) -> RUsage {
+    let mut usage = rusage_from_ticks(utime, stime);
+    let clamp = |value: usize| value.min(isize::MAX as usize) as isize;
+    usage.ru_maxrss = clamp(resources.maxrss_pages.saturating_mul(PAGE_SIZE / 1024));
+    usage.ru_minflt = clamp(resources.minflt);
+    usage.ru_majflt = clamp(resources.majflt);
+    usage.ru_inblock = clamp(resources.inblock);
+    usage.ru_oublock = clamp(resources.oublock);
+    usage.ru_nvcsw = clamp(resources.nvcsw);
+    usage.ru_nivcsw = clamp(resources.nivcsw);
+    usage
+}
+
 pub fn sys_getrusage(who: isize, usage: *mut RUsage) -> SysResult<usize> {
     const RUSAGE_SELF: isize = 0;
     const RUSAGE_CHILDREN: isize = -1;
+    const RUSAGE_THREAD: isize = 1;
 
     let task = current_task().expect("[kernel] current task is None.");
+    if who == RUSAGE_SELF || who == RUSAGE_THREAD {
+        let resident = task.op_memory_set_read(|memory_set| memory_set.resident_page_count());
+        task.note_maxrss_pages(resident);
+    }
     let rusage = match who {
         RUSAGE_SELF => {
-            let ticks = task.elapsed_ticks();
-            rusage_from_ticks(ticks, ticks)
+            let (utime, stime) = task.process_accounting_ticks();
+            rusage_from_snapshot(utime, stime, task.process_resource_usage())
         }
         RUSAGE_CHILDREN => {
             let (utime, stime) = task.child_ticks();
-            rusage_from_ticks(utime, stime)
+            rusage_from_snapshot(utime, stime, task.child_resource_usage())
+        }
+        RUSAGE_THREAD => {
+            let (utime, stime) = task.thread_accounting_ticks();
+            let mut resources = task.thread_resource_usage();
+            resources.maxrss_pages = task.process_resource_usage().maxrss_pages;
+            rusage_from_snapshot(utime, stime, resources)
         }
         _ => return Err(Errno::EINVAL),
     };
@@ -754,7 +790,7 @@ pub fn sys_setpgid(pid: usize, pgid: usize) -> SysResult<usize> {
     let target = if pid == 0 {
         current.clone()
     } else {
-        process_leader(&TASK_MANAGER.get(pid).ok_or(Errno::ESRCH)?)
+        process_task(pid)?
     };
     if !target.is_process_leader() {
         return Err(Errno::ESRCH);
@@ -762,7 +798,8 @@ pub fn sys_setpgid(pid: usize, pgid: usize) -> SysResult<usize> {
 
     let target_is_current = target.tgid() == current.tgid();
     if !target_is_current {
-        let is_child = current.op_children_mut(|children| children.contains_key(&target.tgid()));
+        let is_child =
+            current.op_process_children_mut(|children| children.contains_key(&target.tgid()));
         if !is_child {
             return Err(Errno::ESRCH);
         }
@@ -780,8 +817,8 @@ pub fn sys_setpgid(pid: usize, pgid: usize) -> SysResult<usize> {
     let new_pgid = if pgid == 0 { target.tgid() } else { pgid };
     if new_pgid != target.tgid() {
         let mut group_exists_in_session = false;
-        TASK_MANAGER.for_each(|task| {
-            if task.is_process_leader() && task.sid() == current.sid() && task.pgid() == new_pgid {
+        PROCESS_MANAGER.for_each(|process| {
+            if process.sid() == current.sid() && process.pgid() == new_pgid {
                 group_exists_in_session = true;
             }
         });
@@ -790,7 +827,15 @@ pub fn sys_setpgid(pid: usize, pgid: usize) -> SysResult<usize> {
         }
     }
 
+    let sid = target.sid();
+    let old_pgid = target.pgid();
+    let old_was_orphaned = crate::fs::tty::process_group_is_orphaned(sid, old_pgid);
+    let new_was_orphaned = crate::fs::tty::process_group_is_orphaned(sid, new_pgid);
     set_process_pgid(&target, new_pgid);
+    crate::fs::tty::notify_orphaned_process_group_transition(sid, old_pgid, old_was_orphaned);
+    if new_pgid != old_pgid {
+        crate::fs::tty::notify_orphaned_process_group_transition(sid, new_pgid, new_was_orphaned);
+    }
     Ok(0)
 }
 
@@ -799,7 +844,7 @@ pub fn sys_getpgid(pid: usize) -> SysResult<usize> {
     let target = if pid == 0 {
         process_leader(&current_thread)
     } else {
-        process_leader(&TASK_MANAGER.get(pid).ok_or(Errno::ESRCH)?)
+        process_task(pid)?
     };
     Ok(target.pgid())
 }
@@ -813,7 +858,7 @@ pub fn sys_getsid(pid: usize) -> SysResult<usize> {
     let target = if pid == 0 {
         process_leader(&current_thread)
     } else {
-        process_leader(&TASK_MANAGER.get(pid).ok_or(Errno::ESRCH)?)
+        process_task(pid)?
     };
     Ok(target.sid())
 }
@@ -829,8 +874,30 @@ pub fn sys_setsid() -> SysResult<usize> {
     if current.pgid() == pid {
         return Err(Errno::EPERM);
     }
+    let old_sid = current.sid();
+    let mut affected_groups = alloc::vec![current.pgid()];
+    current.op_process_children_mut(|children| {
+        for child in children.values() {
+            if child.sid() == old_sid && !affected_groups.contains(&child.pgid()) {
+                affected_groups.push(child.pgid());
+            }
+        }
+    });
+    let orphan_states = affected_groups
+        .iter()
+        .map(|&pgid| {
+            (
+                pgid,
+                crate::fs::tty::process_group_is_orphaned(old_sid, pgid),
+            )
+        })
+        .collect::<alloc::vec::Vec<_>>();
+    crate::fs::tty::detach_process_from_console(&current.process());
     set_process_sid(&current, pid);
     set_process_pgid(&current, pid);
+    for (pgid, was_orphaned) in orphan_states {
+        crate::fs::tty::notify_orphaned_process_group_transition(old_sid, pgid, was_orphaned);
+    }
     Ok(pid)
 }
 
@@ -844,8 +911,7 @@ pub fn sys_prlimit64(
     let task = if pid == 0 {
         current.clone()
     } else {
-        let task = TASK_MANAGER.get(pid).ok_or(Errno::ESRCH)?;
-        process_leader(&task)
+        process_task(pid)?
     };
     if resource >= RLIMIT_COUNT {
         return Err(Errno::EINVAL);
@@ -1253,6 +1319,7 @@ pub fn sys_wait4(
     let nohang = options.contains(WaitOption::WNOHANG);
     loop {
         let task = current_task().expect("[kernel] current task is None.");
+        let observed_child_event = task.process().child_event_generation();
         let current_pgid = task.pgid();
         let target_pid = (pid > 0).then_some(pid as usize);
         let target_pgid = if pid == 0 {
@@ -1263,8 +1330,8 @@ pub fn sys_wait4(
             None
         };
         let exited_child_ids = task.exited_child_ids();
-        let wait_result = task.op_children_mut(|children| {
-            let matches_child = |child_tid: usize, child: &Arc<TaskControlBlock>| {
+        let wait_result = task.op_process_children_mut(|children| {
+            let matches_child = |child_tid: usize, child: &Arc<crate::task::ProcessState>| {
                 pid == -1 || target_pid == Some(child_tid) || target_pgid == Some(child.pgid())
             };
             let has_matching_child = if pid == -1 {
@@ -1302,49 +1369,67 @@ pub fn sys_wait4(
             let queued = exited_child_ids.iter().find_map(|child_tid| {
                 children.get(child_tid).and_then(|child| {
                     (matches_child(*child_tid, child) && child.is_exited()).then(|| {
-                        let ticks = child.elapsed_ticks();
-                        (*child_tid, child.wait_status(), Some((ticks, ticks)))
+                        let accounting = (child.accounting_ticks(), child.resource_usage());
+                        (*child_tid, child.wait_status(), Some(accounting))
                     })
                 })
             });
             Ok(queued.or_else(|| {
                 children.iter().find_map(|(child_tid, child)| {
                     (matches_child(*child_tid, child) && child.is_exited()).then(|| {
-                        let ticks = child.elapsed_ticks();
-                        (*child_tid, child.wait_status(), Some((ticks, ticks)))
+                        let accounting = (child.accounting_ticks(), child.resource_usage());
+                        (*child_tid, child.wait_status(), Some(accounting))
                     })
                 })
             }))
-        })?;
+        });
+        let wait_result = match wait_result {
+            Ok(result) => result,
+            Err(err) => {
+                // A SIGCHLD handler can wake wait4 after SA_NOCLDWAIT (or
+                // explicit SIG_IGN) has already removed the child. Prefer
+                // the rescan result ECHILD over reporting that SIGCHLD as an
+                // unrelated EINTR, matching Linux wait semantics.
+                task.clear_interrupted();
+                return Err(err);
+            }
+        };
 
         if let Some((child_tid, wait_status, child_ticks)) = wait_result {
             if !exit_code_ptr.is_null() {
                 copy_to_user(exit_code_ptr, &wait_status as *const i32, 1)?;
             }
 
-            if let Some((child_utime, child_stime)) = child_ticks {
+            if let Some(((child_utime, child_stime), child_resources)) = child_ticks {
                 if !rusage.is_null() {
-                    let usage = rusage_from_ticks(child_utime, child_stime);
+                    let usage = rusage_from_snapshot(child_utime, child_stime, child_resources);
                     copy_to_user(rusage, &usage as *const RUsage, 1)?;
                 }
 
                 // All user-visible output is complete. Only now commit the
                 // parent accounting and Zombie removal.
-                let removed =
-                    task.op_children_mut(|children| children.remove(&child_tid).is_some());
+                let removed = task.op_process_children_mut(|children| {
+                    children
+                        .remove(&child_tid)
+                        .inspect(|child| child.mark_reaped())
+                        .is_some()
+                });
                 if !removed {
                     return Err(Errno::ECHILD);
                 }
+                PROCESS_MANAGER.remove(child_tid);
                 task.add_child_ticks(child_utime, child_stime);
+                task.add_child_resource_usage(child_resources);
                 task.remove_exited_child(child_tid);
             } else {
-                task.op_children_mut(|children| {
+                task.op_process_children_mut(|children| {
                     if let Some(child) = children.get(&child_tid) {
                         child.take_wait_event();
                     }
                 });
             }
 
+            task.clear_interrupted();
             return Ok(child_tid);
         }
 
@@ -1360,16 +1445,11 @@ pub fn sys_wait4(
             task.clear_interrupted();
             return Err(Errno::EINTR);
         }
-        if wait_block_current(&task) {
-            // SIGCHLD may select this exact waiter and set `interrupted` at
-            // the same time as publishing the child exit. Prefer the wait
-            // result over EINTR, matching the scan-before-sleep rule above.
-            if !task.exited_child_ids().is_empty() {
-                task.clear_interrupted();
-                continue;
-            }
-            task.clear_interrupted();
-            return Err(Errno::EINTR);
+        if wait_block_current(&task, observed_child_event) {
+            // Always rescan first. A child may either have become waitable or
+            // have been auto-reaped; an unrelated signal will fall through
+            // to the interrupted check on the next iteration.
+            continue;
         }
     }
 }
@@ -1411,7 +1491,7 @@ pub fn sys_waitid(
     id: usize,
     infop: *mut LinuxSigInfo,
     options: usize,
-    _rusage: usize,
+    rusage: usize,
 ) -> SysResult<usize> {
     if options & !WAITID_ALLOWED_OPTIONS != 0
         || options & (WAITID_WEXITED | WAITID_WSTOPPED | WAITID_WCONTINUED) == 0
@@ -1427,6 +1507,7 @@ pub fn sys_waitid(
 
     loop {
         let task = current_task().expect("[kernel] current task is None.");
+        let observed_child_event = task.process().child_event_generation();
         let current_pgid = task.pgid();
         let target_pgid = if idtype == WAITID_P_PGID && id == 0 {
             current_pgid
@@ -1435,13 +1516,14 @@ pub fn sys_waitid(
         };
         let exited_child_ids = task.exited_child_ids();
 
-        let wait_result = task.op_children_mut(|children| {
-            let matches_child = |child_tid: usize, child: &Arc<TaskControlBlock>| match idtype {
-                WAITID_P_ALL => true,
-                WAITID_P_PID => child_tid == id,
-                WAITID_P_PGID => child.pgid() == target_pgid,
-                _ => false,
-            };
+        let wait_result = task.op_process_children_mut(|children| {
+            let matches_child =
+                |child_tid: usize, child: &Arc<crate::task::ProcessState>| match idtype {
+                    WAITID_P_ALL => true,
+                    WAITID_P_PID => child_tid == id,
+                    WAITID_P_PGID => child.pgid() == target_pgid,
+                    _ => false,
+                };
             let has_matching_child = match idtype {
                 WAITID_P_ALL => !children.is_empty(),
                 WAITID_P_PID => children.contains_key(&id),
@@ -1467,6 +1549,7 @@ pub fn sys_waitid(
                                 *child_tid,
                                 LinuxSigInfo::new_child(*child_tid, status, code),
                                 false,
+                                None,
                             ));
                         }
                     }
@@ -1486,6 +1569,7 @@ pub fn sys_waitid(
                             *child_tid,
                             waitid_child_info(*child_tid, child.wait_status()),
                             true,
+                            Some((child.accounting_ticks(), child.resource_usage())),
                         )
                     })
                 })
@@ -1497,26 +1581,42 @@ pub fn sys_waitid(
                             *child_tid,
                             waitid_child_info(*child_tid, child.wait_status()),
                             true,
+                            Some((child.accounting_ticks(), child.resource_usage())),
                         )
                     })
                 })
             }))
         })?;
 
-        if let Some((child_tid, info, exited)) = wait_result {
+        if let Some((child_tid, info, exited, child_accounting)) = wait_result {
             if !infop.is_null() {
                 copy_to_user(infop, &info as *const LinuxSigInfo, 1)?;
             }
+            if rusage != 0 {
+                let usage = child_accounting.map_or_else(RUsage::default, |(ticks, resources)| {
+                    rusage_from_snapshot(ticks.0, ticks.1, resources)
+                });
+                copy_to_user(rusage as *mut RUsage, &usage as *const RUsage, 1)?;
+            }
             if !nowait {
                 if exited {
-                    let removed =
-                        task.op_children_mut(|children| children.remove(&child_tid).is_some());
+                    let removed = task.op_process_children_mut(|children| {
+                        children
+                            .remove(&child_tid)
+                            .inspect(|child| child.mark_reaped())
+                            .is_some()
+                    });
                     if !removed {
                         return Err(Errno::ECHILD);
                     }
+                    PROCESS_MANAGER.remove(child_tid);
+                    if let Some(((child_utime, child_stime), child_resources)) = child_accounting {
+                        task.add_child_ticks(child_utime, child_stime);
+                        task.add_child_resource_usage(child_resources);
+                    }
                     task.remove_exited_child(child_tid);
                 } else {
-                    task.op_children_mut(|children| {
+                    task.op_process_children_mut(|children| {
                         if let Some(child) = children.get(&child_tid) {
                             child.take_wait_event();
                         }
@@ -1534,7 +1634,7 @@ pub fn sys_waitid(
             task.clear_interrupted();
             return Err(Errno::EINTR);
         }
-        if wait_block_current(&task) {
+        if wait_block_current(&task, observed_child_event) {
             if !task.exited_child_ids().is_empty() {
                 task.clear_interrupted();
                 continue;
@@ -1578,10 +1678,10 @@ fn priority_targets(which: usize, who: usize) -> SysResult<Vec<Arc<TaskControlBl
     };
 
     let mut targets = Vec::new();
-    TASK_MANAGER.for_each(|task| {
-        if !task.is_process_leader() {
+    PROCESS_MANAGER.for_each(|process| {
+        let Some(task) = process.signal_target() else {
             return;
-        }
+        };
         let matches = match which {
             PRIO_PROCESS => task.tgid() == target_id,
             PRIO_PGRP => task.pgid() == target_id,
@@ -1589,7 +1689,7 @@ fn priority_targets(which: usize, who: usize) -> SysResult<Vec<Arc<TaskControlBl
             _ => false,
         };
         if matches {
-            targets.push(task.clone());
+            targets.push(task);
         }
     });
 
@@ -1653,13 +1753,11 @@ pub fn sys_getpid() -> SysResult<usize> {
 /// 系统调用 sys-getppid
 pub fn sys_getppid() -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
-    Ok(task.op_parent(|parent| {
-        parent
-            .as_ref()
-            .and_then(|parent| parent.upgrade())
-            .map(|parent| parent.tid())
-            .unwrap_or(0)
-    }))
+    Ok(task
+        .process()
+        .parent()
+        .map(|parent| parent.tgid())
+        .unwrap_or(0))
 }
 
 /// 系统调用 sys_set_tid_address

@@ -56,14 +56,12 @@ pub struct SigAction {
 
 impl SigAction {
     pub fn new(sig: Sig) -> Self {
-        //new(sig)只是出厂设置, 用户随后可以通过 sigaction 系统调用把它改掉。
-        let atype = ActionType::default(sig);
-        let sa_handler = match atype {
-            ActionType::Ignore => SIG_IGN,
-            ActionType::Term | ActionType::Stop | ActionType::Cont | ActionType::Core => SIG_DFL,
-        };
+        // SIG_DFL and SIG_IGN can have the same immediate delivery behavior
+        // but different lifecycle effects (notably SIGCHLD zombie handling),
+        // so never collapse a default-ignored signal into explicit SIG_IGN.
+        let _ = sig;
         Self {
-            sa_handler,
+            sa_handler: SIG_DFL,
             flags: SigActionFlag::empty(),
             restorer: 0,
             mask: SigSet::empty(),

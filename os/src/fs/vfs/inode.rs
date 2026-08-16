@@ -1,8 +1,8 @@
 // os/src/vfs/inode.rs
 
 use super::{Dentry, LinuxDirent64};
-use crate::fs::KStat;
 use crate::fs::page_cache::PageCache;
+use crate::fs::KStat;
 use crate::syscall::{Errno, SysResult};
 use crate::timer::TimeSpec;
 use alloc::string::String;
@@ -20,6 +20,12 @@ pub trait InodeOp: Any + Send + Sync {
     fn read_at(&self, path: &str, off: usize, buf: &mut [u8]) -> SysResult<usize>;
     fn write_at(&self, path: &str, off: usize, buf: &[u8]) -> SysResult<usize>;
     fn truncate(&self, path: &str, size: usize) -> SysResult<usize>;
+
+    /// Deallocate full filesystem blocks and zero partial blocks without
+    /// changing the logical file size.
+    fn punch_hole(&self, _path: &str, _offset: usize, _len: usize) -> SysResult<usize> {
+        Err(Errno::EOPNOTSUPP)
+    }
 
     /// 返回共享页缓存。仅 ext4 常规文件返回 Some，其余返回 None。
     fn get_page_cache(&self) -> Option<Arc<PageCache>> {

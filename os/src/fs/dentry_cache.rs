@@ -30,17 +30,26 @@ pub fn lookup_dentry_cache(abs_path: &str) -> Option<Arc<Dentry>> {
 /// 将 dentry 插入全局缓存，若已满则踢掉一个只有缓存引用的条目腾位
 pub fn insert_dentry_cache(dentry: Arc<Dentry>) {
     let mut cache = DENTRY_CACHE.lock();
+    let mut evicted = None;
     if cache.len() >= DENTRY_CACHE_CAPACITY {
         let victim_key = cache
             .iter()
             .find(|(_, d)| Arc::strong_count(d) == 1)
             .map(|(k, _)| k.clone());
         if let Some(key) = victim_key {
-            cache.remove(&key);
+            evicted = cache.remove(&key);
             crate::perf::dentry_cache_eviction(1);
         }
     }
     cache.insert(dentry.current_abs_path(), dentry);
+    drop(cache);
+    if let Some(evicted) = evicted {
+        let inode = evicted.try_get_inode();
+        drop(evicted);
+        if let Some(inode) = inode {
+            crate::fs::ext4::flush_lazytime_inode_on_evict(inode);
+        }
+    }
 }
 
 /// 将 dentry 加入固有锚点列表，使其永不被淘汰
@@ -99,7 +108,17 @@ pub fn clean_dentry_cache() {
         .filter(|(_, d)| Arc::strong_count(d) == 1)
         .map(|(k, _)| k.clone())
         .collect();
-    for key in keys {
-        cache.remove(&key);
+    let evicted: Vec<_> = keys
+        .into_iter()
+        .filter_map(|key| cache.remove(&key))
+        .collect();
+    drop(cache);
+    let inodes: Vec<_> = evicted
+        .iter()
+        .filter_map(|dentry| dentry.try_get_inode())
+        .collect();
+    drop(evicted);
+    for inode in inodes {
+        crate::fs::ext4::flush_lazytime_inode_on_evict(inode);
     }
 }

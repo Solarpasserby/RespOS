@@ -16,9 +16,9 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use user_lib::{
-    O_CLOEXEC, O_CREATE, O_DIRECTORY, O_RDONLY, O_TRUNC, O_WRONLY, SIGKILL, chdir, chmod, close,
-    exec, execve, exit, fork, getdents64, kill, lseek, mkdir, open, poweroff, read, rmdir, symlink,
-    time_get, unlink, waitpid, write, yield_,
+    chdir, chmod, close, exec, execve, exit, fork, getdents64, kill, lseek, mkdir, open, poweroff,
+    read, rmdir, symlink, time_get, unlink, waitpid, write, yield_, O_CLOEXEC, O_CREATE,
+    O_DIRECTORY, O_RDONLY, O_TRUNC, O_WRONLY, SIGKILL,
 };
 
 const BUSYBOX_PATH: &str = "/musl/busybox\0";
@@ -51,12 +51,20 @@ const TASK_A_FUTEX_EXIT_PROBE: bool = option_env!("TASK_A_FUTEX_EXIT_PROBE").is_
 const TASK_A_FUTEX_CMP_REQUEUE_PROBE: bool =
     option_env!("TASK_A_FUTEX_CMP_REQUEUE_PROBE").is_some();
 const TASK_A_CLOCK_PROBE: bool = option_env!("TASK_A_CLOCK_PROBE").is_some();
+const TASK_A_FADVISE_PHASE5_PROBE: bool = option_env!("TASK_A_FADVISE_PHASE5_PROBE").is_some();
+const TASK_A_RTC_SET_PROBE: bool = option_env!("TASK_A_RTC_SET_PROBE").is_some();
 const TASK_A_SOCKET_TIMEOUT_PROBE: bool = option_env!("TASK_A_SOCKET_TIMEOUT_PROBE").is_some();
 const TASK_A_SESSION_PROBE: bool = option_env!("TASK_A_SESSION_PROBE").is_some();
 const TASK_A_TASK_PHASE5_PROBE: bool = option_env!("TASK_A_TASK_PHASE5_PROBE").is_some();
+const TASK_A_JOB_CONTROL_PROBE: bool = option_env!("TASK_A_JOB_CONTROL_PROBE").is_some();
 const TASK_A_MMAP_PHASE5_PROBE: bool = option_env!("TASK_A_MMAP_PHASE5_PROBE").is_some();
+const TASK_A_BUILDSTORM_FILE_PROBE: bool = option_env!("TASK_A_BUILDSTORM_FILE_PROBE").is_some();
 const TASK_A_MPROTECT_FAILURE_PROBE: bool = option_env!("TASK_A_MPROTECT_FAILURE_PROBE").is_some();
 const TASK_A_UTIMENS_SPECIAL_PROBE: bool = option_env!("TASK_A_UTIMENS_SPECIAL_PROBE").is_some();
+const TASK_A_EXT4_TIMESTAMP_PERSIST_PROBE: bool =
+    option_env!("TASK_A_EXT4_TIMESTAMP_PERSIST_PROBE").is_some();
+const TASK_A_ATIME_PHASE5_PROBE: bool = option_env!("TASK_A_ATIME_PHASE5_PROBE").is_some();
+const TASK_A_LAZYTIME_PERSIST_PROBE: bool = option_env!("TASK_A_LAZYTIME_PERSIST_PROBE").is_some();
 const TASK_A_SYSV_SHM_FUTEX_PROBE: bool = option_env!("TASK_A_SYSV_SHM_FUTEX_PROBE").is_some();
 const TASK_A_SYSV_SHM_LIFECYCLE_PROBE: bool =
     option_env!("TASK_A_SYSV_SHM_LIFECYCLE_PROBE").is_some();
@@ -385,7 +393,11 @@ fn parse_simple_busybox_args(line: &str) -> Option<Vec<String>> {
         args.push(arg);
     }
 
-    if args.is_empty() { None } else { Some(args) }
+    if args.is_empty() {
+        None
+    } else {
+        Some(args)
+    }
 }
 
 fn run_busybox_direct_command(busybox_path: &str, line: &str) -> Option<i32> {
@@ -451,9 +463,6 @@ fn normalize_busybox_exit(line: &str, ec: i32) -> i32 {
         // false 的预期行为就是非零退出。
         "false" => 0,
         "which ls" => 0,
-        // QEMU 下没有真实 RTC 后端；内核提供最小 /dev/misc/rtc 兼容，
-        // 但不同 busybox/libc 组合仍可能把 RTC 探测错误作为退出码上报。
-        "hwclock" => 0,
         _ => ec,
     }
 }
@@ -1535,6 +1544,49 @@ fn run_task_a_clock_probe() {
     }
 }
 
+fn run_task_a_fadvise_phase5_probe() {
+    const ROUNDS: usize = 8;
+    for round in 1..=ROUNDS {
+        let pid = fork();
+        assert!(pid >= 0, "failed to fork fadvise_phase5_probe");
+        if pid == 0 {
+            let argv = ["fadvise_phase5_probe\0".as_ptr(), core::ptr::null()];
+            let ret = exec("fadvise_phase5_probe\0", &argv);
+            println!("[testrunner] exec fadvise_phase5_probe failed: {}", ret);
+            exit(-1);
+        }
+        let mut status = 0;
+        assert_eq!(waitpid(pid as usize, &mut status), pid);
+        assert_eq!(status, 0, "fadvise_phase5_probe failed");
+        println!(
+            "[testrunner] fadvise Phase 5 probe round {}/{} PASS",
+            round, ROUNDS
+        );
+    }
+}
+
+fn run_task_a_rtc_set_probe() -> i32 {
+    let pid = fork();
+    assert!(pid >= 0, "failed to fork rtc_set_phase5_probe");
+    if pid == 0 {
+        let argv = ["rtc_set_phase5_probe\0".as_ptr(), core::ptr::null()];
+        let ret = exec("rtc_set_phase5_probe\0", &argv);
+        println!("[testrunner] exec rtc_set_phase5_probe failed: {}", ret);
+        exit(-1);
+    }
+    let mut status = 0;
+    assert_eq!(waitpid(pid as usize, &mut status), pid);
+    if status == 0 {
+        println!("[testrunner] RTC set Phase 5 probe PASS");
+    } else {
+        println!(
+            "[testrunner] RTC set Phase 5 probe failed: status={}",
+            status
+        );
+    }
+    status
+}
+
 fn run_task_a_socket_timeout_probe() {
     let pid = fork();
     assert!(pid >= 0, "failed to fork socket_timeout_probe");
@@ -1607,6 +1659,52 @@ fn run_task_a_mmap_phase5_probe() -> i32 {
     status
 }
 
+fn run_task_a_buildstorm_file_probe() -> i32 {
+    let pid = fork();
+    assert!(pid >= 0, "failed to fork buildstorm_file_probe");
+    if pid == 0 {
+        let argv = ["buildstorm_file_probe\0".as_ptr(), core::ptr::null()];
+        let ret = exec("buildstorm_file_probe\0", &argv);
+        println!("[testrunner] exec buildstorm_file_probe failed: {}", ret);
+        exit(-1);
+    }
+    let mut status = 0;
+    assert_eq!(waitpid(pid as usize, &mut status), pid);
+    if status == 0 {
+        println!("[testrunner] buildstorm file probe PASS");
+    } else {
+        println!(
+            "[testrunner] buildstorm file probe failed: status={}",
+            status
+        );
+    }
+    if status != 0 {
+        return status;
+    }
+
+    let pid = fork();
+    assert!(pid >= 0, "failed to fork buildstorm_private_map_probe");
+    if pid == 0 {
+        let argv = ["buildstorm_private_map_probe\0".as_ptr(), core::ptr::null()];
+        let ret = exec("buildstorm_private_map_probe\0", &argv);
+        println!(
+            "[testrunner] exec buildstorm_private_map_probe failed: {}",
+            ret
+        );
+        exit(-1);
+    }
+    assert_eq!(waitpid(pid as usize, &mut status), pid);
+    if status == 0 {
+        println!("[testrunner] buildstorm private-map probe PASS");
+    } else {
+        println!(
+            "[testrunner] buildstorm private-map probe failed: status={}",
+            status
+        );
+    }
+    status
+}
+
 fn run_task_a_mprotect_failure_probe() -> i32 {
     let pid = fork();
     assert!(pid >= 0, "failed to fork mprotect_failure_probe");
@@ -1649,6 +1747,69 @@ fn run_task_a_utimens_special_probe() -> i32 {
             "[testrunner] utimens special probe failed: status={}",
             status
         );
+    }
+    status
+}
+
+fn run_task_a_ext4_timestamp_persist_probe() -> i32 {
+    let pid = fork();
+    assert!(pid >= 0, "failed to fork ext4_timestamp_phase5_probe");
+    if pid == 0 {
+        let argv = ["ext4_timestamp_phase5_probe\0".as_ptr(), core::ptr::null()];
+        let ret = exec("ext4_timestamp_phase5_probe\0", &argv);
+        println!(
+            "[testrunner] exec ext4_timestamp_phase5_probe failed: {}",
+            ret
+        );
+        exit(-1);
+    }
+
+    let mut status = 0;
+    assert_eq!(waitpid(pid as usize, &mut status), pid);
+    if status == 0 {
+        println!("[testrunner] ext4 timestamp persistence probe PASS");
+    } else {
+        println!(
+            "[testrunner] ext4 timestamp persistence probe failed: status={}",
+            status
+        );
+    }
+    status
+}
+
+fn run_task_a_atime_phase5_probe() -> i32 {
+    let pid = fork();
+    assert!(pid >= 0, "failed to fork atime_phase5_probe");
+    if pid == 0 {
+        let argv = ["atime_phase5_probe\0".as_ptr(), core::ptr::null()];
+        let ret = exec("atime_phase5_probe\0", &argv);
+        println!("[testrunner] exec atime_phase5_probe failed: {}", ret);
+        exit(-1);
+    }
+
+    let mut status = 0;
+    assert_eq!(waitpid(pid as usize, &mut status), pid);
+    if status == 0 {
+        println!("[testrunner] atime Phase 5 probe PASS");
+    } else {
+        println!("[testrunner] atime Phase 5 probe failed: status={}", status);
+    }
+    status
+}
+
+fn run_task_a_lazytime_persist_probe() -> i32 {
+    let pid = fork();
+    assert!(pid >= 0, "failed to fork lazytime_persist_probe");
+    if pid == 0 {
+        let argv = ["lazytime_persist_probe\0".as_ptr(), core::ptr::null()];
+        let ret = exec("lazytime_persist_probe\0", &argv);
+        println!("[testrunner] exec lazytime_persist_probe failed: {}", ret);
+        exit(-1);
+    }
+    let mut status = 0;
+    assert_eq!(waitpid(pid as usize, &mut status), pid);
+    if status == 0 {
+        println!("[testrunner] lazytime persistence probe PASS");
     }
     status
 }
@@ -1798,35 +1959,55 @@ fn run_task_a_pwrite_append_atomic_probe() -> i32 {
 }
 
 fn run_task_a_signal_phase5_probe() {
+    for round in 1..=8 {
+        let pid = fork();
+        assert!(pid >= 0, "failed to fork signal_phase5_probe");
+        if pid == 0 {
+            let argv = ["signal_phase5_probe\0".as_ptr(), core::ptr::null()];
+            let ret = exec("signal_phase5_probe\0", &argv);
+            println!("[testrunner] exec signal_phase5_probe failed: {}", ret);
+            exit(-1);
+        }
+
+        let mut status = 0;
+        assert_eq!(waitpid(pid as usize, &mut status), pid);
+        assert_eq!(status, 0, "signal_phase5_probe failed");
+        println!("[testrunner] signal Phase 5 probe round {}/8 PASS", round);
+    }
+}
+
+fn run_task_a_job_control_probe() {
     let pid = fork();
-    assert!(pid >= 0, "failed to fork signal_phase5_probe");
+    assert!(pid >= 0, "failed to fork job_control_phase5_probe");
     if pid == 0 {
-        let argv = ["signal_phase5_probe\0".as_ptr(), core::ptr::null()];
-        let ret = exec("signal_phase5_probe\0", &argv);
-        println!("[testrunner] exec signal_phase5_probe failed: {}", ret);
+        let argv = ["job_control_phase5_probe\0".as_ptr(), core::ptr::null()];
+        let ret = exec("job_control_phase5_probe\0", &argv);
+        println!("[testrunner] exec job_control_phase5_probe failed: {}", ret);
         exit(-1);
     }
 
     let mut status = 0;
     assert_eq!(waitpid(pid as usize, &mut status), pid);
-    assert_eq!(status, 0, "signal_phase5_probe failed");
-    println!("[testrunner] signal Phase 5 probe PASS");
+    assert_eq!(status, 0, "job_control_phase5_probe failed");
+    println!("[testrunner] job-control Phase 5 probe PASS");
 }
 
 fn run_task_a_socket_phase5_probe() {
-    let pid = fork();
-    assert!(pid >= 0, "failed to fork socket_phase5_probe");
-    if pid == 0 {
-        let argv = ["socket_phase5_probe\0".as_ptr(), core::ptr::null()];
-        let ret = exec("socket_phase5_probe\0", &argv);
-        println!("[testrunner] exec socket_phase5_probe failed: {}", ret);
-        exit(-1);
-    }
+    for round in 1..=8 {
+        let pid = fork();
+        assert!(pid >= 0, "failed to fork socket_phase5_probe");
+        if pid == 0 {
+            let argv = ["socket_phase5_probe\0".as_ptr(), core::ptr::null()];
+            let ret = exec("socket_phase5_probe\0", &argv);
+            println!("[testrunner] exec socket_phase5_probe failed: {}", ret);
+            exit(-1);
+        }
 
-    let mut status = 0;
-    assert_eq!(waitpid(pid as usize, &mut status), pid);
-    assert_eq!(status, 0, "socket_phase5_probe failed");
-    println!("[testrunner] socket Phase 5 probe PASS");
+        let mut status = 0;
+        assert_eq!(waitpid(pid as usize, &mut status), pid);
+        assert_eq!(status, 0, "socket_phase5_probe failed");
+        println!("[testrunner] socket Phase 5 probe round {}/8 PASS", round);
+    }
 }
 
 fn run_task_a_socket_flags_probe() {
@@ -1988,6 +2169,18 @@ fn main() -> i32 {
         poweroff();
         return 0;
     }
+    if TASK_A_RTC_SET_PROBE {
+        let status = run_task_a_rtc_set_probe();
+        println!("[testrunner] RTC set Phase 5 probe finished, powering off");
+        poweroff();
+        return if status == 0 { 0 } else { 1 };
+    }
+    if TASK_A_FADVISE_PHASE5_PROBE {
+        run_task_a_fadvise_phase5_probe();
+        println!("[testrunner] fadvise Phase 5 probe finished, powering off");
+        poweroff();
+        return 0;
+    }
     if TASK_A_SOCKET_TIMEOUT_PROBE {
         run_task_a_socket_timeout_probe();
         println!("[testrunner] socket timeout probe finished, powering off");
@@ -2012,6 +2205,12 @@ fn main() -> i32 {
         poweroff();
         return if status == 0 { 0 } else { 1 };
     }
+    if TASK_A_BUILDSTORM_FILE_PROBE {
+        let status = run_task_a_buildstorm_file_probe();
+        println!("[testrunner] buildstorm file probe finished, powering off");
+        poweroff();
+        return if status == 0 { 0 } else { 1 };
+    }
     if TASK_A_MPROTECT_FAILURE_PROBE {
         let status = run_task_a_mprotect_failure_probe();
         println!("[testrunner] mprotect failure probe finished, powering off");
@@ -2021,6 +2220,24 @@ fn main() -> i32 {
     if TASK_A_UTIMENS_SPECIAL_PROBE {
         let status = run_task_a_utimens_special_probe();
         println!("[testrunner] utimens special probe finished, powering off");
+        poweroff();
+        return if status == 0 { 0 } else { 1 };
+    }
+    if TASK_A_EXT4_TIMESTAMP_PERSIST_PROBE {
+        let status = run_task_a_ext4_timestamp_persist_probe();
+        println!("[testrunner] ext4 timestamp persistence probe finished, powering off");
+        poweroff();
+        return if status == 0 { 0 } else { 1 };
+    }
+    if TASK_A_LAZYTIME_PERSIST_PROBE {
+        let status = run_task_a_lazytime_persist_probe();
+        println!("[testrunner] lazytime persistence probe finished, powering off");
+        poweroff();
+        return if status == 0 { 0 } else { 1 };
+    }
+    if TASK_A_ATIME_PHASE5_PROBE {
+        let status = run_task_a_atime_phase5_probe();
+        println!("[testrunner] atime Phase 5 probe finished, powering off");
         poweroff();
         return if status == 0 { 0 } else { 1 };
     }
@@ -2063,6 +2280,12 @@ fn main() -> i32 {
     if TASK_A_SIGNAL_PHASE5_PROBE {
         run_task_a_signal_phase5_probe();
         println!("[testrunner] signal Phase 5 probe finished, powering off");
+        poweroff();
+        return 0;
+    }
+    if TASK_A_JOB_CONTROL_PROBE {
+        run_task_a_job_control_probe();
+        println!("[testrunner] job-control Phase 5 probe finished, powering off");
         poweroff();
         return 0;
     }
@@ -2215,6 +2438,18 @@ fn main() -> i32 {
         poweroff();
         return 0;
     }
+    if TASK_A_RTC_SET_PROBE {
+        let status = run_task_a_rtc_set_probe();
+        println!("[testrunner] RTC set Phase 5 probe finished, powering off");
+        poweroff();
+        return if status == 0 { 0 } else { 1 };
+    }
+    if TASK_A_FADVISE_PHASE5_PROBE {
+        run_task_a_fadvise_phase5_probe();
+        println!("[testrunner] fadvise Phase 5 probe finished, powering off");
+        poweroff();
+        return 0;
+    }
     if TASK_A_SOCKET_TIMEOUT_PROBE {
         run_task_a_socket_timeout_probe();
         println!("[testrunner] socket timeout probe finished, powering off");
@@ -2239,6 +2474,12 @@ fn main() -> i32 {
         poweroff();
         return if status == 0 { 0 } else { 1 };
     }
+    if TASK_A_BUILDSTORM_FILE_PROBE {
+        let status = run_task_a_buildstorm_file_probe();
+        println!("[testrunner] buildstorm file probe finished, powering off");
+        poweroff();
+        return if status == 0 { 0 } else { 1 };
+    }
     if TASK_A_MPROTECT_FAILURE_PROBE {
         let status = run_task_a_mprotect_failure_probe();
         println!("[testrunner] mprotect failure probe finished, powering off");
@@ -2248,6 +2489,24 @@ fn main() -> i32 {
     if TASK_A_UTIMENS_SPECIAL_PROBE {
         let status = run_task_a_utimens_special_probe();
         println!("[testrunner] utimens special probe finished, powering off");
+        poweroff();
+        return if status == 0 { 0 } else { 1 };
+    }
+    if TASK_A_EXT4_TIMESTAMP_PERSIST_PROBE {
+        let status = run_task_a_ext4_timestamp_persist_probe();
+        println!("[testrunner] ext4 timestamp persistence probe finished, powering off");
+        poweroff();
+        return if status == 0 { 0 } else { 1 };
+    }
+    if TASK_A_LAZYTIME_PERSIST_PROBE {
+        let status = run_task_a_lazytime_persist_probe();
+        println!("[testrunner] lazytime persistence probe finished, powering off");
+        poweroff();
+        return if status == 0 { 0 } else { 1 };
+    }
+    if TASK_A_ATIME_PHASE5_PROBE {
+        let status = run_task_a_atime_phase5_probe();
+        println!("[testrunner] atime Phase 5 probe finished, powering off");
         poweroff();
         return if status == 0 { 0 } else { 1 };
     }
@@ -2290,6 +2549,12 @@ fn main() -> i32 {
     if TASK_A_SIGNAL_PHASE5_PROBE {
         run_task_a_signal_phase5_probe();
         println!("[testrunner] signal Phase 5 probe finished, powering off");
+        poweroff();
+        return 0;
+    }
+    if TASK_A_JOB_CONTROL_PROBE {
+        run_task_a_job_control_probe();
+        println!("[testrunner] job-control Phase 5 probe finished, powering off");
         poweroff();
         return 0;
     }

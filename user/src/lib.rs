@@ -70,7 +70,9 @@ fn clear_bss() {
 
 use syscall::*;
 
-pub use syscall::{ITimerSpec, IoVec, RLimit, RUsage, Stat, Statx, TimeSpec, TimeVal};
+pub use syscall::{
+    ITimerSpec, IoVec, MMsgHdr, MsgHdr, RLimit, RUsage, Stat, Statx, TimeSpec, TimeVal, Tms,
+};
 
 pub const O_RDONLY: usize = 0;
 pub const O_WRONLY: usize = 1 << 0;
@@ -196,6 +198,12 @@ pub fn read(fd: usize, buf: &mut [u8]) -> isize {
 }
 pub fn write(fd: usize, buf: &[u8]) -> isize {
     sys_write(fd, buf)
+}
+pub fn readv(fd: usize, iov: &[IoVec]) -> isize {
+    sys_readv(fd, iov.as_ptr(), iov.len())
+}
+pub fn writev(fd: usize, iov: &[IoVec]) -> isize {
+    sys_writev(fd, iov.as_ptr(), iov.len())
 }
 pub fn splice_raw(
     fd_in: usize,
@@ -418,6 +426,10 @@ pub fn fstat(fd: usize, stat: &mut Stat) -> isize {
 pub fn fsync(fd: usize) -> isize {
     sys_fsync(fd)
 }
+
+pub fn fadvise64(fd: usize, offset: isize, len: isize, advice: usize) -> isize {
+    sys_fadvise64(fd, offset, len, advice)
+}
 pub fn sync() -> isize {
     sys_sync()
 }
@@ -532,8 +544,22 @@ pub fn wait4_raw(pid: isize, exit_code: *mut i32, options: usize, rusage: *mut R
     sys_wait4_full(pid, exit_code, options, rusage)
 }
 
+pub fn waitid_raw(
+    idtype: usize,
+    id: usize,
+    infop: *mut u8,
+    options: usize,
+    rusage: *mut RUsage,
+) -> isize {
+    sys_waitid_raw(idtype, id, infop, options, rusage)
+}
+
 pub fn getrusage_raw(who: isize, usage: *mut RUsage) -> isize {
     sys_getrusage(who, usage)
+}
+
+pub fn times(tms: &mut Tms) -> isize {
+    sys_times(tms)
 }
 
 pub fn timer_create_raw(clock_id: usize, timerid: *mut i32) -> isize {
@@ -563,6 +589,14 @@ pub fn clock_settime_raw(clock_id: usize, value: *const TimeSpec) -> isize {
 
 pub fn clock_gettime_raw(clock_id: usize, value: *mut TimeSpec) -> isize {
     sys_clock_gettime(clock_id, value)
+}
+pub fn clock_nanosleep_raw(
+    clock_id: usize,
+    flags: usize,
+    request: *const TimeSpec,
+    remaining: *mut TimeSpec,
+) -> isize {
+    sys_clock_nanosleep(clock_id, flags, request, remaining)
 }
 
 pub fn clock_getres_raw(clock_id: usize, value: *mut TimeSpec) -> isize {
@@ -712,6 +746,17 @@ pub fn ppoll_raw(
     sys_ppoll(fds.as_mut_ptr(), fds.len(), timeout, sigmask, sigsetsize)
 }
 
+pub fn pselect6_raw(
+    nfds: usize,
+    readfds: usize,
+    writefds: usize,
+    exceptfds: usize,
+    timeout: *const TimeSpec,
+    sigmask: usize,
+) -> isize {
+    sys_pselect6(nfds, readfds, writefds, exceptfds, timeout, sigmask)
+}
+
 pub fn sendto(fd: usize, buf: &[u8], flags: usize, addr: Option<&SockAddrIn>) -> isize {
     let (addr_ptr, addrlen) = match addr {
         Some(addr) => (
@@ -744,6 +789,37 @@ pub fn recvfrom(
         addr_ptr,
         addrlen_ptr,
     )
+}
+
+pub fn sendmsg(fd: usize, msg: &MsgHdr, flags: usize) -> isize {
+    sys_sendmsg(fd, msg, flags)
+}
+
+pub fn recvmsg(fd: usize, msg: &mut MsgHdr, flags: usize) -> isize {
+    sys_recvmsg(fd, msg, flags)
+}
+
+pub fn recvmmsg(fd: usize, messages: &mut [MMsgHdr], flags: usize) -> isize {
+    sys_recvmmsg(
+        fd,
+        messages.as_mut_ptr(),
+        messages.len(),
+        flags,
+        core::ptr::null_mut(),
+    )
+}
+
+pub fn recvmmsg_with_timeout(
+    fd: usize,
+    messages: &mut [MMsgHdr],
+    flags: usize,
+    timeout: &mut TimeSpec,
+) -> isize {
+    sys_recvmmsg(fd, messages.as_mut_ptr(), messages.len(), flags, timeout)
+}
+
+pub fn sendmmsg(fd: usize, messages: &mut [MMsgHdr], flags: usize) -> isize {
+    sys_sendmmsg(fd, messages.as_mut_ptr(), messages.len(), flags)
 }
 
 pub fn setsockopt_raw<T>(fd: usize, level: usize, optname: usize, value: &T) -> isize {
@@ -834,6 +910,14 @@ pub fn sigprocmask_raw(how: usize, set: *const u64, oldset: *mut u64, sigsetsize
 pub fn sigpending_raw(set: *mut u64, sigsetsize: usize) -> isize {
     sys_sigpending_raw(set, sigsetsize)
 }
+pub fn sigtimedwait_raw(
+    set: *const u64,
+    info: *mut u8,
+    timeout: *const TimeSpec,
+    sigsetsize: usize,
+) -> isize {
+    sys_sigtimedwait_raw(set, info, timeout, sigsetsize)
+}
 pub fn sigqueueinfo_raw(tgid: usize, signum: i32, info: *const u8) -> isize {
     sys_sigqueueinfo_raw(tgid, signum, info)
 }
@@ -843,7 +927,13 @@ pub fn sigreturn() -> isize {
 }
 
 pub fn poweroff() -> isize {
-    sys_reboot()
+    const LINUX_REBOOT_CMD_POWER_OFF: usize = 0x4321_fedc;
+    sys_reboot(LINUX_REBOOT_CMD_POWER_OFF)
+}
+
+pub fn reboot_restart() -> isize {
+    const LINUX_REBOOT_CMD_RESTART: usize = 0x0123_4567;
+    sys_reboot(LINUX_REBOOT_CMD_RESTART)
 }
 
 bitflags! {

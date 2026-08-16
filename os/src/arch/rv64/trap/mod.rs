@@ -82,6 +82,9 @@ pub fn enable_timer_interrupt() {
 #[unsafe(no_mangle)]
 pub fn trap_handler(cx: &mut TrapContext) {
     crate::perf::user_trap(1);
+    if let Some(task) = current_task() {
+        task.enter_kernel_accounting();
+    }
     // 设置状态寄存器，使内核可以访问用户数据
     unsafe {
         sstatus::set_sum();
@@ -93,10 +96,11 @@ pub fn trap_handler(cx: &mut TrapContext) {
         Trap::Exception(Exception::UserEnvCall) => {
             let syscall_id = cx.x[17];
             let syscall_args = [cx.x[10], cx.x[11], cx.x[12], cx.x[13], cx.x[14], cx.x[15]];
+            let syscall_is_restartable = is_restartable_syscall(syscall_id, &syscall_args);
             crate::perf::user_syscall_trap(1);
             cx.sepc += 4; // 异常处理完成后直接执行后续指令
             let ret = syscall(syscall_id, syscall_args);
-            if ret == Err(Errno::EINTR) && syscall_id == SYSCALL_WAIT4 {
+            if ret == Err(Errno::EINTR) && syscall_is_restartable {
                 restart_syscall_arg0 = Some(syscall_args[0]);
             }
             cx.x[10] = match ret {
@@ -117,6 +121,20 @@ pub fn trap_handler(cx: &mut TrapContext) {
                 .op_memory_set_write(|memory_set| {
                     memory_set.handle_page_fault(page_fault_cause, stval)
                 });
+            if let Ok(outcome) = result {
+                if let Some(task) = current_task() {
+                    match outcome {
+                        crate::mm::PageFaultOutcome::Minor => task.note_minor_fault(),
+                        crate::mm::PageFaultOutcome::Major => task.note_major_fault(),
+                        crate::mm::PageFaultOutcome::Retry => {}
+                    }
+                    if outcome != crate::mm::PageFaultOutcome::Retry {
+                        let resident =
+                            task.op_memory_set_read(|memory_set| memory_set.resident_page_count());
+                        task.note_maxrss_pages(resident);
+                    }
+                }
+            }
             if let Err(err) = result {
                 #[cfg(feature = "fault_trace")]
                 if let Some(task) = current_task() {
@@ -133,7 +151,7 @@ pub fn trap_handler(cx: &mut TrapContext) {
                         err
                     );
                 }
-                let sig = if err == Errno::EIO {
+                let sig = if matches!(err, Errno::EIO | Errno::ENOSPC) {
                     Sig::SIGBUS
                 } else {
                     Sig::SIGSEGV
@@ -217,6 +235,9 @@ pub fn trap_handler(cx: &mut TrapContext) {
         }
     };
     handle_signals(restart_syscall_arg0);
+    if let Some(task) = current_task() {
+        task.leave_kernel_accounting();
+    }
     return;
 }
 

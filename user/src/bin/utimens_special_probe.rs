@@ -129,6 +129,47 @@ fn main() -> i32 {
     times = [
         TimeSpec {
             sec: usize::MAX,
+            nsec: 123_456_789,
+        },
+        TimeSpec {
+            sec: 2_147_483_648,
+            nsec: 987_654_321,
+        },
+    ];
+    assert_eq!(utimens(PATH, &times), 0);
+    let extended = path_stat(PATH);
+    assert_eq!(extended.st_atime.sec, usize::MAX);
+    assert_eq!(extended.st_atime.nsec, 123_456_789);
+    assert_eq!(extended.st_mtime.sec, 2_147_483_648);
+    assert_eq!(extended.st_mtime.nsec, 987_654_321);
+
+    times = [
+        TimeSpec {
+            sec: usize::MAX - 2_147_483_648,
+            nsec: 333_333_333,
+        },
+        TimeSpec {
+            sec: 15_032_385_536,
+            nsec: 666_666_666,
+        },
+    ];
+    assert_eq!(utimens(PATH, &times), 0);
+    let clamped = path_stat(PATH);
+    assert_eq!(clamped.st_atime.sec as isize, -2_147_483_648);
+    assert_eq!(clamped.st_atime.nsec, 0);
+    assert_eq!(clamped.st_mtime.sec, 15_032_385_535);
+    assert_eq!(clamped.st_mtime.nsec, 0);
+
+    times = [
+        TimeSpec { sec: 100, nsec: 0 },
+        TimeSpec { sec: 200, nsec: 0 },
+    ];
+    assert_eq!(utimens(PATH, &times), 0);
+    let baseline = path_stat(PATH);
+
+    times = [
+        TimeSpec {
+            sec: usize::MAX,
             nsec: UTIME_OMIT,
         },
         TimeSpec {
@@ -205,7 +246,7 @@ fn main() -> i32 {
     assert_eq!(close(fd), 0);
     assert_eq!(unlink(PATH), 0);
     println!(
-        "UTIMENS_SPECIAL PASS omit=pass now=pass invalid_nsec=pass missing_double_omit=pass permission=pass"
+        "UTIMENS_SPECIAL PASS omit=pass now=pass invalid_nsec=pass negative_epoch_nsec=pass clamp=pass missing_double_omit=pass permission=pass"
     );
     0
 }

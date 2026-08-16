@@ -4,10 +4,10 @@ use crate::config::BLOCK_SIZE;
 use crate::drivers::{BlockDevice, DevError, DevResult, Device, DeviceType};
 use spin::Mutex;
 use virtio_drivers::{
-    Hal,
     device::blk::VirtIOBlk,
     transport::Transport,
     // transport::mmio::VirtIOHeader
+    Hal,
 };
 
 pub struct VirtIoBlkDev<H: Hal, T: Transport> {
@@ -58,6 +58,9 @@ impl<H: Hal + 'static, T: Transport + 'static> BlockDevice for VirtIoBlkDev<H, T
             crate::perf::block_read_request(1);
             crate::perf::block_read_bytes(buf.len());
             crate::perf::block_read_size(buf.len());
+            if let Some(task) = crate::task::current_task() {
+                task.note_input_blocks(buf.len() / BLOCK_SIZE);
+            }
         } else if let Err(error) = &result {
             println!(
                 "[virtio-blk-error] op=read block={} bytes={} error={:?}",

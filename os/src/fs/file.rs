@@ -3,15 +3,17 @@
 use super::vfs::{InodeOp, InodeType, LinuxDirent64, SuperBlockOp};
 use crate::config::{KERNEL_HEAP_SIZE, PAGE_SIZE};
 use crate::fs::ext4::Ext4Inode;
-use crate::fs::mount::{MS_NOATIME, MS_NODIRATIME, MS_STRICTATIME, check_mount_file_growth};
+use crate::fs::mount::{
+    MS_LAZYTIME, MS_NOATIME, MS_NODIRATIME, MS_STRICTATIME, check_mount_file_growth,
+};
 use crate::fs::page_cache::{
-    PageCache, WritebackErrorCursor, register_dirty_owner, sync_page_cache_owner,
-    sync_page_cache_range,
+    DEFAULT_READ_AHEAD_PAGES, PageCache, SEQUENTIAL_READ_AHEAD_PAGES, WritebackErrorCursor,
+    register_dirty_owner, sync_page_cache_owner, sync_page_cache_range,
 };
 use crate::fs::{KStat, Path, PollEvents};
 use crate::mm::FrameTracker;
 use crate::syscall::{Errno, SysResult};
-use crate::timer::{TimeSpec, get_time_ms};
+use crate::timer::TimeSpec;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
@@ -44,6 +46,11 @@ struct FileInner {
     /// fork share this cursor together with the rest of `FileInner`.
     writeback_error_cursor: Option<WritebackErrorCursor>,
     write_back: bool,
+    /// Linux f_ra/FMODE_RANDOM state belongs to the open-file description,
+    /// so dup/fork share it while an independent open starts at NORMAL.
+    read_ahead_pages: usize,
+    /// FMODE_NOREUSE suppresses cache promotion on subsequent accesses.
+    no_reuse: bool,
     tmpfile_meta: Option<TmpFileMeta>,
     atime_override: Option<TimeSpec>,
     mtime_override: Option<TimeSpec>,
@@ -104,6 +111,12 @@ pub trait FileOp: Any + Send + Sync {
     }
     fn mmap_open(&self, _shared: bool, _writable: bool, _pages: usize) {}
     fn mmap_close(&self, _shared: bool, _writable: bool, _pages: usize) {}
+    /// Establish persistent backing for a writable shared-mapping page before
+    /// its PTE becomes writable. Memory-backed files cannot run out of disk
+    /// blocks, so their default implementation needs no reservation.
+    fn reserve_shared_mmap_write(&self, _offset: usize, _data: &[u8]) -> SysResult {
+        Ok(())
+    }
     // 非阻塞可读：数据是否立即可用—— pipe 非空 / 文件总是可读
     fn read_ready(&self) -> bool {
         true
@@ -167,6 +180,106 @@ pub trait FileOp: Any + Send + Sync {
 }
 
 impl File {
+    fn reserve_shared_mmap_write(&self, offset: usize, data: &[u8]) -> SysResult {
+        if data.is_empty() {
+            return Ok(());
+        }
+        // Keep the file state lock through the lower allocation. truncate
+        // uses the same lock for lower size change and PageCache resize, so a
+        // page reservation cannot re-extend a file between those two steps.
+        let inner = self.inner.lock();
+        let visible_path = inner.path.abs_path();
+        let path = self.storage_path(&visible_path);
+        if inner.path.mnt.is_readonly() {
+            return Err(Errno::EROFS);
+        }
+        if !inner.write_back {
+            return Ok(());
+        }
+        let file_size = inner
+            .page_cache
+            .as_ref()
+            .map(|cache| cache.len())
+            .unwrap_or(self.inode.stat(path.as_str())?.size);
+        if offset >= file_size {
+            return Err(Errno::EIO);
+        }
+        let reserve_len = data.len().min(file_size - offset);
+
+        // lwext4 has no unwritten-extent reservation entry point. Writing the
+        // page's current bytes materializes a sparse block without changing
+        // visible contents or file size, and reports ENOSPC before userspace
+        // is allowed to dirty the shared frame.
+        let written = self
+            .inode
+            .write_at(path.as_str(), offset, &data[..reserve_len])?;
+        if written != reserve_len {
+            return Err(Errno::EIO);
+        }
+        Ok(())
+    }
+
+    pub fn fadvise(&self, offset: usize, len: usize, advice: usize) -> SysResult<usize> {
+        const POSIX_FADV_NORMAL: usize = 0;
+        const POSIX_FADV_RANDOM: usize = 1;
+        const POSIX_FADV_SEQUENTIAL: usize = 2;
+        const POSIX_FADV_WILLNEED: usize = 3;
+        const POSIX_FADV_DONTNEED: usize = 4;
+        const POSIX_FADV_NOREUSE: usize = 5;
+
+        let (page_cache, write_back, path, read_ahead_pages) = {
+            let mut inner = self.inner.lock();
+            match advice {
+                POSIX_FADV_NORMAL => {
+                    inner.read_ahead_pages = DEFAULT_READ_AHEAD_PAGES;
+                    inner.no_reuse = false;
+                    return Ok(0);
+                }
+                POSIX_FADV_RANDOM => {
+                    inner.read_ahead_pages = 1;
+                    return Ok(0);
+                }
+                POSIX_FADV_SEQUENTIAL => {
+                    inner.read_ahead_pages = SEQUENTIAL_READ_AHEAD_PAGES;
+                    return Ok(0);
+                }
+                POSIX_FADV_NOREUSE => {
+                    inner.no_reuse = true;
+                    return Ok(0);
+                }
+                POSIX_FADV_WILLNEED | POSIX_FADV_DONTNEED => {}
+                _ => return Err(Errno::EINVAL),
+            }
+            let visible_path = inner.path.abs_path();
+            (
+                inner.page_cache.clone(),
+                inner.write_back,
+                self.storage_path(&visible_path),
+                inner.read_ahead_pages,
+            )
+        };
+        let Some(page_cache) = page_cache else {
+            return Ok(0);
+        };
+        let lower = write_back.then_some((&self.inode, path.as_str()));
+        if advice == POSIX_FADV_WILLNEED {
+            page_cache.prefetch_range(offset, len, lower, read_ahead_pages);
+        } else if write_back {
+            let end = if len == 0 {
+                page_cache.len()
+            } else {
+                offset.saturating_add(len)
+            };
+            // Linux starts writeback before invalidation and does not return
+            // writeback errors from fadvise.  RespOS has no async flusher for
+            // this request, so perform the same step synchronously and leave
+            // failed pages dirty/pinned for the normal error cursor.
+            let _ = page_cache.sync_range(&self.inode, path.as_str(), offset, end);
+            page_cache.evict_clean_range(offset, len);
+        }
+        Ok(0)
+    }
+
     fn storage_path(&self, path: &str) -> alloc::string::String {
         alloc::string::String::from(path)
     }
@@ -177,22 +290,25 @@ impl File {
     pub(crate) fn shared_page_frame(
         &self,
         file_offset: usize,
-    ) -> SysResult<Option<Arc<FrameTracker>>> {
-        let (page_cache, write_back, path) = {
+    ) -> SysResult<Option<(Arc<FrameTracker>, bool)>> {
+        let (page_cache, write_back, path, read_ahead_pages, mark_accessed) = {
             let inner = self.inner.lock();
             let visible_path = inner.path.abs_path();
             (
                 inner.page_cache.clone(),
                 inner.write_back,
                 self.storage_path(&visible_path),
+                inner.read_ahead_pages,
+                !inner.no_reuse,
             )
         };
         let Some(page_cache) = page_cache else {
             return Ok(None);
         };
         let lower = write_back.then_some((&self.inode, path.as_str()));
+        let page_index = file_offset / PAGE_SIZE;
         page_cache
-            .shared_frame_at(file_offset / PAGE_SIZE, lower)
+            .shared_frame_at(page_index, lower, read_ahead_pages, mark_accessed)
             .map(Some)
     }
 
@@ -227,6 +343,8 @@ impl File {
                 page_cache,
                 writeback_error_cursor,
                 write_back,
+                read_ahead_pages: DEFAULT_READ_AHEAD_PAGES,
+                no_reuse: false,
                 tmpfile_meta: None,
                 atime_override: None,
                 mtime_override: None,
@@ -256,6 +374,8 @@ impl File {
                 page_cache,
                 writeback_error_cursor,
                 write_back: false,
+                read_ahead_pages: DEFAULT_READ_AHEAD_PAGES,
+                no_reuse: false,
                 tmpfile_meta: Some(meta),
                 atime_override: None,
                 mtime_override: None,
@@ -358,9 +478,7 @@ impl File {
     fn readdir_uncached(&self) -> SysResult<Arc<Vec<LinuxDirent64>>> {
         let path = self.path();
         let mut entries = self.inode.readdir(&path.abs_path())?;
-        if let Some(atime) = self.touch_atime_if_needed(&path, InodeType::Directory)? {
-            self.inner.lock().atime_override = Some(atime);
-        }
+        self.touch_atime_if_needed(&path, InodeType::Directory)?;
 
         if Arc::ptr_eq(&path.dentry, &path.mnt.root) {
             if let Some(mount) = crate::fs::mount::get_mount_by_vfsmount(&path.mnt) {
@@ -403,11 +521,7 @@ impl File {
     }
 
     fn now_timespec() -> TimeSpec {
-        let ms = get_time_ms();
-        TimeSpec {
-            sec: (ms / 1000) as isize,
-            nsec: ((ms % 1000) * 1_000_000) as isize,
-        }
+        crate::syscall::realtime_timespec()
     }
 
     pub fn set_times(&self, atime: Option<TimeSpec>, mtime: Option<TimeSpec>) -> SysResult {
@@ -424,15 +538,17 @@ impl File {
             self.inode.set_times(path.as_str(), atime, mtime)?;
         }
 
-        let ctime = Self::now_timespec();
-        let mut inner = self.inner.lock();
-        if let Some(atime) = atime {
-            inner.atime_override = Some(atime);
+        if tmpfile {
+            let ctime = Self::now_timespec();
+            let mut inner = self.inner.lock();
+            if let Some(atime) = atime {
+                inner.atime_override = Some(atime);
+            }
+            if let Some(mtime) = mtime {
+                inner.mtime_override = Some(mtime);
+            }
+            inner.ctime_override = Some(ctime);
         }
-        if let Some(mtime) = mtime {
-            inner.mtime_override = Some(mtime);
-        }
-        inner.ctime_override = Some(ctime);
         Ok(())
     }
 
@@ -526,14 +642,70 @@ impl File {
             }
         }
         if inner.offset > size {
-            drop(inner);
-            self.inner.lock().offset = size;
+            inner.offset = size;
+        }
+        let truncated_identity = (size < old_size)
+            .then_some(self.shared_page_identity)
+            .flatten();
+        drop(inner);
+        if let Some((dev, ino)) = truncated_identity {
+            crate::mm::truncate_file_mappings(dev, ino, size);
+        }
+        Ok(0)
+    }
+
+    pub fn punch_hole(&self, offset: usize, len: usize) -> SysResult<usize> {
+        let mut inner = self.inner.lock();
+        if inner.path.mnt.is_readonly() {
+            return Err(Errno::EROFS);
+        }
+        let visible_path = inner.path.abs_path();
+        let path = self.storage_path(&visible_path);
+        let file_size = inner
+            .page_cache
+            .as_ref()
+            .map(|cache| cache.len())
+            .unwrap_or(self.inode.stat(&path)?.size);
+        let end = offset.saturating_add(len).min(file_size);
+        if offset >= end {
+            return Ok(0);
+        }
+
+        if let Some(page_cache) = inner.page_cache.clone() {
+            if !inner.write_back {
+                return Err(Errno::EOPNOTSUPP);
+            }
+            // Page granularity is deliberate: dirty bytes outside a partial
+            // boundary block must reach lower storage before that block is
+            // zeroed in place.
+            page_cache.sync_range(&self.inode, path.as_str(), offset, end)?;
+            // Publish older delayed mtime/ctime before the destructive extent
+            // transaction. Otherwise a later metadata flush can reload and
+            // overwrite the inode's newly reduced i_blocks value.
+            self.inode.flush_data_metadata(path.as_str())?;
+            page_cache.with_writeback_exclusion(|| {
+                self.inode.punch_hole(path.as_str(), offset, end - offset)?;
+                page_cache.punch_hole(offset, end - offset);
+                Ok(())
+            })?;
+            let now = Self::now_timespec();
+            Self::update_cached_write_times(&mut inner, now);
+        } else {
+            self.inode.punch_hole(path.as_str(), offset, end - offset)?;
+            if let Some((dev, ino)) = self.shared_page_identity {
+                crate::mm::punch_shared_file_pages(dev, ino, offset, end - offset);
+            }
+        }
+        let identity = self.shared_page_identity;
+        drop(inner);
+        if let Some((dev, ino)) = identity {
+            crate::mm::punch_file_mappings(dev, ino, offset, end - offset);
         }
         Ok(0)
     }
 
     pub fn read_at_offset(&self, offset: usize, buf: &mut [u8]) -> SysResult<usize> {
-        let (path, file_path, page_cache, write_back) = {
+        let (path, file_path, page_cache, write_back, read_ahead_pages, mark_accessed) = {
             let inner = self.inner.lock();
             let visible_path = inner.path.abs_path();
             (
@@ -541,12 +713,14 @@ impl File {
                 inner.path.clone(),
                 inner.page_cache.clone(),
                 inner.write_back,
+                inner.read_ahead_pages,
+                !inner.no_reuse,
             )
         };
         let ty = self.inode.node_type();
         let n = if let Some(ref pc) = page_cache {
             let lower = write_back.then_some((&self.inode, path.as_str()));
-            pc.read_at(offset, buf, lower)
+            pc.read_at_advised(offset, buf, lower, read_ahead_pages, mark_accessed)
         } else {
             self.inode.read_at(&path, offset, buf)
         }?;
@@ -555,9 +729,7 @@ impl File {
                 crate::mm::overlay_shared_file_pages(dev, ino, offset, &mut buf[..n]);
             }
         }
-        if let Some(atime) = self.touch_atime_if_needed(&file_path, ty)? {
-            self.inner.lock().atime_override = Some(atime);
-        }
+        self.touch_atime_if_needed(&file_path, ty)?;
         Ok(n)
     }
 
@@ -730,11 +902,7 @@ impl File {
             )
         } else {
             let stat = self.inode.stat(storage_path.as_str())?;
-            (
-                cached_atime.unwrap_or(stat.atime),
-                cached_mtime.unwrap_or(stat.mtime),
-                cached_ctime.unwrap_or(stat.ctime),
-            )
+            (stat.atime, stat.mtime, stat.ctime)
         };
 
         let timestamp_le = |left: TimeSpec, right: TimeSpec| {
@@ -751,7 +919,12 @@ impl File {
 
         if !tmpfile {
             if let Some(inode) = self.inode.as_any().downcast_ref::<Ext4Inode>() {
-                inode.touch_atime(storage_path.as_str(), now)?;
+                if path.mnt.has_flag(MS_LAZYTIME) {
+                    inode.defer_atime(storage_path.as_str(), now)?;
+                    crate::fs::ext4::register_lazytime_inode(self.inode.clone());
+                } else {
+                    inode.touch_atime(storage_path.as_str(), now)?;
+                }
             }
         }
         Ok(Some(now))
@@ -769,6 +942,10 @@ impl FileOp for File {
         self
     }
 
+    fn reserve_shared_mmap_write(&self, offset: usize, data: &[u8]) -> SysResult {
+        File::reserve_shared_mmap_write(self, offset, data)
+    }
+
     fn splice_supported(&self) -> bool {
         true
     }
@@ -782,7 +959,7 @@ impl FileOp for File {
         let ty = self.inode.node_type();
         let n = if let Some(ref pc) = inner.page_cache {
             let lower = inner.write_back.then_some((&self.inode, path.as_str()));
-            pc.read_at(offset, buf, lower)?
+            pc.read_at_advised(offset, buf, lower, inner.read_ahead_pages, !inner.no_reuse)?
         } else {
             self.inode.read_at(&path, offset, buf)?
         };
@@ -793,9 +970,7 @@ impl FileOp for File {
         }
         inner.offset += n;
         drop(inner);
-        if let Some(atime) = self.touch_atime_if_needed(&file_path, ty)? {
-            self.inner.lock().atime_override = Some(atime);
-        }
+        self.touch_atime_if_needed(&file_path, ty)?;
         Ok(n)
     }
 
@@ -875,8 +1050,8 @@ impl FileOp for File {
         if let Some(ref pc) = inner.page_cache {
             let mut stat = self.inode.stat(&path)?;
             stat.size = pc.len();
-            stat.blocks = KStat::blocks_for_size(stat.size as u64);
             if let Some(meta) = inner.tmpfile_meta {
+                stat.blocks = KStat::blocks_for_size(stat.size as u64);
                 stat.ty = InodeType::Regular;
                 stat.mode = meta.mode;
                 stat.uid = meta.uid;
@@ -926,7 +1101,11 @@ impl FileOp for File {
 
     fn fsync(&self) -> SysResult<usize> {
         crate::perf::explicit_fsync(1);
-        let superblock = self.inner.lock().path.mnt.fs.clone();
+        let (superblock, path) = {
+            let inner = self.inner.lock();
+            let visible_path = inner.path.abs_path();
+            (inner.path.mnt.fs.clone(), self.storage_path(&visible_path))
+        };
         let data_result = self.sync_cached_data();
         // Consume an error recorded by this attempt as well as an earlier
         // close/threshold writeback. This prevents a single failure from
@@ -934,6 +1113,7 @@ impl FileOp for File {
         let writeback_error = self.check_writeback_error();
         data_result?;
         writeback_error?;
+        self.inode.flush_data_metadata(path.as_str())?;
         superblock.sync()?;
         Ok(0)
     }
@@ -963,6 +1143,10 @@ impl FileOp for File {
 
     fn truncate(&self, size: usize) -> SysResult<usize> {
         File::truncate(self, size)
+    }
+
+    fn punch_hole(&self, offset: usize, len: usize) -> SysResult<usize> {
+        File::punch_hole(self, offset, len)
     }
 }
 

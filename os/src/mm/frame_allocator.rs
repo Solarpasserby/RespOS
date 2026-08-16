@@ -1,7 +1,7 @@
 // os/src/mm/frame_allocator
 
 use super::address::{PhysAddr, PhysPageNum};
-use crate::config::{MEMORY_START, physical_memory_end};
+use crate::config::{physical_memory_end, MEMORY_START};
 use alloc::vec::Vec;
 use lazy_static::lazy_static;
 use spin::Mutex;

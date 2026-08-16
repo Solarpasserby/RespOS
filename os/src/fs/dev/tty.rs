@@ -33,6 +33,7 @@ impl InodeOp for TtyInode {
     }
 
     fn read_at(&self, _path: &str, _off: usize, buf: &mut [u8]) -> SysResult<usize> {
+        crate::fs::tty::check_background_read()?;
         let mut count = 0;
         while count < buf.len() {
             let c = console_getchar();
@@ -58,6 +59,7 @@ impl InodeOp for TtyInode {
     }
 
     fn write_at(&self, _path: &str, _off: usize, buf: &[u8]) -> SysResult<usize> {
+        crate::fs::tty::check_background_write()?;
         crate::console::write_user_bytes(buf);
         Ok(buf.len())
     }

@@ -29,11 +29,12 @@ Phase 6 的调度器、allocator、异步 I/O 和细粒度锁重构。
 - 制定日期：2026-08-14；代码基线：`5d9adea`。
 - Linux/POSIX Phase 0--4 主体已完成；Phase 5 的 AF_UNIX 基本关闭/poll、signal ABI 首轮、精确
   timeout、`wait4` 的窄化 `SA_RESTART` 和 CPU clock 已有专项证据。
-- task leader exit/non-leader exec、mmap EOF/truncate/SIGBUS、完整 signal restart/process-pending、
-  termios/job control 和 inet socket 等价语义仍未闭合。
-- 当前工作区的 `os/src/net/socket.rs` 与 `scripts/socket_timeout_probe_linux.c` 正在推进 socket timeout；
-  在 Linux baseline、RespOS probe、双架构构建和专项运行完成前，本方案统一将其视为“实现中”，不记为
-  已支持。
+- 制定时 task leader exit/non-leader exec、mmap EOF/truncate/SIGBUS、完整 signal restart/process-pending、
+  termios/job control 和 inet socket 等价语义均未闭合；2026-08-15 的当前进度已关闭稳定 identity/de-thread
+  核心并完成 process-pending 与 job-control 首轮，具体边界以 `current-status.md` 为准。
+- 2026-08-15 当前工作树已闭合 socket timeout、稳定 process identity、leader exit/non-leader exec、
+  mmap EOF/truncate/SIGBUS、process-pending/job-control 首轮及主要零进展 restart class；剩余边界以
+  `current-status.md` 顶部和各里程碑的下一交付物为准。
 - 快速变化的实际结果继续写入 [current-status.md](./current-status.md)，本文件只维护推进顺序、任务边界
   和退出门槛。
 
@@ -84,14 +85,15 @@ Phase 6 的调度器、allocator、异步 I/O 和细粒度锁重构。
 | AF_UNIX `SO_PEERCRED` | socketpair 与 pathname 双向凭据快照、musl/glibc `getsockopt02` 双架构 2 hart 通过 | 双架构已验证 | 补 credential change；`SCM_CREDENTIALS/SO_PASSCRED` 另立子项 |
 | AF_UNIX→pipe `splice` | Linux/RespOS 错误矩阵与 connected transfer probe、musl/glibc `splice01`--`splice07` 双架构 2 hart 通过 | 双架构已验证 | datagram/seqpacket 与 socket 输出方向按需求扩展；不宣称 zero-copy |
 | `getsid()` | Linux/RespOS session probe 与 PID 1 基础身份双架构 2 hart 通过 | 双架构已验证（无 controlling tty） | 与完整 job control 一起扩展跨 exec/session 关系 |
-| termios/job control | 当前 tty ioctl 主要只有窗口查询，源码明确未建模 controlling tty | 已知差异 | tty/session/pgrp 状态设计和 probe |
-| leader `exit`、non-leader `exec` | `task_phase5_probe` 有三项 expected failure | 已知差异 | leader identity 与 de-thread 实现 |
+| termios/job control | Linux/RV64/LA64 probe 已覆盖 controlling tty/前台组、stop/continue wait event、后台读 EIO、TOSTOP ignored-write 与 detach | 双架构已验证（首轮状态机） | canonical/echo/control chars、hangup I/O、orphan transition、forced steal 与 PTY |
+| leader `exit`、non-leader `exec` | 八项 `task_phase5_probe` 在 RV64/LA64 2/8 hart 通过，含稳定 identity、失败原子性与并发 exec | 双架构已验证（M2.1 核心） | exec-vs-exit_group 扩大竞态与资源基线 |
 | `CLONE_VFORK|CLONE_VM` | `clone05` 双架构双 libc 通过；额外 vfork01/02 与 RV64 CAgent/minibuild 回归通过 | 双架构已验证（当前范围） | 完整 BuildStorm、posix_spawn file-actions/失败回报 |
-| process-pending、`SA_NOCLDWAIT`、通用 restart | signal 首轮只闭合查询/exec；restart 仅覆盖 `wait4` | 已知差异 | 分主题 signal probe，不做全局一刀切 restart |
+| process-pending、`SA_NOCLDWAIT`、通用 restart | process-pending、标准/实时队列、进程内 `RLIMIT_SIGPENDING`、SIGCHLD auto-reap/NOCLDSTOP 已通过三方专项；restart 覆盖 wait4、pipe/vector/socket/mmsg（含 recvmmsg timeout）、null-timeout futex，poll/sleep timeout 类已验证非重启 | 受限支持 | real-UID 全局 pending 配额、time64/compat 与未盘点 timeout 类 |
 | futex absolute timeout / precise wake | RV64 bitset/wake 与 LA64 wake 双 libc 通过；LA64 首组 musl monotonic wait 在 secondary 上线窗口稳定延迟约 0.87 s，后续 realtime/glibc 正常 | 已知差异 | 待确认：审计 LA64 secondary 启动与跨 hart 时间/调度，不放宽 timeout 阈值 |
-| mmap EOF/truncate/SIGBUS | Linux oracle 全通过；RV64/LA64 4 GiB/2 hart 均稳定复现相同七项 expected failure | 已知差异 | resident provenance、动态 EOF、truncate invalidation、fault 分类 |
+| mmap EOF/truncate/punch/ENOSPC SIGBUS | Linux/RV64/LA64 probe 的 EOF/truncate shared/private/private-COW、跨进程失效及 16 轮 fault/store 竞态通过；ext4 punch、真实块释放、cross-process provenance、16 轮 punch-vs-store/msync 通过；16 MiB auxiliary ext4 满盘 shared store SIGBUS 与释放空间后恢复双架构通过；`mmap05`、BuildStorm file、fadvise 相邻回归通过 | 双架构已验证（M3 当前范围） | `mmap16` 的 checkpoint/futex 已证实正常，当前阻断是 buffered writeback `ENOSPC` 未反馈给填盘 `write()`；另有 page-mkwrite 性能与更宽 mmap LTP 簇 |
 | `mmap/mprotect(PROT_NONE)` | LA64 software-present/hardware-invalid PTE；`mmap05` 与临时过滤的 `mprotect04` 双 libc 通过，RV64 回归通过；独立 Linux/RV64/LA64 probe 已覆盖未知 prot/未对齐 `EINVAL` 权限不变、只读 shared backing `EACCES` 不获写权限及 unmapped-hole `ENOMEM`，并校正 POSIX 允许非 `EINVAL` 失败部分修改 | 双架构已验证（当前 PROT_NONE 与参数/权限/映射缺口失败范围） | 补内存压力/VMA 上限失败与并发 user-copy；旧 LA 模拟器上的 NR/NX 其他组合单列验证 |
-| realtime/纳秒/atime、user/system CPU time | Phase 1 与 CPU clock 文档保留明确边界 | 待验证 | 跨重启时间 probe 与 clock/accounting 子项 |
+| `posix_fadvise` / PageCache advice | 六种 advice、错误矩阵、open-description 状态、1/16/32 页窗口、WILLNEED、完整页/EOF DONTNEED、dirty writeback 与 NOREUSE reset 已由 Linux oracle 和 RV64/LA64 8 轮专项验证；双 libc 八项 LTP、mmap 与 rusage 相邻回归通过 | 双架构已验证（当前同步 writeback 范围） | async writeback/error 时序、极大范围节流与完整 BuildStorm soak |
+| realtime/纳秒/atime、CPU/rusage | CPU process/thread user/system、`RUSAGE_THREAD`、fault/RSS/actual context-switch、block I/O、cold-file major fault、全部 Linux-zero legacy 字段及 wait4/raw-waitid children 聚合已通过专项；RTC init/read/set 与同设备 reset persistence、ext4 扩展及 128-byte 旧 inode 已通过双架构；regular/directory default/24h relatime、strictatime、mount/open noatime、nodiratime、lazytime 显式同步、background/eviction、无显式 sync crash-image 与 ctime 关系双架构通过；timestamp LTP 双 libc双架构通过 | 双架构已验证（CPU accounting 与 rusage 当前字段、RTC 当前 QEMU 范围、ext4 timestamp layout 与 atime 当前范围）；其余待验证 | CPU hotplug accounting 与更宽 LTP；真实断电/volatile device cache、lazytime I/O failure/registry soak、真实电池 RTC 掉电由硬件平台另验 |
 | musl `pathconf()` pathname 错误 | 当前 RV64/LA64 镜像的 musl 反汇编证实 `pathconf` 丢弃 path；musl `pathconf02` 五项失败而 glibc 全通过 | 已知差异 | 待确认：可复现 musl 构建/镜像替换与完整 musl 回归 |
 | LA64 musl `readlink*()` 零长度 | musl 1.2.5 wrapper 把 size 0 转成内部 size 1 调用；内核已对真实 size 0 返回 `EINVAL`，RV64 musl 1.2.0 与两架构 glibc 通过 | 已知差异 | 待确认：是否修改 musl runtime；不在内核特判 size 1 |
 | RV64 musl `epoll_create()` invalid size | musl 1.2.0 丢弃 size 后调用合法 `epoll_create1(0)`；LA64 musl 1.2.5 与两架构 glibc 的 `epoll_create02` 通过 | 已知差异 | 待确认：与其他 musl 差异统一更新 runtime；不得拒绝合法 `epoll_create1(0)` |
@@ -198,12 +200,13 @@ control。进程身份必须从“某个永远存活的 leader TCB”中解耦�
 只保留调用线程的 thread-directed pending，按既有协议清理 sibling 的 robust futex 和
 `clear_child_tid`，最后原子安装新映像。
 
-当前拟定的唯一所有权模型、de-thread 提交顺序、锁序与验证拆分见
-[process-identity-phase5-design.md](./process-identity-phase5-design.md)。该设计当前为 `待确认`；不得以
-保留退出 leader TCB 的 tombstone 作为最终实现。
+已采用的唯一所有权模型、de-thread 提交顺序、锁序与验证拆分见
+[process-identity-phase5-design.md](./process-identity-phase5-design.md)。稳定身份、leader exit、最后线程
+Zombie 与 non-leader exec 核心路径已实现；不得以保留退出 leader TCB 的 tombstone 作为实现。
 
-退出门槛是现有 `task_phase5_probe` 从三个 expected failure 变为 `TASK_PHASE5 ALL PASS`，并追加
-2/8 hart 的 exit/exec/wait/资源回收压力。
+现有 `task_phase5_probe` 已从修复前 expected failure 变为八项 `TASK_PHASE5 ALL PASS`，RV64/LA64
+2/8 hart 均通过。M2.1 剩余门槛是 exec-vs-exit_group 扩大竞态与 task/frame/fd/futex/timer 资源基线；
+process-pending 和 job control 属于 M2.2/M2.3，不由该结果替代。
 
 ### M2.2 session 与终端状态
 
@@ -215,11 +218,20 @@ probe 覆盖 session leader 限制、父进程对子进程 `setpgid` 的 exec �
 `SIGTTOU/SIGTTIN/SIGHUP/SIGCONT` 和 controlling tty 释放。没有完整 tty 语义前，不以固定成功或固定
 窗口值宣称 job control 支持。
 
+2026-08-15 已把状态放入共享 console terminal，并以 Linux PTY oracle 与双架构 2 hart probe闭合
+controlling tty/foreground pgrp、默认 `SIGTTIN` stop/`SIGCONT` continue 的 wait 事件、ignored/blocked
+后台读、`TOSTOP` 写和 detach；随后补齐停止进程组因 parent exit/reparent 形成孤儿时的
+`SIGHUP`→`SIGCONT`，双架构各连续 8 轮通过。PTY、line discipline、hangup I/O、并发关系变更线性化与
+forced steal 仍是退出门槛，因此 M2.2 保持进行中。
+
 ### M2.3 process-pending 与 restart class
 
-将 process-directed pending queue 与 per-thread pending queue 分离，递送时才按 mask/目标线程选择；
-exec、fork、线程退出和 group exit 分别定义保留/清理规则。随后独立实现 `SA_NOCLDWAIT` 和 job-control
-signals。
+process-directed pending queue 已与 per-thread pending queue 分离，递送时才按 mask/目标线程选择；
+exec、fork、线程退出和 group exit 的保留/清理规则已有专项覆盖。标准信号合并保留首条 info、实时信号
+同号多实例 FIFO 及进程内 `RLIMIT_SIGPENDING` 填满/恢复已通过 Linux oracle、双架构 probe 和
+`tgkill02`；Linux 的 real-UID 跨进程统一计数仍待凭据 owner 模型。`SA_NOCLDWAIT` 与显式 SIGCHLD
+ignore 的自动回收及 `SA_NOCLDSTOP` 已通过三方专项；下一步优先推进 restart classes，并继续补剩余
+job-control signals。
 
 syscall restart 不做“所有 EINTR 自动重启”。按 Linux restart class 分批扩展：
 
@@ -227,6 +239,29 @@ syscall restart 不做“所有 EINTR 自动重启”。按 Linux restart class 
 2. read/write/pipe/socket，已有字节数优先；
 3. 带 timeout 的 poll/futex/sleep/socket，重启时保留剩余时间或按接口契约返回；
 4. 明确不可重启的调用保持 `EINTR`。
+
+2026-08-15 已将零进展阻塞 `read/write/readv/writev(pipe)` 与 `accept/accept4(AF_UNIX)` 纳入显式
+restart-class 表；随后以满/空 AF_UNIX socketpair 闭合
+`sendto/recvfrom/sendmsg/recvmsg/sendmmsg/recvmmsg(null timeout)`。普通 handler、`SA_RESTART`、默认忽略
+三种路径均通过 Linux/RV64/LA64 对照，向量 I/O、`MSG_WAITALL` 和 mmsg 还验证 partial-result/count
+优先级。参数感知分类器随后纳入 null-timeout `FUTEX_WAIT/FUTEX_WAIT_BITSET`；普通 handler、
+`SA_RESTART`、默认忽略三态及双架构各 8 轮通过，带 timeout 的 futex 仍保持 `EINTR/ETIMEDOUT` 并以
+双架构各 20 轮 signal/wake/timeout 竞态门禁证明。无 `SO_SNDTIMEO` 的阻塞 connect 也已纳入；AF_UNIX
+满 accept queue 的普通 handler/`SA_RESTART`/默认忽略三态在 Linux/RV64/LA64 通过；同一 probe 还验证
+accept/recvfrom/sendto/connect 设置方向对应 socket timeout 后，即使 `SA_RESTART` 也返回 `EINTR`。
+分类器已把方向 timeout 检查推广到 socket fd 上的 read/write/readv/writev，双架构各连续 8 轮。
+`nanosleep/ppoll/pselect6/epoll_pwait/clock_nanosleep` 的 timeout 非重启契约也已三方闭合：普通与
+`SA_RESTART` handler 均返回 `EINTR`，默认 ignored signal 等到 timeout；relative nanosleep/clock_nanosleep
+校验 remaining time，absolute clock_nanosleep 保持 remainder 不变。`recvmmsg` 非空 timeout 也已闭合，
+但契约不同：timeout 只在成功 message 后检查/写回，不独立唤醒；零进展 EINTR 不改原值并允许
+SA_RESTART，partial count 保留最后一次成功写回，`MSG_WAITFORONE` 首条后转 nonblock。后续 time64/compat
+和其他 timeout 类仍须分别建立证据。
+同轮暴露并修复 wait 的 scan→register lost-wakeup：父进程级 child-event generation 使登记后的代际变化
+强制重扫；登记复查不再因无关旧 zombie 忙循环，双架构完整 signal probe 各连续 8 轮通过。
+signal enqueue 的 `interrupted` 仅作 wake hint，发布后现重新验证 pending/interruptible 条件，防止
+consumer 已消费 signal 后的晚写让下一阻塞 syscall 假 `EINTR`。
+stop/continue 同样按发布顺序闭合：先写 `Stopped`，再通知 parent，最后 handoff 不覆盖并发 SIGCONT 的
+`Ready`；双架构 signal 8 轮和 job-control 专项通过。
 
 每一类都必须覆盖无 handler、无 `SA_RESTART`、有 `SA_RESTART`、默认忽略和 signal/完成竞态。
 
@@ -238,10 +273,18 @@ syscall restart 不做“所有 EINTR 自动重启”。按 Linux restart class 
 
 ## 里程碑 M3：mmap EOF、truncate 与 SIGBUS
 
-2026-08-14 已把 `TASK_A_MMAP_PHASE5_PROBE=1` 接入 RV64/LA64 `testrunner`。Linux oracle 全通过；
-两架构 guest 均以相同集合复现七项差异：shared/private 初始整页越过 EOF、两类 resident 整页在
-truncate 后越过 EOF、private 部分页 truncate 清零、private 动态 EOF 增长，以及 private COW 整页
-truncate。实现前后都使用该入口比较，不能只看宿主 `make` 的退出状态。
+2026-08-15 已闭合核心七项：普通 mmap 使用 live EOF、truncate 跨唯一 MemorySet 失效 resident whole
+page、clean private file page 以 PageCache+COW 保存 provenance，partial tail 在 clean/dirty private
+情况下分别清零/保留。随后补齐显式跨进程竞态：独立 truncator 对已驻留和未 fault mapper 的访问均
+收敛为 SIGBUS，另以 16 轮同时 fault/store 与 shrink 验证 truncate-done 后不残留可访问 PTE。
+Linux/RV64/LA64 均输出 `MMAP_PHASE5 ALL PASS`；双架构双 libc `mmap05`、双架构 BuildStorm file 与
+RV64 private-map 相邻回归通过。2026-08-16 又闭合 ext4 punch-hole：partial boundary 清零、完整物理块
+释放、`st_blocks` 真实下降、eviction 后 lower 零读，以及跨进程 shared/clean-private 失效和 private-COW
+保留均由 Linux/RV64/LA64 对照通过；错误矩阵与 mmap/BuildStorm/fadvise 相邻门禁也已通过。剩余边界是
+shared write 存储耗尽也已由 write-protected PTE + fault-time backing 协议关闭，并在双架构 16 MiB ext4
+验证 SIGBUS 和释放空间后恢复；16 轮 punch-vs-store/msync 三方门禁也已通过。剩余边界是 page-mkwrite
+性能和更宽 mmap LTP；`mmap16` 当前由 parent 的 buffered-write 填盘循环无法观察 writeback `ENOSPC`
+所阻断，首个 checkpoint/futex 已由 trace 证实正常，不能从自定义单页满盘范围直接外推。
 
 采用当前审计已经收敛的方案：
 
@@ -256,18 +299,30 @@ truncate。实现前后都使用该入口比较，不能只看宿主 `make` 的�
 5. grow 后未 fault 页按当前 EOF 重新从文件读取；旧 truncate 失效不得被 writeback 反向扩容；
 6. user copy 遇到同类 file fault 时返回正确的短拷贝/errno，不在内核中直接触发用户 signal handler。
 
-退出门槛是 `mmap_phase5_probe` 的七项 expected failure 全部消失，并通过 shared/private、已 COW/未
-COW、grow/shrink、并发 fault/truncate、RV64/LA64 SMP shootdown 与 frame reclaim 专项。
+当前 EOF/truncate/punch/ENOSPC 及 punch-msync 并发门槛已满足。M3 后续是补齐 buffered writeback
+`ENOSPC` 的记录/反馈以恢复 `mmap16`、补 page-mkwrite 成功路径性能/回收证据和更宽双架构 mmap LTP；
+DAX/huge page 按当前范围明确排除。
 
 ## 里程碑 M4：文件与时间遗留语义
 
 该里程碑不重做 Phase 1--4，而只关闭已有文档明确保留的边界：
 
-1. ext4 纳秒、负时间和溢出规则，以及真实 `CLOCK_REALTIME` 初始化/设置的持久化边界；
+1. ext4 纳秒、负时间、2038 后 epoch 和新 inode realtime 已由 Linux、双架构即时及跨重启 probe
+   关闭；`CLOCK_REALTIME` 已从 RV64 goldfish/LA64 LS7A RTC 初始化；Linux 式上下界 clamp 已跨重启
+   验证；128-byte 无 extra inode 的 signed-32-bit 秒级 clamp 也已双架构跨重启关闭。RTC init/read/set
+   与同设备 reset persistence 已双架构关闭；新 QEMU 进程不模拟电池后备 RTC，真实硬件掉电由目标平台
+   另验；
 2. `UTIME_NOW/UTIME_OMIT` 的当前运行时状态机及 flat credential 下非 owner 权限矩阵已由
-   Linux 契约和 RV64/LA64 probe 关闭；继续补 `CAP_FOWNER`/ACL、纳秒/负秒/溢出持久化，以及
-   atime/relatime/strictatime/`O_NOATIME` 的事件和 ctime 关系；
-3. `times/getrusage` 的 user/system 拆分和子进程累计，不把 total 同填两字段当完整实现；
+   Linux 契约和 RV64/LA64 probe 关闭；继续补 `CAP_FOWNER`/ACL，以及
+   regular/directory default/24-hour relatime、strictatime/noatime/`O_NOATIME`/`MS_NODIRATIME` 的事件和
+   ctime 关系，以及 lazytime 的立即可见性、fsync/sync/remount durability boundary、monotonic
+   background expiry、最后 owner eviction 与无显式 sync crash-image 已由双架构 probe 关闭；继续补真实
+   断电/volatile device cache、lower I/O failure injection 与超大 registry soak；
+3. `times/getrusage` 的 process/thread user/system、`RUSAGE_THREAD`、fault/RSS/actual context-switch、
+   block I/O、可重复 cold-file major fault、全部 Linux-zero legacy 字段与 wait4/raw-waitid 已回收子进程
+   累计已通过 Linux/RV64/LA64 专项；full `posix_fadvise` advice、writeback-before-invalidate 和 PageCache
+   行为也已通过 Linux oracle、双架构专项/LTP/mmap/rusage 回归。继续补 async writeback 时序、CPU hotplug
+   accounting 与更宽 LTP，不把当前字段闭合外推为完整 rusage；
 4. namespace 并发可见性、POSIX record lock 的 fork/dup/close 生命周期和 FIFO 多开边界；
 5. 当前 LTP 失败矩阵中有规范证据的文件接口，其 errno、失败原子性和跨重启状态。
 
@@ -361,8 +416,8 @@ summary，不能以 QEMU/make 返回 0 代替测试通过。
    `ECONNABORTED -> EINPROGRESS -> success` 重连序列已完成；真实网络 timeout/unreachable/reset 与
    iperf 回归仍待补；
 4. `getsid` 与 session/pgid Linux 对照已完成，不在该补丁中实现完整 tty；
-5. 重构稳定 process identity，关闭 leader exit/non-leader exec；
-6. 在稳定身份上实现 controlling tty/job control，再推进 process-pending 和 restart classes；
+5. 稳定 process identity、leader exit/non-leader exec 核心路径已完成，继续清理兼容双写和剩余 owner；
+6. 在稳定身份上推进 process-pending、controlling tty/job control 和 restart classes；
 7. 按 M3 的 resident provenance 方案关闭 mmap 七项差异；
 8. 根据覆盖矩阵和 LTP 证据推进 M4、M5；没有触发证据时不进入 M6。
 

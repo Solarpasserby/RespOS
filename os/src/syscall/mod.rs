@@ -252,8 +252,9 @@ use system::*;
 use time::*;
 
 pub use time::{
-    check_nanosleep_timeouts, check_posix_timers, finish_task_timeout, register_task_timeout,
-    register_task_timeout_us, remove_posix_timers_for_owner,
+    check_nanosleep_timeouts, check_posix_timers, finish_task_timeout, init_realtime_from_rtc,
+    realtime_timespec, register_task_timeout, register_task_timeout_us,
+    remove_posix_timers_for_owner,
 };
 
 pub fn check_all_task_timers() {
@@ -285,6 +286,41 @@ pub fn service_task_timers_at_safe_point() {
 
 fn merge_offset_arg(low: usize, high: usize) -> isize {
     (((high as u64) << 32) | ((low as u64) & 0xffff_ffff)) as i64 as isize
+}
+
+/// Syscalls for which an interrupted, zero-progress operation is restarted
+/// when the delivered handler has SA_RESTART. Timeout-bearing and explicitly
+/// non-restartable waits must stay out of this list.
+pub fn is_restartable_syscall(syscall_id: usize, args: &[usize; 6]) -> bool {
+    if syscall_id == SYSCALL_RECVMMSG {
+        return net::socket_recv_is_restartable(args[0]).unwrap_or(false);
+    }
+    if syscall_id == SYSCALL_FUTEX {
+        const FUTEX_CMD_MASK: usize = 0x7f;
+        const FUTEX_WAIT: usize = 0;
+        const FUTEX_WAIT_BITSET: usize = 9;
+        let command = args[1] & FUTEX_CMD_MASK;
+        return matches!(command, FUTEX_WAIT | FUTEX_WAIT_BITSET) && args[3] == 0;
+    }
+    if matches!(syscall_id, SYSCALL_READ | SYSCALL_READV) {
+        return net::socket_recv_is_restartable(args[0]).unwrap_or(true);
+    }
+    if matches!(syscall_id, SYSCALL_WRITE | SYSCALL_WRITEV) {
+        return net::socket_send_is_restartable(args[0]).unwrap_or(true);
+    }
+    if matches!(syscall_id, SYSCALL_ACCEPT | SYSCALL_ACCEPT4) {
+        return net::socket_recv_is_restartable(args[0]).unwrap_or(false);
+    }
+    if matches!(
+        syscall_id,
+        SYSCALL_CONNECT | SYSCALL_SENDTO | SYSCALL_SENDMSG | SYSCALL_SENDMMSG
+    ) {
+        return net::socket_send_is_restartable(args[0]).unwrap_or(false);
+    }
+    if matches!(syscall_id, SYSCALL_RECVFROM | SYSCALL_RECVMSG) {
+        return net::socket_recv_is_restartable(args[0]).unwrap_or(false);
+    }
+    syscall_id == SYSCALL_WAIT4
 }
 
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
@@ -569,7 +605,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
         SYSCALL_SIGRETURN => sys_sigreturn(),
         SYSCALL_SETPRIORITY => sys_setpriority(args[0], args[1], args[2] as isize),
         SYSCALL_GETPRIORITY => sys_getpriority(args[0], args[1]),
-        SYSCALL_REBOOT => sys_reboot(),
+        SYSCALL_REBOOT => sys_reboot(args[0], args[1], args[2]),
         SYSCALL_SETREGID => sys_setregid(args[0], args[1]),
         SYSCALL_SETGID => sys_setgid(args[0]),
         SYSCALL_SETREUID => sys_setreuid(args[0], args[1]),

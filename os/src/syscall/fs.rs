@@ -6,15 +6,15 @@ use crate::fs::dev::{LoopControlInode, LoopInode, VirtBlkInode};
 use crate::fs::mount::{do_mount, do_umount2, sync_all_filesystems, sync_filesystem};
 use crate::fs::vfs::{InodeOp, InodeType};
 use crate::fs::{
-    AT_EMPTY_PATH, AT_FDCWD, AT_NO_AUTOMOUNT, AT_SYMLINK_NOFOLLOW, FdEntry, File, FileOp, KStat,
-    OpenFlags, POLL_READ, POLL_WRITE, Pipe, PollEvents, SpecialFd, Stat, Statfs64,
     check_dir_search_permission, filename_create, filename_link, filename_link_tmpfile,
     filename_lookup, filename_lookup_no_follow_final_symlink, filename_mknod, filename_rename,
-    filename_symlink, filename_unlink, init_fdset, make_pipe, open_named_fifo, path_open,
+    filename_symlink, filename_unlink, init_fdset, make_pipe, open_named_fifo, path_open, FdEntry,
+    File, FileOp, KStat, OpenFlags, Pipe, PollEvents, SpecialFd, Stat, Statfs64, AT_EMPTY_PATH,
+    AT_FDCWD, AT_NO_AUTOMOUNT, AT_SYMLINK_NOFOLLOW, POLL_READ, POLL_WRITE,
 };
 use crate::mm::{
-    IoBufferKind, KernelIoBuffer, VPNRange, VirtAddr, check_user_readable, check_user_writable,
-    copy_cstr_from_user, copy_from_user, copy_to_user, writeback_file_pages,
+    check_user_readable, check_user_writable, copy_cstr_from_user, copy_from_user, copy_to_user,
+    writeback_file_pages, IoBufferKind, KernelIoBuffer, VPNRange, VirtAddr,
 };
 use crate::mutex::SpinLock;
 use crate::signal::sig_struct::{Sig, SigSet};
@@ -23,7 +23,7 @@ use crate::task::{
     current_task, prepare_current_task_blocked, remove_task, switch_to_next_task,
     yield_current_task,
 };
-use crate::timer::{TimeSpec, get_time_ms, get_timeout_us};
+use crate::timer::{get_timeout_us, TimeSpec};
 use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 use lazy_static::lazy_static;
 
@@ -42,6 +42,7 @@ const XATTR_SIZE_MAX: usize = 65_536;
 const CHOWN_ID_UNCHANGED: usize = u32::MAX as usize;
 const CLOSE_RANGE_UNSHARE: usize = 1 << 1;
 const CLOSE_RANGE_CLOEXEC: usize = 1 << 2;
+const CAP_SYS_TIME: usize = 25;
 
 const LOCK_SH: usize = 1;
 const LOCK_EX: usize = 2;
@@ -685,6 +686,14 @@ pub fn sys_fadvise64(fd: usize, offset: isize, len: isize, advice: usize) -> Sys
     let task = current_task().expect("[kernel] current task is None.");
     let file = task.get_fd_entry(fd)?.file;
     file.can_seek()?;
+    let offset = offset as usize;
+    let len = len as usize;
+    if len != 0 {
+        offset.checked_add(len).ok_or(Errno::EINVAL)?;
+    }
+    if let Some(file) = file.as_any().downcast_ref::<File>() {
+        return file.fadvise(offset, len, advice);
+    }
     Ok(0)
 }
 
@@ -815,6 +824,12 @@ pub fn sys_readv(fd: usize, iov: *const IoVec, iovcnt: usize) -> SysResult<usize
     check_iovec_buffers(&items, IovecBufferPerm::Write)?;
     let mut total: usize = 0;
     for item in items {
+        if total != 0 {
+            let task = current_task().expect("[kernel] current task is None.");
+            if !task.get_fd_entry(fd)?.file.read_ready() {
+                break;
+            }
+        }
         if item.len == 0 {
             continue;
         }
@@ -1802,11 +1817,7 @@ fn validate_utimens_time(ts: TimeSpec) -> SysResult<TimeSpec> {
 }
 
 fn current_timespec() -> TimeSpec {
-    let ms = get_time_ms();
-    TimeSpec {
-        sec: (ms / 1000) as isize,
-        nsec: ((ms % 1000) * 1_000_000) as isize,
-    }
+    super::time::realtime_timespec()
 }
 
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -2549,11 +2560,29 @@ pub fn sys_ioctl(fd: usize, request: usize, arg: usize) -> SysResult<usize> {
     const FIONREAD: usize = 0x541b;
     const FIONBIO: usize = 0x5421;
     const RTC_RD_TIME: usize = 0x8024_7009;
+    const RTC_SET_TIME: usize = 0x4024_700a;
+    // Linux declares ioctl(2)'s command as unsigned int.  Some libc paths
+    // sign-extend constants whose direction bit is set when loading them into
+    // a syscall register, so normalize at the ABI boundary before dispatch.
+    let request = request as u32 as usize;
 
     let task = current_task().expect("[kernel] current task is None.");
     let fd_entry = task.get_fd_entry(fd)?;
 
     match request {
+        crate::fs::tty::TCGETS
+        | crate::fs::tty::TCSETS
+        | crate::fs::tty::TCSETSW
+        | crate::fs::tty::TCSETSF
+        | crate::fs::tty::TIOCSCTTY
+        | crate::fs::tty::TIOCGPGRP
+        | crate::fs::tty::TIOCSPGRP
+        | crate::fs::tty::TIOCNOTTY
+        | crate::fs::tty::TIOCGSID
+            if fd_entry.file.is_tty() =>
+        {
+            crate::fs::tty::console_ioctl(request, arg)
+        }
         TIOCGWINSZ if fd_entry.file.is_tty() => {
             let winsize = WinSize {
                 row: 24,
@@ -2586,8 +2615,28 @@ pub fn sys_ioctl(fd: usize, request: usize, arg: usize) -> SysResult<usize> {
             }
         }
         RTC_RD_TIME if is_rtc_file(&fd_entry.file) => {
-            let rtc_time = rtc_time_from_unix(get_time_ms() / 1000);
+            let epoch_ns = crate::timer::rtc_epoch_ns().ok_or(Errno::EIO)?;
+            let seconds = usize::try_from(epoch_ns / 1_000_000_000).map_err(|_| Errno::EINVAL)?;
+            let rtc_time = rtc_time_from_unix(seconds);
             copy_to_user(arg as *mut RtcTime, &rtc_time as *const RtcTime, 1)?;
+            Ok(0)
+        }
+        RTC_SET_TIME if is_rtc_file(&fd_entry.file) => {
+            // Linux performs the RTC class capability check before touching
+            // the user pointer and reports EACCES for this ioctl.
+            if !task.has_cap(CAP_SYS_TIME) {
+                return Err(Errno::EACCES);
+            }
+            let mut rtc_time = RtcTime::default();
+            copy_from_user(&mut rtc_time as *mut RtcTime, arg as *const RtcTime, 1)?;
+            let seconds = rtc_time_to_unix(&rtc_time)?;
+            let epoch_ns = u64::try_from(seconds)
+                .ok()
+                .and_then(|seconds| seconds.checked_mul(1_000_000_000))
+                .ok_or(Errno::EINVAL)?;
+            if !crate::timer::rtc_set_epoch_ns(epoch_ns) {
+                return Err(Errno::EIO);
+            }
             Ok(0)
         }
         _ => device_ioctl(&fd_entry.file, request, arg),
@@ -2618,7 +2667,10 @@ fn device_ioctl(
 fn is_rtc_file(file: &alloc::sync::Arc<dyn FileOp>) -> bool {
     file.as_any()
         .downcast_ref::<File>()
-        .map(|file| file.path().abs_path().as_str().ends_with("/rtc"))
+        .map(|file| {
+            let path = file.path().abs_path();
+            path.as_str().ends_with("/rtc") || path.as_str().ends_with("/rtc0")
+        })
         .unwrap_or(false)
 }
 
@@ -2669,6 +2721,56 @@ fn rtc_time_from_unix(secs: usize) -> RtcTime {
         tm_yday: day_of_year as i32,
         tm_isdst: 0,
     }
+}
+
+fn rtc_time_to_unix(time: &RtcTime) -> SysResult<usize> {
+    let year = time.tm_year.checked_add(1900).ok_or(Errno::EINVAL)?;
+    if !(1970..=9999).contains(&year)
+        || !(0..=11).contains(&time.tm_mon)
+        || !(0..=23).contains(&time.tm_hour)
+        || !(0..=59).contains(&time.tm_min)
+        || !(0..=59).contains(&time.tm_sec)
+    {
+        return Err(Errno::EINVAL);
+    }
+    let year = year as usize;
+    let month = time.tm_mon as usize;
+    let month_days = [
+        31usize,
+        if is_leap_year(year) { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    if time.tm_mday < 1 || time.tm_mday as usize > month_days[month] {
+        return Err(Errno::EINVAL);
+    }
+    let years_before = year - 1;
+    let leap_days_before_year = years_before / 4 - years_before / 100 + years_before / 400;
+    let base_year = 1969usize;
+    let leap_days_before_epoch = base_year / 4 - base_year / 100 + base_year / 400;
+    let mut days = (year - 1970)
+        .checked_mul(365)
+        .and_then(|days| {
+            days.checked_add(leap_days_before_year.saturating_sub(leap_days_before_epoch))
+        })
+        .ok_or(Errno::EINVAL)?;
+    days = days
+        .checked_add(month_days[..month].iter().sum())
+        .and_then(|days| days.checked_add(time.tm_mday as usize - 1))
+        .ok_or(Errno::EINVAL)?;
+    days.checked_mul(86_400)
+        .and_then(|seconds| seconds.checked_add(time.tm_hour as usize * 3_600))
+        .and_then(|seconds| seconds.checked_add(time.tm_min as usize * 60))
+        .and_then(|seconds| seconds.checked_add(time.tm_sec as usize))
+        .ok_or(Errno::EINVAL)
 }
 
 fn is_leap_year(year: usize) -> bool {

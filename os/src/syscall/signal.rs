@@ -5,8 +5,8 @@ use crate::signal::sig_stack::{SS_DISABLE, SignalStack};
 use crate::signal::sig_struct::{FrameFlags, Sig, SigFrame, SigRTFrame, SigSet};
 use crate::signal::{LinuxSigInfo, SiField, SigInfo};
 use crate::task::{
-    TASK_MANAGER, current_task, prepare_current_task_blocked, remove_task, switch_to_next_task,
-    yield_current_task,
+    PROCESS_MANAGER, TASK_MANAGER, current_task, prepare_current_task_blocked, remove_task,
+    switch_to_next_task, yield_current_task,
 };
 use crate::timer::{TimeSpec, get_timeout_ms};
 use alloc::vec::Vec;
@@ -83,8 +83,8 @@ pub fn sys_kill(pid: usize, signum: i32) -> SysResult<usize> {
     let pid = pid as isize;
     let mut targets = Vec::new();
     if pid > 0 {
-        if let Some(task) = TASK_MANAGER.get(pid as usize) {
-            targets.push(task);
+        if let Some(process) = PROCESS_MANAGER.get(pid as usize) {
+            targets.push(process);
         }
     } else {
         let pgid = if pid == 0 {
@@ -94,12 +94,11 @@ pub fn sys_kill(pid: usize, signum: i32) -> SysResult<usize> {
         } else {
             (-pid) as usize
         };
-        TASK_MANAGER.for_each(|task| {
-            if task.tid() == task.tgid()
-                && (pgid == usize::MAX || task.pgid() == pgid)
-                && !(pid == -1 && task.tgid() == current.tgid())
+        PROCESS_MANAGER.for_each(|process| {
+            if (pgid == usize::MAX || process.pgid() == pgid)
+                && !(pid == -1 && process.tgid() == current.tgid())
             {
-                targets.push(task.clone());
+                targets.push(process.clone());
             }
         });
     }
@@ -107,35 +106,37 @@ pub fn sys_kill(pid: usize, signum: i32) -> SysResult<usize> {
     if targets.is_empty() {
         return Err(Errno::ESRCH);
     }
-    if signum == 0 {
-        return Ok(0);
-    }
-
     let mut delivered = false;
     let mut denied = false;
-    for task in targets {
+    for process in targets {
         if current.euid() != 0
-            && current.euid() != task.uid()
-            && current.euid() != task.suid()
-            && current.uid() != task.uid()
-            && current.uid() != task.suid()
+            && current.euid() != process.uid()
+            && current.euid() != process.suid()
+            && current.uid() != process.uid()
+            && current.uid() != process.suid()
         {
             denied = true;
             continue;
         }
-        let siginfo = SigInfo::new(
-            sig.raw(),
-            SigInfo::USER,
-            SiField::Kill {
-                tid: current.tgid(),
-            },
-        );
-        task.receive_siginfo(siginfo, !task.is_process_leader());
-        if sig == Sig::SIGCONT && task.is_stopped() {
-            task.set_wait_event(SigInfo::CLD_CONTINUED, sig.raw());
-            task.notify_parent_sigchld(SigInfo::CLD_CONTINUED);
-            crate::task::wakeup_stopped_task(task);
+        if signum != 0 {
+            if let Some(task) = process.signal_target() {
+                let siginfo = SigInfo::new(
+                    sig.raw(),
+                    SigInfo::USER,
+                    SiField::Kill {
+                        tid: current.tgid(),
+                    },
+                );
+                task.receive_siginfo(siginfo, false);
+                if sig == Sig::SIGCONT && task.is_stopped() {
+                    task.set_wait_event(SigInfo::CLD_CONTINUED, sig.raw());
+                    task.notify_parent_sigchld(SigInfo::CLD_CONTINUED);
+                    crate::task::wakeup_stopped_task(task);
+                }
+            }
         }
+        // Linux reports success for a zombie that still has a PID even though
+        // no live member can observe the signal.
         delivered = true;
     }
     if delivered {
@@ -166,8 +167,15 @@ pub fn sys_tkill(tid: usize, signum: i32) -> SysResult<usize> {
                 tid: current_task().unwrap().tid(), //获取发送者的线程号
             },
         );
-        task.receive_siginfo(siginfo, true);
-        Ok(0)
+        let limit = task
+            .rlimit(crate::task::RLIMIT_SIGPENDING)
+            .map(|(cur, _)| cur)
+            .unwrap_or(usize::MAX);
+        if task.try_receive_siginfo(siginfo, true, limit) {
+            Ok(0)
+        } else {
+            Err(Errno::EAGAIN)
+        }
     } else {
         Err(Errno::ESRCH)
     }
@@ -183,11 +191,6 @@ pub fn sys_tgkill(tgid: usize, tid: usize, signum: i32) -> SysResult<usize> {
         }
         if signum == 0 {
             return Ok(0);
-        }
-        if signum > Sig::SIGLEGACYMAX.raw()
-            && task.op_sig_pending(|pending| pending.mask.contain_signal(Sig::from(signum)))
-        {
-            return Err(Errno::EAGAIN);
         }
     } else {
         return Err(Errno::ESRCH);
@@ -232,7 +235,7 @@ pub fn sys_rt_sigpending(set: *mut SigSet, sigsetsize: usize) -> SysResult<usize
     // Linux exposes signals that are pending because they are blocked.  An
     // unblocked signal is deliverable and must not be reported merely because
     // it is still between enqueue and the next return-to-user signal check.
-    let pending = task.op_sig_pending(|pending| pending.pending & pending.mask);
+    let pending = task.pending_blocked_set();
     copy_to_user(set, &pending as *const SigSet, 1)?;
     Ok(0)
 }
@@ -292,13 +295,13 @@ pub fn sys_rt_sigqueueinfo(
     if signum != 0 && !sig.is_valid() {
         return Err(Errno::EINVAL);
     }
-    let task = TASK_MANAGER.get(tgid).ok_or(Errno::ESRCH)?;
+    let process = PROCESS_MANAGER.get(tgid).ok_or(Errno::ESRCH)?;
     let current = current_task().expect("[kernel] current task is None.");
     if current.euid() != 0
-        && current.euid() != task.uid()
-        && current.euid() != task.suid()
-        && current.uid() != task.uid()
-        && current.uid() != task.suid()
+        && current.euid() != process.uid()
+        && current.euid() != process.suid()
+        && current.uid() != process.uid()
+        && current.uid() != process.suid()
     {
         return Err(Errno::EPERM);
     }
@@ -315,7 +318,15 @@ pub fn sys_rt_sigqueueinfo(
     }
     let mut siginfo = SigInfo::from(linux_info);
     siginfo.signo = signum;
-    task.receive_siginfo(siginfo, !task.is_process_leader());
+    if let Some(task) = process.signal_target() {
+        let limit = task
+            .rlimit(crate::task::RLIMIT_SIGPENDING)
+            .map(|(cur, _)| cur)
+            .unwrap_or(usize::MAX);
+        if !task.try_receive_siginfo(siginfo, false, limit) {
+            return Err(Errno::EAGAIN);
+        }
+    }
     Ok(0)
 }
 
@@ -488,11 +499,7 @@ fn take_sigtimedwait_signal(
     info_ptr: usize,
     task: &crate::task::TaskControlBlock,
 ) -> SysResult<Option<usize>> {
-    let Some((sig, siginfo)) = task.op_sig_pending(|pending| {
-        pending
-            .find_signal_in_set(wanted_set)
-            .and_then(|sig| pending.get_info(sig).copied().map(|info| (sig, info)))
-    }) else {
+    let Some((sig, siginfo, process_scope)) = task.peek_pending_in_set(wanted_set) else {
         return Ok(None);
     };
 
@@ -506,7 +513,12 @@ fn take_sigtimedwait_signal(
             1,
         )?;
     }
-    task.op_sig_pending_mut(|pending| pending.fetch_signal_from_set(wanted_set));
+    // Another thread may consume a process-pending signal while this thread
+    // validates userspace. Do not consume a newer same-numbered signal or
+    // report the old one twice; retry selection instead.
+    if !task.consume_pending_signal(sig, siginfo, process_scope) {
+        return Ok(None);
+    }
     task.clear_interrupted();
     Ok(Some(sig.raw() as usize))
 }
@@ -622,8 +634,7 @@ pub fn sys_rt_sigtimedwait(
 
             // Signal/timeout can win after the checks above but before the
             // blocked state becomes visible. Never sleep through that race.
-            let wanted_pending =
-                task.op_sig_pending(|pending| !(pending.pending & wanted_set).is_empty());
+            let wanted_pending = task.has_pending_in_set(wanted_set);
             if task.is_ready()
                 || wanted_pending
                 || task.check_signal_interrupt()
@@ -668,8 +679,7 @@ pub fn sys_rt_sigtimedwait(
                 yield_current_task();
                 continue;
             }
-            let wanted_pending =
-                task.op_sig_pending(|pending| !(pending.pending & wanted_set).is_empty());
+            let wanted_pending = task.has_pending_in_set(wanted_set);
             if task.is_ready()
                 || wanted_pending
                 || task.check_signal_interrupt()
