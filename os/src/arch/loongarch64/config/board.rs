@@ -61,7 +61,7 @@ pub fn physical_memory_size() -> usize {
 /// while DMW0 still provides physical-address MMIO access. Invalid or
 /// unsupported input deliberately leaves the compatibility fallback in place.
 #[cfg(not(feature = "board_ls2k1000"))]
-pub fn init_physical_memory_end() {
+pub fn init_physical_memory_end(_argc: usize, _argv: usize) {
     if let Some(end) = unsafe { fw_cfg_memory_end() } {
         let minimum = HIGH_MEMORY_START + crate::config::KERNEL_HEAP_SIZE;
         PHYSICAL_MEMORY_END.store(
@@ -71,10 +71,24 @@ pub fn init_physical_memory_end() {
     }
 }
 
-/// 2K1000LA 没有 QEMU fw_cfg。Stage 1 保持 `MEMORY_END` fallback；
-/// Stage 2 改为从 U-Boot 传入的 DTB `/memory` reg 解析实际末址。
+/// 2K1000LA 没有 QEMU fw_cfg；从 U-Boot `go` 传入的 DTB `/memory` reg 解析实际
+/// DDR 末址。解析失败时保持 `MEMORY_END` fallback。
 #[cfg(feature = "board_ls2k1000")]
-pub fn init_physical_memory_end() {}
+pub fn init_physical_memory_end(argc: usize, argv: usize) {
+    // 2K1000LA DDR 起始物理地址（StarryOS someboot 内核装载点）。
+    const DDR_BASE: usize = 0x0020_0000;
+
+    let Some(fdt_addr) = crate::arch::fdt::fdt_addr_from_boot_args(argc, argv) else {
+        return;
+    };
+    let Some(end) = (unsafe { crate::arch::fdt::memory_end_from_fdt(fdt_addr) }) else {
+        return;
+    };
+    // 至少覆盖 DDR 基址，且不超过 48-bit 物理地址上限。
+    if end > DDR_BASE && end <= (1usize << 48) {
+        PHYSICAL_MEMORY_END.store(end, Ordering::Release);
+    }
+}
 
 #[cfg(not(feature = "board_ls2k1000"))]
 unsafe fn fw_cfg_memory_end() -> Option<usize> {

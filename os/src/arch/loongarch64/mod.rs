@@ -6,6 +6,8 @@
 
 pub mod config;
 mod entry;
+#[cfg(feature = "board_ls2k1000")]
+pub mod fdt;
 pub mod interrupt;
 pub mod mm;
 // LoongArch virt 机器上的块设备经 PCI 暴露。

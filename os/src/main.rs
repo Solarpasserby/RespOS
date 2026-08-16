@@ -50,16 +50,18 @@ pub fn rust_main(hart_id: usize, opaque: usize) -> ! {
 
 #[cfg(target_arch = "loongarch64")]
 #[unsafe(no_mangle)]
-pub fn rust_main() -> ! {
+pub fn rust_main(argc: usize, argv: usize) -> ! {
     clear_bss();
-    config::init_physical_memory_end();
+    config::init_physical_memory_end(argc, argv);
 
     #[cfg(feature = "board_ls2k1000")]
     {
-        // Stage 1 里程碑：先验证 entry + early UART。
-        // MMU / heap / interrupt / timer / FS / SMP 均未初始化，打印后停在此处；
-        // 后续 stage 再逐层接入 MMU、timer、LIOINTC 等。
-        sbi::early_print("Hello RespOS on Loongson 2K1000LA\n");
+        // Stage 1 已验证 entry + early UART；Stage 2 先发现 DDR 末址（FDT /memory）。
+        // MMU / heap / interrupt / timer / FS / SMP 仍未初始化，打印后停在此处，
+        // 后续 stage 再逐层接入。
+        sbi::early_print("Hello RespOS on Loongson 2K1000LA, mem_end=");
+        sbi::early_print_hex(config::physical_memory_end());
+        sbi::early_print("\n");
         arch::idle()
     }
 

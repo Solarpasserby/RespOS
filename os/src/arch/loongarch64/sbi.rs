@@ -62,6 +62,17 @@ pub fn early_print(s: &str) {
     }
 }
 
+/// 以十六进制输出一个 usize（Stage-2 诊断用，打印 DDR 末址等）。
+#[cfg(feature = "board_ls2k1000")]
+pub fn early_print_hex(v: usize) {
+    early_print("0x");
+    for shift in (0..64).rev().step_by(4) {
+        let d = ((v >> shift) & 0xf) as u8;
+        let c = if d < 10 { b'0' + d } else { b'a' + d - 10 };
+        early_putchar(c);
+    }
+}
+
 /// 从控制台读取一个字符（无数据时返回 0）
 pub fn console_getchar() -> usize {
     unsafe {
