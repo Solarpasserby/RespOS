@@ -288,6 +288,10 @@ pub struct PageCache {
     size_version: AtomicUsize,
     dirty_pages: AtomicUsize,
     writeback_error: Mutex<WritebackErrorState>,
+    /// Prefix of each file page for which page_mkwrite has established
+    /// persistent backing. This matters when filesystem blocks are smaller
+    /// than a VM page and ftruncate extends a resident tail page.
+    mmap_reserved_prefixes: Mutex<BTreeMap<usize, usize>>,
     /// Serializes lower-file writeback against lower truncate. Buffered
     /// writers stay concurrent and are resolved by page/size generations.
     writeback_lock: Mutex<()>,
@@ -306,6 +310,7 @@ impl PageCache {
                 sequence: 0,
                 error: None,
             }),
+            mmap_reserved_prefixes: Mutex::new(BTreeMap::new()),
             writeback_lock: Mutex::new(()),
         });
         PAGE_CACHE_REGISTRY
@@ -329,6 +334,22 @@ impl PageCache {
 
     pub fn has_dirty_pages(&self) -> bool {
         self.dirty_pages.load(Ordering::Relaxed) != 0
+    }
+
+    pub fn reserve_mmap_prefix<T>(
+        &self,
+        page_idx: usize,
+        prefix_len: usize,
+        reserve: impl FnOnce(usize) -> SysResult<T>,
+    ) -> SysResult<Option<T>> {
+        let mut prefixes = self.mmap_reserved_prefixes.lock();
+        let current = prefixes.get(&page_idx).copied().unwrap_or(0);
+        if prefix_len <= current {
+            return Ok(None);
+        }
+        let result = reserve(current)?;
+        prefixes.insert(page_idx, prefix_len);
+        Ok(Some(result))
     }
 
     /// Start an open-file-description error cursor at the current sequence.
@@ -481,6 +502,15 @@ impl PageCache {
                     page.write_version = page.write_version.wrapping_add(1);
                 }
             }
+            let mut prefixes = self.mmap_reserved_prefixes.lock();
+            prefixes.retain(|page_idx, prefix| {
+                let page_start = page_idx.saturating_mul(PAGE_SIZE);
+                if page_start >= new_size {
+                    return false;
+                }
+                *prefix = (*prefix).min(new_size - page_start);
+                *prefix != 0
+            });
         }
         if removed_pages != 0 {
             PAGE_CACHE_PAGE_COUNT.fetch_sub(removed_pages, Ordering::Relaxed);

@@ -119,7 +119,7 @@ pub fn trap_handler(cx: &mut TrapContext) {
             let result = current_task()
                 .expect("[kernel] current task is None.")
                 .op_memory_set_write(|memory_set| {
-                    memory_set.handle_page_fault(page_fault_cause, stval)
+                    memory_set.handle_page_fault(page_fault_cause, stval, Some(cx.get_sp()))
                 });
             if let Ok(outcome) = result {
                 if let Some(task) = current_task() {

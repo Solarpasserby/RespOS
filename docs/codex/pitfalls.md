@@ -847,21 +847,31 @@
   已完成的 partial write，但返回原始 operation error。所有启用 cache write-back 的路径都必须在统一
   Finish 中配对关闭，新增 C API 也应专项检查错误出口。
 
-## buffered writeback 的 ENOSPC 不能只留在后台错误状态
+## synthetic mount 丢失 mkfs geometry 会把填盘测试伪装成 writeback 故障
 
-- 状态：已确认，待修复
-- 适用范围：PageCache buffered write、阈值/后台 writeback、填盘循环、LTP `mmap16`
-- 最后验证：2026-08-16；RV64 musl/glibc 聚焦运行与 futex trace
-- 证据：`/tmp/respos-rv-mmap16-enospc-phase5-final.log`、
-  `/tmp/respos-rv-mmap16-futex-trace.log`
-- 内容：`mmap16` child 对首个 checkpoint 的 wake 与 parent 的 timed wait 使用相同 scope/uaddr，parent
-  确实被唤醒；它随后以 buffered `write()` 填满文件系统。RespOS 可先接受 dirty cache，阈值 writeback
-  即使得到 `ENOSPC`，后续 write 仍继续成功，导致 Linux/LTP 期待的“填盘 write 最终返回 ENOSPC”永不
-  出现，parent 也就不会发出第二次 checkpoint wake。表面上的 child checkpoint timeout 是下游症状，
-  不是 futex 或 mremap 根因，也不否定独立 page-mkwrite store-fault/SIGBUS 门禁。
-- 后续影响：writeback error 必须与可观察的文件/open-description 状态建立明确生命周期，并由合适的
-  `write`/`fsync` 边界消费；修复时要覆盖 partial write、错误只报告一次还是持续报告、释放空间后恢复、
-  多 fd 与并发 writer，且不能让 cache 中已接受的数据被静默宣称持久化。
+- 状态：已确认并修复
+- 适用范围：lightweight block mount、no-op mkfs、filesystem capacity/block size、LTP `mmap16`
+- 最后验证：2026-08-16；RV64/LA64 musl/glibc `mmap16` 各 10/10
+- 证据：`/tmp/respos-rv-mmap16-synthetic-fs-capacity.log`、
+  `/tmp/respos-{rv,la}-mmap16-pagecache-isize-extended-v2.log`
+- 内容：`mmap16` 的首个 checkpoint 正常，parent 也进入填盘循环；逐次 writeback 全部成功且隐藏 backing
+  文件增长到数百 MiB，说明不是后台 `ENOSPC` 被吞掉。根因是 `/dev/vda2` 只提供设备 admission size，
+  mount backing 却没有继承 no-op mkfs 请求的 10 MiB capacity/1 KiB block size。因而 parent 永远填不满
+  实际根文件系统，child 才在第二个 checkpoint 超时。
+- 后续影响：synthetic device size 与 formatted filesystem geometry 必须分开；no-op formatter 也要把
+  capacity/block size 传给 mount emulation。遇到填盘不结束时先记录 backing 的实际增长与 lower write
+  结果，不能仅从“buffered write 一直成功”推断 writeback-error 生命周期有缺陷。
+
+## LoongArch 写保护必须同时清 PTE W 与 D
+
+- 状态：已确认并修复
+- 适用范围：page-mkwrite、COW、任何要求下一次 store 重新 fault 的 PTE 降权
+- 最后验证：2026-08-16；双架构 `mmap16` 与 Phase 5 mmap probe
+- 证据：清 W 后 RV64 `mmap16` 10/10、LA64 0/10；清 W/D 后 LA64 musl/glibc 均 10/10
+- 内容：公共 `PTEFlags::WRITE` 映射到 LoongArch PTE W，但硬件 PageModifyFault 还由 D 位决定。保留旧
+  DIRTY 只清 WRITE 时，LA 可继续 store 而不进入 page_mkwrite；RV64 因权限模型不同不会暴露该错误。
+- 后续影响：建立 read-only/COW/page-mkwrite 边界时沿用 `WRITE | DIRTY` 成对清除；页表修改后仍须完成
+  本地及远端 TLB shootdown，不能用架构单测结果外推另一架构。
 
 ## 可写共享文件映射不能永久冻结 mmap 时的 EOF
 
@@ -1585,3 +1595,18 @@ socket 直接返回 `EAGAIN` 是可见 ABI 错误。accept 取走 endpoint 后�
 - 后续影响：Linux 对照只断言 syscall/error/data 与稳定的完整页边界；RespOS 专项可用自身同步实现的 I/O
   计数固定策略效果，但不能将完成时序外推为 POSIX 契约。修改 eviction 时必须同时跑 mmap/SIGBUS、冷
   major fault/block-I/O 与 dirty writeback 回归。
+
+## 零长 inode 不等于 mmap 一定 SIGBUS，grow-down fault 也不能只看 VMA flag
+
+- 状态：已确认并修正
+- 适用范围：`/dev/zero`、普通零长文件、`MAP_GROWSDOWN`、page-fault/user-copy
+- 最后验证：2026-08-16；RV64/LA64 musl/glibc `mmap10` 1/1、`mmap18` 4/4
+- 证据：`/tmp/respos-{rv,la}-mmap10-dev-zero.log`、
+  `/tmp/respos-{rv,la}-mmap18-growsdown-sp.log`
+- 内容：把所有 file-backed mapping 都套用 live EOF 会让 size=0 的 `/dev/zero` 在首次写时
+  SIGBUS；正确分界是由设备显式声明零填充 mmap，不能放宽普通文件 EOF。另一方面，
+  只要下方有 `MAP_GROWSDOWN` VMA 就扩展，会把任意坏指针和内核 user-copy 误当成栈增长；
+  必须同时校验紧邻页、用户 SP 和 guard gap。
+- 后续影响：新增 special file mmap 时应以 inode/file capability 表达语义，不以 size 或
+  pathname 猜测。修改 trap frame、VMA split/merge 或 copyin/copyout fault 路径时，必须复跑 `mmap18`
+  的成功与 blocker 两类用例。

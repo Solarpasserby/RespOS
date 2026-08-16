@@ -526,6 +526,51 @@ pub(crate) fn truncate_file_mappings(dev: u64, ino: u64, new_size: usize) {
     }
 }
 
+/// Linux pagecache_isize_extended(): if extending i_size exposes another
+/// filesystem block inside an already resident VM page, write-protect that
+/// page so its next store must pass through page_mkwrite allocation.
+pub(crate) fn protect_extended_file_mappings(
+    dev: u64,
+    ino: u64,
+    old_size: usize,
+    new_size: usize,
+    block_size: usize,
+) {
+    if old_size >= new_size || block_size >= PAGE_SIZE || block_size == 0 {
+        return;
+    }
+    let rounded_old = old_size.div_ceil(block_size).saturating_mul(block_size);
+    if new_size <= rounded_old || rounded_old % PAGE_SIZE == 0 {
+        return;
+    }
+
+    let mut seen = BTreeSet::new();
+    for task in TASK_MANAGER.snapshot() {
+        let memory_set = task.memory_set_arc();
+        let key = Arc::as_ptr(&memory_set) as usize;
+        if !seen.insert(key) {
+            continue;
+        }
+        let files = task.op_memory_set_read(MemorySet::mapped_file_handles);
+        let matching = files
+            .into_iter()
+            .filter(|file| {
+                file.get_stat()
+                    .is_ok_and(|stat| stat.dev == dev && stat.ino == ino)
+            })
+            .collect::<Vec<_>>();
+        if matching.is_empty() {
+            continue;
+        }
+        task.op_memory_set_write(|memory_set| {
+            for file in &matching {
+                memory_set.write_protect_file_page(file, old_size / PAGE_SIZE);
+            }
+            memory_set.flush_tlb();
+        });
+    }
+}
+
 /// Invalidate fully punched resident file pages in every address space.
 /// Shared mappings and clean private pages must refault the new hole, while a
 /// writable MAP_PRIVATE page that has already completed COW remains anonymous
@@ -743,6 +788,42 @@ impl MemorySet {
                 .collect::<Vec<_>>();
             for vpn in victims {
                 area.unmap_one(&mut self.page_table, vpn);
+            }
+        }
+    }
+
+    fn write_protect_file_page(&mut self, file: &Arc<dyn FileOp>, file_page: usize) {
+        for area in self.areas.iter_mut() {
+            let Some(backing) = &area.file_backing else {
+                continue;
+            };
+            if !Arc::ptr_eq(&backing.file, file)
+                || !area.shared
+                || !area.map_perm.contains(MapPermission::WRITE)
+            {
+                continue;
+            }
+            let victims = area
+                .data_frames
+                .keys()
+                .copied()
+                .filter(|vpn| {
+                    let page_offset = (*vpn - area.vpn_range.get_start()) * PAGE_SIZE;
+                    backing
+                        .offset
+                        .checked_add(page_offset)
+                        .is_some_and(|offset| offset / PAGE_SIZE == file_page)
+                })
+                .collect::<Vec<_>>();
+            for vpn in victims {
+                if let Some(pte) = self.page_table.translate(vpn) {
+                    let mut flags = pte.flags();
+                    // LoongArch raises PageModifyFault from its hardware D
+                    // bit, while RV uses W. Clear both representations so the
+                    // next store reaches the common page_mkwrite path.
+                    flags.remove(PTEFlags::WRITE | PTEFlags::DIRTY);
+                    self.page_table.modify_pte(vpn, flags);
+                }
             }
         }
     }
@@ -1167,6 +1248,7 @@ impl MemorySet {
             && right.shm_attach_id.is_none()
             && left.map_perm == right.map_perm
             && left.locked == right.locked
+            && left.grows_down == right.grows_down
             && left.wipe_on_fork == right.wipe_on_fork
             && left.dontfork == right.dontfork
     }
@@ -1236,6 +1318,7 @@ impl MemorySet {
         replace: bool,
         noreplace: bool,
         locked: bool,
+        grows_down: bool,
         backing: MmapBacking<'_>,
     ) -> SysResult<usize> {
         if let MmapBacking::SharedFrames { frames, .. } = &backing {
@@ -1255,14 +1338,16 @@ impl MemorySet {
 
         match backing {
             MmapBacking::LazyAnonymous => {
-                self.push_map_area_lazy(MapArea::new_with_flags(
+                let mut area = MapArea::new_with_flags(
                     VirtAddr::from(placement.start),
                     VirtAddr::from(placement.end),
                     MapType::Framed,
                     placement.map_perm,
                     false,
                     placement.locked,
-                ));
+                );
+                area.grows_down = grows_down;
+                self.push_map_area_lazy(area);
             }
             MmapBacking::SharedAnonymous => {
                 let mut area = MapArea::new_shared(
@@ -1271,6 +1356,7 @@ impl MemorySet {
                     placement.map_perm,
                 );
                 area.locked = placement.locked;
+                area.grows_down = grows_down;
                 self.push_empty_map_area(area, None, 0);
             }
             MmapBacking::SharedFrames { attach_id, frames } => {
@@ -1280,6 +1366,7 @@ impl MemorySet {
                     placement.map_perm,
                 );
                 area.locked = placement.locked;
+                area.grows_down = grows_down;
                 area.shm_attach_id = Some(attach_id);
                 let mut mapped_vpns = Vec::new();
                 for (vpn, frame) in area.vpn_range.into_iter().zip(frames.iter()) {
@@ -1308,6 +1395,7 @@ impl MemorySet {
                     offset,
                     len,
                 );
+                area.grows_down = grows_down;
                 area.file_backing.as_mut().unwrap().live_eof = true;
                 self.push_map_area_lazy(area);
             }
@@ -1331,6 +1419,7 @@ impl MemorySet {
                     offset,
                     len,
                 );
+                area.grows_down = grows_down;
                 area.file_backing.as_mut().unwrap().live_eof = true;
                 let mut mapped_vpns = Vec::new();
                 for (page_index, (vpn, frame)) in area
@@ -3072,17 +3161,17 @@ impl MemorySet {
         &mut self,
         cause: PageFaultCause,
         stval: usize,
+        user_sp: Option<usize>,
     ) -> SysResult<PageFaultOutcome> {
         if stval == 0 || stval >= TRAMPOLINE {
             return Err(Errno::EFAULT);
         }
         let vpn = VirtAddr::from(stval).floor();
 
-        let area_idx = self
-            .areas
-            .iter()
-            .position(|a| a.vpn_range.contain(&vpn))
-            .ok_or(Errno::EFAULT)?;
+        let area_idx = match self.areas.iter().position(|a| a.vpn_range.contain(&vpn)) {
+            Some(index) => index,
+            None => self.expand_grows_down(vpn, user_sp).ok_or(Errno::EFAULT)?,
+        };
 
         let area_perm = self.areas[area_idx].map_perm;
         if !area_perm.contains(MapPermission::USER) {
@@ -3211,6 +3300,35 @@ impl MemorySet {
         Err(Errno::EFAULT)
     }
 
+    /// Expand a MAP_GROWSDOWN VMA by one guard page when the saved user stack
+    /// pointer is inside that page, while preserving Linux's default
+    /// 256-page separation from the preceding mapping.
+    fn expand_grows_down(
+        &mut self,
+        fault_vpn: VirtPageNum,
+        user_sp: Option<usize>,
+    ) -> Option<usize> {
+        const STACK_GUARD_GAP_PAGES: usize = 256;
+
+        let stack_vpn = VirtAddr::from(user_sp?).floor();
+        if stack_vpn != fault_vpn {
+            return None;
+        }
+        let index = self.areas.iter().position(|area| {
+            area.grows_down
+                && area.vpn_range.get_start().0 == fault_vpn.0.checked_add(1).unwrap_or(0)
+        })?;
+        if index != 0 {
+            let previous_end = self.areas[index - 1].vpn_range.get_end().0;
+            if fault_vpn.0.saturating_sub(previous_end) < STACK_GUARD_GAP_PAGES {
+                return None;
+            }
+        }
+        let end = self.areas[index].vpn_range.get_end();
+        self.areas[index].vpn_range = VPNRange::new(fault_vpn, end);
+        Some(index)
+    }
+
     pub fn ensure_user_page_access(
         &mut self,
         vpn_range: VPNRange,
@@ -3239,7 +3357,7 @@ impl MemorySet {
                 PageFaultCause::Load
             };
             let va = usize::from(VirtAddr::from(vpn));
-            let _ = self.handle_page_fault(cause, va)?;
+            let _ = self.handle_page_fault(cause, va, None)?;
         }
         Ok(())
     }
@@ -3255,6 +3373,7 @@ struct MapArea {
     map_perm: MapPermission,
     shared: bool,
     locked: bool,
+    grows_down: bool,
     wipe_on_fork: bool,
     dontfork: bool,
     file_backing: Option<FileBacking>,
@@ -3275,6 +3394,7 @@ struct MapAreaMeta {
     map_perm: MapPermission,
     shared: bool,
     locked: bool,
+    grows_down: bool,
     wipe_on_fork: bool,
     dontfork: bool,
     file_backing: Option<FileBacking>,
@@ -3306,6 +3426,7 @@ impl MapArea {
             map_perm,
             shared: false,
             locked: false,
+            grows_down: false,
             wipe_on_fork: false,
             dontfork: false,
             file_backing: None,
@@ -3361,6 +3482,7 @@ impl MapArea {
             map_perm: self.map_perm,
             shared: self.shared,
             locked: self.locked,
+            grows_down: self.grows_down,
             wipe_on_fork: self.wipe_on_fork,
             dontfork: self.dontfork,
             file_backing: self.file_backing.clone(),
@@ -3380,6 +3502,7 @@ impl MapArea {
             map_perm: meta.map_perm,
             shared: meta.shared,
             locked: meta.locked,
+            grows_down: meta.grows_down,
             wipe_on_fork: meta.wipe_on_fork,
             dontfork: meta.dontfork,
             file_backing: meta.file_backing,

@@ -1165,12 +1165,24 @@ ENOSPC 项必须使用 disposable 小文件系统，先预建 sparse target，�
 mount capability 时 Linux oracle 会明确打印 SKIP；双架构正式门禁使用 make 自动创建的 16 MiB
 `/respos` auxiliary ext4，不依赖根盘剩余空间。
 
-LTP `mmap16` 不是当前自动门禁：它仍在 `user/oscomp_ltp_list.txt` 注释。临时启用后可用
-`LTP_CASE_FILTER=mmap16` 聚焦。2026-08-16 的 RV64 双 libc trace 已证明首个 checkpoint/futex wake
-成功，child 也完成首次 page-mkwrite、ftruncate 和 mremap；parent 随后卡在 buffered `write()` 填盘
-循环，因为后台/阈值 writeback 的 `ENOSPC` 未关联并反馈给后续 write，因而没有发出第二次 checkpoint
-wake。需要复查同步/后台写回错误的记录、消费和每个 open file description 的可见性，不能用自定义
-page-mkwrite probe 替代 `mmap16` TPASS，也不能再把该 TBROK 归因于 checkpoint 或 mremap。
+LTP `mmap16` 已加入默认列表，也可用 `LTP_CASE_FILTER=mmap16` 聚焦。正式门禁要求 RV64/LA64、
+musl/glibc 均出现 10 个 `TPASS: bug is not reproduced`。它依赖 `/dev/vda2` 的 device size 足以通过 LTP
+scratch admission，同时 no-op mkfs 将请求的 filesystem capacity/block size 交给 synthetic mount；不得
+把两者合并。该 case 还覆盖 `ftruncate` grow 跨 sub-page filesystem block 后，resident shared PTE
+重新写保护并在下一次 store 经 page-mkwrite 得到 ENOSPC/SIGBUS。
+
+更宽 mmap 簇使用同一个精确 filter 在两架构顺序运行：
+
+```bash
+MMAP_WIDE='mmap001,mmap01,mmap02,mmap03,mmap04,mmap05,mmap06,mmap08,mmap09,mmap10,mmap11,mmap12,mmap13,mmap14,mmap15,mmap16,mmap17,mmap18,mmap19,mmap20,munmap01,munmap02,munmap03,mprotect05,mremap05,mremap06'
+LTP_CASE_FILTER="$MMAP_WIDE" make rv
+LTP_CASE_FILTER="$MMAP_WIDE" make la
+```
+
+2026-08-16 当前预期是每个架构的 musl/glibc 均 `25 passed, 1 failed`；只允许
+`mremap06` 因 fixture 的 `fallocate()` 返回 `EOPNOTSUPP` 而 TBROK。`mmap10` 必须 1/1，
+`mmap18` 必须 4/4。实现 default/`KEEP_SIZE` 预分配后必须将预期改为 26/0，并核对
+`mremap06` 是否真正进入 mremap 断言，不能把前置 TBROK 记为 mremap 通过。
 
 需要复核 checkpoint 时可在 `debug_traces` 构建中设置 `TASK_A_FUTEX_TRACE=1`；默认 release 构建不会
 产生该诊断输出。证据应同时核对 wake/wait 的 scope、uaddr 和发生顺序。

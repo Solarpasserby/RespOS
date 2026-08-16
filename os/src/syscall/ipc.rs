@@ -493,6 +493,7 @@ pub fn sys_shmat(shmid: usize, shmaddr: usize, shmflg: usize) -> SysResult<usize
                 shmflg & SHM_REMAP != 0,
                 exact_addr,
                 false,
+                false,
                 MmapBacking::SharedFrames {
                     attach_id,
                     frames: frames.as_slice(),

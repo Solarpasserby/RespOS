@@ -20,6 +20,37 @@
 - 后续影响：不能把 advice 放在 fd table entry，否则 dup 不共享；不能无条件驱逐部分覆盖页、dirty 页、
   mmap pin 或无 lower backing 的 tmpfile。引入异步 flusher 时必须保持“先 writeback、后 invalidation”顺序。
 
+## File size grow 与 sub-page filesystem block 的 page-mkwrite 边界
+
+- 状态：当前 ext4/synthetic block mount 范围已实现并双架构验证
+- 适用范围：writable `MAP_SHARED`、`ftruncate` grow、filesystem block size 小于 VM page、ENOSPC/SIGBUS
+- 最后验证：2026-08-16
+- 证据：`os/src/fs/{dev,mount,file,page_cache}.rs`、`os/src/mm/memory_set.rs`；双架构双 libc
+  `mmap16` 与 Phase 5 mmap probe 日志见 [current-status.md](./current-status.md)
+- 内容：mount geometry 必须区分 block-device capacity、formatted filesystem capacity 和 filesystem
+  block size。若 grow 越过 old EOF 所在 filesystem block、仍停留在同一 VM page 且确实暴露新范围，
+  按稳定 `(dev, ino)` 扫描 live shared mappings，将对应 resident PTE 写保护；LoongArch 清 W/D，RV64
+  清 W。下一次 store 经 page-mkwrite 为尚未覆盖的 page prefix 建立 backing，成功后才恢复 WRITE；
+  ENOSPC 由 trap 转为 SIGBUS。shrink 同时裁剪 PageCache 的 reservation prefix，避免 truncate/regrow
+  复用失效预留。
+- 后续影响：不能只依据 VM page size 判断 grow 是否需要 refault，也不能把 device admission size 当成
+  filesystem 可分配空间。真实 formatter 可从 ext superblock恢复 geometry；bundled no-op mkfs 必须显式
+  记录参数。修改 PTE 后必须完成跨 hart TLB shootdown。
+
+## 特殊零填充映射与 `MAP_GROWSDOWN`
+
+- 状态：当前 `/dev/zero` 与单页 stack-growth 范围已实现并双架构验证
+- 适用范围：`mmap10`、`mmap18`、user-mode page fault 与 kernel user-copy
+- 最后验证：2026-08-16
+- 证据：`os/src/fs/{dev/zero,file,vfs/inode}.rs`、`os/src/syscall/mm.rs`、
+  `os/src/mm/memory_set.rs`与双架构 trap 入口；日志见 [current-status.md](./current-status.md)。
+- 内容：只有 inode/file 显式声明 `mmap_zero_filled` 才绕过 file EOF，普通零长文件仍必须
+  SIGBUS。`MAP_GROWSDOWN` 只能在用户 trap 传入的 SP 位于紧邻下方 fault page 时扩展，
+  并与前一 VMA 保持 256 页 guard gap；不带 SP 的内核代访路径不会扩展。
+- 后续影响：不能以 inode size=0 通用推导设备 mmap 语义，也不能见到 grow-down
+  VMA 就对任意下方 fault 扩展。若后续支持跨多页栈跳跃，仍须保留 SP 与 guard-gap
+  验证，不得让 `copyin/copyout` 变成隐式栈增长触发器。
+
 ## 启动与执行链
 
 ```text

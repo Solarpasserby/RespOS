@@ -3,6 +3,27 @@
 这里只收录能解释当前代码形态或避免重复踩坑的决策。日期是当前证据最后核验时间，不一定是
 最初提出时间。
 
+## 比赛提测固定在已验证性能提交，Phase 5 健壮版保留给现场赛
+
+- 状态：已采用
+- 适用范围：线上最终提测、BuildStorm 评分、Phase 5/POSIX 后续分支
+- 最后验证：2026-08-16
+- 证据：提测候选 `44f93dbb6bfa6e615cc489a0c4e75309e5d56b94`；健壮版
+  `70df39f85b8598c94d805645cd4b236a25e6991d`；两者完整 RV final 与 CPU-clock 分片实验日志见
+  [current-status.md](./current-status.md)
+- 决策：线上提测使用 `44f93db`，它包含 I/O buffer pool 与 `/proc/uptime` 修复，并已有 CAgent 10/10、
+  BuildStorm `633.48s` 的完整证据；`origin/main` 和 `contest/main` 当前也指向该提交。`70df39f8` 保留为
+  Phase 5/POSIX 健壮线，供现场赛需求和后续语义工作使用，不在截止前继续叠加未经稳定 A/B 证明的性能
+  重构。生成提测产物时必须从显式 `44f93db` 的干净 worktree 构建，不能复用当前分支后来生成的
+  `kernel-rv/kernel-la`。
+- 原因：健壮版完整 final 功能通过，但同机 8 GiB RV 样本为 `684.79s/729.94s`，相对已验证评分提交
+  没有性能优势；继续优化的时间和回归风险高于临近提测的期望收益。现场赛可能更依赖稳定 process
+  identity、leader exit/non-leader exec、signal/job-control、mmap/truncate/punch/ENOSPC、时间戳与 rusage
+  语义，因此保留而不丢弃该线。
+- 后续影响：不得把“线上选旧提交”解释为 Phase 5 修复无效，也不得把两个分支的测试证据混用。若未来
+  要把健壮线重新作为评分候选，至少需要固定资源的完整 A/B、相同产物哈希、双架构专项和官方 final
+  门禁；没有正收益的优化实验应回退而不是累积。
+
 ## `posix_fadvise` 状态属于 open file description，DONTNEED 只失效安全页
 
 - 状态：已采用，当前工作树待提交

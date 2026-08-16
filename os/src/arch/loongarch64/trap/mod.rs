@@ -47,12 +47,14 @@ fn is_page_fault(exception: estat::Exception) -> bool {
     )
 }
 
-fn handle_user_page_fault(_cx: &TrapContext, exception: estat::Exception) {
+fn handle_user_page_fault(cx: &TrapContext, exception: estat::Exception) {
     let badv = badv::read();
     let cause = page_fault_cause(exception);
     let result = current_task()
         .expect("[kernel] current task is None.")
-        .op_memory_set_write(|memory_set| memory_set.handle_page_fault(cause, badv));
+        .op_memory_set_write(|memory_set| {
+            memory_set.handle_page_fault(cause, badv, Some(cx.get_sp()))
+        });
     if let Ok(outcome) = result {
         if let Some(task) = current_task() {
             match outcome {

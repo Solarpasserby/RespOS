@@ -31,6 +31,11 @@ pub trait InodeOp: Any + Send + Sync {
     fn get_page_cache(&self) -> Option<Arc<PageCache>> {
         None
     }
+    /// Character devices such as /dev/zero can request anonymous mmap
+    /// semantics instead of being constrained by their stat size.
+    fn mmap_zero_filled(&self) -> bool {
+        false
+    }
     /// Publish the logical write time before delayed data writeback.  Regular
     /// files may keep this metadata pending until fsync/syncfs/unmount.
     fn note_data_write(&self, _path: &str, _time: TimeSpec) -> SysResult {

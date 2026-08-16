@@ -27,6 +27,10 @@ impl InodeOp for ZeroInode {
             .with_rdev(ZERO_RDEV))
     }
 
+    fn mmap_zero_filled(&self) -> bool {
+        true
+    }
+
     fn read_at(&self, _path: &str, _off: usize, buf: &mut [u8]) -> SysResult<usize> {
         buf.fill(0);
         Ok(buf.len())

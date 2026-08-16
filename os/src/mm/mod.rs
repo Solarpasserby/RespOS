@@ -28,8 +28,8 @@ use heap_allocator::init_heap;
 pub use io_buffer::{drain_io_buffers, IoBufferKind, KernelIoBuffer};
 pub(crate) use memory_set::{
     mmap_file_backing, overlay_shared_file_pages, punch_file_mappings, punch_shared_file_pages,
-    shared_file_page_entry_count, truncate_file_mappings, truncate_shared_file_pages,
-    update_shared_file_pages, writeback_file_pages, MmapBacking,
+    protect_extended_file_mappings, shared_file_page_entry_count, truncate_file_mappings,
+    truncate_shared_file_pages, update_shared_file_pages, writeback_file_pages, MmapBacking,
 };
 pub use memory_set::{MapPermission, MemorySet, PageFaultOutcome, KERNEL_SPACE};
 

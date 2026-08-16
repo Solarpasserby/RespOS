@@ -83,6 +83,15 @@ fn exec_looks_like_ltp_mkfs_shell(path: &str, args: &[String]) -> bool {
     })
 }
 
+fn finish_ltp_noop_mkfs(path: &str, args: &[String]) -> bool {
+    if exec_looks_like_ltp_mkfs(path, args) || exec_looks_like_ltp_mkfs_shell(path, args) {
+        crate::fs::dev::record_noop_mkfs(path, args);
+        true
+    } else {
+        false
+    }
+}
+
 fn builtin_for_fs_exec(path: &str, args: &[String]) -> Option<&'static str> {
     let is_cp_path = matches!(path, "/musl/cp" | "/glibc/cp" | "/bin/cp");
     if is_cp_path && args.len() == 3 && args[1].contains("/ltp/testcases/bin/") && args[2] == "." {
@@ -1129,9 +1138,7 @@ pub fn sys_execve(path: *const u8, args: *const usize, envp: *const usize) -> Sy
         extract_cstrings_from_user(envp)?
     };
     let task = current_task().expect("[kernel] current task is None.");
-    if exec_looks_like_ltp_mkfs(path.as_str(), args_vec.as_slice())
-        || exec_looks_like_ltp_mkfs_shell(path.as_str(), args_vec.as_slice())
-    {
+    if finish_ltp_noop_mkfs(path.as_str(), args_vec.as_slice()) {
         exit_and_run_next(0);
     }
 
@@ -1218,9 +1225,7 @@ fn exec_fs_file(
         exe_path,
         args_vec.first().map(String::as_str).unwrap_or("")
     );
-    if exec_looks_like_ltp_mkfs(exe_path.as_str(), args_vec.as_slice())
-        || exec_looks_like_ltp_mkfs_shell(exe_path.as_str(), args_vec.as_slice())
-    {
+    if finish_ltp_noop_mkfs(exe_path.as_str(), args_vec.as_slice()) {
         exit_and_run_next(0);
     }
     let head = read_exec_head(&file)?;
@@ -1267,9 +1272,7 @@ pub fn sys_execveat(
     } else {
         extract_cstrings_from_user(args)?
     };
-    if exec_looks_like_ltp_mkfs(path.as_str(), args_vec.as_slice())
-        || exec_looks_like_ltp_mkfs_shell(path.as_str(), args_vec.as_slice())
-    {
+    if finish_ltp_noop_mkfs(path.as_str(), args_vec.as_slice()) {
         exit_and_run_next(0);
     }
     let open_flags = if flags & AT_SYMLINK_NOFOLLOW != 0 {

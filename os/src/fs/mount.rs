@@ -15,7 +15,7 @@ use super::namei::{
 };
 use super::vfs::Dentry;
 use super::vfs::{InodeOp, InodeType, SuperBlockOp};
-use crate::fs::dev::{LoopInode, init_devfs};
+use crate::fs::dev::{LoopInode, VirtBlkInode, init_devfs};
 use crate::fs::proc::init_procfs;
 use crate::syscall::{Errno, SysResult};
 use alloc::sync::{Arc, Weak};
@@ -75,6 +75,7 @@ struct MountBackingRoot {
     parent_inode: Arc<dyn InodeOp>,
     root: Arc<Dentry>,
     capacity: Option<usize>,
+    block_size: usize,
 }
 
 /// 全局挂载表（类比 Linux mount tree）。
@@ -370,7 +371,7 @@ pub fn do_mount(_source: &str, target: &str, fstype: &str, flags: usize) -> SysR
 
     if fstype == "tmpfs" {
         let fs = crate::fs::ext4::super_block();
-        let backing_root = create_mount_backing_root(&fs, None)?;
+        let backing_root = create_mount_backing_root(&fs, None, crate::config::PAGE_SIZE)?;
         let vfs_mount = VfsMount::new(backing_root.root.clone(), fs, flags as i32);
         let parent_mount = get_mount_by_vfsmount(&target_path.mnt).ok_or(Errno::EINVAL)?;
         remove_dentry_cache_descendants(target_visible_path.as_str());
@@ -401,8 +402,28 @@ pub fn do_mount(_source: &str, target: &str, fstype: &str, flags: usize) -> SysR
                 .get_inode()
                 .as_any()
                 .downcast_ref::<LoopInode>()
-                .and_then(|loop_device| loop_device.backing_size().ok());
-            let backing_root = create_mount_backing_root(&ext4_fs, capacity)?;
+                .and_then(|loop_device| {
+                    loop_device
+                        .formatted_capacity(fstype)
+                        .or_else(|| loop_device.backing_size().ok())
+                })
+                .or_else(|| {
+                    source_path
+                        .dentry
+                        .get_inode()
+                        .as_any()
+                        .downcast_ref::<VirtBlkInode>()
+                        .map(|block_device| block_device.mount_capacity(fstype))
+                });
+            let block_size = source_path
+                .dentry
+                .get_inode()
+                .as_any()
+                .downcast_ref::<VirtBlkInode>()
+                .map_or(crate::config::PAGE_SIZE, |device| {
+                    device.mount_block_size(fstype)
+                });
+            let backing_root = create_mount_backing_root(&ext4_fs, capacity, block_size)?;
             let vfs_mount = VfsMount::new(backing_root.root.clone(), ext4_fs, flags as i32);
             let parent_mount = get_mount_by_vfsmount(&target_path.mnt).ok_or(Errno::EINVAL)?;
             remove_dentry_cache_descendants(target_visible_path.as_str());
@@ -421,6 +442,7 @@ pub fn do_mount(_source: &str, target: &str, fstype: &str, flags: usize) -> SysR
 fn create_mount_backing_root(
     fs: &Arc<dyn SuperBlockOp>,
     capacity: Option<usize>,
+    block_size: usize,
 ) -> SysResult<MountBackingRoot> {
     let real_root = fs.root_inode();
     for _ in 0..1024 {
@@ -435,6 +457,7 @@ fn create_mount_backing_root(
                     parent_inode: real_root,
                     root: Arc::new(Dentry::new(path, None, inode)),
                     capacity,
+                    block_size,
                 });
             }
             Err(Errno::EEXIST) => continue,
@@ -465,6 +488,31 @@ pub fn check_mount_file_growth(path: &Path, old_size: usize, new_size: usize) ->
         return Err(Errno::ENOSPC);
     }
     Ok(())
+}
+
+pub fn check_mount_allocation_available(path: &Path, additional: usize) -> SysResult {
+    if additional == 0 {
+        return Ok(());
+    }
+    let Some(mount) = get_mount_by_vfsmount(&path.mnt) else {
+        return Ok(());
+    };
+    let Some(backing_root) = mount.backing_root.as_ref() else {
+        return Ok(());
+    };
+    let Some(capacity) = backing_root.capacity else {
+        return Ok(());
+    };
+    if backing_tree_size(&backing_root.root)?.saturating_add(additional) > capacity {
+        return Err(Errno::ENOSPC);
+    }
+    Ok(())
+}
+
+pub fn mount_block_size(path: &Path) -> usize {
+    get_mount_by_vfsmount(&path.mnt)
+        .and_then(|mount| mount.backing_root.as_ref().map(|root| root.block_size))
+        .unwrap_or(crate::config::PAGE_SIZE)
 }
 
 fn backing_tree_size(dentry: &Arc<Dentry>) -> SysResult<usize> {

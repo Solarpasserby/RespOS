@@ -4,7 +4,8 @@ use super::vfs::{InodeOp, InodeType, LinuxDirent64, SuperBlockOp};
 use crate::config::{KERNEL_HEAP_SIZE, PAGE_SIZE};
 use crate::fs::ext4::Ext4Inode;
 use crate::fs::mount::{
-    MS_LAZYTIME, MS_NOATIME, MS_NODIRATIME, MS_STRICTATIME, check_mount_file_growth,
+    MS_LAZYTIME, MS_NOATIME, MS_NODIRATIME, MS_STRICTATIME,
+    check_mount_allocation_available, check_mount_file_growth, mount_block_size,
 };
 use crate::fs::page_cache::{
     DEFAULT_READ_AHEAD_PAGES, PageCache, SEQUENTIAL_READ_AHEAD_PAGES, WritebackErrorCursor,
@@ -109,6 +110,9 @@ pub trait FileOp: Any + Send + Sync {
         }
         Ok(())
     }
+    fn mmap_zero_filled(&self) -> bool {
+        false
+    }
     fn mmap_open(&self, _shared: bool, _writable: bool, _pages: usize) {}
     fn mmap_close(&self, _shared: bool, _writable: bool, _pages: usize) {}
     /// Establish persistent backing for a writable shared-mapping page before
@@ -205,17 +209,30 @@ impl File {
             return Err(Errno::EIO);
         }
         let reserve_len = data.len().min(file_size - offset);
+        let page_idx = offset / PAGE_SIZE;
+        let page_offset = offset % PAGE_SIZE;
+        let reserve_prefix = page_offset.checked_add(reserve_len).ok_or(Errno::EINVAL)?;
+        let page_cache = inner.page_cache.clone().ok_or(Errno::EIO)?;
 
         // lwext4 has no unwritten-extent reservation entry point. Writing the
         // page's current bytes materializes a sparse block without changing
         // visible contents or file size, and reports ENOSPC before userspace
         // is allowed to dirty the shared frame.
-        let written = self
-            .inode
-            .write_at(path.as_str(), offset, &data[..reserve_len])?;
-        if written != reserve_len {
-            return Err(Errno::EIO);
-        }
+        page_cache.reserve_mmap_prefix(page_idx, reserve_prefix, |reserved_prefix| {
+            let new_start = reserved_prefix.max(page_offset);
+            let additional = reserve_prefix.saturating_sub(new_start);
+            check_mount_allocation_available(&inner.path, additional)?;
+            let data_start = new_start - page_offset;
+            let written = self.inode.write_at(
+                path.as_str(),
+                offset + data_start,
+                &data[data_start..reserve_len],
+            )?;
+            if written != reserve_len - data_start {
+                return Err(Errno::EIO);
+            }
+            Ok(())
+        })?;
         Ok(())
     }
 
@@ -644,12 +661,15 @@ impl File {
         if inner.offset > size {
             inner.offset = size;
         }
-        let truncated_identity = (size < old_size)
-            .then_some(self.shared_page_identity)
-            .flatten();
+        let mapping_identity = self.shared_page_identity;
+        let block_size = mount_block_size(&inner.path);
         drop(inner);
-        if let Some((dev, ino)) = truncated_identity {
-            crate::mm::truncate_file_mappings(dev, ino, size);
+        if let Some((dev, ino)) = mapping_identity {
+            if size < old_size {
+                crate::mm::truncate_file_mappings(dev, ino, size);
+            } else if size > old_size {
+                crate::mm::protect_extended_file_mappings(dev, ino, old_size, size, block_size);
+            }
         }
         Ok(0)
     }
@@ -944,6 +964,10 @@ impl FileOp for File {
 
     fn reserve_shared_mmap_write(&self, offset: usize, data: &[u8]) -> SysResult {
         File::reserve_shared_mmap_write(self, offset, data)
+    }
+
+    fn mmap_zero_filled(&self) -> bool {
+        self.inode.mmap_zero_filled()
     }
 
     fn splice_supported(&self) -> bool {

@@ -90,7 +90,7 @@ Phase 6 的调度器、allocator、异步 I/O 和细粒度锁重构。
 | `CLONE_VFORK|CLONE_VM` | `clone05` 双架构双 libc 通过；额外 vfork01/02 与 RV64 CAgent/minibuild 回归通过 | 双架构已验证（当前范围） | 完整 BuildStorm、posix_spawn file-actions/失败回报 |
 | process-pending、`SA_NOCLDWAIT`、通用 restart | process-pending、标准/实时队列、进程内 `RLIMIT_SIGPENDING`、SIGCHLD auto-reap/NOCLDSTOP 已通过三方专项；restart 覆盖 wait4、pipe/vector/socket/mmsg（含 recvmmsg timeout）、null-timeout futex，poll/sleep timeout 类已验证非重启 | 受限支持 | real-UID 全局 pending 配额、time64/compat 与未盘点 timeout 类 |
 | futex absolute timeout / precise wake | RV64 bitset/wake 与 LA64 wake 双 libc 通过；LA64 首组 musl monotonic wait 在 secondary 上线窗口稳定延迟约 0.87 s，后续 realtime/glibc 正常 | 已知差异 | 待确认：审计 LA64 secondary 启动与跨 hart 时间/调度，不放宽 timeout 阈值 |
-| mmap EOF/truncate/punch/ENOSPC SIGBUS | Linux/RV64/LA64 probe 的 EOF/truncate shared/private/private-COW、跨进程失效及 16 轮 fault/store 竞态通过；ext4 punch、真实块释放、cross-process provenance、16 轮 punch-vs-store/msync 通过；16 MiB auxiliary ext4 满盘 shared store SIGBUS 与释放空间后恢复双架构通过；`mmap05`、BuildStorm file、fadvise 相邻回归通过 | 双架构已验证（M3 当前范围） | `mmap16` 的 checkpoint/futex 已证实正常，当前阻断是 buffered writeback `ENOSPC` 未反馈给填盘 `write()`；另有 page-mkwrite 性能与更宽 mmap LTP 簇 |
+| mmap EOF/truncate/punch/ENOSPC SIGBUS | Linux/RV64/LA64 probe 的 EOF/truncate shared/private/private-COW、跨进程失效及 16 轮 fault/store 竞态通过；ext4 punch、真实块释放、cross-process provenance、16 轮 punch-vs-store/msync 通过；16 MiB auxiliary ext4 满盘 shared store SIGBUS 与释放空间后恢复双架构通过；sub-page filesystem block grow/refault、`/dev/zero` 零填充映射与 `MAP_GROWSDOWN` 已双架构双 libc 通过；26 项扩展簇为 25/1，唯一 `mremap06` 由缺失 fallocate 预分配导致 TBROK | 双架构已验证（M3 当前范围） | ext4 default/`KEEP_SIZE` unwritten extent、page-mkwrite 性能与更宽 mmap LTP |
 | `mmap/mprotect(PROT_NONE)` | LA64 software-present/hardware-invalid PTE；`mmap05` 与临时过滤的 `mprotect04` 双 libc 通过，RV64 回归通过；独立 Linux/RV64/LA64 probe 已覆盖未知 prot/未对齐 `EINVAL` 权限不变、只读 shared backing `EACCES` 不获写权限及 unmapped-hole `ENOMEM`，并校正 POSIX 允许非 `EINVAL` 失败部分修改 | 双架构已验证（当前 PROT_NONE 与参数/权限/映射缺口失败范围） | 补内存压力/VMA 上限失败与并发 user-copy；旧 LA 模拟器上的 NR/NX 其他组合单列验证 |
 | `posix_fadvise` / PageCache advice | 六种 advice、错误矩阵、open-description 状态、1/16/32 页窗口、WILLNEED、完整页/EOF DONTNEED、dirty writeback 与 NOREUSE reset 已由 Linux oracle 和 RV64/LA64 8 轮专项验证；双 libc 八项 LTP、mmap 与 rusage 相邻回归通过 | 双架构已验证（当前同步 writeback 范围） | async writeback/error 时序、极大范围节流与完整 BuildStorm soak |
 | realtime/纳秒/atime、CPU/rusage | CPU process/thread user/system、`RUSAGE_THREAD`、fault/RSS/actual context-switch、block I/O、cold-file major fault、全部 Linux-zero legacy 字段及 wait4/raw-waitid children 聚合已通过专项；RTC init/read/set 与同设备 reset persistence、ext4 扩展及 128-byte 旧 inode 已通过双架构；regular/directory default/24h relatime、strictatime、mount/open noatime、nodiratime、lazytime 显式同步、background/eviction、无显式 sync crash-image 与 ctime 关系双架构通过；timestamp LTP 双 libc双架构通过 | 双架构已验证（CPU accounting 与 rusage 当前字段、RTC 当前 QEMU 范围、ext4 timestamp layout 与 atime 当前范围）；其余待验证 | CPU hotplug accounting 与更宽 LTP；真实断电/volatile device cache、lazytime I/O failure/registry soak、真实电池 RTC 掉电由硬件平台另验 |
@@ -283,8 +283,12 @@ RV64 private-map 相邻回归通过。2026-08-16 又闭合 ext4 punch-hole：par
 保留均由 Linux/RV64/LA64 对照通过；错误矩阵与 mmap/BuildStorm/fadvise 相邻门禁也已通过。剩余边界是
 shared write 存储耗尽也已由 write-protected PTE + fault-time backing 协议关闭，并在双架构 16 MiB ext4
 验证 SIGBUS 和释放空间后恢复；16 轮 punch-vs-store/msync 三方门禁也已通过。剩余边界是 page-mkwrite
-性能和更宽 mmap LTP；`mmap16` 当前由 parent 的 buffered-write 填盘循环无法观察 writeback `ENOSPC`
-所阻断，首个 checkpoint/futex 已由 trace 证实正常，不能从自定义单页满盘范围直接外推。
+性能和更宽 mmap LTP。`mmap16` 的旧 TBROK 已确认是 synthetic mount 丢失 mkfs capacity/block size，
+并非 buffered writeback 吞错；补齐 geometry 与 `pagecache_isize_extended()` 式 grow 写保护后，双架构
+musl/glibc 各 10/10 TPASS。扩展到 26 项后，`/dev/zero` 的 `mmap10` 与带 SP/256-page
+guard-gap 校验的 `MAP_GROWSDOWN` `mmap18` 已闭合；双架构双 libc 均为 25/1，唯一
+`mremap06` 在前置 `fallocate` 阶段 TBROK。下一个可实现边界因此是 default/`KEEP_SIZE`
+unwritten extent，不是修改 mremap 以绕过 fixture。
 
 采用当前审计已经收敛的方案：
 
@@ -296,11 +300,13 @@ shared write 存储耗尽也已由 write-protected PTE + fault-time backing 协�
    `O(live tasks x VMAs)`，不提前增加 inode-to-VMA 反向索引；
 4. shrink 撤销完整越界 PTE/resident frame，并通过现有 shootdown/residency completion 后回收；部分页
    对 shared 和未 COW private 清尾，已 COW private 按 Linux probe 的匿名页规则处理；
-5. grow 后未 fault 页按当前 EOF 重新从文件读取；旧 truncate 失效不得被 writeback 反向扩容；
+5. grow 后未 fault 页按当前 EOF 重新从文件读取；若 block size 小于 VM page 且 grow 暴露同页新块，
+   所有 resident shared PTE 降权，使下一次 store 重新执行 page-mkwrite allocation；旧 truncate 失效不得
+   被 writeback 反向扩容；
 6. user copy 遇到同类 file fault 时返回正确的短拷贝/errno，不在内核中直接触发用户 signal handler。
 
-当前 EOF/truncate/punch/ENOSPC 及 punch-msync 并发门槛已满足。M3 后续是补齐 buffered writeback
-`ENOSPC` 的记录/反馈以恢复 `mmap16`、补 page-mkwrite 成功路径性能/回收证据和更宽双架构 mmap LTP；
+当前 EOF/truncate/punch/ENOSPC、sub-page-block grow 及 punch-msync 并发门槛已满足。M3 后续是补
+page-mkwrite 成功路径性能/回收证据和更宽双架构 mmap LTP；
 DAX/huge page 按当前范围明确排除。
 
 ## 里程碑 M4：文件与时间遗留语义

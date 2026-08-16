@@ -1,5 +1,36 @@
 # RespOS 当前状态
 
+## 2026-08-16 当前提交 RV64 final 功能通过与宿主内存边界（提交 `70df39f8`）
+
+- **命令与结果**：`make run-rv-final RV_FINAL_OUTPUT=/tmp/respos-rv-phase5-final-70df39f8.log` 使用
+  Makefile 默认的 16 GiB/8 hart、release、公开 final 根盘和 `-snapshot`。CAgent 10/10、脚本 exit 0，
+  `BUILDSTORM_TOOLCHAIN ok`、`BUILDSTORM_MINIBUILD ok`，最终
+  `BUILDSTORM_COMPILE mode=multi ok=true elapsed_s=712.72 cores=8 bytes=1681000 arch=riscv64`；Cargo
+  release 为 `11m35s`，axbuild 为 `703.51s`，BuildStorm 脚本 exit 0 后 guest 正常 poweroff。未观察到
+  panic、OOM、SIGBUS 或 I/O error marker。
+- **性能归因边界**：本轮宿主只有约 15 GiB 物理内存；启动前 available 约 8.6 GiB，swap 已用约
+  3.3 GiB，却为 QEMU 声明 16 GiB guest RAM。相对同文档此前 16 GiB/8 hart 本地样本的
+  `633.48s`，本轮慢约 12.5%；运行中未保留连续 RSS/PSI/swap-in/out 时间线，不能把差值唯一归因于
+  host swapping，但该配置对本机明显激进，也不应与用户此前 8 GiB 样本直接比较。后续本机功能回归
+  优先显式使用 `RV_FINAL_MEM=8G RV_FINAL_SMP=8`，正式 16 GiB 成绩只与相同宿主资源和监控口径比较。
+- **8 GiB 同提交复跑**：用户随后以同一 `70df39f8`、8 GiB/8 hart 复跑；DTB 地址
+  `0x27fe00000` 与 8 hart 启动记录确认该内存配置。CAgent 10/10、toolchain/minibuild 及最终 BuildStorm
+  再次完整通过，Cargo release `11m07s`、axbuild `675.33s`、guest elapsed `684.79s`，产物 marker 仍为
+  `bytes=1681000`。日志 `/tmp/respos-rv-final-70df39f8-rerun.log`，SHA-256
+  `1a1b6334eabcb9c326f1b0151ebcf111d4009260e7b8d8b00ad5644f9a97848b`。相对本节 16 GiB 高压轮改善
+  `27.93s`（约 3.9%），证明宿主资源状态确实贡献了一部分差异；相对旧 `633.48s` 样本仍慢约 8.1%，
+  但没有相同宿主窗口的旧/新内核交替 A/B，不能把这 8.1% 直接拆成语义开销与宿主波动。日志只证明
+  marker 字节数相同；若要记录 byte-for-byte 相同，还需保存并比较产物 SHA-256。
+- **待测性能假设**：源码确认每次 user trap 进入/返回都会更新时间并争用线程共享的 process CPU-clock
+  lock；每次成功 page fault 会遍历全部用户 VMA 重算 resident pages；read/readdir 后为防 lwext4 隐式
+  atime 更新而失效 raw inode metadata，使后续 relatime 判断可能重新进入 lower stat。三项均是合理热点，
+  但在 per-hart CPU accounting、增量 RSS 和由 VFS 独占 atime 更新分别做单变量 A/B 前保持 `待验证`。
+- **CPU-clock 分片实验已回退**：曾将 process clock 改为每 hart 独立 shard lock；RV64/LA64 release、
+  clock 20/20、wait4 和 signal 8/8 全部通过，但同机 8 GiB/8 hart 完整 RV final 为 Cargo `11m53s`、
+  axbuild `720.83s`、guest elapsed `729.94s`，比紧邻的 `684.79s` 样本慢约 6.6%。日志
+  `/tmp/respos-rv-final-cpu-clock-shards-8g.log`。单轮不能证明分片本身导致回退，却也没有进入评分版本所需
+  的正收益证据，因此实现已从工作树撤回；不再为该假设继续消耗完整 BuildStorm 轮次。
+
 ## 2026-08-16 shared mmap ENOSPC write-fault/SIGBUS 闭合（当前 Phase 5 工作树）
 
 - **page-mkwrite 边界**：writable shared file PTE 初始只读；首次 store fault 在仍持有稳定 VMA/frame
@@ -25,17 +56,43 @@
   store+`MS_SYNC` 与整页 punch 均必须成功且无死锁，lower 最终字节只能是合法线性化结果 0 或 mapper
   新值。三方均输出 `punch_msync_race PASS`，双架构日志为
   `/tmp/respos-{rv,la}-mmap-punch-msync-race-final.log`。
-- **LTP `mmap16` 当前阻断**：重新临时纳入后，RV64 musl/glibc 均 TBROK。带
-  `TASK_A_FUTEX_TRACE=1` 的 `debug_traces` 运行证明 child 对首个 checkpoint 的 wake 与 parent 的
-  `wait-timed-woken` 使用完全相同的 scope/uaddr；child 也已完成首次 page-mkwrite、`ftruncate(8192)` 和
-  `mremap(...,8192)`。parent 随后进入 buffered `write()` 填盘循环，但 RespOS 在后台/阈值 writeback
-  得到 `ENOSPC` 后仍持续接受 cache write，循环始终观察不到 `write() == -1, errno == ENOSPC`，因而没有
-  发出第二次 checkpoint wake，child 最终超时。普通日志为
-  `/tmp/respos-rv-mmap16-enospc-phase5-final.log`，诊断日志为 `/tmp/respos-rv-mmap16-futex-trace.log`。
-  因此仍从默认列表排除；这是 buffered writeback error 关联/反馈缺口，不是 futex、mremap 或已闭合的
-  shared-mmap page-mkwrite/SIGBUS 路径失败。
-- **剩余边界**：M3 核心语义已闭合；更宽 mmap LTP 的当前首要阻断是上述 buffered-write `ENOSPC`
-  传播，另需 page-mkwrite 性能评估。DAX、huge page、远程/异步分配文件系统不在当前 ext4 范围。
+- **LTP `mmap16` 闭合**：早期 TBROK 并非 buffered writeback 错误关联。精确 trace 证明 parent 已被首个
+  checkpoint 唤醒并持续成功写入数百 MiB，真正原因是 lightweight block mount 把格式化后的 10 MiB
+  文件系统映射到根 ext4 隐藏目录时丢失了 filesystem capacity。虚拟块设备现在区分用于 LTP admission
+  的 300 MiB device size 与 mkfs 选择的 filesystem capacity/block size；no-op mkfs 记录参数，真实 ext
+  header 与 loop backing 也可提供 geometry。`ftruncate` 跨越同一 VM page 内的新 filesystem block 时，
+  按 Linux `pagecache_isize_extended()` 条件写保护所有 shared resident 映射；下一次 store 重新进入
+  page-mkwrite，仅预留尚未覆盖的页前缀，空间不足由 trap 转成 `SIGBUS`。LoongArch 同时清 PTE W/D，
+  RV64 清 W。`mmap16` 已加入默认列表；RV64/LA64 的 musl/glibc 均为 10/10 TPASS，日志
+  `/tmp/respos-{rv,la}-mmap16-pagecache-isize-extended-v2.log`。
+- **本轮相邻回归**：最新源码的 Phase 5 mmap probe 在双架构均输出 `MMAP_PHASE5 ALL PASS`，日志
+  `/tmp/respos-{rv,la}-mmap-phase5-after-mmap16.log`；双架构双 libc `mmap05` 各 1/1，日志
+  `/tmp/respos-{rv,la}-mmap16-mmap05-regression.log`。BuildStorm file probe 双架构通过，RV64 同轮
+  64 MiB/4-worker private-map 通过，日志 `/tmp/respos-{rv,la}-mmap16-buildstorm-file.log`。
+- **剩余边界**：M3 当前 ext4/QEMU 范围已闭合；仍需 page-mkwrite 性能评估、更宽
+  mmap LTP 与 default/`KEEP_SIZE` unwritten extent。本文紧接的扩展簇结果已将前两个
+  mmap 语义缺口具体收敛到后一项。
+  DAX、huge page、远程/异步分配文件系统不在当前范围。
+
+## 2026-08-16 `/dev/zero` mmap 与 `MAP_GROWSDOWN` 闭合（当前 Phase 5 工作树）
+
+- **`/dev/zero` 映射**：普通文件仍以 live inode size 判断 EOF/SIGBUS，但特殊设备通过
+  `mmap_zero_filled()` 显式声明零填充映射；`MAP_PRIVATE` 使用 lazy anonymous，`MAP_SHARED` 使用
+  shared anonymous，不再将 size=0 的 `/dev/zero` 误判为文件 EOF。RV64/LA64、musl/glibc
+  `mmap10` 均为 1/1 TPASS，日志 `/tmp/respos-{rv,la}-mmap10-dev-zero.log`。
+- **向下扩展边界**：`MAP_GROWSDOWN` VMA 只在 fault page 紧邻 VMA 下界、trap 保存的用户 SP
+  确实位于该页，且与前一 VMA 仍保留 256 页 guard gap 时向下扩一页。内核
+  user-copy 不传 SP，因而不能意外扩栈。RV64/LA64、musl/glibc `mmap18` 均为 4/4
+  TPASS，含两个成功项和两个 blocker-page 失败项；日志
+  `/tmp/respos-{rv,la}-mmap18-growsdown-sp.log`。
+- **更宽 LTP 结果**：26 项 mmap/munmap/mprotect/mremap 簇在两架构、两 libc 均为
+  `25 passed, 1 failed, 0 skipped`；唯一失败是 `mremap06` 前置 `fallocate()` 返回
+  `EOPNOTSUPP` 导致 TBROK，不是 mremap 动作本身的已观测失败。日志
+  `/tmp/respos-{rv,la}-mmap-wide-phase5-v2.log`。最新源码的 Phase 5 mmap 专项也在双架构
+  再次 `MMAP_PHASE5 ALL PASS`，日志
+  `/tmp/respos-{rv,la}-mmap-phase5-after-zero-growsdown.log`。
+- **剩余边界**：该扩展簇已将下一个实质缺口收敛到 ext4 default/`KEEP_SIZE`
+  预分配和 unwritten extent；不应以稀疏扩容伪装 `fallocate`。
 
 ## 2026-08-16 mmap `PUNCH_HOLE` 与跨映射失效闭合（当前 Phase 5 工作树）
 
@@ -55,8 +112,9 @@
   日志为 `/tmp/respos-{rv,la}-mmap-punch-{mmap05-ltp,buildstorm-file,fadvise}.log`。
 - **诚实边界**：`fallocate04` 测的是普通预分配，两架构双 libc 当前均 skip；这不是 punch-hole 失败，也
   不能作为 punch 证据。default/`KEEP_SIZE` 真实预分配仍需 unwritten extent。存储耗尽 shared write
-  fault 的 `SIGBUS` 与 16 轮 punch-vs-store/msync 已由上节关闭；`mmap16` buffered-write `ENOSPC`
-  反馈和更宽 mmap LTP 仍待推进。
+  fault 的 `SIGBUS`、16 轮 punch-vs-store/msync 与 `mmap16` sub-page-block grow/refault 已由上节关闭；
+  更宽 mmap LTP 的最新 26 项结果见上节，当前唯一阻断已收敛到
+  default/`KEEP_SIZE` unwritten extent。
 
 ## 2026-08-16 lazytime background/eviction/crash-image 闭合（当前 Phase 5 工作树）
 
