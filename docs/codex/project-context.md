@@ -8,20 +8,18 @@
 队友同步仓库后，建议按以下顺序阅读：
 
 1. [current-status.md](./current-status.md)：当前提交、已验证结果和正在进行的阻断；
-2. 按分工选择路线：[buildstorm-smp-plan.md](./buildstorm-smp-plan.md) 对应架构线，
-   [linux-posix-refactor-plan.md](./linux-posix-refactor-plan.md) 对应 Phase 线；POSIX 专项的具体执行顺序见
+2. 当前现场赛分工见 [software-compatibility-network-plan.md](./software-compatibility-network-plan.md)：
+   当前主线负责真实软件兼容性，队友负责 virtio-net 与 Git HTTP(S)/SSH；既有 Phase 5/POSIX 语义矩阵见
    [posix-semantics-execution-plan.md](./posix-semantics-execution-plan.md)；
 3. [workflows.md](./workflows.md)：构建、镜像恢复和 QEMU 运行命令；
 4. [architecture.md](./architecture.md)：修改内核前需要遵守的调用链和不变量；
 5. [pitfalls.md](./pitfalls.md)：已知失败模式和排查顺序；
 6. [../cagent/day1.md](../cagent/day1.md)：题目一历史协作材料。
 
-当前代码基线为 `1788fa2`（包含学长 `0c21575` 与自动比赛镜像识别）。RV64 16 GiB/8 核和 LA64
-12 GiB/12 hart 已建立本地完整 BuildStorm 基线；
-Linux/POSIX Phase 0--4 主体已经推进完成。2026-08-13 起按两条线并行：架构线继续 LA SMP/TLB/ASID
-与 BuildStorm 性能，Phase 线继续 Phase 5 的 MM、task/signal、IPC/network 语义。课程评测平台当前
-暂不可用，平台结果统一标记 `待验证`；最新分工和共享文件边界见 [current-status.md](./current-status.md)
-首节。
+当前现场赛健壮线基线为 `ae2f38ce`。Linux/POSIX Phase 0--4 主体和 Phase 5 多个核心语义已经闭合；
+2026-08-16 起近期开发改为两条面向真实软件的并行线：当前主线继续 Git/Vim/GCC/rustc 软件兼容性，
+队友推进 QEMU virtio-net 以及 Git HTTP(S)/SSH。线上评分提交仍固定为既有决策中的 `44f93dbb`，不得
+混用两条分支的测试证据。实际软件、真实网卡和平台结果在产生对应日志前统一标记 `待验证`。
 
 ## 项目定位
 
@@ -60,8 +58,8 @@ Linux/POSIX Phase 0--4 主体已经推进完成。2026-08-13 起按两条线并�
 | `os/src/fs/` | VFS、ext4、mount、namei、fd、page cache、pipe、proc/dev | 区分 fd、open file、path、dentry、inode |
 | `os/src/syscall/` | Linux ABI 参数解析与各领域入口 | 保持薄层，避免在 syscall 中复制领域状态机 |
 | `os/src/signal/` | signal state、handler、siginfo、alt stack | trap context 有架构差异 |
-| `os/src/net/` | smoltcp socket、TCP/UDP、loopback、listen table | 当前实测主要覆盖 loopback benchmark |
-| `os/src/drivers/` | virtio block/net 和设备抽象 | RV 使用 MMIO，LA QEMU 使用 PCI 设备形式 |
+| `os/src/net/` | smoltcp socket、TCP/UDP、loopback、listen table | 当前只接入 IP-medium loopback，尚无真实 NIC 数据面 |
+| `os/src/drivers/` | virtio block 和设备/DMA 抽象 | QEMU 虽挂载 virtio-net，内核尚无 net driver；RV 使用 MMIO，LA 使用 PCI |
 | `user/` | no_std 用户库、系统调用封装、工具、probe、testrunner | `user/build.rs` 生成 LTP 清单 |
 | `img/` | 比赛测试镜像 | 运行会修改镜像内容，必要时从 `.xz` 恢复 |
 | `judge/` | LTP 日志解析、Linux baseline 对比 | 不要用 QEMU 退出码替代日志分析 |
@@ -71,10 +69,23 @@ Linux/POSIX Phase 0--4 主体已经推进完成。2026-08-13 起按两条线并�
 
 ## 当前开发基线与目标
 
-### 2026-08-13 双线开发基线
+### 2026-08-16 软件兼容性与真实网络双线
 
 - 状态：当前
-- 适用范围：`1788fa2` 后续工作
+- 适用范围：现场赛健壮线 `ae2f38ce` 后续工作
+- 最后验证：2026-08-16
+- 证据：[software-compatibility-network-plan.md](./software-compatibility-network-plan.md)、当前源码的
+  loopback net 与 block-only virtio driver、官方 2023--2025 现场赛 README
+- 内容：Phase 5 后续改为真实 workload 驱动。当前主线先验证 Git/Vim/GCC/rustc，再按第一个稳定失败
+  补 TTY/PTY、进程/libc、文件一致性、proc/dev 等语义；队友从 virtio-net bring-up 推进 DNS/TCP、
+  Git HTTP(S) 与 SSH。HTTP server 只作可选诊断，不是交付目标。
+- 后续影响：两条线在 Git 本地 → HTTP(S) → SSH 处汇合，共享入口实行单写入者；真实网卡证据必须
+  排除 loopback，所有应用通过声明必须绑定当前 commit、镜像和双架构日志。
+
+### 2026-08-13 双线开发基线
+
+- 状态：历史基线；2026-08-16 起由软件兼容性/真实网络双线接替
+- 适用范围：`1788fa2` 至路线切换前的工作
 - 最后验证：2026-08-13
 - 证据：当前 Git HEAD、[current-status.md](./current-status.md) 顶部状态收口、双架构兼容构建记录
 - 内容：架构线负责 `os/src/arch/**` 和 LA SMP/TLB/ASID 的底层协议与性能验证；Phase 线负责

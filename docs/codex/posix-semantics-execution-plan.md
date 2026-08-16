@@ -22,6 +22,14 @@ Phase 6 的调度器、allocator、异步 I/O 和细粒度锁重构。
   -> Phase 6 性能重构
 ```
 
+### 2026-08-16 近期执行入口调整
+
+现场赛近期任务改由
+[software-compatibility-network-plan.md](./software-compatibility-network-plan.md) 统筹：当前主线先运行
+Git/Vim/GCC/rustc，并按第一个稳定失败从本文件矩阵选择语义工作；队友负责 virtio-net 与 Git
+HTTP(S)/SSH。本文件继续维护已知 ABI 边界、证据和 backlog，但不再意味着必须脱离 workload 顺序逐项
+扫完整张 POSIX 清单。简单 HTTP server 不是当前交付目标，网络通过也不得由 loopback 结果代替。
+
 ## 基线、目标与非目标
 
 ### 计划基线

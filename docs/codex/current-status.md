@@ -1,5 +1,19 @@
 # RespOS 当前状态
 
+## 2026-08-16 现场赛路线切换：软件兼容性与真实网络双线（基线 `ae2f38ce`）
+
+- **最新目标**：当前主线继续真实软件兼容性，优先验证并修复 Git、Vim、GCC、rustc；队友负责
+  virtio-net 与 Git HTTP(S)/SSH。完整分工、共享文件边界和验收门禁见
+  [software-compatibility-network-plan.md](./software-compatibility-network-plan.md)。
+- **网络当前事实**：Makefile 已为 RV64/LA64 QEMU 挂载 virtio-net，但内核当前只接入
+  `LoopbackDev`，驱动目录只有 virtio block；既有 inet/iperf 结果不能证明真实 NIC 可用。RV64
+  virtio-mmio、LA64 virtio-pci、DNS、Git HTTP(S) 和 SSH 均为 `待验证`。
+- **软件当前事实**：BuildStorm 已证明工具链复杂路径具有较强基础，Phase 5 也已有 process identity、
+  leader exit/non-leader exec、signal/job-control 首轮和 mmap/truncate/SIGBUS 等专项证据；但当前
+  `ae2f38ce` 上官方 2025 Git/Vim/GCC/rustc 的逐项端到端结果尚未建立，统一标记 `待验证`。
+- **边界**：简单 HTTP server 不再是网络交付目标，只可用于诊断。线上评分提交继续固定在
+  `44f93dbb`；本节计划和后续现场赛证据属于 `ae2f38ce` 健壮线，不与评分提交混用。
+
 ## 2026-08-16 当前提交 RV64 final 功能通过与宿主内存边界（提交 `70df39f8`）
 
 - **命令与结果**：`make run-rv-final RV_FINAL_OUTPUT=/tmp/respos-rv-phase5-final-70df39f8.log` 使用

@@ -3,6 +3,22 @@
 这里只收录能解释当前代码形态或避免重复踩坑的决策。日期是当前证据最后核验时间，不一定是
 最初提出时间。
 
+## 现场赛开发以真实软件首失败驱动，网络以 Git HTTP(S)/SSH 为交付目标
+
+- 状态：已采用
+- 适用范围：`ae2f38ce` 之后的现场赛健壮线、Phase 5/POSIX 排序、virtio-net 分工与答辩展示
+- 最后验证：2026-08-16
+- 证据：官方 2023--2025 现场赛 README；当前源码只有 loopback 网络和 virtio block driver；
+  [software-compatibility-network-plan.md](./software-compatibility-network-plan.md)
+- 决策：当前主线优先跑 Git/Vim/GCC/rustc，由真实软件的第一个稳定失败触发必要的 POSIX/Linux ABI
+  修复；队友优先建立真实 virtio-net，并以 Git HTTP(S) 和 SSH 的 clone/fetch/pull、条件允许时 push
+  作为端到端交付。简单 HTTP server 降为可选诊断工具。两条线通过 Git 本地基线和远端 transport 汇合。
+- 原因：近三年官方任务已经验证完整软件和网络组合路径，继续无差别扩展接口清单的边际收益低于真实
+  workload 驱动；Git 远端操作还能同时覆盖 NIC、DNS、TCP、事件、时间、随机数、TLS/SSH 用户态依赖和
+  文件系统一致性。
+- 后续影响：不能用 loopback 测试、QEMU 设备参数或单个 syscall 成功宣称网络/应用兼容。未取得绑定
+  commit、镜像、架构和日志的结果一律标记 `待验证`；共享入口实行单写入者，凭据不得进入仓库或日志。
+
 ## 比赛提测固定在已验证性能提交，Phase 5 健壮版保留给现场赛
 
 - 状态：已采用
