@@ -6,7 +6,11 @@
 
 == 10.1 概述
 <101-概述>
-RespOS 的驱动模型通过统一的 `Device` trait 和 `Disk` trait 抽象块设备，通过 virtio 框架支持 virtio-blk 和 virtio-net 两种虚拟设备。设备驱动层位于 HAL 之上------HAL 提供 MMIO 地址映射和中断注册能力，驱动层负责设备初始化和数据传输协议。
+RespOS 的驱动模型通过统一的 `Device` trait 和 `Disk` trait 抽象块设备，通过 virtio 框架支持 virtio-blk 和 virtio-net 两种虚拟设备。设备驱动层位于 HAL 之上——HAL 提供 MMIO 地址映射和中断注册能力，驱动层负责设备初始化和数据传输协议。
+
+#image("../../assets/figures/device-path-final.svg")
+
+#strong[图 10-1 RespOS 设备驱动分层与数据通路]
 
 #quote(block: true)[
 【建议检查的代码】`os/src/drivers/mod.rs`，`os/src/drivers/device.rs`
@@ -14,13 +18,13 @@ RespOS 的驱动模型通过统一的 `Device` trait 和 `Disk` trait 抽象块�
 
 == 10.2 块设备驱动
 <102-块设备驱动>
-#strong[virtio-blk 设备初始化]。virtio-blk 是 QEMU 提供的高性能虚拟块设备。初始化流程为：通过 MMIO 地址探测 virtio 设备 → 读取设备 ID 确认是块设备 → 协商 features（如 `VIRTIO_BLK_F_RO`、`VIRTIO_BLK_F_FLUSH` 等）→ 分配一个 virtqueue → 完成驱动初始化。
+#strong[virtio-blk 设备初始化];。virtio-blk 是 QEMU 提供的高性能虚拟块设备。初始化流程为：通过 MMIO 地址探测 virtio 设备 → 读取设备 ID 确认是块设备 → 协商 features（如 `VIRTIO_BLK_F_RO`、`VIRTIO_BLK_F_FLUSH` 等）→ 分配一个 virtqueue → 完成驱动初始化。
 
-#strong[块读写接口]。`Disk` trait 提供 `read_block(block_id, buf)` 和 `write_block(block_id, buf)` 两个核心操作。每个请求构造一个 virtio-blk request（type + sector + data），填入 virtqueue descriptor，通知设备后轮询等待响应。数据直接从 descriptor 对应的物理内存区域传输，无需额外拷贝。
+#strong[块读写接口];。`Disk` trait 提供 `read_block(block_id, buf)` 和 `write_block(block_id, buf)` 两个核心操作。每个请求构造一个 virtio-blk request（type + sector + data），填入 virtqueue descriptor，通知设备后轮询等待响应。数据直接从 descriptor 对应的物理内存区域传输，无需额外拷贝。
 
-#strong[与文件系统的对接]。ext4 后端的 `BlockDeviceImpl` 实现了 lwext4 需要的 `ext4_blockdev_iface` 回调表------包含 `dev_open`、`dev_read`、`dev_write`、`dev_close`、`dev_seek` 五个函数。这些函数将 lwext4 的块操作翻译为 `Disk` trait 调用，使 lwext4 能透明使用 virtio-blk 设备。
+#strong[与文件系统的对接];。ext4 后端的 `BlockDeviceImpl` 实现了 lwext4 需要的 `ext4_blockdev_iface` 回调表——包含 `dev_open`、`dev_read`、`dev_write`、`dev_close`、`dev_seek` 五个函数。这些函数将 lwext4 的块操作翻译为 `Disk` trait 调用，使 lwext4 能透明使用 virtio-blk 设备。
 
-#strong[双架构差异]。RISC-V 下 virtio 设备通过 MMIO 地址直接访问；LoongArch 下某些 virtio 设备通过 PCI 总线连接，需要额外的 PCI 枚举步骤。
+#strong[双架构差异];。RISC-V 下 virtio 设备通过 MMIO 地址直接访问；LoongArch 下某些 virtio 设备通过 PCI 总线连接，需要额外的 PCI 枚举步骤。
 
 #quote(block: true)[
 【建议检查的代码】`os/src/drivers/virtio/`，`os/src/drivers/disk.rs`
@@ -36,11 +40,11 @@ virtio-net 设备的初始化流程与 virtio-blk 类似，但需要两条 virtq
 
 == 10.4 串口驱动
 <104-串口驱动>
-NS16550A UART 是 x86/ARM/RISC-V 平台通用的串口控制器。RespOS 通过 MMIO 地址映射访问 UART 的寄存器（THR/RBR 用于收发、LSR 用于状态查询）。串口是内核早期启动阶段唯一的调试输出通道------在 console 初始化完成前，所有 `println!` 通过 UART 逐字节输出。
+NS16550A UART 是 x86/ARM/RISC-V 平台通用的串口控制器。RespOS 通过 MMIO 地址映射访问 UART 的寄存器（THR/RBR 用于收发、LSR 用于状态查询）。串口是内核早期启动阶段唯一的调试输出通道——在 console 初始化完成前，所有 `println!` 通过 UART 逐字节输出。
 
 == 10.5 设备树与设备发现
 <105-设备树与设备发现>
-设备树（Device Tree）是 RISC-V 平台描述硬件拓扑的标准方式。它是一个树形数据结构，描述 CPU 核心数、内存基址和大小、外设 MMIO 地址等关键信息。RespOS 在启动时解析 FDT，提取物理内存范围和 virtio 设备的 MMIO 基址。LoongArch 2K1000 平台不使用设备树，改为板级固定配置------内存大小和外设地址在 `board/2k1000.rs` 中硬编码。
+设备树（Device Tree）是 RISC-V 平台描述硬件拓扑的标准方式。它是一个树形数据结构，描述 CPU 核心数、内存基址和大小、外设 MMIO 地址等关键信息。RespOS 在启动时解析 FDT，提取物理内存范围和 virtio 设备的 MMIO 基址。LoongArch 2K1000 平台不使用设备树，改为板级固定配置——内存大小和外设地址在 `board/2k1000.rs` 中硬编码。
 
 #quote(block: true)[
 【建议检查的代码】架构相关的设备树解析代码，`os/src/arch/*/config/board.rs`

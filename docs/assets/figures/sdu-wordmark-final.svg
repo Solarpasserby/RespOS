@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1050" height="150" viewBox="0 0 1050 150">
+  <rect width="1050" height="150" fill="#8B1A2B"/>
+  <circle cx="80" cy="75" r="54" fill="none" stroke="#fff" stroke-width="5"/>
+  <path d="M45 94 L80 38 L115 94 M55 94 H105 M67 74 H93" fill="none" stroke="#fff" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="155" y="70" font-family="Noto Sans CJK SC, sans-serif" font-size="44" font-weight="700" fill="#fff">山东大学</text>
+  <text x="157" y="112" font-family="DejaVu Sans, sans-serif" font-size="27" letter-spacing="4" fill="#fff">SHANDONG UNIVERSITY</text>
+</svg>

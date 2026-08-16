@@ -86,7 +86,7 @@
       inset: (x: 16pt, y: 9pt),
       radius: 2pt,
     )[
-      #image("../assets/figures/sdu-logo.svg", width: 21em)
+      #image("../assets/figures/sdu-wordmark-final.svg", width: 21em)
     ]
   ]
 ]

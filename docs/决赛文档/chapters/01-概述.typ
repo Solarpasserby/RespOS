@@ -7,17 +7,22 @@ RespOS 是一个使用 Rust 编写的教学与竞赛型宏内核，面向全国�
 RespOS 的设计由三个目标共同决定：
 
 #figure(
-  align(center)[#table(
-    columns: 3,
-    align: (auto,auto,auto,),
-    table.header([目标], [具体做法], [体现出的结果],),
-    table.hline(),
-    [支持两种架构], [任务、内存、文件和系统调用等部分尽量复用；启动、页表、trap、上下文切换和时钟在架构层分别实现], [同一套内核功能可以运行在 RV64 与 LA64 上],
-    [兼容 Linux 用户态], [syscall 层处理 ABI 参数、返回值和错误码，具体状态由各领域模块维护], [musl/glibc 程序可以通过统一的系统调用边界使用内核],
-    [保持工程上的可维护性], [用明确的数据结构、锁和资源生命周期组织复杂操作，并为失败路径保留回滚空间], [fork、exec、mmap、mount、socket 和信号等操作有清晰的模块边界],
-  )]
-  , kind: table
-  )
+align(center)[#table(
+  columns: 3,
+  align: (col, row) => (auto,auto,auto,).at(col),
+  inset: 6pt,
+  [目标], [具体做法], [体现出的结果],
+  [支持两种架构],
+  [任务、内存、文件和系统调用等部分尽量复用；启动、页表、trap、上下文切换和时钟在架构层分别实现],
+  [同一套内核功能可以运行在 RV64 与 LA64 上],
+  [兼容 Linux 用户态],
+  [syscall 层处理 ABI 参数、返回值和错误码，具体状态由各领域模块维护],
+  [musl/glibc 程序可以通过统一的系统调用边界使用内核],
+  [保持工程上的可维护性],
+  [用明确的数据结构、锁和资源生命周期组织复杂操作，并为失败路径保留回滚空间],
+  [fork、exec、mmap、mount、socket 和信号等操作有清晰的模块边界],
+)]
+)
 
 表 1-1 RespOS 的设计目标
 
@@ -26,6 +31,10 @@ RespOS 的设计由三个目标共同决定：
 == 1.2 从启动到用户程序
 <12-从启动到用户程序>
 RespOS 采用宏内核结构。内核子系统运行在同一特权级地址空间中，通过对象和模块边界分工；用户程序通过系统调用、文件描述符、信号和网络接口与内核交互。
+
+#image("../../assets/figures/respos-overview-final.svg")
+
+#strong[图 1-1 RespOS 从用户态到硬件的总体分层]
 
 一次典型的启动和执行过程可以概括为：
 
@@ -39,7 +48,7 @@ RespOS 采用宏内核结构。内核子系统运行在同一特权级地址空�
   → 返回用户态，或由调度器切换到其他任务
 ```
 
-图 1-1 RespOS 的启动与执行链
+图 1-2 RespOS 的启动与执行链
 
 启动阶段的先后顺序由模块依赖决定：trap 入口需要先具备基本的保存和恢复能力，内存管理要先于用户任务和大多数内核对象建立，initproc 入队后系统才进入常规调度，时钟中断则为调度、睡眠和超时机制提供持续的时间事件。
 
@@ -62,7 +71,7 @@ os/src/
 └── main.rs     # 公共启动入口
 ```
 
-图 1-2 RespOS 内核的主要模块
+图 1-3 RespOS 内核的主要模块
 
 这些目录不是彼此隔离的服务。例如，`mmap` 同时需要 MM 的 VMA/PTE 管理和 FS 的 `FileOp`、页缓存；pipe 和 socket 的阻塞需要 task 的等待与唤醒机制；信号投递要修改用户态 `TrapContext`，并由 trap 返回路径恢复；文件描述符则把普通文件、pipe、socket、timerfd 和设备对象放进同一套用户接口。
 
@@ -71,21 +80,34 @@ os/src/
 RespOS 将执行状态、地址空间、文件对象和硬件现场分开保存。这样做的好处是，资源共享关系可以单独表达，架构差异也不会扩散到公共模块。
 
 #figure(
-  align(center)[#table(
-    columns: 3,
-    align: (auto,auto,auto,),
-    table.header([对象], [主要职责], [跨模块关系],),
-    table.hline(),
-    [`TaskControlBlock`], [保存 tid/tgid、任务状态、内核栈、调度属性和资源引用], [持有或关联地址空间、fd 表和信号状态，由 scheduler 管理],
-    [`MemorySet` / VMA], [表示用户地址空间、映射权限和文件 backing], [被 exec、fork、mmap、缺页和 trap 路径共同使用],
-    [`TrapContext`], [保存用户寄存器、返回地址和特权状态], [syscall、缺页和信号处理会修改它，返回汇编负责恢复],
-    [`TaskContext`], [保存内核态切换点和内核栈信息], [由上下文切换代码保存和恢复，连接任务与调度器],
-    [`FdTable` / `FileOp`], [管理 fd 与打开文件状态], [pipe、socket、timerfd 和设备文件复用 `FileOp` 接口],
-    [`Dentry` / `InodeOp`], [分别表示路径中的目录项和后端文件对象], [由 namei、mount、ext4、procfs 和 devfs 共同使用],
-    [timeout registry], [管理 deadline、等待者和到期动作], [服务 sleep、futex、信号和 timerfd 的超时唤醒],
-  )]
-  , kind: table
-  )
+align(center)[#table(
+  columns: 3,
+  align: (col, row) => (auto,auto,auto,).at(col),
+  inset: 6pt,
+  [对象], [主要职责], [跨模块关系],
+  [`TaskControlBlock`],
+  [保存 tid/tgid、任务状态、内核栈、调度属性和资源引用],
+  [持有或关联地址空间、fd 表和信号状态，由 scheduler 管理],
+  [`MemorySet` / VMA],
+  [表示用户地址空间、映射权限和文件 backing],
+  [被 exec、fork、mmap、缺页和 trap 路径共同使用],
+  [`TrapContext`],
+  [保存用户寄存器、返回地址和特权状态],
+  [syscall、缺页和信号处理会修改它，返回汇编负责恢复],
+  [`TaskContext`],
+  [保存内核态切换点和内核栈信息],
+  [由上下文切换代码保存和恢复，连接任务与调度器],
+  [`FdTable` / `FileOp`],
+  [管理 fd 与打开文件状态],
+  [pipe、socket、timerfd 和设备文件复用 `FileOp` 接口],
+  [`Dentry` / `InodeOp`],
+  [分别表示路径中的目录项和后端文件对象],
+  [由 namei、mount、ext4、procfs 和 devfs 共同使用],
+  [timeout registry],
+  [管理 deadline、等待者和到期动作],
+  [服务 sleep、futex、信号和 timerfd 的超时唤醒],
+)]
+)
 
 表 1-2 RespOS 的核心对象
 
@@ -101,7 +123,7 @@ RespOS 没有把所有行为都堆在 syscall 分支中，而是把用户可以�
 
 === 1.5.2 先准备，再提交
 <152-先准备再提交>
-fork、exec、mmap、mount 和 accept 等操作都会同时影响多个对象，单个步骤成功并不代表整个操作已经完成。RespOS 对这类路径采用"先准备、后发布"的组织方式：先创建对象、检查资源和建立引用关系，确认关键步骤成功后再改变任务状态、挂载关系、页表或 fd 表；如果中途失败，则释放已准备的资源，不发布半完成状态。
+fork、exec、mmap、mount 和 accept 等操作都会同时影响多个对象，单个步骤成功并不代表整个操作已经完成。RespOS 对这类路径采用“先准备、后发布”的组织方式：先创建对象、检查资源和建立引用关系，确认关键步骤成功后再改变任务状态、挂载关系、页表或 fd 表；如果中途失败，则释放已准备的资源，不发布半完成状态。
 
 例如，exec 要先完成 ELF 装载、地址空间和用户栈准备，再替换旧映像；fork 要先完成子任务和资源关系的建立，再把子任务放入可运行队列；阻塞操作则要先将任务和等待条件建立关联，再进入 blocked 状态。这个原则贯穿资源回收、阻塞唤醒和并发错误处理，是各模块之间能够稳定协作的基础。
 
@@ -113,26 +135,41 @@ RISC-V64 与 LoongArch64 在寄存器、页表根寄存器、异常入口和返�
 
 == 1.6 章节安排
 <16-章节安排>
-第 2---9 章按照"执行基础---资源管理---外部交互---硬件落地"的顺序展开：
+第 2—9 章按照“执行基础—资源管理—外部交互—硬件落地”的顺序展开：
 
 #figure(
-  align(center)[#table(
-    columns: 3,
-    align: (auto,auto,auto,),
-    table.header([章节], [主要问题], [内容范围],),
-    table.hline(),
-    [第 2 章 进程管理], [任务如何创建、调度、阻塞和退出？], [TCB、线程组、clone/exec、调度器、上下文切换和 SMP 生命周期],
-    [第 3 章 中断与异常处理], [trap 如何保存现场并安全返回？], [TrapContext、syscall、缺页、timer trap、信号交付和双架构返回],
-    [第 4 章 内存管理], [地址空间如何建立、修改和回收？], [VMA/PTE/页帧、lazy allocation、COW、文件映射和 TLB 可见性],
-    [第 5 章 文件系统], [fd、路径和后端文件系统如何连接？], [VFS、mount/namei、ext4、procfs/devfs、页缓存和 fd 生命周期],
-    [第 6 章 进程间通信与信号], [任务如何传递数据、同步和通知？], [signal、pipe、futex、System V 共享内存及其竞争协议],
-    [第 7 章 时钟模块], [时间事件如何驱动睡眠和超时？], [时间尺度、deadline、sleep、POSIX timer 和 timerfd],
-    [第 8 章 网络模块], [socket ABI 如何连接协议栈和阻塞模型？], [smoltcp、TCP/UDP/UNIX socket、loopback、监听池和 poll],
-    [第 9 章 硬件抽象层与架构适配], [公共内核如何落到两种指令集？], [启动、页表、trap、TaskContext、时钟和架构边界],
-  )]
-  , kind: table
-  )
+align(center)[#table(
+  columns: 3,
+  align: (col, row) => (auto,auto,auto,).at(col),
+  inset: 6pt,
+  [章节], [主要问题], [内容范围],
+  [第 2 章 进程管理],
+  [任务如何创建、调度、阻塞和退出？],
+  [TCB、线程组、clone/exec、调度器、上下文切换和 SMP 生命周期],
+  [第 3 章 中断与异常处理],
+  [trap 如何保存现场并安全返回？],
+  [TrapContext、syscall、缺页、timer trap、信号交付和双架构返回],
+  [第 4 章 内存管理],
+  [地址空间如何建立、修改和回收？],
+  [VMA/PTE/页帧、lazy allocation、COW、文件映射和 TLB 可见性],
+  [第 5 章 文件系统],
+  [fd、路径和后端文件系统如何连接？],
+  [VFS、mount/namei、ext4、procfs/devfs、页缓存和 fd 生命周期],
+  [第 6 章 进程间通信与信号],
+  [任务如何传递数据、同步和通知？],
+  [signal、pipe、futex、System V 共享内存及其竞争协议],
+  [第 7 章 时钟模块],
+  [时间事件如何驱动睡眠和超时？],
+  [时间尺度、deadline、sleep、POSIX timer 和 timerfd],
+  [第 8 章 网络模块],
+  [socket ABI 如何连接协议栈和阻塞模型？],
+  [smoltcp、TCP/UDP/UNIX socket、loopback、监听池和 poll],
+  [第 9 章 硬件抽象层与架构适配],
+  [公共内核如何落到两种指令集？],
+  [启动、页表、trap、TaskContext、时钟和架构边界],
+)]
+)
 
-表 1-3 第 2---9 章的内容安排
+表 1-3 第 2—9 章的内容安排
 
 阅读后续章节时，可以把 RespOS 看成三条相互交织的链路：任务和 trap 构成执行链，MM、VFS 和 socket 构成资源链，timer、signal、pipe、futex 和网络 poll 构成事件链。它们最终汇合在同一个目标上：让用户程序能够在两种架构上通过接近 Linux 的接口完成加载、运行、阻塞、通信和退出。

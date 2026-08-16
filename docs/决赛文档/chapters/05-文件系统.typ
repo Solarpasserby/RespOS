@@ -6,13 +6,17 @@
 
 RespOS 的文件系统参考并实现了类 Linux 的 VFS 分层模型。这个模型把三个容易混淆的问题分开：文件在目录树中的位置是什么，文件本身具有什么属性和操作，某一次打开之后又处于什么状态。路径查找解决第一个问题，`InodeOp` 解决第二个问题，`FileOp` 解决第三个问题，`FdTable` 再把这些内核对象映射为用户态看到的整数 fd。
 
+#image("../../assets/figures/vfs-layers-final.svg")
+
+#strong[图 5-1 RespOS VFS 对象与后端分层]
+
 文件系统主要以 ext4 作为持久化后端，同时接入 procfs、devfs、tmpfile、pipe、socket 等对象。它们不需要都具有磁盘 inode 或路径，但只要实现相应的 `FileOp`，就可以复用 `read`、`write`、`poll`、`fcntl` 和 `close` 等文件描述符语义。文件后端 I/O 与地址空间管理则通过 `FileOp` 的按偏移访问和 mmap 写回接口连接起来。
 
 == 5.1 VFS 对象模型
 <51-vfs-对象模型>
 === 5.1.1 `File`：一次打开文件的运行时状态
 <511-file一次打开文件的运行时状态>
-文件系统对象进入用户态前，会经历"路径找到 inode、根据 inode 建立打开对象、把打开对象放入 fd 表"的过程。RespOS 中，普通文件的打开实例由 `File` 表示，并实现 `FileOp` trait。`File` 自身保存稳定的 inode 引用，动态变化的打开状态则集中放在受互斥锁保护的 `FileInner` 中：
+文件系统对象进入用户态前，会经历“路径找到 inode、根据 inode 建立打开对象、把打开对象放入 fd 表”的过程。RespOS 中，普通文件的打开实例由 `File` 表示，并实现 `FileOp` trait。`File` 自身保存稳定的 inode 引用，动态变化的打开状态则集中放在受互斥锁保护的 `FileInner` 中：
 
 ```rust
 pub struct File {
@@ -33,7 +37,7 @@ struct FileInner {
 
 代码片段 5-1 `File` 与 `FileInner` 的核心状态
 
-`FileInner` 中的 `offset` 以字节为单位，表示该"打开文件的描述符"当前的访问位置；`path` 将这次打开与挂载实例中的 dentry 绑定；`flags` 保存打开状态；`page_cache` 和 `write_back` 则把普通文件的 I/O 与缓存写回连接起来。`File` 构造时会增加 ext4 inode 的打开计数，并根据 inode 类型取得共享页缓存。
+`FileInner` 中的 `offset` 以字节为单位，表示该“打开文件的描述符”当前的访问位置；`path` 将这次打开与挂载实例中的 dentry 绑定；`flags` 保存打开状态；`page_cache` 和 `write_back` 则把普通文件的 I/O 与缓存写回连接起来。`File` 构造时会增加 ext4 inode 的打开计数，并根据 inode 类型取得共享页缓存。
 
 打开标志会直接影响初始状态。若指定 `O_TRUNC` 且以写模式打开，构造阶段先将文件截断并同步调整缓存长度；若指定 `O_APPEND`，普通文件的初始 offset 设置为当前文件大小，否则从零开始。之后 `read`/`write` 在 `FileInner` 锁内推进 offset。因此两个独立的 `open` 创建的 `File` 拥有独立访问位置，而 `dup` 或 fork 复制同一个 `Arc<dyn FileOp>` 时会共享该位置。
 
@@ -127,7 +131,7 @@ ext4 inode 的创建经过 inode cache：`get_or_create` 先按 inode 号查找�
 - #strong[rename。] dentry 可以保持自身身份并更新父链，但 lwext4 后端需要访问新的路径。RespOS 将新路径记录到 `renamed_path`，使已经打开的 `File` 后续通过 `storage_path` 不再访问旧路径。
 - #strong[unlink 与延迟清理。] 如果文件仍有打开者且链接数归零，适配层先把后端文件改名为 `.respos_orphan_<ino>`，将内核侧链接数覆盖为零；最后一个 `File` 关闭时，`open_files` 归零并删除这个隐藏路径。这样目录项可以先从命名空间消失，已有 fd 仍然可以继续访问文件内容。
 
-因此，`Ext4Inode` 并不是简单的"lwext4 inode 指针包装"，而是 VFS 语义与路径型 ext4 后端之间的适配层：它统一缓存 inode 身份，维护打开计数和元数据覆盖，协调 rename/unlink 生命周期，并把普通文件读写接入共享页缓存。
+因此，`Ext4Inode` 并不是简单的“lwext4 inode 指针包装”，而是 VFS 语义与路径型 ext4 后端之间的适配层：它统一缓存 inode 身份，维护打开计数和元数据覆盖，协调 rename/unlink 生命周期，并把普通文件读写接入共享页缓存。
 
 === 5.1.5 `Dentry`、`Path` 与对象定位
 <515-dentrypath-与对象定位>
@@ -144,13 +148,13 @@ pub struct DentryInner {
 
 代码片段 5-5 `Dentry` 的路径树状态
 
-`inode == None` 表示负目录项，可缓存"该名字不存在"的结果。父节点使用强引用以支持沿父链重建路径，子节点使用 `Weak` 避免形成永久引用环。rename 时 dentry 保持对象身份，通过父链和 `alias_path` 计算新的后端路径；unlink 删除名字空间中的 dentry 连接，但不必立即销毁仍被打开的 inode。
+`inode == None` 表示负目录项，可缓存“该名字不存在”的结果。父节点使用强引用以支持沿父链重建路径，子节点使用 `Weak` 避免形成永久引用环。rename 时 dentry 保持对象身份，通过父链和 `alias_path` 计算新的后端路径；unlink 删除名字空间中的 dentry 连接，但不必立即销毁仍被打开的 inode。
 
 == 5.2 挂载树与路径解析
 <52-挂载树与路径解析>
 === 5.2.1 `VfsMount` 与 `Mount`
 <521-vfsmount-与-mount>
-RespOS 将"一个文件系统实例"和"它挂载到哪里"分开表示。`VfsMount` 保存该实例的根 dentry、超级块和挂载 flags；`Mount` 保存挂载点、父挂载和子挂载，形成全局 mount tree：
+RespOS 将“一个文件系统实例”和“它挂载到哪里”分开表示。`VfsMount` 保存该实例的根 dentry、超级块和挂载 flags；`Mount` 保存挂载点、父挂载和子挂载，形成全局 mount tree：
 
 ```rust
 pub struct VfsMount {
@@ -248,9 +252,9 @@ SuperBlockOp::sync：提交文件系统级缓存和块设备状态
 
 === 5.4.3 与 `mmap(MAP_SHARED)` 的协作
 <543-与-mmapmap_shared-的协作>
-文件映射的写回由 MM 和 FS 共同完成。建立可写共享映射前，`FileOp::mmap_allowed` 检查文件是否可读，并要求 `MAP_SHARED|PROT_WRITE` 对应的"打开文件的描述符"可写。映射建立后，页面内容由地址空间管理；在 `msync`、`munmap`、MAP\_FIXED 替换、mremap 收缩/覆盖、mprotect 或进程退出等路径中，MM 在地址空间锁内取得已有页帧的快照，然后释放 `MemorySet` 锁，再通过 `FileOp` 写入页缓存或后端，最后按需要调用 `fsync`。
+文件映射的写回由 MM 和 FS 共同完成。建立可写共享映射前，`FileOp::mmap_allowed` 检查文件是否可读，并要求 `MAP_SHARED|PROT_WRITE` 对应的“打开文件的描述符”可写。映射建立后，页面内容由地址空间管理；在 `msync`、`munmap`、MAP\_FIXED 替换、mremap 收缩/覆盖、mprotect 或进程退出等路径中，MM 在地址空间锁内取得已有页帧的快照，然后释放 `MemorySet` 锁，再通过 `FileOp` 写入页缓存或后端，最后按需要调用 `fsync`。
 
-这种"快照---锁外 I/O---同步"的协议有两个目的：避免文件后端 I/O 持有地址空间写锁导致锁序反转，也避免后端阻塞把所有地址空间操作串在一起。由于当前硬件路径没有统一提供 dirty bit，系统对已有可写共享页帧采用保守写回，从而以更明确的同步行为换取实现可靠性。
+这种“快照—锁外 I/O—同步”的协议有两个目的：避免文件后端 I/O 持有地址空间写锁导致锁序反转，也避免后端阻塞把所有地址空间操作串在一起。由于当前硬件路径没有统一提供 dirty bit，系统对已有可写共享页帧采用保守写回，从而以更明确的同步行为换取实现可靠性。
 
 == 5.5 文件描述符表与生命周期
 <55-文件描述符表与生命周期>
@@ -280,7 +284,7 @@ pub struct FdEntry {
 <56-功能与设计总结>
 文件系统是连接了系统调用、进程、内存和设备的基础设施。表 5-2 总结了 RespOS 已形成的主要功能和对应设计。
 
-| 功能或设计 | 主要实现 | | -\-\- | -\-\- | -\-\- | | VFS 对象抽象 | 通过 `Path`、`Dentry`、`InodeOp`、`FileOp` 和 `SuperBlockOp` 分离路径、命名、文件对象、打开状态与后端存储 | | 磁盘文件系统 | 通过 `lwext4_rust` 接入 ext4，支持普通文件、目录、符号链接、硬链接、rename、unlink 和属性操作 | | 虚拟文件系统 | 以独立挂载实例接入 procfs、devfs，并提供 `/proc`、`/dev`、shm 等内核和设备接口 | | 路径与挂载 | 支持 cwd/root/dirfd 起点、dentry cache、符号链接、`.`/`..` 以及跨挂载点路径遍历 | | 文件访问性能 | 通过 ext4 inode 级共享页缓存、目录项缓存和目录读取缓存减少后端访问 | | 数据一致性 | 通过页缓存写回、`fsync`、unlink 孤儿文件和 rename 回滚维护文件数据与命名空间的一致性 | | 内核模块协作 | 通过 file-backed VMA、`mmap` 写回、pipe、socket、poll 和统一 fd 生命周期连接 MM、task、IPC、network 与 drivers |
+| 功能或设计 | 主要实现 | | --- | --- | --- | | VFS 对象抽象 | 通过 `Path`、`Dentry`、`InodeOp`、`FileOp` 和 `SuperBlockOp` 分离路径、命名、文件对象、打开状态与后端存储 | | 磁盘文件系统 | 通过 `lwext4_rust` 接入 ext4，支持普通文件、目录、符号链接、硬链接、rename、unlink 和属性操作 | | 虚拟文件系统 | 以独立挂载实例接入 procfs、devfs，并提供 `/proc`、`/dev`、shm 等内核和设备接口 | | 路径与挂载 | 支持 cwd/root/dirfd 起点、dentry cache、符号链接、`.`/`..` 以及跨挂载点路径遍历 | | 文件访问性能 | 通过 ext4 inode 级共享页缓存、目录项缓存和目录读取缓存减少后端访问 | | 数据一致性 | 通过页缓存写回、`fsync`、unlink 孤儿文件和 rename 回滚维护文件数据与命名空间的一致性 | | 内核模块协作 | 通过 file-backed VMA、`mmap` 写回、pipe、socket、poll 和统一 fd 生命周期连接 MM、task、IPC、network 与 drivers |
 
 #strong[表 5-2 文件系统主要功能与设计对应关系]
 

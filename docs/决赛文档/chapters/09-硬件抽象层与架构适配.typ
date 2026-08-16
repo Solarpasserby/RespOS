@@ -4,7 +4,7 @@
 本章介绍 RespOS 在 RISC-V64 和 LoongArch64 上的架构适配，以及页表、trap、任务切换、时钟和启动流程的统一边界。
 ]
 
-RespOS 的双架构支持采用"公共内核逻辑 + 架构目录特化"的设计。任务管理、内存管理、文件系统和系统调用等模块使用统一的公共代码；启动入口、寄存器访问、页表操作、异常返回、上下文切换和时钟触发等必须依赖硬件的部分，则分别位于 `os/src/arch/rv64/` 和 `os/src/arch/loongarch64/`。
+RespOS 的双架构支持采用“公共内核逻辑 + 架构目录特化”的设计。任务管理、内存管理、文件系统和系统调用等模块使用统一的公共代码；启动入口、寄存器访问、页表操作、异常返回、上下文切换和时钟触发等必须依赖硬件的部分，则分别位于 `os/src/arch/rv64/` 和 `os/src/arch/loongarch64/`。
 
 当前架构层不是一套完全由 trait 组成的独立 HAL 库，而是由条件编译、模块重导出、同名函数和相同的数据结构约定共同形成的适配边界。`os/src/arch/mod.rs` 根据 `target_arch` 选择具体实现并重新导出，使公共代码可以调用 `read_mmu_token`、`write_mmu_token`、`sfence`、`set_next_ti_trigger` 等统一入口，而不直接散落 CSR、汇编指令和硬件寄存器假设。
 
@@ -34,27 +34,50 @@ RespOS 的架构目录按照启动、内存、trap、task、timer 和 interrupt 
 
 #strong[图 9-1 RespOS 双架构适配结构]
 
-这种结构的关键不是让两个架构的代码完全相同，而是让公共模块只依赖稳定的语义接口。例如，公共内存管理只需要"写入当前页表根并刷新地址转换缓存"，不需要知道 RV64 使用 `satp`、`sfence.vma`，还是 LoongArch 使用 `PGDL/PGDH` 和 `invtlb`。架构层负责把同一语义翻译成对应指令序列。
+这种结构的关键不是让两个架构的代码完全相同，而是让公共模块只依赖稳定的语义接口。例如，公共内存管理只需要“写入当前页表根并刷新地址转换缓存”，不需要知道 RV64 使用 `satp`、`sfence.vma`，还是 LoongArch 使用 `PGDL/PGDH` 和 `invtlb`。架构层负责把同一语义翻译成对应指令序列。
 
 === 9.1.2 双架构差异总览
 <912-双架构差异总览>
 #figure(
-  align(center)[#table(
-    columns: 4,
-    align: (auto,auto,auto,auto,),
-    table.header([适配维度], [RISC-V64], [LoongArch64], [公共抽象],),
-    table.hline(),
-    [内核入口], [OpenSBI 进入 S-mode，传入 hart id 和 FDT opaque], [QEMU/固件进入低地址直映入口], [`enter_main` → `rust_main_high`],
-    [当前计数器], [`time` CSR/计数器], [`rdtime.d`], [`get_time`、频率转换和下一次触发],
-    [地址转换根], [`satp`], [`PGDL/PGDH`], [`read_mmu_token`、`write_mmu_token`],
-    [页表遍历], [硬件 Sv39 遍历], [TLB refill 汇编使用 `lddir`/`ldpte`], [`map/unmap/query/protect`],
-    [用户 trap 状态], [`stvec`、`sstatus`、`sepc`、`scause`、`stval`], [`EEntry`、`PRMD`、`ERA`、`ESTAT`、`BADV`], [`TrapContext` 与公共 trap handler],
-    [异常返回], [`sret`], [`ertn`], [restore 汇编后的用户态返回],
-    [任务页表切换], [写 `satp` 后 `sfence.vma`], [同时写 `PGDL/PGDH` 后刷新 TLB], [`TaskContext` 保存地址空间 token],
-    [外部设备形态], [QEMU virt 的 MMIO 设备], [QEMU LoongArch 的 PCI 设备], [drivers 层统一设备操作],
-  )]
-  , kind: table
-  )
+align(center)[#table(
+  columns: 4,
+  align: (col, row) => (auto,auto,auto,auto,).at(col),
+  inset: 6pt,
+  [适配维度], [RISC-V64], [LoongArch64], [公共抽象],
+  [内核入口],
+  [OpenSBI 进入 S-mode，传入 hart id 和 FDT opaque],
+  [QEMU/固件进入低地址直映入口],
+  [`enter_main` → `rust_main_high`],
+  [当前计数器],
+  [`time` CSR/计数器],
+  [`rdtime.d`],
+  [`get_time`、频率转换和下一次触发],
+  [地址转换根],
+  [`satp`],
+  [`PGDL/PGDH`],
+  [`read_mmu_token`、`write_mmu_token`],
+  [页表遍历],
+  [硬件 Sv39 遍历],
+  [TLB refill 汇编使用 `lddir`/`ldpte`],
+  [`map/unmap/query/protect`],
+  [用户 trap 状态],
+  [`stvec`、`sstatus`、`sepc`、`scause`、`stval`],
+  [`EEntry`、`PRMD`、`ERA`、`ESTAT`、`BADV`],
+  [`TrapContext` 与公共 trap handler],
+  [异常返回],
+  [`sret`],
+  [`ertn`],
+  [restore 汇编后的用户态返回],
+  [任务页表切换],
+  [写 `satp` 后 `sfence.vma`],
+  [同时写 `PGDL/PGDH` 后刷新 TLB],
+  [`TaskContext` 保存地址空间 token],
+  [外部设备形态],
+  [QEMU virt 的 MMIO 设备],
+  [QEMU LoongArch 的 PCI 设备],
+  [drivers 层统一设备操作],
+)]
+)
 
 #strong[表 9-1 RV64 与 LA64 的架构差异及统一接口]
 
@@ -76,7 +99,7 @@ RISC-V 还为内核 direct map 提供了大页映射入口。启动阶段的 ear
 <923-loongarch-页表与-tlb-refill>
 LoongArch 的页表同样采用三级、4 KiB 页粒度的结构，但硬件地址转换通过 TLB 完成。发生 TLB miss 时，`tlb_refill.S` 使用 `PGD` 根地址和 `lddir`、`ldpte` 指令读取多级页表项，装载偶数页和奇数页的 TLBLo 后执行 `tlbfill`；如果目录项无效，则构造无效 TLB 项并返回异常路径。
 
-LoongArch 的 `read_mmu_token` 返回 `PGDL` 根地址，`write_mmu_token` 同时更新 `PGDL` 和 `PGDH`，并设置 ASID 和页表根同步状态。任务切换汇编也保存一个根 token，恢复时写入两个根页表寄存器并刷新 TLB。公共代码因此只看到"切换地址空间并使地址转换状态生效"，不需要处理两个根寄存器的细节。
+LoongArch 的 `read_mmu_token` 返回 `PGDL` 根地址，`write_mmu_token` 同时更新 `PGDL` 和 `PGDH`，并设置 ASID 和页表根同步状态。任务切换汇编也保存一个根 token，恢复时写入两个根页表寄存器并刷新 TLB。公共代码因此只看到“切换地址空间并使地址转换状态生效”，不需要处理两个根寄存器的细节。
 
 === 9.2.4 页表操作的统一语义
 <924-页表操作的统一语义>
@@ -121,20 +144,31 @@ RISC-V 从 `stvec` 进入 `trap.S`，硬件提供 `sepc`、`scause` 和 `stval`�
 `TrapContext` 表示一次用户态执行被内核接管时需要保存的完整状态。两个架构都保存 32 个通用寄存器、用户返回 PC、用户栈指针以及返回特权级所需的状态，但字段形式不同：
 
 #figure(
-  align(center)[#table(
-    columns: 3,
-    align: (auto,auto,auto,),
-    table.header([内容], [RISC-V64], [LoongArch64],),
-    table.hline(),
-    [通用寄存器], [`x[32]`，ABI 参数使用 `a0-a7`], [`x[32]`，ABI 参数使用 `r4-r11`],
-    [返回地址], [`sepc`], [`era`],
-    [前一特权级], [`sstatus.SPP`], [`prmd.PPLV`],
-    [返回中断状态], [`sstatus.SPIE/SIE`], [`prmd.PIE`],
-    [浮点状态], [`f[32]`、`fcsr`], [当前 TrapContext 不单独保存浮点寄存器],
-    [公共访问], [`get_a0/set_a0/get_sp/set_sepc` 等], [提供同名语义访问方法，内部映射到不同寄存器编号],
-  )]
-  , kind: table
-  )
+align(center)[#table(
+  columns: 3,
+  align: (col, row) => (auto,auto,auto,).at(col),
+  inset: 6pt,
+  [内容], [RISC-V64], [LoongArch64],
+  [通用寄存器],
+  [`x[32]`，ABI 参数使用 `a0-a7`],
+  [`x[32]`，ABI 参数使用 `r4-r11`],
+  [返回地址],
+  [`sepc`],
+  [`era`],
+  [前一特权级],
+  [`sstatus.SPP`],
+  [`prmd.PPLV`],
+  [返回中断状态],
+  [`sstatus.SPIE/SIE`],
+  [`prmd.PIE`],
+  [浮点状态],
+  [`f[32]`、`fcsr`],
+  [当前 TrapContext 不单独保存浮点寄存器],
+  [公共访问],
+  [`get_a0/set_a0/get_sp/set_sepc` 等],
+  [提供同名语义访问方法，内部映射到不同寄存器编号],
+)]
+)
 
 #strong[表 9-2 两种架构的 TrapContext 对照]
 
@@ -146,7 +180,7 @@ RISC-V 的用户态返回路径包含一个必须保持的安全顺序：恢复�
 
 如果提前恢复用户态 trap vector 或提前打开 SIE，timer 可能在 `sscratch` 和寄存器恢复尚未完成时重入用户 trap 入口，破坏 trap 保存约定。该顺序同时适用于普通 syscall 返回、exec 初始上下文和 signal `sigreturn`，因此被放在架构汇编层统一保证。
 
-LoongArch 返回路径则恢复 `PRMD`、`ERA` 和通用寄存器，最后通过 `ertn` 返回。两者的返回指令不同，但共同遵守"完成内核上下文恢复后再恢复用户态特权状态"的原则。
+LoongArch 返回路径则恢复 `PRMD`、`ERA` 和通用寄存器，最后通过 `ertn` 返回。两者的返回指令不同，但共同遵守“完成内核上下文恢复后再恢复用户态特权状态”的原则。
 
 == 9.4 任务上下文与调度切换
 <94-任务上下文与调度切换>
@@ -204,7 +238,7 @@ RISC-V 和 LoongArch 的 `switch.S` 使用相同的抽象参数：下一个任�
 <952-risc-v-启动路径>
 RISC-V `_start` 从 OpenSBI 进入 S-mode，获得 hart id 和 FDT opaque 参数。汇编入口根据 hart id 选择独立 early stack，写入 boot page table 的根到 `satp`，执行 `sfence.vma` 后跳转到 `enter_main`。Rust 入口随后完成 BSS 清零、读取 FDT 中的实际内存范围，并进入公共启动阶段。
 
-RISC-V 的启动页表预先覆盖 QEMU virt 的最大可达内存窗口，以保证 boot hart 能访问 OpenSBI 放置在 RAM 顶部的 FDT；正式内存管理仍依据 FDT 的实际 `reg` 范围建立 frame allocator 和 kernel direct map。这体现了"早期可达窗口"和"真实资源上限"的明确分工。
+RISC-V 的启动页表预先覆盖 QEMU virt 的最大可达内存窗口，以保证 boot hart 能访问 OpenSBI 放置在 RAM 顶部的 FDT；正式内存管理仍依据 FDT 的实际 `reg` 范围建立 frame allocator 和 kernel direct map。这体现了“早期可达窗口”和“真实资源上限”的明确分工。
 
 === 9.5.3 LoongArch 启动路径
 <953-loongarch-启动路径>
@@ -217,20 +251,25 @@ LoongArch `_start` 进入时仍处于低地址直接映射环境。入口先保�
 RespOS 的硬件抽象与架构适配可以归纳为表 9-3：
 
 #figure(
-  align(center)[#table(
-    columns: 2,
-    align: (auto,auto,),
-    table.header([设计成果], [实现方式],),
-    table.hline(),
-    [公共内核跨架构复用], [`arch/mod.rs` 使用条件编译选择架构实现，并通过同名入口向公共模块提供统一语义],
-    [双架构地址空间], [两个架构共享高半区内核模型，分别封装 `satp` 或 `PGDL/PGDH`、页表遍历和 TLB 刷新],
-    [统一 trap 处理], [架构汇编保存不同硬件上下文，公共 Rust handler 复用 syscall、page fault、timer 和 signal 分发],
-    [统一任务切换], [`TaskContext` 采用相同抽象布局，`switch.S` 仅特化寄存器保存、页表根切换和地址转换刷新],
-    [双架构启动], [RV64 从 OpenSBI/FDT 进入，LA64 从低地址直映过渡到高半区，最终进入同一公共初始化顺序],
-    [架构安全约束], [在 arch 层保证 trap return 顺序、页表根切换、TLB 刷新和早期映射过渡的正确性],
-  )]
-  , kind: table
-  )
+align(center)[#table(
+  columns: 2,
+  align: (col, row) => (auto,auto,).at(col),
+  inset: 6pt,
+  [设计成果], [实现方式],
+  [公共内核跨架构复用],
+  [`arch/mod.rs` 使用条件编译选择架构实现，并通过同名入口向公共模块提供统一语义],
+  [双架构地址空间],
+  [两个架构共享高半区内核模型，分别封装 `satp` 或 `PGDL/PGDH`、页表遍历和 TLB 刷新],
+  [统一 trap 处理],
+  [架构汇编保存不同硬件上下文，公共 Rust handler 复用 syscall、page fault、timer 和 signal 分发],
+  [统一任务切换],
+  [`TaskContext` 采用相同抽象布局，`switch.S` 仅特化寄存器保存、页表根切换和地址转换刷新],
+  [双架构启动],
+  [RV64 从 OpenSBI/FDT 进入，LA64 从低地址直映过渡到高半区，最终进入同一公共初始化顺序],
+  [架构安全约束],
+  [在 arch 层保证 trap return 顺序、页表根切换、TLB 刷新和早期映射过渡的正确性],
+)]
+)
 
 #strong[表 9-3 硬件抽象层与架构适配的设计成果]
 

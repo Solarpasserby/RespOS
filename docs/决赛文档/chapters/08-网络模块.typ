@@ -4,7 +4,7 @@
 本章介绍 smoltcp 与 Linux socket ABI 的连接方式，以及 TCP、UDP、UNIX 域 socket 和并发 `listen/accept` 的实现。
 ]
 
-RespOS 采用"内核管理 ABI、对象生命周期和阻塞语义，smoltcp 管理 TCP/IP 协议状态机"的分层设计。这一边界使项目无需重新实现 TCP 重传、滑动窗口和报文解析，而能把工程重点放在用户态真正可见的部分：fd 身份、`bind/connect/listen/accept`、阻塞与信号中断、backlog 并发容量、`poll/epoll` 就绪性以及 close 时的句柄回收。
+RespOS 采用“内核管理 ABI、对象生命周期和阻塞语义，smoltcp 管理 TCP/IP 协议状态机”的分层设计。这一边界使项目无需重新实现 TCP 重传、滑动窗口和报文解析，而能把工程重点放在用户态真正可见的部分：fd 身份、`bind/connect/listen/accept`、阻塞与信号中断、backlog 并发容量、`poll/epoll` 就绪性以及 close 时的句柄回收。
 
 当前数据面明确聚焦于本地回环通信。内核已实现 IPv4 loopback 上的 TCP/UDP，并为 `AF_INET6` 的 `::`/`::1` 提供回环 ABI 兼容，同时实现基于内存队列的 UNIX 域 socket。源码中没有将 virtio-net 设备接入 `Interface`，因此本章不将真实以太网收发或物理网卡列为已完成能力。
 
@@ -34,19 +34,33 @@ Socket : FileOp：fd 身份、O_NONBLOCK、read/write/readiness
 #strong[表 8-1 网络各层的所有者与职责]
 
 #figure(
-  align(center)[#table(
-    columns: 4,
-    align: (auto,auto,auto,auto,),
-    table.header([层次], [主要对象], [负责的状态], [不在该层处理的内容],),
-    table.hline(),
-    [syscall ABI], [`SockAddrIn/SockAddrIn6/SockAddrUn`、`MsgHdr`、`MMsgHdr`], [参数长度、字节序、用户指针、fd 分配与 errno], [TCP 状态转换、句柄回收],
-    [fd/VFS 抽象], [`Socket : FileOp`], [domain/kind、非阻塞状态、统一 read/write/readiness], [TCP 报文和 UDP 队列算法],
-    [传输层适配], [`TcpSocket`、`UdpSocket`、`ListenTable`], [连接粗粒度状态、本地/对端地址、backlog、阻塞等待], [拥塞控制、重传算法],
-    [协议栈], [smoltcp `SocketSet`、TCP/UDP socket], [TCP/IP 协议状态机、收发缓冲、报文处理], [Linux fd 和进程语义],
-    [设备], [`LoopbackDev`], [待接收数据包队列和可复用缓冲池], [真实 NIC 中断、DMA 和 virtqueue],
-  )]
-  , kind: table
-  )
+align(center)[#table(
+  columns: 4,
+  align: (col, row) => (auto,auto,auto,auto,).at(col),
+  inset: 6pt,
+  [层次], [主要对象], [负责的状态], [不在该层处理的内容],
+  [syscall ABI],
+  [`SockAddrIn/SockAddrIn6/SockAddrUn`、`MsgHdr`、`MMsgHdr`],
+  [参数长度、字节序、用户指针、fd 分配与 errno],
+  [TCP 状态转换、句柄回收],
+  [fd/VFS 抽象],
+  [`Socket : FileOp`],
+  [domain/kind、非阻塞状态、统一 read/write/readiness],
+  [TCP 报文和 UDP 队列算法],
+  [传输层适配],
+  [`TcpSocket`、`UdpSocket`、`ListenTable`],
+  [连接粗粒度状态、本地/对端地址、backlog、阻塞等待],
+  [拥塞控制、重传算法],
+  [协议栈],
+  [smoltcp `SocketSet`、TCP/UDP socket],
+  [TCP/IP 协议状态机、收发缓冲、报文处理],
+  [Linux fd 和进程语义],
+  [设备],
+  [`LoopbackDev`],
+  [待接收数据包队列和可复用缓冲池],
+  [真实 NIC 中断、DMA 和 virtqueue],
+)]
+)
 
 这样分层后，更换协议库或增加真实网卡时，应优先保持 `Socket : FileOp` 和 syscall ABI 层不变；而修改 `accept` 并发性时，则必须同时审计 `ListenTable`、smoltcp handle 和 fd 的唯一所有权。
 
@@ -165,7 +179,7 @@ TCP 的 `connect/accept/send/recv` 共用 `block_on` 模式：先调用 `poll_in
 <842-backlog-listener-池>
 RespOS 不把 smoltcp 的单个 listening socket 直接等同于 Linux backlog，因为 smoltcp 中一个 listener 完成握手后会变成该条已连接 socket。在用户态调用 `accept` 前，原端口就暂时失去可承接后续 SYN 的 listener；多个 client 在同一轮 poll 中到达时，后续连接可能收到 reset。
 
-RespOS 因此将 `listen(backlog)` 实现为受限 listener 池。backlog 被限制到 1～128，每个端口的 `ListenTableEntry` 同时维护"仍在监听/握手中"的 `listen_handles` 和"已连接、等待 accept"的 `accept_queue`。两个队列总长度不超过 backlog，既预留并发握手容量，又防止恶意大 backlog 无界占用每个 64 KiB 收发缓冲的 TCP socket。
+RespOS 因此将 `listen(backlog)` 实现为受限 listener 池。backlog 被限制到 1～128，每个端口的 `ListenTableEntry` 同时维护“仍在监听/握手中”的 `listen_handles` 和“已连接、等待 accept”的 `accept_queue`。两个队列总长度不超过 backlog，既预留并发握手容量，又防止恶意大 backlog 无界占用每个 64 KiB 收发缓冲的 TCP socket。
 
 #strong[代码片段 8-3 listener 池的容量不变量]
 
@@ -213,16 +227,21 @@ UDP 不需要 TCP 的连接状态机，但仍然管理本地端点、默认对�
 #strong[表 8-2 UDP 两种用法的数据路径]
 
 #figure(
-  align(center)[#table(
-    columns: 4,
-    align: (auto,auto,auto,auto,),
-    table.header([用法], [发送], [接收], [地址语义],),
-    table.hline(),
-    [无连接], [`sendto(buf, remote)`], [`recvfrom(buf)`], [每个数据报单独指定/返回对端],
-    [已 `connect`], [`send(buf)`], [`recv(buf)`], [socket 保存默认对端，接收时过滤非匹配端点],
-  )]
-  , kind: table
-  )
+align(center)[#table(
+  columns: 4,
+  align: (col, row) => (auto,auto,auto,auto,).at(col),
+  inset: 6pt,
+  [用法], [发送], [接收], [地址语义],
+  [无连接],
+  [`sendto(buf, remote)`],
+  [`recvfrom(buf)`],
+  [每个数据报单独指定/返回对端],
+  [已 `connect`],
+  [`send(buf)`],
+  [`recv(buf)`],
+  [socket 保存默认对端，接收时过滤非匹配端点],
+)]
+)
 
 未显式 `bind` 的 socket 在首次发送或 `connect` 时自动绑定回环临时端口。`recvfrom` 先使用固定 1528 字节的内核临时缓冲接收，再按用户缓冲长度复制并写回来源地址；协议栈报告数据报超过该临时缓冲时，当前路径将 `Truncated` 转换为 `EAGAIN`，因此不能把它表述为任意长度数据报的完整接收。阻塞 UDP 会在 `EAGAIN` 时让出 CPU 并检查信号，但当前使用 cooperative yield，没有 TCP 路径的 1 ms blocked-timeout 协议。
 
@@ -236,24 +255,33 @@ pathname `bind` 会通过 VFS 创建 `InodeType::Socket` 节点，同时把路�
 
 == 8.6 网络系统调用与就绪性
 <86-网络系统调用与就绪性>
-RespOS 的网络 syscall 层保持"解析 ABI、获取 socket 对象、调用领域方法、写回结果"的边界。表 8-3 展示已接入的主要接口及其实现重点。
+RespOS 的网络 syscall 层保持“解析 ABI、获取 socket 对象、调用领域方法、写回结果”的边界。表 8-3 展示已接入的主要接口及其实现重点。
 
 #strong[表 8-3 主要 socket 系统调用]
 
 #figure(
-  align(center)[#table(
-    columns: 3,
-    align: (auto,auto,auto,),
-    table.header([类别], [系统调用], [RespOS 实现重点],),
-    table.hline(),
-    [创建], [`socket`、`socketpair`], [domain/type/protocol 校验，`SOCK_NONBLOCK/CLOEXEC`，多 fd 失败回滚],
-    [端点与连接], [`bind`、`connect`、`listen`、`accept/accept4`], [sockaddr 转换，低端口权限，backlog 传递，新连接 fd 所有权],
-    [数据], [`sendto/recvfrom`、`sendmsg/recvmsg`、`sendmmsg/recvmmsg`], [通过 MM 逐页 copyin/copyout，iovec 聚合/分散，部分成功返回],
-    [查询与控制], [`getsockname/getpeername`、`setsockopt/getsockopt`、`shutdown`], [长度受限写回，`TCP_NODELAY`、IP TTL 等有效选项，半关闭语义],
-    [等待], [`read/write`、`ppoll/pselect6`、`epoll`], [通过 `FileOp::read_ready/write_ready` 统一扫描 socket 可读/可写状态],
-  )]
-  , kind: table
-  )
+align(center)[#table(
+  columns: 3,
+  align: (col, row) => (auto,auto,auto,).at(col),
+  inset: 6pt,
+  [类别], [系统调用], [RespOS 实现重点],
+  [创建],
+  [`socket`、`socketpair`],
+  [domain/type/protocol 校验，`SOCK_NONBLOCK/CLOEXEC`，多 fd 失败回滚],
+  [端点与连接],
+  [`bind`、`connect`、`listen`、`accept/accept4`],
+  [sockaddr 转换，低端口权限，backlog 传递，新连接 fd 所有权],
+  [数据],
+  [`sendto/recvfrom`、`sendmsg/recvmsg`、`sendmmsg/recvmmsg`],
+  [通过 MM 逐页 copyin/copyout，iovec 聚合/分散，部分成功返回],
+  [查询与控制],
+  [`getsockname/getpeername`、`setsockopt/getsockopt`、`shutdown`],
+  [长度受限写回，`TCP_NODELAY`、IP TTL 等有效选项，半关闭语义],
+  [等待],
+  [`read/write`、`ppoll/pselect6`、`epoll`],
+  [通过 `FileOp::read_ready/write_ready` 统一扫描 socket 可读/可写状态],
+)]
+)
 
 `sendmsg/recvmsg` 会先检查 `IOV_MAX=1024` 和累计长度溢出，再经 MM 的用户页拷贝路径处理每个 iovec；`sendmmsg/recvmmsg` 按消息顺序处理，中途失败时，若前面已有成功项就返回已完成数量，保留 Linux 多消息接口的部分进度语义。控制消息、out-of-band 数据和 error queue 尚未实现，相关 flag 返回明确 errno，而不伪造附加数据。
 
@@ -274,19 +302,28 @@ RespOS 接受 `AF_INET6` TCP/UDP socket，但当前只对 `::` 和 `::1` 建立�
 #strong[表 8-4 网络模块的跨模块协作]
 
 #figure(
-  align(center)[#table(
-    columns: 3,
-    align: (auto,auto,auto,),
-    table.header([协作模块], [网络使用的能力], [关键约束],),
-    table.hline(),
-    [MM], [sockaddr、iovec、数据缓冲和 sockopt 的 copyin/copyout], [用户页可能跨页或 lazy/COW，不在 net syscall 中直接解引用],
-    [VFS / fd table], [`Socket : FileOp`、fd 分配、`CLOEXEC`、`O_NONBLOCK`], [descriptor flag 与共享 socket 状态必须维持既有分层],
-    [task / signal], [可中断阻塞、yield、blocked registration、`EINTR`], [检查与入队之间不得丢失 signal wakeup],
-    [timer], [TCP 阻塞轮询的短 timeout、smoltcp poll timestamp], [不在 socket syscall 忙等导致全局 timeout 饥饿],
-    [procfs], [`/proc/net/tcp` 的动态端点和状态], [从实际 listener/socket 生成，不维护会过期的镜像],
-  )]
-  , kind: table
-  )
+align(center)[#table(
+  columns: 3,
+  align: (col, row) => (auto,auto,auto,).at(col),
+  inset: 6pt,
+  [协作模块], [网络使用的能力], [关键约束],
+  [MM],
+  [sockaddr、iovec、数据缓冲和 sockopt 的 copyin/copyout],
+  [用户页可能跨页或 lazy/COW，不在 net syscall 中直接解引用],
+  [VFS / fd table],
+  [`Socket : FileOp`、fd 分配、`CLOEXEC`、`O_NONBLOCK`],
+  [descriptor flag 与共享 socket 状态必须维持既有分层],
+  [task / signal],
+  [可中断阻塞、yield、blocked registration、`EINTR`],
+  [检查与入队之间不得丢失 signal wakeup],
+  [timer],
+  [TCP 阻塞轮询的短 timeout、smoltcp poll timestamp],
+  [不在 socket syscall 忙等导致全局 timeout 饥饿],
+  [procfs],
+  [`/proc/net/tcp` 的动态端点和状态],
+  [从实际 listener/socket 生成，不维护会过期的镜像],
+)]
+)
 
 == 8.8 功能与设计成果总结
 <88-功能与设计成果总结>
@@ -295,19 +332,30 @@ RespOS 网络模块的项目贡献主要位于 smoltcp 之上和之下的工程�
 #strong[表 8-5 网络模块成果与当前边界]
 
 #figure(
-  align(center)[#table(
-    columns: 3,
-    align: (auto,auto,auto,),
-    table.header([方向], [已实现的设计成果], [证据或边界],),
-    table.hline(),
-    [TCP loopback], [`connect/listen/accept/send/recv/shutdown`，CAS 状态机，可中断阻塞], [`net_loopback_smoke` 覆盖 fork 客户端与请求/回显；真实外网不在当前数据面内],
-    [并发监听], [backlog 限制为 1～128，listener 池、accept queue 和 poll 后立即补位], [2026-08-03 RV64 CAgent 连续三轮的并发 connect 失败消失；不用 client 硬编码重试掩盖 `ECONNREFUSED`],
-    [UDP loopback], [`bind/sendto/recvfrom/connect/send/recv`，自动临时端口], [`net_loopback_smoke` 覆盖数据报发送、内容和来源地址],
-    [UNIX 域], [pathname/抽象 key、`socketpair`、listen/connect/accept、64 KiB 内存通道], [`DGRAM/SEQPACKET` 当前与 stream 共用字节队列，不宣称完整消息边界],
-    [Linux ABI], [sockaddr v4/v6/unix、msg/mmsg、主要 sockopt、fd readiness、`/proc/net/tcp`], [ancillary data、OOB/error queue、raw socket 未实现；socket poll waiter 仍为协作式重试],
-    [网络层与设备], [IPv4 loopback 与 `AF_INET6 ::/::1` 兼容入口], [其他 IPv6 地址、路由、virtio-net 与物理网卡数据路径尚未接入],
-  )]
-  , kind: table
-  )
+align(center)[#table(
+  columns: 3,
+  align: (col, row) => (auto,auto,auto,).at(col),
+  inset: 6pt,
+  [方向], [已实现的设计成果], [证据或边界],
+  [TCP loopback],
+  [`connect/listen/accept/send/recv/shutdown`，CAS 状态机，可中断阻塞],
+  [`net_loopback_smoke` 覆盖 fork 客户端与请求/回显；真实外网不在当前数据面内],
+  [并发监听],
+  [backlog 限制为 1～128，listener 池、accept queue 和 poll 后立即补位],
+  [2026-08-03 RV64 CAgent 连续三轮的并发 connect 失败消失；不用 client 硬编码重试掩盖 `ECONNREFUSED`],
+  [UDP loopback],
+  [`bind/sendto/recvfrom/connect/send/recv`，自动临时端口],
+  [`net_loopback_smoke` 覆盖数据报发送、内容和来源地址],
+  [UNIX 域],
+  [pathname/抽象 key、`socketpair`、listen/connect/accept、64 KiB 内存通道],
+  [`DGRAM/SEQPACKET` 当前与 stream 共用字节队列，不宣称完整消息边界],
+  [Linux ABI],
+  [sockaddr v4/v6/unix、msg/mmsg、主要 sockopt、fd readiness、`/proc/net/tcp`],
+  [ancillary data、OOB/error queue、raw socket 未实现；socket poll waiter 仍为协作式重试],
+  [网络层与设备],
+  [IPv4 loopback 与 `AF_INET6 ::/::1` 兼容入口],
+  [其他 IPv6 地址、路由、virtio-net 与物理网卡数据路径尚未接入],
+)]
+)
 
 就当前实现而言，网络模块已经形成了一条本地通信闭环：套接字由 fd 持有，协议状态由 smoltcp 驱动，阻塞过程与调度和信号协作，并发握手由 listener 池维持 backlog 容量，close 后再回收协议句柄。章节中列出的边界对应当前实际接入的数据路径，而不是第三方库本身的功能列表。

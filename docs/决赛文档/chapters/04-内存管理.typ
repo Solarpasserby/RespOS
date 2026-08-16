@@ -4,11 +4,11 @@
 本章介绍物理页分配、进程地址空间、缺页与文件映射，并说明多核环境下页表修改的同步方式。
 ]
 
-RespOS 采用"`MemorySet` 拥有地址空间语义"的设计，因为单独管理页表只能说明 CPU 当前看见什么，无法表达一段虚拟地址是否合法、是否按需分配、来自哪个文件，以及由谁回收。因此，内存层将 VMA（Virtual Memory Area）、PTE 和物理页帧组成一个完整的所有权模型，并让 `mmap`、`fork`、`exec`、用户指针访问与进程退出共用这套规则。
+RespOS 采用“`MemorySet` 拥有地址空间语义”的设计，因为单独管理页表只能说明 CPU 当前看见什么，无法表达一段虚拟地址是否合法、是否按需分配、来自哪个文件，以及由谁回收。因此，内存层将 VMA（Virtual Memory Area）、PTE 和物理页帧组成一个完整的所有权模型，并让 `mmap`、`fork`、`exec`、用户指针访问与进程退出共用这套规则。
 
 == 4.1 分层对象与核心不变量
 <41-分层对象与核心不变量>
-RespOS 将"虚拟地址承诺"、"硬件映射状态"和"物理内存所有权"分层表示。如图 4-1 所示，一个已声明但尚未访问的 lazy VMA 可以没有 PTE 和页帧；只有页面真正被访问后，后两层状态才建立。
+RespOS 将“虚拟地址承诺”、“硬件映射状态”和“物理内存所有权”分层表示。如图 4-1 所示，一个已声明但尚未访问的 lazy VMA 可以没有 PTE 和页帧；只有页面真正被访问后，后两层状态才建立。
 
 ```text
 MemorySet（一个地址空间）
@@ -25,18 +25,29 @@ MemorySet（一个地址空间）
 #strong[表 4-1 地址空间核心对象]
 
 #figure(
-  align(center)[#table(
-    columns: 4,
-    align: (auto,auto,auto,auto,),
-    table.header([对象], [表达的概念], [拥有的状态], [创建、共享与释放],),
-    table.hline(),
-    [`MemorySet`], [一个进程地址空间], [页表、VMA 集合、`brk`、`mmap_start`], [`exec` 构建，`CLONE_VM` 任务共享，最后一个引用释放],
-    [`MapArea`], [一段连续 VMA], [VPN 范围、权限、共享标志、文件偏移、驻留页], [ELF loader、`brk`、`mmap` 创建；`munmap/mprotect/mremap` 切分],
-    [PTE], [硬件页级映射], [PPN、R/W/X/U 和 COW 等标志], [建图或缺页时创建，改权限时更新，解除映射时删除],
-    [`FrameTracker`], [一个 4 KiB 物理页帧的所有权], [PPN；共享页由 `Arc` 表达引用], [分配时清零，最后一个所有者销毁时自动归还],
-  )]
-  , kind: table
-  )
+align(center)[#table(
+  columns: 4,
+  align: (col, row) => (auto,auto,auto,auto,).at(col),
+  inset: 6pt,
+  [对象], [表达的概念], [拥有的状态], [创建、共享与释放],
+  [`MemorySet`],
+  [一个进程地址空间],
+  [页表、VMA 集合、`brk`、`mmap_start`],
+  [`exec` 构建，`CLONE_VM` 任务共享，最后一个引用释放],
+  [`MapArea`],
+  [一段连续 VMA],
+  [VPN 范围、权限、共享标志、文件偏移、驻留页],
+  [ELF loader、`brk`、`mmap` 创建；`munmap/mprotect/mremap` 切分],
+  [PTE],
+  [硬件页级映射],
+  [PPN、R/W/X/U 和 COW 等标志],
+  [建图或缺页时创建，改权限时更新，解除映射时删除],
+  [`FrameTracker`],
+  [一个 4 KiB 物理页帧的所有权],
+  [PPN；共享页由 `Arc` 表达引用],
+  [分配时清零，最后一个所有者销毁时自动归还],
+)]
+)
 
 #strong[代码片段 4-1 地址空间与 VMA 的关键字段]
 
@@ -65,9 +76,9 @@ struct MapArea {
 }
 ```
 
-代码片段 4-1 中的 `areas` 是按起始 VPN 排序的 VMA 序列，`data_frames` 则是稀疏的驻留页集合。这种"范围元数据 + 实际工作集"的表示使大范围 lazy VMA 不需要按虚拟跨度预先创建管理对象，退出回收也只遍历已驻留页。
+代码片段 4-1 中的 `areas` 是按起始 VPN 排序的 VMA 序列，`data_frames` 则是稀疏的驻留页集合。这种“范围元数据 + 实际工作集”的表示使大范围 lazy VMA 不需要按虚拟跨度预先创建管理对象，退出回收也只遍历已驻留页。
 
-RespOS 在 debug 构建中对上述模型执行结构自检：VMA 必须有序、非空且不重叠；`data_frames` 的 VPN 必须落在所属 VMA 中并对应有效 PTE；用户 VMA 必须带 U 权限；COW 页不能同时可写；shared VMA 不能误入私有 COW 路径。这些断言把"实现约定"变成了可执行的不变量。
+RespOS 在 debug 构建中对上述模型执行结构自检：VMA 必须有序、非空且不重叠；`data_frames` 的 VPN 必须落在所属 VMA 中并对应有效 PTE；用户 VMA 必须带 U 权限；COW 页不能同时可写；shared VMA 不能误入私有 COW 路径。这些断言把“实现约定”变成了可执行的不变量。
 
 == 4.2 双架构地址空间布局
 <42-双架构地址空间布局>
@@ -76,24 +87,35 @@ RespOS 在 RV64 和 LA64 上保持共享的 39 bit 虚拟地址模型，因为�
 #strong[表 4-2 RV64 与 LA64 内存布局对比]
 
 #figure(
-  align(center)[#table(
-    columns: 3,
-    align: (auto,auto,auto,),
-    table.header([项目], [RISC-V 64], [LoongArch 64],),
-    table.hline(),
-    [内核虚拟基址], [`0xffff_ffc0_0000_0000`], [`0xffff_ffc0_0000_0000`],
-    [内核物理入口], [`0x8020_0000`], [`0x0020_0000`],
-    [用户 `mmap` 区间], [`0x20_0000_0000` ～ `0x22_0000_0000`], [相同],
-    [用户信号返回跳板], [`0x3f_ffff_e000`], [相同],
-    [内核堆], [64 MiB], [48 MiB],
-    [物理内存上限来源], [OpenSBI 传入 FDT 的 `/memory/reg`], [板级静态配置],
-  )]
-  , kind: table
-  )
+align(center)[#table(
+  columns: 3,
+  align: (col, row) => (auto,auto,auto,).at(col),
+  inset: 6pt,
+  [项目], [RISC-V 64], [LoongArch 64],
+  [内核虚拟基址],
+  [`0xffff_ffc0_0000_0000`],
+  [`0xffff_ffc0_0000_0000`],
+  [内核物理入口],
+  [`0x8020_0000`],
+  [`0x0020_0000`],
+  [用户 `mmap` 区间],
+  [`0x20_0000_0000` ～ `0x22_0000_0000`],
+  [相同],
+  [用户信号返回跳板],
+  [`0x3f_ffff_e000`],
+  [相同],
+  [内核堆],
+  [64 MiB],
+  [48 MiB],
+  [物理内存上限来源],
+  [OpenSBI 传入 FDT 的 `/memory/reg`],
+  [板级静态配置],
+)]
+)
 
 内核页表对 `text`、`rodata`、`data`、`bss` 分别设置 RX、R、RW、RW 权限，其余 RAM 和 MMIO 按 `KERNEL_BASE + physical_address` 的固定偏移映射。因此，内核可以由 PPN 直接得到访问页帧的高半区虚拟地址，页表页构造、COW 复制和用户拷贝无需临时建立 kmap。
 
-LoongArch 启动时确实会使用早期低地址可达路径，但进入公共内存初始化后会激活高半区内核页表并关闭低地址 direct map。因而，当前实现不是"RV64 使用高半区页表、LA64 长期使用 DMW 内核"的两套公共模型；架构差异主要保留在页表格式、MMU 寄存器与 TLB 操作后端中。
+LoongArch 启动时确实会使用早期低地址可达路径，但进入公共内存初始化后会激活高半区内核页表并关闭低地址 direct map。因而，当前实现不是“RV64 使用高半区页表、LA64 长期使用 DMW 内核”的两套公共模型；架构差异主要保留在页表格式、MMU 寄存器与 TLB 操作后端中。
 
 == 4.3 物理页帧与内核堆
 <43-物理页帧与内核堆>
@@ -128,7 +150,7 @@ impl Drop for FrameTracker {
 
 === 4.3.1 RV64 动态物理内存发现
 <431-rv64-动态物理内存发现>
-RISC-V 的物理内存管理采用"最大可达窗口"与"实际可分配范围"分离的设计。早期根页表预留最多 8 GiB QEMU RAM 的可达窗口，启动 hart 再从 OpenSBI 传入的 FDT `/memory/reg` 取得本次启动的真实内存末址。页帧分配器只管理真实范围，因此既能使用 8 GiB 负载，也不会在 256 MiB 配置下误分配不存在的物理页。
+RISC-V 的物理内存管理采用“最大可达窗口”与“实际可分配范围”分离的设计。早期根页表预留最多 8 GiB QEMU RAM 的可达窗口，启动 hart 再从 OpenSBI 传入的 FDT `/memory/reg` 取得本次启动的真实内存末址。页帧分配器只管理真实范围，因此既能使用 8 GiB 负载，也不会在 256 MiB 配置下误分配不存在的物理页。
 
 ```text
 early page table：建立最大 8 GiB 可达窗口
@@ -155,22 +177,39 @@ RespOS 把 `mmap`、`munmap`、`mprotect`、`mremap`、`MAP_FIXED` 对地址空�
 #strong[表 4-3 主要 VMA 类型及其建图策略]
 
 #figure(
-  align(center)[#table(
-    columns: 4,
-    align: (auto,auto,auto,auto,),
-    table.header([VMA 类型], [建立时], [首次访问], [`fork` 后关系],),
-    table.hline(),
-    [私有匿名 `mmap`], [只记录 VMA], [分配清零页], [已驻留可写页进入 COW，未驻留页各自缺页],
-    [`brk` 堆], [RV64 记录 lazy VMA；LA64 当前预先驻留], [按架构策略处理], [私有可写页进入 COW],
-    [私有文件映射], [记录 file/offset/len], [分配私有页并按页读文件], [已驻留可写页进入 COW，修改不回写原文件],
-    [共享匿名映射], [预先建立共享页], [直接访问共享 frame], [父子保持共享，不进入 COW],
-    [共享文件映射], [在 MM 锁外预取并按文件页身份复用 frame], [直接访问共享 frame], [父子保持共享，解除映射前进入写回协议],
-    [文件系统主 ELF 段], [`exec` 只记录 `PT_LOAD` backing], [按页读取文件，BSS 剩余部分保持为零], [`exec` 前的派生遵循私有文件页规则],
-  )]
-  , kind: table
-  )
+align(center)[#table(
+  columns: 4,
+  align: (col, row) => (auto,auto,auto,auto,).at(col),
+  inset: 6pt,
+  [VMA 类型], [建立时], [首次访问], [`fork` 后关系],
+  [私有匿名 `mmap`],
+  [只记录 VMA],
+  [分配清零页],
+  [已驻留可写页进入 COW，未驻留页各自缺页],
+  [`brk` 堆],
+  [RV64 记录 lazy VMA；LA64 当前预先驻留],
+  [按架构策略处理],
+  [私有可写页进入 COW],
+  [私有文件映射],
+  [记录 file/offset/len],
+  [分配私有页并按页读文件],
+  [已驻留可写页进入 COW，修改不回写原文件],
+  [共享匿名映射],
+  [预先建立共享页],
+  [直接访问共享 frame],
+  [父子保持共享，不进入 COW],
+  [共享文件映射],
+  [在 MM 锁外预取并按文件页身份复用 frame],
+  [直接访问共享 frame],
+  [父子保持共享，解除映射前进入写回协议],
+  [文件系统主 ELF 段],
+  [`exec` 只记录 `PT_LOAD` backing],
+  [按页读取文件，BSS 剩余部分保持为零],
+  [`exec` 前的派生遵循私有文件页规则],
+)]
+)
 
-需要特别注意的是，当前 ELF loader 为用户栈创建的是已驻留映射，并在栈底下方保留守护页；因此，本章不将"用户栈懒分配"列为当前特性。不同映射类型的差异由 backing 和 `shared` 语义决定，而不是根据调用这些对象的系统调用路径临时推测。
+需要特别注意的是，当前 ELF loader 为用户栈创建的是已驻留映射，并在栈底下方保留守护页；因此，本章不将“用户栈懒分配”列为当前特性。不同映射类型的差异由 backing 和 `shared` 语义决定，而不是根据调用这些对象的系统调用路径临时推测。
 
 == 4.5 缺页处理与按需分配
 <45-缺页处理与按需分配>
@@ -197,7 +236,7 @@ RespOS 将合法缺页视为延迟工作的统一入口。RV64 和 LA64 的异�
 
 == 4.6 写时复制
 <46-写时复制>
-COW 将 `fork` 的成本从"复制全部私有页"改为"只复制后续真正被写的页"。之所以这样设计，是因为许多子进程会很快调用 `exec` 或退出，在 `fork` 时立即复制全部驻留页往往不会产生用户可见的价值。
+COW 将 `fork` 的成本从“复制全部私有页”改为“只复制后续真正被写的页”。之所以这样设计，是因为许多子进程会很快调用 `exec` 或退出，在 `fork` 时立即复制全部驻留页往往不会产生用户可见的价值。
 
 `MemorySet::from_existed_user` 处理三种情况：已驻留的私有可写页由父子共享同一 `Arc<FrameTracker>`，两个 PTE 都去掉 W 位并设置软件 COW 标志；私有只读页直接共享且保持只读；尚未驻留的 lazy 页只复制 VMA 元数据，父子以后分别缺页。shared VMA 则始终共享原 frame，不进入私有 COW 路径。
 
@@ -223,7 +262,7 @@ if Arc::strong_count(old_frame) == 1 {
 <47-共享文件映射与锁外写回>
 可写 `MAP_SHARED` 的难点不是建立 PTE，而是同一文件页的多个映射如何看见同一份修改，以及 `msync`、`munmap`、`MAP_FIXED`、`mremap`、`mprotect` 和进程退出如何共用同一条写回协议。RespOS 以 `(dev, ino, page_index)` 作为共享文件页身份，用弱引用缓存复用存活的 `FrameTracker`，使同一文件页的不同映射共享物理内容。
 
-写回使用"锁内快照、锁外 I/O、成功后改图"的协议。如图 4-4 所示，内存层持 `MemorySet` 锁时只校验范围并把驻留页内容复制到独立 `FileWriteback` 快照；锁释放后才经 `FileOp` 写入页缓存，`MS_SYNC` 再额外执行 `fsync`；对能向用户返回错误的映射 syscall，写回成功后才解除或替换映射。
+写回使用“锁内快照、锁外 I/O、成功后改图”的协议。如图 4-4 所示，内存层持 `MemorySet` 锁时只校验范围并把驻留页内容复制到独立 `FileWriteback` 快照；锁释放后才经 `FileOp` 写入页缓存，`MS_SYNC` 再额外执行 `fsync`；对能向用户返回错误的映射 syscall，写回成功后才解除或替换映射。
 
 ```text
 MemorySet 锁内：定位 writable shared VMA
@@ -238,13 +277,13 @@ MemorySet 锁内：定位 writable shared VMA
 
 #strong[图 4-4 共享文件页的锁外写回协议]
 
-之所以不在 `MemorySet` 锁内直接调用文件后端，是因为文件 I/O 可能获取页缓存、inode、ext4 和块设备锁，不仅会放大地址空间临界区，也会引入 MM---FS 锁序环。快照对象与 `MemorySet` 脱钩，使后端 I/O 的错误可以在修改映射前返回给 syscall，同时保持内存层和文件层的责任边界。进程退出没有可接收 errno 的调用方，因此退出路径会记录写回错误后继续释放地址空间，而不会因无法返回错误而泄漏进程资源。
+之所以不在 `MemorySet` 锁内直接调用文件后端，是因为文件 I/O 可能获取页缓存、inode、ext4 和块设备锁，不仅会放大地址空间临界区，也会引入 MM—FS 锁序环。快照对象与 `MemorySet` 脱钩，使后端 I/O 的错误可以在修改映射前返回给 syscall，同时保持内存层和文件层的责任边界。进程退出没有可接收 errno 的调用方，因此退出路径会记录写回错误后继续释放地址空间，而不会因无法返回错误而泄漏进程资源。
 
 当前实现没有利用硬件 dirty bit 做精确脏页追踪，因此会保守写回已驻留、可写的共享文件页。`MS_INVALIDATE` 需要 inode 级的全局失效协议，当前明确返回 `EOPNOTSUPP`；文件截断后访问已映射页的完整 `SIGBUS` 边界也尚未建立。这些限制界定了当前共享写回语义，不影响已实现的 `MS_ASYNC` 页缓存写入和 `MS_SYNC` 同步刷新路径。
 
 == 4.8 大 ELF 按需装载
 <48-大-elf-按需装载>
-RespOS 对文件系统 ELF 采用 file-backed `PT_LOAD` 设计，因为"先把整个可执行文件读入内核 `Vec`，再为用户段分配物理页"会使内核堆同时承受整文件副本和 loader 中间对象。对 45,559,552 字节的 cargo 而言，仅临时文件副本就接近 RV64 64 MiB 内核堆的容量。
+RespOS 对文件系统 ELF 采用 file-backed `PT_LOAD` 设计，因为“先把整个可执行文件读入内核 `Vec`，再为用户段分配物理页”会使内核堆同时承受整文件副本和 loader 中间对象。对 45,559,552 字节的 cargo 而言，仅临时文件副本就接近 RV64 64 MiB 内核堆的容量。
 
 `try_from_elf_file` 只读取 ELF64 header、program header 和 `PT_INTERP` 名称，并将元数据前缀硬限制为 1 MiB。主程序的 `PT_LOAD` VMA 持有 `Arc<dyn FileOp>`、页对齐偏移和文件有效长度；首次访问才分配私有 frame 并按页读取，而新页未被文件覆盖的部分天然保持为零，满足 BSS 语义。
 
@@ -253,18 +292,25 @@ RespOS 对文件系统 ELF 采用 file-backed `PT_LOAD` 设计，因为"先把�
 #strong[表 4-4 整文件装载与 file-backed ELF 对比]
 
 #figure(
-  align(center)[#table(
-    columns: 3,
-    align: (auto,auto,auto,),
-    table.header([对比项], [整文件 eager loader], [当前 file-backed loader],),
-    table.hline(),
-    [`exec` 临时内存], [随 ELF 文件大小增长], [只保留有界元数据，上限 1 MiB],
-    [`PT_LOAD` 驻留], [`exec` 阶段集中分配], [首次访问时逐页分配],
-    [BSS 处理], [loader 显式填充], [页帧先清零，只覆盖文件有效字节],
-    [异常 ELF], [可能放大内核分配], [检查 header 尺寸、偏移、文件末尾和页内同余，失败返回 `ENOEXEC`],
-  )]
-  , kind: table
-  )
+align(center)[#table(
+  columns: 3,
+  align: (col, row) => (auto,auto,auto,).at(col),
+  inset: 6pt,
+  [对比项], [整文件 eager loader], [当前 file-backed loader],
+  [`exec` 临时内存],
+  [随 ELF 文件大小增长],
+  [只保留有界元数据，上限 1 MiB],
+  [`PT_LOAD` 驻留],
+  [`exec` 阶段集中分配],
+  [首次访问时逐页分配],
+  [BSS 处理],
+  [loader 显式填充],
+  [页帧先清零，只覆盖文件有效字节],
+  [异常 ELF],
+  [可能放大内核分配],
+  [检查 header 尺寸、偏移、文件末尾和页内同余，失败返回 `ENOEXEC`],
+)]
+)
 
 该路径已支撑上述 cargo 在 RV64 `-smp 8 -m 8G` 环境中运行到 `BUILDSTORM_TOOLCHAIN ok`。这一结果证明动态物理内存发现、大文件元数据有界读取和私有 file fault 已能共同支撑大型工具链启动。这不等于 BuildStorm 最终多核编译已通过；当前动态链接器仍使用整文件读取路径，后续可继续复用同一 file backing 抽象。
 
@@ -295,19 +341,28 @@ RespOS 对文件系统 ELF 采用 file-backed `PT_LOAD` 设计，因为"先把�
 #strong[表 4-5 内存管理的跨模块接口]
 
 #figure(
-  align(center)[#table(
-    columns: 3,
-    align: (auto,auto,auto,),
-    table.header([协作模块], [内存层提供的能力], [对方必须保证的条件],),
-    table.hline(),
-    [syscall], [范围校验、VMA 建图/切分/改权限、用户 copy], [只解析 ABI 和 errno，不绕过 `MemorySet` 直接修改 PTE],
-    [task / scheduler], [COW 派生、`CLONE_VM` 共享、地址空间激活/回收], [`exec/exit` 回收前确保远端 sibling 不再使用旧地址空间],
-    [trap / arch], [公共 `handle_page_fault`、页表操作与 TLB 刷新入口], [将架构故障归一为 Instruction/Load/Store，正确实现 PTE/COW 标志],
-    [VFS / page cache], [file-backed VMA、共享文件页和写回快照], [`FileOp` 提供按偏移读写、`stat`、`fsync` 和 mmap 生命周期回调],
-    [procfs / sysinfo], [真实物理页帧数和内核堆统计], [不把早期最大可达窗口当成真实 RAM],
-  )]
-  , kind: table
-  )
+align(center)[#table(
+  columns: 3,
+  align: (col, row) => (auto,auto,auto,).at(col),
+  inset: 6pt,
+  [协作模块], [内存层提供的能力], [对方必须保证的条件],
+  [syscall],
+  [范围校验、VMA 建图/切分/改权限、用户 copy],
+  [只解析 ABI 和 errno，不绕过 `MemorySet` 直接修改 PTE],
+  [task / scheduler],
+  [COW 派生、`CLONE_VM` 共享、地址空间激活/回收],
+  [`exec/exit` 回收前确保远端 sibling 不再使用旧地址空间],
+  [trap / arch],
+  [公共 `handle_page_fault`、页表操作与 TLB 刷新入口],
+  [将架构故障归一为 Instruction/Load/Store，正确实现 PTE/COW 标志],
+  [VFS / page cache],
+  [file-backed VMA、共享文件页和写回快照],
+  [`FileOp` 提供按偏移读写、`stat`、`fsync` 和 mmap 生命周期回调],
+  [procfs / sysinfo],
+  [真实物理页帧数和内核堆统计],
+  [不把早期最大可达窗口当成真实 RAM],
+)]
+)
 
 == 4.11 功能与设计成果总结
 <411-功能与设计成果总结>
@@ -316,18 +371,27 @@ RespOS 内存管理的主线不是罗列更多分配算法，而是在统一所�
 #strong[表 4-6 内存管理成果与当前边界]
 
 #figure(
-  align(center)[#table(
-    columns: 3,
-    align: (auto,auto,auto,),
-    table.header([方向], [已实现的设计成果], [当前证据或边界],),
-    table.hline(),
-    [地址空间], [`MemorySet—VMA—PTE—Frame` 统一模型，范围修改共用切分逻辑], [debug 不变量与 split self-test 直接检查结构正确性],
-    [节省实际内存], [私有匿名页、私有文件页和主 ELF 按需驻留；`fork` 使用 COW], [无 swap 和通用页回收器；LA64 `brk` 当前为 eager],
-    [文件共享映射], [共享 file frame + 锁外快照写回], [2026-08-02 记录的 mmap/munmap 子集中，RV64 musl/glibc 各 20 通过、2 个已知边界失败；LA64 各 15 通过、0 失败；`MS_INVALIDATE` 和 truncate-`SIGBUS` 未完整实现],
-    [大程序装载], [FDT 动态 RAM + file-backed 主 ELF + 1 MiB 元数据上限], [2026-08-06 的 RV64 8 核/8 GiB 记录达到 `BUILDSTORM_TOOLCHAIN ok`；最终 minibuild/多核编译不由此结果代替],
-    [多核页表], [RV64 active-hart 跟踪和定向 SBI RFENCE，旧 frame 回收前完成 shootdown], [2026-08-06 的 2/8 核共享 MM 专项压力已通过；结论限于当前 QEMU/OpenSBI，LA64 SMP 待专项验证],
-  )]
-  , kind: table
-  )
+align(center)[#table(
+  columns: 3,
+  align: (col, row) => (auto,auto,auto,).at(col),
+  inset: 6pt,
+  [方向], [已实现的设计成果], [当前证据或边界],
+  [地址空间],
+  [`MemorySet—VMA—PTE—Frame` 统一模型，范围修改共用切分逻辑],
+  [debug 不变量与 split self-test 直接检查结构正确性],
+  [节省实际内存],
+  [私有匿名页、私有文件页和主 ELF 按需驻留；`fork` 使用 COW],
+  [无 swap 和通用页回收器；LA64 `brk` 当前为 eager],
+  [文件共享映射],
+  [共享 file frame + 锁外快照写回],
+  [2026-08-02 记录的 mmap/munmap 子集中，RV64 musl/glibc 各 20 通过、2 个已知边界失败；LA64 各 15 通过、0 失败；`MS_INVALIDATE` 和 truncate-`SIGBUS` 未完整实现],
+  [大程序装载],
+  [FDT 动态 RAM + file-backed 主 ELF + 1 MiB 元数据上限],
+  [2026-08-06 的 RV64 8 核/8 GiB 记录达到 `BUILDSTORM_TOOLCHAIN ok`；最终 minibuild/多核编译不由此结果代替],
+  [多核页表],
+  [RV64 active-hart 跟踪和定向 SBI RFENCE，旧 frame 回收前完成 shootdown],
+  [2026-08-06 的 2/8 核共享 MM 专项压力已通过；结论限于当前 QEMU/OpenSBI，LA64 SMP 待专项验证],
+)]
+)
 
-在这套模型中，"分配一页内存"已经不只是分配器的局部操作。虚拟范围可以延迟承诺，但权限必须在 VMA 和 PTE 两层一致；物理页可以共享，但所有权和回收必须有唯一落点；写回和页表替换可以分阶段执行，但失败不能留下半完成状态。
+在这套模型中，“分配一页内存”已经不只是分配器的局部操作。虚拟范围可以延迟承诺，但权限必须在 VMA 和 PTE 两层一致；物理页可以共享，但所有权和回收必须有唯一落点；写回和页表替换可以分阶段执行，但失败不能留下半完成状态。

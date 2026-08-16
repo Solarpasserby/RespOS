@@ -4,9 +4,9 @@
 本章介绍两个架构的时钟来源、timer trap 和超时管理，并说明 clock、sleep、interval timer、POSIX timer 与 timerfd 如何使用同一套时间接口。
 ]
 
-时钟模块是内核中连接硬件、调度器和用户态时间接口的基础设施。它一方面读取架构相关的硬件计数器并设置下一次 timer interrupt，另一方面把"经过了多少时间"转换为不同用途的时间：用户可见的运行时间、超时和 deadline 使用的单调时间，以及 CPU 时间记账使用的时间。nanosleep、futex、interval timer、POSIX timer 和 timerfd 都建立在这些统一的时间接口之上。
+时钟模块是内核中连接硬件、调度器和用户态时间接口的基础设施。它一方面读取架构相关的硬件计数器并设置下一次 timer interrupt，另一方面把“经过了多少时间”转换为不同用途的时间：用户可见的运行时间、超时和 deadline 使用的单调时间，以及 CPU 时间记账使用的时间。nanosleep、futex、interval timer、POSIX timer 和 timerfd 都建立在这些统一的时间接口之上。
 
-RespOS 将"读取时间"和"等待事件"分开处理：读取时间只查询计数器并完成单位转换，等待事件则登记 deadline、阻塞当前任务，在时钟安全点检查到期对象并唤醒任务或投递信号。这种分工使不同用户态接口可以共享计时基础，同时保持各自的可观察语义。
+RespOS 将“读取时间”和“等待事件”分开处理：读取时间只查询计数器并完成单位转换，等待事件则登记 deadline、阻塞当前任务，在时钟安全点检查到期对象并唤醒任务或投递信号。这种分工使不同用户态接口可以共享计时基础，同时保持各自的可观察语义。
 
 == 7.1 时间模型与核心数据
 <71-时间模型与核心数据>
@@ -15,17 +15,22 @@ RespOS 将"读取时间"和"等待事件"分开处理：读取时间只查询计
 内核不会把所有时间需求都直接绑定到同一个频率。架构层分别提供三种逻辑时钟频率：
 
 #figure(
-  align(center)[#table(
-    columns: 3,
-    align: (auto,auto,auto,),
-    table.header([时间尺度], [使用场景], [设计目的],),
-    table.hline(),
-    [hardware clock], [设置硬件中断、timeout 和 deadline], [反映底层计时器的真实运行尺度],
-    [user clock], [`clock_gettime`、文件时间和用户可见运行时间], [提供稳定的用户态时间单位和精度],
-    [accounting clock], [`times`、`getrusage` 等 CPU 时间记账], [为资源统计保留独立的计时口径],
-  )]
-  , kind: table
-  )
+align(center)[#table(
+  columns: 3,
+  align: (col, row) => (auto,auto,auto,).at(col),
+  inset: 6pt,
+  [时间尺度], [使用场景], [设计目的],
+  [hardware clock],
+  [设置硬件中断、timeout 和 deadline],
+  [反映底层计时器的真实运行尺度],
+  [user clock],
+  [`clock_gettime`、文件时间和用户可见运行时间],
+  [提供稳定的用户态时间单位和精度],
+  [accounting clock],
+  [`times`、`getrusage` 等 CPU 时间记账],
+  [为资源统计保留独立的计时口径],
+)]
+)
 
 #strong[表 7-1 RespOS 的时间尺度]
 
@@ -158,19 +163,28 @@ POSIX timer 使用独立的全局表保存 timer id、owner、clock、signal、d
 用户态可以通过 `clock_gettime` 读取不同语义的时钟：
 
 #figure(
-  align(center)[#table(
-    columns: 3,
-    align: (auto,auto,auto,),
-    table.header([时钟], [RespOS 中的含义], [典型用途],),
-    table.hline(),
-    [`CLOCK_REALTIME`], [monotonic time 加可调整的 realtime offset], [日历时间、文件时间、绝对时间],
-    [`CLOCK_MONOTONIC`], [持续增长的单调时间], [timeout、相对等待和 deadline],
-    [`CLOCK_MONOTONIC_RAW`], [原始单调时间口径], [需要避免 realtime 调整的计时],
-    [`CLOCK_BOOTTIME`], [当前运行期间持续增长的时间口径], [睡眠与系统运行时间相关接口],
-    [`CLOCK_REALTIME_COARSE` / `MONOTONIC_COARSE`], [对应时间量化到毫秒], [低开销的粗粒度查询],
-  )]
-  , kind: table
-  )
+align(center)[#table(
+  columns: 3,
+  align: (col, row) => (auto,auto,auto,).at(col),
+  inset: 6pt,
+  [时钟], [RespOS 中的含义], [典型用途],
+  [`CLOCK_REALTIME`],
+  [monotonic time 加可调整的 realtime offset],
+  [日历时间、文件时间、绝对时间],
+  [`CLOCK_MONOTONIC`],
+  [持续增长的单调时间],
+  [timeout、相对等待和 deadline],
+  [`CLOCK_MONOTONIC_RAW`],
+  [原始单调时间口径],
+  [需要避免 realtime 调整的计时],
+  [`CLOCK_BOOTTIME`],
+  [当前运行期间持续增长的时间口径],
+  [睡眠与系统运行时间相关接口],
+  [`CLOCK_REALTIME_COARSE` / `MONOTONIC_COARSE`],
+  [对应时间量化到毫秒],
+  [低开销的粗粒度查询],
+)]
+)
 
 #strong[表 7-2 用户可见时钟接口]
 
@@ -200,20 +214,31 @@ timerfd 本身仍以文件描述符参与生命周期管理，关闭最后一个
 时钟模块通过统一的当前时间和到期检查入口服务多个内核子系统：
 
 #figure(
-  align(center)[#table(
-    columns: 3,
-    align: (auto,auto,auto,),
-    table.header([协作模块], [时钟模块提供的能力], [产生的用户态效果],),
-    table.hline(),
-    [task / scheduler], [timer interrupt、抢占时机、任务 timeout 唤醒], [sleep、阻塞任务按 deadline 恢复执行],
-    [futex], [timeout clock 和到期检查], [`FUTEX_WAIT` 的超时返回],
-    [signal], [interval/POSIX timer 到期事件], [`SIGALRM` 等信号投递],
-    [FS / poll], [timerfd 的可读通知], [timerfd 与 poll/epoll 统一等待],
-    [syscall], [clock、sleep、timer 的 ABI 转换], [用户态读取时间和设置定时器],
-    [net], [单调时间戳], [TCP/UDP 协议栈的超时与时间推进],
-  )]
-  , kind: table
-  )
+align(center)[#table(
+  columns: 3,
+  align: (col, row) => (auto,auto,auto,).at(col),
+  inset: 6pt,
+  [协作模块], [时钟模块提供的能力], [产生的用户态效果],
+  [task / scheduler],
+  [timer interrupt、抢占时机、任务 timeout 唤醒],
+  [sleep、阻塞任务按 deadline 恢复执行],
+  [futex],
+  [timeout clock 和到期检查],
+  [`FUTEX_WAIT` 的超时返回],
+  [signal],
+  [interval/POSIX timer 到期事件],
+  [`SIGALRM` 等信号投递],
+  [FS / poll],
+  [timerfd 的可读通知],
+  [timerfd 与 poll/epoll 统一等待],
+  [syscall],
+  [clock、sleep、timer 的 ABI 转换],
+  [用户态读取时间和设置定时器],
+  [net],
+  [单调时间戳],
+  [TCP/UDP 协议栈的超时与时间推进],
+)]
+)
 
 #strong[表 7-3 时钟模块与其他子系统的协作关系]
 

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="470" viewBox="0 0 1000 470">
+  <defs><marker id="a" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0 0L10 4 0 8Z" fill="#667085"/></marker><style>.t{font:700 22px sans-serif;fill:#202124}.s{font:15px sans-serif;fill:#475467}.m{font:15px monospace;fill:#344054}.ar{stroke:#667085;stroke-width:2;marker-end:url(#a)}</style></defs><rect width="1000" height="470" fill="#fff"/>
+  <rect x="70" y="30" width="860" height="55" rx="10" fill="#fff7ed" stroke="#c2410c" stroke-width="2"/><text x="500" y="64" text-anchor="middle" class="t">用户 I/O · 文件系统 · 网络协议栈</text>
+  <line x1="300" y1="85" x2="300" y2="130" class="ar"/><line x1="700" y1="85" x2="700" y2="130" class="ar"/>
+  <rect x="80" y="130" width="440" height="80" rx="10" fill="#ecfdf3" stroke="#16a34a" stroke-width="2"/><text x="300" y="161" text-anchor="middle" class="t">块设备通路</text><text x="300" y="190" text-anchor="middle" class="m">VFS → PageCache → Ext4 → Disk trait</text>
+  <rect x="550" y="130" width="370" height="80" rx="10" fill="#eff6ff" stroke="#2563eb" stroke-width="2"/><text x="735" y="161" text-anchor="middle" class="t">网络设备通路</text><text x="735" y="190" text-anchor="middle" class="m">Socket → smoltcp → NetDevice</text>
+  <line x1="300" y1="210" x2="300" y2="260" class="ar"/><line x1="735" y1="210" x2="735" y2="260" class="ar"/>
+  <rect x="80" y="260" width="440" height="75" rx="10" fill="#f8fafc" stroke="#64748b" stroke-width="2"/><text x="300" y="290" text-anchor="middle" class="t">virtio-blk</text><text x="300" y="317" text-anchor="middle" class="s">request · descriptor · virtqueue · DMA</text>
+  <rect x="550" y="260" width="370" height="75" rx="10" fill="#f8fafc" stroke="#64748b" stroke-width="2"/><text x="735" y="290" text-anchor="middle" class="t">virtio-net</text><text x="735" y="317" text-anchor="middle" class="s">RX queue · TX queue · poll</text>
+  <line x1="300" y1="335" x2="300" y2="382" class="ar"/><line x1="735" y1="335" x2="735" y2="382" class="ar"/>
+  <rect x="100" y="382" width="800" height="58" rx="10" fill="#fef2f2" stroke="#dc2626" stroke-width="2"/><text x="500" y="407" text-anchor="middle" class="t">HAL 与平台传输</text><text x="500" y="430" text-anchor="middle" class="m">DMA / MMIO / interrupt · RV64 MMIO · LoongArch64 PCI</text>
+</svg>
