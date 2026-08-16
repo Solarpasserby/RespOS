@@ -197,6 +197,7 @@ fn read_elf_metadata(file: Arc<dyn FileOp>) -> SysResult<Vec<u8>> {
     const ELF64_HEADER_SIZE: usize = 64;
     const ELF64_PROGRAM_HEADER_SIZE: usize = 56;
     const ELF_METADATA_LIMIT: usize = 1024 * 1024;
+    const ELF_INTERP_LIMIT: usize = 4096;
 
     let file_size = file.get_stat()?.size;
     if file_size < ELF64_HEADER_SIZE {
@@ -225,22 +226,54 @@ fn read_elf_metadata(file: Arc<dyn FileOp>) -> SysResult<Vec<u8>> {
 
     let mut metadata = alloc::vec![0u8; ph_end.max(ELF64_HEADER_SIZE)];
     read_file_exact_at(file.clone(), 0, &mut metadata)?;
-    let header_elf = xmas_elf::ElfFile::new(&metadata).map_err(|_| Errno::ENOEXEC)?;
-    let mut metadata_len = metadata.len();
-    for i in 0..header_elf.header.pt2.ph_count() {
-        let ph = header_elf.program_header(i).map_err(|_| Errno::ENOEXEC)?;
-        if ph.get_type().map_err(|_| Errno::ENOEXEC)? == xmas_elf::program::Type::Interp {
-            metadata_len = metadata_len.max(
-                (ph.offset() as usize)
-                    .checked_add(ph.file_size() as usize)
-                    .filter(|end| *end <= file_size && *end <= ELF_METADATA_LIMIT)
-                    .ok_or(Errno::ENOEXEC)?,
-            );
+    let interp_headers = {
+        let header_elf = xmas_elf::ElfFile::new(&metadata).map_err(|_| Errno::ENOEXEC)?;
+        let mut headers = Vec::new();
+        for i in 0..header_elf.header.pt2.ph_count() {
+            let ph = header_elf.program_header(i).map_err(|_| Errno::ENOEXEC)?;
+            if ph.get_type().map_err(|_| Errno::ENOEXEC)? == xmas_elf::program::Type::Interp {
+                let offset = usize::try_from(ph.offset()).map_err(|_| Errno::ENOEXEC)?;
+                let len = usize::try_from(ph.file_size()).map_err(|_| Errno::ENOEXEC)?;
+                offset
+                    .checked_add(len)
+                    .filter(|end| *end <= file_size)
+                    .ok_or(Errno::ENOEXEC)?;
+                if len == 0 || len > ELF_INTERP_LIMIT {
+                    return Err(Errno::ENOEXEC);
+                }
+                headers.push((i as usize, offset, len));
+            }
         }
-    }
-    if metadata_len > metadata.len() {
-        metadata.resize(metadata_len, 0);
-        read_file_exact_at(file, 0, &mut metadata)?;
+        headers
+    };
+
+    // A valid PT_INTERP may live near the end of a large ELF (Alpine's Cargo
+    // places it around 19 MiB). Do not retain the entire prefix in the kernel
+    // heap. Append only the interpreter string to the compact metadata image
+    // and redirect that program header's p_offset to the appended copy. LOAD
+    // offsets remain the real file offsets used by lazy page faults.
+    for (index, file_offset, len) in interp_headers {
+        let relocated_offset = metadata.len();
+        let relocated_end = relocated_offset
+            .checked_add(len)
+            .filter(|end| *end <= ELF_METADATA_LIMIT)
+            .ok_or(Errno::ENOEXEC)?;
+        metadata.resize(relocated_end, 0);
+        read_file_exact_at(
+            file.clone(),
+            file_offset,
+            &mut metadata[relocated_offset..relocated_end],
+        )?;
+
+        let ph_start = ph_offset
+            .checked_add(index.checked_mul(ph_entry_size).ok_or(Errno::ENOEXEC)?)
+            .ok_or(Errno::ENOEXEC)?;
+        let offset_field = ph_start.checked_add(8).ok_or(Errno::ENOEXEC)?;
+        let offset_end = offset_field.checked_add(8).ok_or(Errno::ENOEXEC)?;
+        let field = metadata
+            .get_mut(offset_field..offset_end)
+            .ok_or(Errno::ENOEXEC)?;
+        field.copy_from_slice(&(relocated_offset as u64).to_le_bytes());
     }
     Ok(metadata)
 }

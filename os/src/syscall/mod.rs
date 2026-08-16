@@ -226,6 +226,7 @@ const SYSCALL_MEMFD_SECRET: usize = 447;
 
 mod errno;
 mod fs;
+pub(crate) use fs::release_posix_locks_for_process;
 pub(crate) mod ipc;
 mod mm;
 mod net;

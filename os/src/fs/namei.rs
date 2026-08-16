@@ -587,6 +587,7 @@ pub fn open_last_lookups(nd: &mut Nameidata, flags: usize, mode: usize) -> SysRe
     let file = Arc::new(File::new(Path::new(nd.mnt.clone(), dentry), inode, flags));
     if flags.contains(OpenFlags::O_TRUNC)
         && flags.intersects(OpenFlags::O_WRONLY | OpenFlags::O_RDWR)
+        && file.inode().node_type() == InodeType::Regular
     {
         file.truncate(0)?;
     }
@@ -631,6 +632,7 @@ pub fn path_open(dirfd: isize, path: &str, flags: usize, mode: usize) -> SysResu
         let file = Arc::new(File::new(path, inode, open_flags));
         if open_flags.contains(OpenFlags::O_TRUNC)
             && open_flags.intersects(OpenFlags::O_WRONLY | OpenFlags::O_RDWR)
+            && file.inode().node_type() == InodeType::Regular
         {
             file.truncate(0)?;
         }

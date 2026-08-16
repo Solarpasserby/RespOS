@@ -1,5 +1,64 @@
 # RespOS 当前状态
 
+## 2026-08-16 软件 POSIX 矩阵、命名 FIFO、pipe 原子性与锁生命周期（当前工作树，基线 `21c02eb2`）
+
+- **真实工具矩阵**：新增 `respos-software/software-posix.sh`，使用 Alpine 自带
+  `find/xargs -P2/sha256sum/sort` 验证并发 pipeline，使用 blocking named FIFO 验证双 writer 数据完整性，
+  使用 `tar | gzip` 验证归档、硬链接与符号链接保持，使用 util-linux `flock` 验证跨进程竞争/退出释放，
+  使用 guest GCC 现场编译 C probe 验证 nonblocking pipe 小 writev 的空间判断，以及 flock/record-lock
+  的 dup、fork、close、exit 生命周期，最后以 APK 本地数据库只读查询验证实际包管理器加载路径。
+- **命名 FIFO 修复**：已有 FIFO 上的 shell `>` 会携带 `O_TRUNC`；Linux 对 FIFO 忽略该 flag，旧 namei
+  却调用特殊 inode truncate 并返回 `EINVAL`。当前仅对 regular inode 执行 open-time truncate。
+  blocking reader/writer open 现在以可中断 rendezvous 配对；共享 pipe 的 EOF/EPIPE 只由最后一个
+  writer/reader 关闭发布，不再由任一 `NamedFifoEnd` 提前关闭整个 buffer。
+- **pipe 原子性修复**：旧 write 在剩余容量不足时会部分提交小记录，使两个并发 sha256sum 的输出拼接。
+  当前不超过 4096-byte `PIPE_BUF` 的 `write` 必须整体提交，否则阻塞或返回 `EAGAIN`；总长度不超过
+  `PIPE_BUF` 的 `writev` 先合并 iovec 后进入同一原子提交，较大写入仍允许部分进度。nonblocking pipe
+  绕过通用的整页 readiness 预检，由 pipe 按本次 record 的实际长度判断是否有足够空间。
+- **锁所有权修复**：`flock` 属于 open-file-description，锁表现在持有 owner 的 weak reference；只有最后
+  一个跨 dup/fork 的文件引用死亡后才在下次竞争中回收，覆盖进程退出且避免任一 fd close 过早释放。
+  POSIX record lock 仍属于 PID，任意相关 fd close 按既有规则释放，并新增 process-group exit 全表清理，
+  不再留下永久冲突。
+- **双架构证据**：RV64/LA64 release、4 GiB/2 hart 均输出六项 `SOFTWARE_POSIX ... PASS` 与
+  `SOFTWARE_POSIX ALL PASS`；LA64 同一 QEMU 连续三轮通过。最终日志为
+  `/tmp/respos-rv-software-posix-review.log`（SHA-256
+  `ccbb6f7729ce6959bb15c154bd29bc7b535e477f7fcc33dfbc222998a1e8c511`）和
+  `/tmp/respos-la-software-posix-review.log`
+  （`0b6495bb288fa3ee02c3019451fe64b89b4eee2784b366cb3ea7a1700a82dacc`）。双架构 musl/glibc
+  FIFO LTP `fsync03,lseek02,open06,read03,write04` 各为 `5 passed, 0 failed`，日志为
+  `/tmp/respos-{rv,la}-fifo-posix-regression.log`。最终 pipe/lock 修复后的 RV64 扩展 Git/Vim/Make/Cargo
+  矩阵仍为 `SOFTWARE_EXTENDED ALL PASS`，日志 `/tmp/respos-rv-software-extended-review.log`，SHA-256
+  `8610ffa685a9fcc81d6835e6a0d88904d145a2e8ffc8101dc4c8f82e3ec55b1c`。
+- **边界**：当前 weak-owner flock 表在同 inode 下一次 flock 操作时惰性删除死亡项，不主动唤醒而沿用
+  既有 yield 重试；语义正确但不是高竞争锁的最终性能方案。`PIPE_BUF` 当前按目标 page size 4096 固定，
+  本轮不声明大 writev 的 Linux 分段公平性、异步 I/O 或 io_uring 兼容。
+
+## 2026-08-16 扩展软件兼容矩阵与大 ELF `PT_INTERP` 闭合（当前工作树，基线 `21c02eb2`）
+
+- **扩展矩阵**：新增 `respos-software/software-extended.sh`，覆盖 64 文件 Git 分支/合并、
+  `gc/repack/fsck`，Vim 被 `SIGKILL` 后的 swap 恢复，GNU Make `-j2` 编译静态库，以及 Cargo
+  offline workspace 的 release 并行构建与增量重编译。Makefile 软件镜像预检同步要求
+  `make/ar/cargo`，避免缺包被误报为内核失败。
+- **大 ELF 修复**：Alpine RV64 `/usr/bin/cargo` 是有效 PIE，但 `PT_INTERP` 位于约 19.5 MiB 文件偏移。
+  旧 `read_elf_metadata()` 把解释器字符串错误限制在首 1 MiB，返回 `ENOEXEC` 后 ash 将 ELF 当脚本解释，
+  表现为 `syntax error: unexpected ")"`。现在只读取 ELF header/program-header 表，并把不超过 4096 bytes
+  的解释器字符串单独追加到紧凑 metadata、重定位 metadata 副本中的 `PT_INTERP.p_offset`；`PT_LOAD`
+  仍保留真实文件偏移供 lazy fault 使用，不按高偏移读入整个文件前缀。
+- **console 并发修复**：timer service hart 和前台 reader 都可能调用 destructive firmware getchar；只锁
+  line-discipline queue 不能防止两个 pump 交错取走字节，实测会把命令重排成 `softwrae` 等字符串。
+  当前以独立 pump lock 串行整个 drain 操作，修复后长命令及扩展脚本未再出现字符重排。
+- **双架构证据**：release、4 GiB/2 hart、software 镜像、`-snapshot` 下，RV64/LA64 均输出四项
+  `SOFTWARE_EXTENDED ... PASS` 与 `SOFTWARE_EXTENDED ALL PASS`。日志分别为
+  `/tmp/respos-rv-software-extended-final.log`（SHA-256
+  `77f1a16e0343b141717c4328289413c2fb488e4e3eddbc65b83bb85e07b85b20`）和
+  `/tmp/respos-la-software-extended-final.log`
+  （`eddb456a8971e76ca3d56075a661d454fd2a235b7cb750abfebb71bc10f10890`）。原软件 smoke 双架构仍为
+  `SOFTWARE_COMPAT ALL PASS`；job-control Phase 5 probe 双架构仍为 `JOB_CONTROL_RESPOS ALL PASS`，
+  对应日志为 `/tmp/respos-{rv,la}-job-control-extended-regression.log`。
+- **边界**：本轮证明的是离线、本地文件系统上的更深真实软件路径；Cargo 在线 registry、Git HTTP(S)/SSH、
+  PTY 和软件包管理器仍未由本轮覆盖。Vim 首轮恢复红项是夹具在 swap 文件刚创建、编辑命令尚未完成时
+  过早杀进程；改为等待 Vim 在 `:preserve` 后写出 ready marker 后通过，不是内核数据损坏。
+
 ## 2026-08-16 Alpine 交互 shell、console line discipline 与全屏 Vim（当前工作树）
 
 - **启动入口**：`respos-software/profile` 改为 `mode=software`；`contest_launcher` 直接
@@ -22,7 +81,7 @@
   均完成 `before`→`final/loong` 编辑、`:wq` 保存并回到 shell；两边随后运行软件脚本，Git/Vim batch/
   GCC/rustc 均输出 `SOFTWARE_COMPAT ALL PASS`。同一内核上的 `job_control_phase5_probe` 两架构仍输出
   `JOB_CONTROL_RESPOS ALL PASS`。完整软件轮交互日志为 `/tmp/respos-{rv,la}-tty-final.log`，最终
-  最终工作树的 Vim/Ctrl-C 复核为 `/tmp/respos-{rv,la}-tty-final-current.log`，job-control
+  工作树的 Vim/Ctrl-C 复核为 `/tmp/respos-{rv,la}-tty-final-current.log`，job-control
   日志为 `/tmp/respos-{rv,la}-job-control-regression.log`；最终工作树另通过 `make build-rv` 与
   `make build-la`。
 - **保留边界**：当前仍只有单一物理 console，没有 PTY、IXON/IXOFF、UTF-8 erase、完整 Linux N_TTY
@@ -3043,8 +3102,9 @@
   阻塞 ppoll 数据唤醒、pipe HUP/ERR、epoll HUP 和 accept EINTR。既有 128 KiB
   `unix_socket_block_probe` 同轮继续通过；RV64/LA64 no-feature release 构建通过。
 - **保留边界**：pathname 在 listener 存活期间 unlink 后用同名节点 rebind 的 registry identity、
-  AF_UNIX getsockname/getpeername 完整地址回报和 named FIFO blocking-open/multi-open 仍需后续专项；
-  TCP/UDP poll 仍沿用协议栈轮询，本轮只收敛有现成条件队列的 AF_UNIX。
+  AF_UNIX getsockname/getpeername 完整地址回报仍需后续专项；本节当时未完成的 named FIFO
+  blocking-open/multi-open 已由 2026-08-16 软件 POSIX 矩阵闭合。TCP/UDP poll 仍沿用协议栈轮询，
+  本轮只收敛有现成条件队列的 AF_UNIX。
 
 ## 2026-08-11 Linux/POSIX Phase 5 signal ABI 首轮（基于 `76f7c61` 的本轮工作树）
 

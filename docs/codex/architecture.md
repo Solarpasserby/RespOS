@@ -379,7 +379,9 @@
   `SIGHUP`、`SIGCONT` 顺序通知整个存活进程组。stdio stdin 和 `/dev/tty` 还必须共享 canonical edit/
   ready record/raw queue；物理 console 由 timer safe point 主动抽取控制字符，使不读 tty 的前台作业也能
   及时收到 VINTR/VQUIT/VSUSP；阻塞 read 只检查当前线程实际可投递的 pending signal，不能用 terminal
-  全局 generation 错误中断同进程内未被选中的 reader thread。
+  全局 generation 错误中断同进程内未被选中的 reader thread。timer service 与前台 reader 均可能进入
+  pump，但固件 getchar 是 destructive 操作，因此必须用独立 pump lock 串行整个 drain；仅锁目标 queue
+  会允许两个 hart 交错取字节并重排输入。
 - 后续影响：增加 PTY 时每个 terminal 实例必须独立持有相同状态机；hangup I/O、flow control、
   SIGWINCH、forced steal 副作用及并发关系变更的统一锁域仍需扩展，不能塞回单个 ioctl 分支。
 
@@ -754,10 +756,39 @@ FdTable slot (FdEntry: descriptor flags)
   FIFO、character、block、socket 都用 `ext4_mknod()` 建立真实特殊 inode，并从 raw inode device slot
   恢复 `KStat.rdev`；statx 按 Linux device 布局拆分 12-bit major 与 20-bit minor，不退化到 legacy
   8-bit minor。`sys_openat` 根据持久的 FIFO 类型将 pathname inode 转为 `NamedFifoEnd`；同一路径的
-  运行态 reader/writer 共享 VFS `PipeRingBuffer`，关闭最后一个端点后释放，不把管道内容写入 ext4。
+  运行态 reader/writer 共享 VFS `PipeRingBuffer`。blocking open 通过 reader/writer rendezvous 配对并可被
+  signal 中断，`O_NONBLOCK|O_WRONLY` 在无 reader 时返回 `ENXIO`；只有最后一个端点关闭才发布对应
+  EOF/EPIPE 并释放运行态 buffer，不把管道内容写入 ext4。open 的 `O_TRUNC` 只作用于 regular inode，
+  对 FIFO 等特殊节点忽略。
 - 后续影响：不能用普通文件占位再只改低 12 位 permission 假装特殊 inode；否则 reopen/readdir/stat
   会继续识别成 regular，并绕过类型相关 errno、xattr 限制与 FIFO 阻塞语义。特殊 inode 正确不等于
   已有对应设备驱动；超出 Linux kernel 32-bit device encoding 的 libc-only device number 不在本范围。
+
+### pipe 小记录与小 writev 以 `PIPE_BUF` 为原子提交边界
+
+- 状态：已实现并由双架构并发真实工具矩阵验证
+- 适用范围：anonymous pipe、named FIFO、write/writev、并发 producer
+- 最后验证：2026-08-16
+- 证据：`os/src/fs/pipe.rs`、`os/src/syscall/fs.rs::sys_writev()`、
+  `respos-software/software-posix.sh`
+- 内容：总长度不超过 4096-byte `PIPE_BUF` 的 write 在 buffer 空间不足时不发布部分字节，而是整体阻塞或
+  对 nonblocking fd 返回 `EAGAIN`；小 writev 先把所有 iovec 拷入单个 kernel record，再调用同一 pipe
+  write 提交。nonblocking pipe 不使用通用的整页 `write_ready()` admission，而由 pipe write 按本次
+  record 长度判断空间；超过该边界的 write/writev 保留 partial-progress 行为。
+- 后续影响：任何 splice/vmsplice 或新 vectored-I/O 快路径若承诺 pipe write 等价语义，都必须明确是否
+  进入同一原子边界；不能按 iovec 逐段调用 write，否则 libc 将正文和换行拆开时仍会互相穿插。
+
+### flock 与 POSIX record lock 使用不同 owner 生命周期
+
+- 状态：已实现并由 guest GCC 生命周期 probe 双架构验证
+- 适用范围：flock、fcntl `F_SETLK`、dup/fork/close/exit
+- 最后验证：2026-08-16
+- 证据：`os/src/syscall/fs.rs`、`os/src/task/task.rs`、`respos-software/software-posix.sh`
+- 内容：flock entry 绑定 open-file-description 的 weak `FileOp` owner；dup/fork 共享该 owner，任一 fd close
+  不释放锁，最后一个强引用死亡后冲突扫描惰性回收 entry。POSIX record lock 以 TGID 为 owner，同一进程
+  任意相关 fd close 释放该 inode 上的锁，process-group exit 统一删除该 TGID 在所有 inode 上的 entry。
+- 后续影响：不得用 PID 实现 flock，也不得用 open-file-description 实现传统 `F_SETLK`。以后加入 OFD
+  record lock 时应建立第三种 owner 类型；高竞争 blocking lock 可增加事件唤醒，但不能改变上述生命周期。
 
 ### ext4 inode 属性与扩展时间戳以底层 transaction 成功为发布点
 
@@ -872,17 +903,19 @@ FdTable slot (FdEntry: descriptor flags)
 
 - 状态：已实现，BuildStorm tg-xtask、手工链接与完整 xtask wrapper 已验证
 - 适用范围：filesystem exec、动态程序、大 ELF、kernel heap
-- 最后验证：2026-08-08；RV64 release、8 核、8 GiB
+- 最后验证：2026-08-16；RV64/LA64 release、2 核、4 GiB
 - 证据：`os/src/mm/memory_set.rs::try_from_elf_file()`、
   `os/src/task/task.rs::execve_file()`、`read_elf_metadata()`、`open_dynamic_linker()`
 - 内容：exec 只把 ELF/program header 与 PT_INTERP 名称读入 kernel heap；主 ELF 的 PT_LOAD VMA
   持有 `Arc<dyn FileOp>`、page-aligned file offset 和有效文件长度，private fault 时分配独立 frame
   并按页读取，BSS 尾部保持零。文件系统中的动态解释器也走相同的 lazy PT_LOAD 路径；文件式 loader
-  将元数据前缀限制为 1 MiB，并在安装 VMA 前校验 ELF64 program-header 尺寸和 PT_LOAD 文件边界；
-  嵌入式 app/解释器 fallback 仍使用完整 slice 的 eager loader。
+  只保留 ELF header/program-header 表；`PT_INTERP` 可位于文件任意合法偏移，loader 最多单独读取 4096
+  bytes 的解释器字符串并将 metadata 副本中的 `p_offset` 重定位到追加副本，因此无需保留高偏移前的
+  整段文件。安装 VMA 前仍校验 ELF64 program-header 尺寸和 PT_LOAD 文件边界；嵌入式 app/解释器
+  fallback 仍使用完整 slice 的 eager loader。
 - 后续影响：PT_LOAD offset 与 virtual address 的页内偏移必须同余；不能重新用 `read_all()` 或
-  单纯放大 kernel heap 规避大 ELF。工具链并发峰值仍需要 128 MiB kernel heap，但这与 ELF 整文件
-  分配是两个独立问题。
+  以 `PT_INTERP` 的文件偏移决定 metadata 前缀长度，也不能单纯放大 kernel heap 规避大 ELF。工具链
+  并发峰值仍需要 128 MiB kernel heap，但这与 ELF 整文件分配是两个独立问题。
 
 ### 用户栈是大范围 lazy VMA，不等于启动时一次性物理分配
 

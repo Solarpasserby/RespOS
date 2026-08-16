@@ -254,7 +254,7 @@ check-la-final-image:
 
 check-rv-software-image:
 	@test -r $(RV_SOFTWARE_FS_IMG) || { echo "missing $(RV_SOFTWARE_FS_IMG); run scripts/get_img.sh software rv" >&2; exit 1; }
-	@for path in /usr/bin/git /usr/bin/vim /usr/bin/gcc /usr/bin/rustc /bin/sh; do \
+	@for path in /usr/bin/git /usr/bin/vim /usr/bin/gcc /usr/bin/rustc /usr/bin/make /usr/bin/ar /usr/bin/cargo /usr/bin/flock /sbin/apk /bin/tar /bin/gzip /bin/sh; do \
 		debugfs -R "stat $$path" $(RV_SOFTWARE_FS_IMG) 2>&1 | grep -q '^Inode:' || { \
 			echo "$(RV_SOFTWARE_FS_IMG) is missing $$path" >&2; exit 1; \
 		}; \
@@ -272,7 +272,7 @@ $(LA_SOFTWARE_FS_IMG): $(LA_SOFTWARE_BASE_IMG)
 	mv -f $@.tmp $@
 
 check-la-software-image: prepare-la-software-root
-	@for path in /usr/bin/git /usr/bin/vim /usr/bin/gcc /usr/bin/rustc /bin/sh; do \
+	@for path in /usr/bin/git /usr/bin/vim /usr/bin/gcc /usr/bin/rustc /usr/bin/make /usr/bin/ar /usr/bin/cargo /usr/bin/flock /sbin/apk /bin/tar /bin/gzip /bin/sh; do \
 		debugfs -R "stat $$path" $(LA_SOFTWARE_FS_IMG) 2>&1 | grep -q '^Inode:' || { \
 			echo "$(LA_SOFTWARE_FS_IMG) is missing $$path" >&2; exit 1; \
 		}; \

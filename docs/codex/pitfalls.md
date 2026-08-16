@@ -1623,3 +1623,55 @@ socket 直接返回 `EAGAIN` 是可见 ABI 错误。accept 取走 endpoint 后�
   也不要在每个 hart 或任意持锁 kernel trap 中直接轮询并投递，否则会重复消费字符或重入
   task/signal registry。
 - 最后验证：2026-08-16，RV64/LA64 Alpine ash 下 `sleep 10` 的 Ctrl-C/Ctrl-Z 均立即生效。
+
+## 固件 console 的 destructive drain 必须整体串行
+
+- 适用范围：SMP、timer safe-point input pump、前台 tty reader、SBI/UART polling console
+- 现象：长命令偶发稳定变成字母次序错误的另一字符串，例如 `software` 变成 `softwrae`；queue 内容本身
+  没有丢失，容易误诊为 shell 行编辑或 QEMU PTY 注入问题。
+- 根因：timer service hart 与 foreground reader 可同时执行 `console_getchar()`；该读取会消费硬件字节。
+  即使随后写入同一个受锁 queue，两个 hart 仍可先后取走相邻字符、再以相反顺序取得 queue lock。
+- 处理：用独立锁覆盖从开始轮询到本轮 drain 结束的完整 pump。不能只锁单次 queue mutation，也不要让
+  多 hart 分别拥有输入缓存。2026-08-16 双架构扩展软件矩阵与 job-control 回归通过。
+
+## `PT_INTERP` 的高文件偏移不是 ELF metadata 大小
+
+- 适用范围：大型 PIE/动态 ELF、filesystem exec、lazy PT_LOAD、kernel heap
+- 现象：有效 ELF 直接执行返回 `ENOEXEC`，shell 随后把二进制当脚本解释并报莫名语法错误；显式执行
+  musl loader 加该 ELF 参数却能正常运行。Alpine RV64 Cargo 的 `PT_INTERP` 位于约 19.5 MiB 偏移。
+- 根因：旧 loader 为限制 kernel heap，把 metadata 及解释器字符串都要求位于首 1 MiB；这是实现限制，
+  不是 ELF ABI 约束。
+- 处理：只读固定 header/program-header 表，再从真实文件偏移单独读取有界解释器字符串，并重定位内存中
+  program header 副本的 `p_offset`。`PT_LOAD` offset 不能随之改写，因为 lazy fault 仍以它读取原文件。
+  2026-08-16 RV64/LA64 Cargo offline workspace 两轮 release 构建与产物运行通过。
+
+## FIFO 的 `O_TRUNC`、open 配对和 EOF 属于三个不同层次
+
+- 适用范围：shell redirection、named FIFO、多 reader/writer、namei 与 pipe runtime
+- 现象：`cmd > fifo` 返回 `EINVAL`，或两个 writer 中第一个退出后 reader 提前 EOF/第二个 writer EPIPE；
+  单 writer 的 nonblocking LTP 仍可能全部通过。
+- 根因：namei 把 `O_TRUNC` 无条件下发给特殊 inode；每个 `NamedFifoEnd` 又复用 anonymous Pipe 的
+  drop 行为，把单端点关闭误当成整个方向关闭。blocking open 若只看当前 endpoint count，还会在已配对
+  writer 快速退出后重新睡眠，丢失已经完成的 rendezvous。
+- 处理：open-time truncate 仅作用 regular inode；pending opener 计入 reader/writer rendezvous，配对完成
+  即使对端随后退出本次 open 仍成功；由 named FIFO 聚合计数在最后一个端点关闭时发布 EOF/EPIPE。
+
+## `PIPE_BUF` 原子性必须覆盖一次 writev 的所有 iovec
+
+- 适用范围：pipe/FIFO、并发 producer、stdio/coreutils、writev
+- 现象：并行 sha256sum 的两行被拼成一行，同时文件开头出现空行；每次单独 write 加锁看似已经串行。
+- 根因：空间不足时小 write 被部分提交；修复单 write 后，sys_writev 又逐 iovec 调用 write，使 libc 分开的
+  正文和换行仍可被其他 producer 插入。POSIX 原子边界看一次 syscall 的总长度，而不是单个 iovec。
+- 处理：不超过 `PIPE_BUF` 的 write 空间不足时零进度阻塞/EAGAIN；同样大小的 writev 先合并为一个 record
+  后提交。nonblocking pipe 不能先用“至少空一整页”的通用 readiness 拒绝小 record，必须让 pipe 按实际
+  请求长度裁决。2026-08-16 LA64 连续三轮、RV64 一轮并行 48 文件 sha256 pipeline 通过。
+
+## 文件锁清理不能只挂在显式 close syscall 上
+
+- 适用范围：flock、POSIX record lock、fd-table clear、dup/fork/process exit
+- 现象：持锁 shell/子进程已经退出，新进程的 `LOCK_NB` 或 `F_SETLK` 仍永久失败；简单 unlock 测试正常。
+- 根因：进程退出直接清空 fd table，不逐项经过 `sys_close()`；同时 flock 属于 open-file-description，按
+  当前进程 fd table 判断“最后一个 fd”会在跨 fork 时过早释放。record lock 则属于 PID，必须在 group
+  exit 清理，即使没有可枚举的最后 close。
+- 处理：flock entry 保存 open-file-description weak owner 并在竞争时剔除死亡项；record lock 在进程组
+  退出提交点按 TGID 全表删除。不要把两种锁合并成同一种 owner 模型。

@@ -1164,3 +1164,17 @@ parent、最后只 handoff”的提交顺序；handoff 不重写状态，以保�
   虚增 `nvcsw`。
 - 后续影响：任何新增 wait reap 路径都必须同时累计时间与资源，并保持 copyout 失败原子性；`WNOWAIT`
   不得提交 children usage。新增 block backend 或绕过 PageCache 的 buffered-write 路径必须审计归属点。
+
+## flock、record lock 与 pipe 原子性按 Linux owner/调用边界分层
+
+- 状态：已采用，双架构真实工具与 guest GCC probe 通过
+- 适用范围：flock、fcntl record lock、pipe/FIFO write/writev、dup/fork/close/exit
+- 最后验证：2026-08-16
+- 决策：flock owner 是 open-file-description，以 weak `FileOp` 表达跨 dup/fork 生命周期；传统 POSIX
+  record lock owner 是 TGID，任意相关 fd close 和 group exit 分别执行 inode 局部/全局清理。pipe 原子
+  record 则以单次 write/writev 的总长度是否不超过 4096-byte `PIPE_BUF` 判断，不以 iovec 边界判断；
+  nonblocking admission 使用 record 实际长度而不是固定整页水位。
+- 原因：把锁清理只挂在 `sys_close` 会漏掉 fd-table exit clear，按当前进程扫描“最后 fd”又会破坏 fork
+  共享 open-file-description；writev 分段下发则会让 libc 拆分的正文/换行互相穿插。
+- 后续影响：OFD record lock 需建立独立 owner 类型；优化锁等待可改变轮询为事件唤醒，但不能提前释放
+  owner。新增 pipe vectored/splice 快路径必须说明并测试其 `PIPE_BUF` 原子契约。

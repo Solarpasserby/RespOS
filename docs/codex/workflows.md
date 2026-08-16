@@ -106,6 +106,30 @@ GCC 和 rustc 单文件编译/运行，并以 `SOFTWARE_COMPAT ALL PASS` 与 she
 LA 目标将上传 raw 基线复制到 `/tmp/respos-la-software-root.img`，只在该副本执行一次 `e2fsck -p`；
 只要源镜像 mtime 没有变化，后续运行复用同一 clean 副本和 hash。
 
+需要覆盖更深的本地软件路径时，在同一 software shell 中运行：
+
+```sh
+sh /respos/software-extended.sh
+```
+
+该脚本验证 Git 分支/合并及 `gc/repack/fsck`、Vim crash 后 swap recovery、GNU Make `-j2` 静态库构建，
+以及 Cargo offline workspace 的 release 构建和增量重编译。成功标志为四项
+`SOFTWARE_EXTENDED ... PASS` 和最终 `SOFTWARE_EXTENDED ALL PASS`。脚本会写入 `/tmp`，不修改只读
+软件根盘；software image 预检要求 `git/vim/gcc/rustc/make/ar/cargo` 全部存在。
+
+需要覆盖并发 POSIX/文件工具语义时运行：
+
+```sh
+sh /respos/software-posix.sh
+```
+
+成功时应依次得到 `pipeline_fifo_parallel`、`archive_link_pipeline`、`pipe_nonblock_atomic`、
+`flock_contention_release`、`lock_lifecycle`、`apk_local_database` 六项 PASS 与
+`SOFTWARE_POSIX ALL PASS`。其中两个 lifecycle/atomic 项会在 guest 内调用 GCC 编译 C probe；pipeline
+会用 `xargs -P2` 制造真实 pipe/writev 并发。修改 pipe、FIFO、flock、fcntl record lock 或 process fd
+cleanup 后，至少双架构各跑一轮；修改小写原子性时额外在较慢的 LA64 同一 QEMU 连续跑三轮，并复跑
+本文后面的双 libc FIFO 五项 LTP。
+
 脚本当前对齐官方 `on-site-final-2025@9ea291d` 的离线命令：四个程序均执行 help 加载；Git 走
 `README.md → add . → commit → status/log`，GCC/rustc 使用各自默认输出名并运行，Vim 以 ex 模式真实
 修改和保存文件。全屏交互验证可执行 `vim -Nu NONE -n /tmp/test.txt`，完成插入、`:wq`，再用 `cat`

@@ -72,9 +72,9 @@ enum FlockKind {
     Exclusive,
 }
 
-#[derive(Copy, Clone)]
 struct FlockEntry {
     owner: usize,
+    owner_ref: alloc::sync::Weak<dyn FileOp>,
     kind: FlockKind,
 }
 
@@ -713,7 +713,10 @@ pub fn sys_write(fd: usize, buf: *mut u8, len: usize) -> SysResult<usize> {
     let mut kbuf = KernelIoBuffer::new(len.min(IO_CHUNK_SIZE), IoBufferKind::Write);
     let mut total = 0usize;
     while total < len {
-        if file.get_flags().contains(OpenFlags::O_NONBLOCK) && !file.write_ready() {
+        if file.get_flags().contains(OpenFlags::O_NONBLOCK)
+            && !is_pipe(&file)
+            && !file.write_ready()
+        {
             if total == 0 {
                 return Err(Errno::EAGAIN);
             }
@@ -802,6 +805,43 @@ enum IovecBufferPerm {
 pub fn sys_writev(fd: usize, iov: *const IoVec, iovcnt: usize) -> SysResult<usize> {
     let items = read_iovecs(iov, iovcnt)?;
     check_iovec_buffers(&items, IovecBufferPerm::Read)?;
+    let vector_len = items
+        .iter()
+        .try_fold(0usize, |total, item| total.checked_add(item.len))
+        .ok_or(Errno::EINVAL)?;
+    let task = current_task().expect("[kernel] current task is None.");
+    let file = task.get_fd_entry(fd)?.file;
+    if is_pipe(&file) && vector_len <= PAGE_SIZE {
+        if !file.writable() {
+            return Err(Errno::EBADF);
+        }
+        if vector_len == 0 {
+            return Ok(0);
+        }
+        let mut record = alloc::vec![0u8; vector_len];
+        let mut offset = 0usize;
+        for item in &items {
+            if item.len == 0 {
+                continue;
+            }
+            unsafe {
+                copy_from_user(
+                    record.as_mut_ptr().add(offset),
+                    item.base as *const u8,
+                    item.len,
+                )?;
+            }
+            offset += item.len;
+        }
+        return match file.write(record.as_slice()) {
+            Err(Errno::EPIPE) => {
+                let siginfo = SigInfo::new(Sig::SIGPIPE.raw(), SigInfo::KERNEL, SiField::None);
+                task.receive_siginfo(siginfo, false);
+                Err(Errno::EPIPE)
+            }
+            result => result,
+        };
+    }
     let mut total: usize = 0;
     for item in items {
         if item.len == 0 {
@@ -1507,24 +1547,6 @@ fn release_flock_for_file(file: &alloc::sync::Arc<dyn FileOp>) {
     }
 }
 
-fn release_flock_for_file_if_last_fd(fd: usize, file: &alloc::sync::Arc<dyn FileOp>) {
-    let Some(task) = current_task() else {
-        release_flock_for_file(file);
-        return;
-    };
-    let owner = flock_owner(file);
-    let has_other_fd = task.open_fds().into_iter().any(|other_fd| {
-        other_fd != fd
-            && task
-                .get_fd_entry(other_fd)
-                .map(|entry| flock_owner(&entry.file) == owner)
-                .unwrap_or(false)
-    });
-    if !has_other_fd {
-        release_flock_for_file(file);
-    }
-}
-
 fn release_posix_locks_for_file(file: &alloc::sync::Arc<dyn FileOp>) {
     let Ok(key) = flock_key(file) else {
         return;
@@ -1542,6 +1564,14 @@ fn release_posix_locks_for_file(file: &alloc::sync::Arc<dyn FileOp>) {
     }
 }
 
+pub(crate) fn release_posix_locks_for_process(owner_pid: usize) {
+    let mut locks = POSIX_LOCKS.lock();
+    locks.retain(|_, entries| {
+        entries.retain(|entry| entry.owner_pid != owner_pid);
+        !entries.is_empty()
+    });
+}
+
 fn flock_conflicts(entries: &[FlockEntry], owner: usize, kind: FlockKind) -> bool {
     entries.iter().any(|entry| {
         entry.owner != owner && (entry.kind == FlockKind::Exclusive || kind == FlockKind::Exclusive)
@@ -1553,11 +1583,16 @@ fn set_flock(file: &alloc::sync::Arc<dyn FileOp>, kind: FlockKind) -> SysResult 
     let owner = flock_owner(file);
     let mut locks = FLOCKS.lock();
     let entries = locks.entry(key).or_default();
+    entries.retain(|entry| entry.owner_ref.upgrade().is_some());
     if flock_conflicts(entries, owner, kind) {
         return Err(Errno::EAGAIN);
     }
     entries.retain(|entry| entry.owner != owner);
-    entries.push(FlockEntry { owner, kind });
+    entries.push(FlockEntry {
+        owner,
+        owner_ref: alloc::sync::Arc::downgrade(file),
+        kind,
+    });
     Ok(())
 }
 
@@ -1607,7 +1642,6 @@ pub fn sys_flock(fd: usize, operation: usize) -> SysResult<usize> {
 pub fn sys_close(fd: usize) -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
     if let Ok(fd_entry) = task.get_fd_entry(fd) {
-        release_flock_for_file_if_last_fd(fd, &fd_entry.file);
         release_posix_locks_for_file(&fd_entry.file);
     }
     task.close(fd)?;
@@ -1635,7 +1669,6 @@ pub fn sys_close_range(first: usize, last: usize, flags: usize) -> SysResult<usi
             let _ = task.set_fd(fd, entry)?;
         } else {
             if let Ok(fd_entry) = task.get_fd_entry(fd) {
-                release_flock_for_file_if_last_fd(fd, &fd_entry.file);
                 release_posix_locks_for_file(&fd_entry.file);
             }
             let _ = task.close(fd);

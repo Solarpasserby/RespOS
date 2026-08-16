@@ -139,6 +139,10 @@ lazy_static! {
         });
     static ref CONSOLE_INPUT: SpinNoIrqLock<ConsoleInputState> =
         SpinNoIrqLock::new(ConsoleInputState::new());
+    /// Firmware console reads are destructive. The timer-service hart and a
+    /// foreground reader may both pump input, so serialize the complete drain
+    /// operation rather than only protecting the destination queues.
+    static ref CONSOLE_PUMP: SpinNoIrqLock<()> = SpinNoIrqLock::new(());
 }
 
 #[derive(Clone, Copy)]
@@ -197,6 +201,7 @@ fn terminal_signal(byte: u8, termios: KernelTermios) -> Option<Sig> {
 /// Pull all currently available firmware-console bytes through the shared
 /// line discipline.
 fn pump_console_input() {
+    let _pump = CONSOLE_PUMP.lock();
     let termios = CONSOLE_TERMINAL.lock().termios;
     let terminal = *CONSOLE_TERMINAL.lock();
     loop {

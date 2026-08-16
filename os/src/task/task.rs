@@ -2873,6 +2873,7 @@ fn exit_process_group(task: Arc<TaskControlBlock>, cause: ExitCause) {
     if fd_table_owned_by_group {
         task.fd_table.lock().clear();
     }
+    crate::syscall::release_posix_locks_for_process(tgid);
     crate::syscall::remove_posix_timers_for_owner(tgid);
 
     cause.apply_to(&leader);
