@@ -130,6 +130,27 @@ sh /respos/software-posix.sh
 cleanup 后，至少双架构各跑一轮；修改小写原子性时额外在较慢的 LA64 同一 QEMU 连续跑三轮，并复跑
 本文后面的双 libc FIFO 五项 LTP。
 
+### pthread 与 posix_spawn libc 组合矩阵
+
+先在宿主 Linux 运行同源 oracle：
+
+```bash
+scripts/run_libc_combination_linux.sh
+```
+
+再按上节方式启动 RV64 或 LA64 software guest，在 Alpine shell 中执行：
+
+```sh
+sh /respos/software-libc.sh
+```
+
+成功时依次输出 `pthread_core`、`pthread_detach_reuse`、`pthread_robust`、`pthread_pshared`、
+`pthread_fork_exec`、`posix_spawn` 六项 `LIBC_COMBINATION ... PASS`，最后输出
+`LIBC_COMBINATION ALL PASS` 和
+`SOFTWARE_LIBC ALL PASS`。guest 脚本使用镜像内 GCC 严格编译 `/respos/libc-combination.c`，覆盖 TLS
+destructor、robust/pshared futex、线程资源复用，以及 spawn file actions/signal/pgroup/PATH/ENOENT。
+高风险 task/futex 修改后可在同一 guest 直接对 `/tmp/respos-software-libc/libc-combination` 循环至少 8 轮。
+
 脚本当前对齐官方 `on-site-final-2025@9ea291d` 的离线命令：四个程序均执行 help 加载；Git 走
 `README.md → add . → commit → status/log`，GCC/rustc 使用各自默认输出名并运行，Vim 以 ex 模式真实
 修改和保存文件。全屏交互验证可执行 `vim -Nu NONE -n /tmp/test.txt`，完成插入、`:wq`，再用 `cat`

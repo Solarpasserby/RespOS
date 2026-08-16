@@ -1,5 +1,32 @@
 # RespOS 当前状态
 
+## 2026-08-16 pthread 与 `posix_spawn()` libc 组合矩阵（当前工作树，基线 `4fb2b7e8`）
+
+- **同源契约探针**：新增 `respos-software/libc-combination.c`，以同一份严格 C11 源码在宿主 Linux 和
+  Alpine guest 验证六组 libc 组合路径：线程 create/join、mutex/condition/rwlock/once、TLS destructor；
+  detached thread 完成与 32 轮 detached 加 32 轮 joinable 资源压力；robust mutex
+  owner-death/consistent/relock；匿名
+  `MAP_SHARED` 上跨进程 pshared mutex/condition；活跃 sibling 阻塞时的 fork/child exec/parent join；以及
+  `posix_spawn()` 的 stdout open action、fd close action、signal mask/default、独立 pgrp、
+  `posix_spawnp()` PATH 搜索和缺失程序 `ENOENT`。
+- **Linux oracle**：`scripts/run_libc_combination_linux.sh` 使用
+  `-std=c11 -O2 -Wall -Wextra -Werror -pthread` 编译运行，完整矩阵连续 20 轮通过。探针不再对 detached
+  thread 调用 `pthread_join()`；POSIX 不保证该误用的可移植返回，不能把 libc 因此崩溃误判为内核线程
+  回收失败。
+- **双架构证据**：RV64/LA64 release、4 GiB/2 hart、software 镜像均输出六项
+  `LIBC_COMBINATION ... PASS`、`LIBC_COMBINATION ALL PASS` 与 `SOFTWARE_LIBC ALL PASS`，随后各直接运行
+  完整二进制 8 轮均通过。日志为 `/tmp/respos-rv-software-libc.log`（SHA-256
+  `b6bb8aa65c3e027602ff83d0fc0c04b952f89dc8bde5660c57751f8cf732f9ca`）和
+  `/tmp/respos-la-software-libc.log`
+  （`7f43499ce50d6a111f3a2144fe9af14d58fe21b7e07c51009b4f4f027bb0783a`）。本轮还在两架构复跑
+  `SOFTWARE_POSIX ALL PASS` 与 Git/Vim/Make/Cargo 的 `SOFTWARE_EXTENDED ALL PASS`；最终 libc 日志
+  单独收口六项及 8 轮压力，避免应用输出淹没契约 marker。
+- **结论与边界**：本轮没有发现需要修改内核的稳定差异；现有 clone/futex/robust-list/vfork/exec
+  基础足以承载上述 Alpine musl 组合路径。当前证据不包含 pthread cancellation、priority
+  inheritance/ceiling、barrier/spinlock、fork 后在 child 执行非 async-signal-safe 操作、完整
+  `posix_spawn` scheduler attributes，以及 glibc guest、named semaphore/shared memory 和 AIO；这些仍按
+  真实 workload 分簇推进。
+
 ## 2026-08-16 软件 POSIX 矩阵、命名 FIFO、pipe 原子性与锁生命周期（当前工作树，基线 `21c02eb2`）
 
 - **真实工具矩阵**：新增 `respos-software/software-posix.sh`，使用 Alpine 自带

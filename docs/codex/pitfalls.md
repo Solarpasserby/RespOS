@@ -1,5 +1,17 @@
 # RespOS 已确认易错点
 
+## 对 detached pthread 调用 join 不能作为可移植内核 oracle
+
+- 状态：已确认；测试夹具已修正
+- 适用范围：pthread detach/resource-reclaim probe、musl/glibc 差异归因
+- 最后验证：2026-08-16
+- 证据：`respos-software/libc-combination.c`、宿主 Linux 与 RV64 Alpine 首轮对照
+- 内容：对 detached thread 再调用 `pthread_join()` 属于不可依赖的误用，libc 不保证统一返回
+  `EINVAL`；RV64 Alpine 首版夹具在此前四线程组通过后因此段错误，但移除该断言、保持线程明确存活并
+  用 condition 验证其完成后，双架构完整矩阵及各 8 轮压力均通过。
+- 后续影响：线程回收测试应验证 detached worker 的可观察完成、同步对象不再被访问以及后续大量线程
+  create/join 能继续成功；不得把 join detached 的返回值或崩溃直接归因为 clone/futex 内核回归。
+
 ## chroot 先检查 privilege 会把 pathname 与目录权限错误遮蔽为 EPERM
 
 - 状态：已确认并修复

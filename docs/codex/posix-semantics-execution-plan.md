@@ -112,7 +112,8 @@ HTTP(S)/SSH。本文件继续维护已知 ABI 边界、证据和 backlog，但�
 | ext4 特殊 inode、`mknod` device payload 与 xattr 限制 | 双架构 probe 验证四类 inode mode、12-bit major/20-bit minor 的 stat/statx 回报与 xattr 限制；musl/glibc 13-case mknod/xattr 及 4-case statx 簇通过 | 双架构已验证（当前范围） | 设备驱动 open/read/write 语义按需求另立子项；不扩展 kernel 32-bit device encoding |
 | ext4 `fallocate()` default/`KEEP_SIZE` | Linux 物理预留 probe 通过；双架构 musl/glibc `fallocate03` 八项均返回 `EOPNOTSUPP` | 已知差异 | 待确认：为 lwext4 unwritten extent 增加事务化预分配入口；禁止稀疏扩容伪装 |
 | SysV SHM `shmat/shmdt` | 跨 attach 数据/futex、`IPC_RMID` lifecycle、`shm_nattch` MM identity，以及 `shmat` 与最后 detach/RMID 的发布竞态和失败回滚 probe 均在 Linux/RV64/LA64 通过；竞态门禁覆盖 32 轮双 attacher（64 次 attach）和 128 轮顺序回收循环；`SHMMIN/SHMMAX`、existing-key size/flag errno、默认 `SHMMNI=4096`、clean-table `SHMALL=2`、已有对象时动态下调 `SHMALL/SHMMNI`、固定配额双创建者线性化、核心 metadata、flat credential 非 owner 权限，以及当前无-swap模型的 `SHM_LOCKED` flag/ownership 已通过；非空地址已按精确映射处理；`shmctl01` metadata 断言正确，但 LA64 卡在 20-child signal/reap teardown；LA64 glibc 2.38 仍有旧 64 KiB SHMLBA 冲突 | 双架构已验证（当前共享/生命周期/计数/双 attacher 线性化、顺序回收、size、SHMMNI、SHMALL 静态/动态配额、固定配额并发创建、核心 metadata、基础权限与 lock 控制面范围）；LA teardown 与 runtime 已知差异 | 待协商：LA 多子进程 signal/exit/wait 活性；另补更宽 N 路并发、`SHM_REMAP` 并发、并发 sysctl/create、IPC namespace、物理内存/ID 溢出、namespace capability、lock 的 `RLIMIT_MEMLOCK`/真实 pinning 与绝对 timestamp；runtime 更新 |
-| `pthread_*`/named sem/shm/AIO/`posix_spawn` | 尚无完整 libc 组合矩阵 | 待验证 | musl/glibc 同源 probe 簇 |
+| `pthread_*`/`posix_spawn` | Alpine musl 同源 probe 覆盖 create/join/detach、TLS destructor、mutex/cond/rwlock/once、robust/pshared、active-sibling fork/exec，以及 spawn file actions/signal/pgroup/PATH/ENOENT；Linux 20 轮、RV64/LA64 各 8 轮通过 | 双架构已验证（当前 musl 组合范围） | cancellation/PI/barrier/spin、child 非 async-signal-safe 路径、scheduler attributes 与 glibc guest |
+| named sem/shm/AIO | 尚无完整 libc 组合矩阵 | 待验证 | musl/glibc 同源 probe 簇 |
 | message queue、`mlockall`、其余 XSI IPC | 需求尚无证据 | 可选扩展 | 需求触发记录；默认不实现 |
 
 ## 单项闭环方法
@@ -344,6 +345,11 @@ DAX/huge page 按当前范围明确排除。
 PageCache 唯一页身份和 writeback error cursor，不为 POSIX 用例恢复 close 全盘同步。
 
 ## 里程碑 M5：验证 libc 组合接口
+
+2026-08-16 已闭合第一批 Alpine musl 组合路径：pthread create/join/detach、mutex/cond/rwlock/once、TLS
+destructor、robust/pshared、active-sibling fork/exec，以及 `posix_spawn` 的 file actions、signal
+mask/default、pgroup、PATH 搜索和缺失程序失败回报。Linux 完整矩阵连续 20 轮、RV64/LA64 各 8 轮
+通过；剩余项仍按下列顺序由 workload 驱动，不把当前范围外推为完整 pthread/POSIX spawn 支持。
 
 此阶段原则是“先测 libc 路径，再决定是否增加内核入口”。按以下顺序分簇：
 
