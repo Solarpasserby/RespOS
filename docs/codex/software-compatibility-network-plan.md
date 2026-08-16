@@ -104,11 +104,11 @@ default/`KEEP_SIZE` unwritten extent、AIO、POSIX message queue、namespace/cgr
 
 ### 当前边界
 
-- Makefile 已向两套 QEMU 挂载 virtio-net，但内核当前只有 `LoopbackDev`；现有 TCP/UDP/iperf 证据主要
-  证明 loopback socket 语义。
-- `virtio-drivers` 和既有 DMA/HAL 可复用，但当前驱动目录只有 block 实现。
-- RV64 可从 virtio-mmio 设备类型扫描起步；LA64 当前 PCI 枚举只寻找 block，新增 net 前需要避免重复
-  扫描和 BAR 分配互相踩踏。
+- 2026-08-16 更新：RV64 virtio-mmio 与 LA64 virtio-pci net 已合入，loopback/Ethernet 共享 SocketSet；
+  QEMU 静态 IPv4、默认路由、UDP DNS、HTTP 与 Git HTTPS `ls-remote`/clone 已双架构通过。
+- 内核 HTTP 已降为 `kernel_http` diagnostic feature，不进入普通 software/final/submission 路径。
+- 下一阻断转为 Git SSH 用户态注入和门禁，以及 DHCP/中断、断网/重连等硬化；详细证据见
+  [current-status.md](./current-status.md)。以下 B0--B4 保留为设计与尚未完成部分的检查表。
 
 ### B0：设备与接口契约
 

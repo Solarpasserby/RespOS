@@ -14,6 +14,7 @@ io_buffer_pool = []
 debug_traces = []
 fault_trace = []
 la_global_kernel = []
+kernel_http = []
 
 [[bin]]
 name = "os"

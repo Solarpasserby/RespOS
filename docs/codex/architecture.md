@@ -1078,21 +1078,26 @@ FdTable slot (FdEntry: descriptor flags)
 
 ## 网络模型
 
-### smoltcp 回环路径是当前主要实现
+### smoltcp SocketSet 由 loopback 与 virtio-net 两个接口共同驱动
 
-- 状态：已确认
-- 适用范围：TCP/UDP socket 与本地网络 benchmark
-- 最后验证：2026-08-03
+- 状态：双架构 QEMU 用户态外连已确认
+- 适用范围：TCP/UDP socket、loopback benchmark、QEMU virtio-net 静态 IPv4
+- 最后验证：2026-08-16
 - 证据：`os/src/net/mod.rs`、`os/src/net/listen.rs`、`os/src/net/socket.rs`、
-  `os/src/syscall/net.rs`；RV64 CAgent 三轮并发回归
-- 内容：socket syscall 经 FileOp socket 对象进入 TCP/UDP 实现，全局 `SocketSet`、loopback
-  interface/device 和 listen table 由锁保护，`poll_interfaces` 驱动协议栈。smoltcp 的单个
+  `os/src/syscall/net.rs`、`respos-software/software-network.sh`；双架构软件网络与 socket-connect 日志见
+  [current-status.md](./current-status.md)
+- 内容：socket syscall 经 FileOp socket 对象进入 TCP/UDP 实现，全局 `SocketSet` 同时由 IP-medium
+  loopback 和 Ethernet-medium virtio-net interface 驱动。TCP connect 按显式本地地址或目的地址选择
+  interface context；UDP 匿名绑定按目的地址选择源 IP，wildcard bind 保持 `0.0.0.0`。QEMU slirp
+  Ethernet 使用 `10.0.2.15/24` 和默认网关 `10.0.2.2`，DNS proxy 为 `10.0.2.3`。Interface lock 必须先于
+  SocketSet lock，和 `poll_interfaces` 一致。smoltcp 的单个
   listener 完成握手后会成为连接 socket，因此 listen table 按受限 `listen(backlog)` 预建
   listener 池；poll 将已连接 handle 转入 accept queue 并及时补位，避免同一轮并发 SYN 在
   userspace `accept` 前收到 reset。
 - 后续影响：网络失败应先区分 ABI、协议状态和测试服务端启动时序，不能只凭一次
   `Connection refused` 判断内核网络语义损坏。修改 poll/accept/close 时必须同时维护 listener
-  池、accept queue 和 socket handle 的唯一所有权，避免泄漏或重复 remove。
+  池、accept queue 和 socket handle 的唯一所有权，避免泄漏或重复 remove。当前地址配置只适用于
+  QEMU user networking；物理网络或不同 subnet 不能复用这些常量冒充 DHCP/配置接口。
 
 ### TCP 阻塞等待同时使用事件唤醒和短定时兜底
 

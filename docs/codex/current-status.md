@@ -1,5 +1,31 @@
 # RespOS 当前状态
 
+## 2026-08-16 virtio-net 用户态外连、DNS 与 Git HTTPS 双架构闭合（当前合并工作树）
+
+- **协议栈修正**：TCP `connect()` 不再固定借用 loopback context；未显式绑定时按目的地址选择
+  loopback 或 Ethernet，显式绑定时由本地地址约束接口，并保持 Interface→SocketSet 锁序。
+  Ethernet interface 安装 QEMU user networking 的 `0.0.0.0/0 via 10.0.2.2`；UDP wildcard bind
+  保留 `0.0.0.0`，匿名 `connect/sendto` 按目的地址选择 `127.0.0.1` 或 `10.0.2.15`。无真实 IPv4
+  接口时，匿名非回环请求返回 `ENETUNREACH`，不再伪装成 loopback/`ECONNREFUSED`。
+- **诊断服务隔离**：内核 HTTP server 改由 `kernel_http` feature 控制；普通 preliminary/final/software
+  构建只启用 virtio-net，不占用 80 端口。`make run-{rv,la}-diagnostic` 自动传入该 feature；HTTP
+  listener 注册失败会回收已加入 SocketSet 的 handle。
+- **可复现软件门禁**：新增 `respos-software/software-network.sh`。两张 Alpine 镜像的
+  `/etc/resolv.conf` 为空，launcher 在 software/final 模式且未发现既有 `nameserver` 时安装 QEMU DNS
+  `10.0.2.3` fallback；RV64 guest 已确认直接 `nslookup` 成功。脚本随后验证 UDP DNS、
+  公网 HTTP、GitHub HTTPS `ls-remote` 和浅克隆。RV64/LA64 release、4 GiB/2 hart 均输出四项
+  `SOFTWARE_NETWORK ... PASS` 与 `SOFTWARE_NETWORK ALL PASS`，克隆 HEAD 均为 `7fd1a60`。
+  日志 `/tmp/respos-rv-software-network-current.log`（SHA-256
+  `faa79d09bc86ad099b47fbddcd410c03ca2f558c14d638ab3b64b22701e0fcbe`）和
+  `/tmp/respos-la-software-network-current.log`（`9d2599eb6c0aadbc7b0d3c1f6e9c5705bad1e03387d97731869764beb3ac3acb`）。
+- **相邻回归**：双架构 `socket_connect_probe` 的 success/refused/`SO_ERROR`/同 fd retry 全部通过，日志
+  `/tmp/respos-{rv,la}-net-loopback-final.log`。默认与 `kernel_http` 双架构 release 构建均通过；
+  RV64 diagnostic feature 实际监听 80 且宿主 curl 得到 1277-byte 页面，日志
+  `/tmp/respos-rv-net-http-feature.log`。
+- **边界**：当前证明 QEMU slirp 静态 IPv4、UDP DNS、HTTP 和 Git HTTPS clone；尚无 DHCP、IPv6
+  Ethernet、设备中断、断网/重连/超时矩阵。镜像没有 OpenSSH，Git SSH 仍需注入用户态程序后验证；
+  不能把 HTTPS 结果外推为 SSH 已完成。
+
 ## 2026-08-16 pthread 与 `posix_spawn()` libc 组合矩阵（当前工作树，基线 `4fb2b7e8`）
 
 - **同源契约探针**：新增 `respos-software/libc-combination.c`，以同一份严格 C11 源码在宿主 Linux 和
@@ -114,7 +140,24 @@
 - **保留边界**：当前仍只有单一物理 console，没有 PTY、IXON/IXOFF、UTF-8 erase、完整 Linux N_TTY
   4096-byte buffer/wakeup、水位控制、hangup 后 I/O、`TIOCSWINSZ/SIGWINCH`。本轮可声明物理 console
   上的基础 canonical/raw 与交互 Vim 闭环，不应外推为完整 Linux tty 子系统。
+## 2026-08-16 virtio-net 与内核内 HTTP 服务器（基于 `cce99e0`，分支 `feat/http`）
 
+- **内容**：新增 `drivers/virtio/net_dev.rs`（VirtIoNetDev，复用既有 DMA bounce/HAL），RV64 从
+  virtio-mmio 扫描 Network 设备、LA64 统一 PCI 枚举（block/net 共享确定性 BAR 分配）后接入
+  `net/ethernet.rs`（smoltcp Ethernet Device）。`net/http.rs` 在真实网卡上绑定 `0.0.0.0:80`，
+  实时渲染 uptime/memory/tasks/CPU/PageCache；空闲循环按 10ms 节流驱动网络与 HTTP。以太网接口
+  先于回环 poll，保证非回环 socket 正确 drain 发送缓冲。
+- **启动栈修复**：原 64 KiB/hart 启动栈在 virtio-net + smoltcp 接口初始化时越界覆盖 `.data`
+  （表现为 `physical_memory_end`/`PER_CPUS` 被随机值破坏，debug 下 `attempt to add with overflow`
+  panic）。RV64/LA64 启动栈扩到 256 KiB/hart。
+- **验证**：RV64/LA64 release 构建通过；`make run-{rv,la}-diagnostic` 后宿主
+  `curl http://127.0.0.1:8080/`（hostfwd 8080->80，免 root）双架构均返回 `200`，RV64
+  `size=1274`、LA64 `size=1281`，正文含 `<title>RespOS 内核内 HTTP 服务器</title>`。串口出现
+  `[net] virtio-net up, mac=..., guest ip=10.0.2.15` 与 `[net] in-kernel HTTP server listening on
+  port 80`；LA64 `[smp] LA online mask=0x3`。
+- **边界**：HTTP 服务是 RX/TX、listen/accept、ARP/TCP 的阶段性诊断工具，不替代 Git HTTP(S)/SSH
+  网络门禁；真实网络验收仍按 [software-compatibility-network-plan.md](./software-compatibility-network-plan.md)
+  主线 B 推进。LA64 debug 内核在本环境启动期无串口输出（release 正常），未归因于本轮改动。
 ## 2026-08-16 2025 Alpine 软件兼容性镜像已接入（当前工作树）
 
 - **获取入口**：`scripts/get_img.sh` 新增 `software [rv|la|both]` 组；无参数仍保持原 `standard`

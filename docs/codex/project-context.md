@@ -58,8 +58,8 @@
 | `os/src/fs/` | VFS、ext4、mount、namei、fd、page cache、pipe、proc/dev | 区分 fd、open file、path、dentry、inode |
 | `os/src/syscall/` | Linux ABI 参数解析与各领域入口 | 保持薄层，避免在 syscall 中复制领域状态机 |
 | `os/src/signal/` | signal state、handler、siginfo、alt stack | trap context 有架构差异 |
-| `os/src/net/` | smoltcp socket、TCP/UDP、loopback、listen table | 当前只接入 IP-medium loopback，尚无真实 NIC 数据面 |
-| `os/src/drivers/` | virtio block 和设备/DMA 抽象 | QEMU 虽挂载 virtio-net，内核尚无 net driver；RV 使用 MMIO，LA 使用 PCI |
+| `os/src/net/` | smoltcp socket、TCP/UDP、loopback/Ethernet、listen table | loopback 与 virtio-net 共享 SocketSet；当前真实接口是 QEMU 静态 IPv4 |
+| `os/src/drivers/` | virtio block/net 和设备/DMA 抽象 | RV 使用 MMIO，LA 使用 PCI；真实网卡当前采用 10ms polling |
 | `user/` | no_std 用户库、系统调用封装、工具、probe、testrunner | `user/build.rs` 生成 LTP 清单 |
 | `img/` | 比赛测试镜像 | 运行会修改镜像内容，必要时从 `.xz` 恢复 |
 | `judge/` | LTP 日志解析、Linux baseline 对比 | 不要用 QEMU 退出码替代日志分析 |
@@ -76,9 +76,9 @@
 - 最后验证：2026-08-16
 - 证据：[software-compatibility-network-plan.md](./software-compatibility-network-plan.md)、当前源码的
   loopback net 与 block-only virtio driver、官方 2023--2025 现场赛 README
-- 内容：Phase 5 后续改为真实 workload 驱动。当前主线先验证 Git/Vim/GCC/rustc，再按第一个稳定失败
-  补 TTY/PTY、进程/libc、文件一致性、proc/dev 等语义；队友从 virtio-net bring-up 推进 DNS/TCP、
-  Git HTTP(S) 与 SSH。HTTP server 只作可选诊断，不是交付目标。
+- 内容：Phase 5 后续改为真实 workload 驱动。Git/Vim/GCC/rustc 本地矩阵已建立；virtio-net 已合入并
+  双架构通过用户态 DNS/HTTP/Git HTTPS clone。后续继续由真实失败补 TTY/PTY、进程/libc、文件一致性、
+  proc/dev 等语义，并推进 Git SSH。HTTP server 只作可选诊断，不是交付目标。
 - 后续影响：两条线在 Git 本地 → HTTP(S) → SSH 处汇合，共享入口实行单写入者；真实网卡证据必须
   排除 loopback，所有应用通过声明必须绑定当前 commit、镜像和双架构日志。
 

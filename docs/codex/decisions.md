@@ -19,6 +19,23 @@
 - 后续影响：不能用 loopback 测试、QEMU 设备参数或单个 syscall 成功宣称网络/应用兼容。未取得绑定
   commit、镜像、架构和日志的结果一律标记 `待验证`；共享入口实行单写入者，凭据不得进入仓库或日志。
 
+## 真实 inet socket 按地址选择接口，内核 HTTP 只属于诊断 feature
+
+- 状态：已采用
+- 适用范围：smoltcp loopback/Ethernet 共存、TCP connect、UDP 自动绑定、比赛与软件镜像
+- 最后验证：2026-08-16
+- 证据：`os/src/net/{mod,tcp,udp,http}.rs`、`os/Cargo.toml`、双架构软件网络与 loopback 回归日志见
+  [current-status.md](./current-status.md)
+- 决策：显式本地绑定优先约束 interface；未绑定时 loopback 目的选择 127.0.0.1/loopback context，其他
+  IPv4 目的选择 10.0.2.15/Ethernet context。wildcard bind 保留 wildcard。QEMU 静态 Ethernet 安装
+  10.0.2.2 默认路由。两个 interface 共享 SocketSet，统一保持 Interface→SocketSet 锁序。内核 HTTP
+  server 由 `kernel_http` feature 控制，只由 diagnostic 入口默认启用。
+- 原因：让所有 connect/UDP 自动绑定固定使用 loopback 会使真实网卡只能接受入站连接；在所有 profile
+  无条件启动内核 HTTP 又会抢占用户态 80 端口并引入无关资源与性能状态。地址驱动选择同时保留既有
+  loopback ABI 和真实外连能力。
+- 后续影响：增加 DHCP、多 NIC、IPv6 或策略路由时，应把当前二选一函数升级为路由/源地址模型，而不是
+  继续堆目的地址特判。新增后台网络服务必须独立 feature/profile，不得静默进入 submission 路径。
+
 ## 比赛提测固定在已验证性能提交，Phase 5 健壮版保留给现场赛
 
 - 状态：已采用

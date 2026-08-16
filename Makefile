@@ -61,6 +61,8 @@ RV_DIAGNOSTIC_MEM ?= 4G
 RV_DIAGNOSTIC_SMP ?= 1
 LA_DIAGNOSTIC_MEM ?= 12G
 LA_DIAGNOSTIC_SMP ?= 12
+RV_DIAGNOSTIC_KERNEL_FEATURES ?= kernel_http
+LA_DIAGNOSTIC_KERNEL_FEATURES ?= kernel_http
 RV_SOFTWARE_MEM ?= 4G
 RV_SOFTWARE_SMP ?= 2
 LA_SOFTWARE_MEM ?= 4G
@@ -305,7 +307,7 @@ run-rv-qemu:
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 		-no-reboot \
 		-device virtio-net-device,netdev=net \
-		-netdev user,id=net \
+		-netdev user,id=net,hostfwd=tcp::8080-:80 \
 		-rtc base=utc \
 		-drive file=$(RV_DISK_IMG),if=none,format=raw,id=x1 \
 		-device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 |& tee $(RV_OUTPUT)
@@ -323,7 +325,7 @@ run-la-qemu:
 		-device virtio-blk-pci,drive=x0 \
 		-no-reboot \
 		-device virtio-net-pci,netdev=net0 \
-		-netdev user,id=net0,hostfwd=tcp::5555-:5555,hostfwd=udp::5555-:5555 \
+		-netdev user,id=net0,hostfwd=tcp::8080-:80,hostfwd=tcp::5555-:5555,hostfwd=udp::5555-:5555 \
 		-rtc base=utc \
 		-drive file=$(LA_DISK_IMG),if=none,format=raw,id=x1 \
 		-device virtio-blk-pci,drive=x1 |& tee $(LA_OUTPUT)
@@ -372,6 +374,7 @@ run-rv-diagnostic: AUX_FS_DIR = respos-diagnostic
 run-rv-diagnostic: MEM = $(RV_DIAGNOSTIC_MEM)
 run-rv-diagnostic: SMP = $(RV_DIAGNOSTIC_SMP)
 run-rv-diagnostic: RV_OUTPUT = $(RV_DIAGNOSTIC_OUTPUT)
+run-rv-diagnostic: RV_KERNEL_FEATURE_ARGS = --features "$(RV_DIAGNOSTIC_KERNEL_FEATURES)"
 run-rv-diagnostic: build-rv check-rv-final-image build-rv-local-disk run-rv-qemu
 
 run-la-diagnostic: LA_FS_IMG = $(LA_FINAL_FS_IMG)
@@ -380,6 +383,7 @@ run-la-diagnostic: AUX_FS_DIR = respos-diagnostic
 run-la-diagnostic: LA_MEM = $(LA_DIAGNOSTIC_MEM)
 run-la-diagnostic: LA_SMP = $(LA_DIAGNOSTIC_SMP)
 run-la-diagnostic: LA_OUTPUT = $(LA_DIAGNOSTIC_OUTPUT)
+run-la-diagnostic: LA_KERNEL_FEATURE_ARGS = --features "$(LA_DIAGNOSTIC_KERNEL_FEATURES)"
 run-la-diagnostic: build-la check-la-final-image build-la-local-disk run-la-qemu
 
 # Software compatibility: mount the archived Alpine root under -snapshot and

@@ -233,6 +233,7 @@ pub fn run_tasks() -> ! {
         cleanup_dead_tasks();
         if crate::arch::smp::is_timer_service_hart() {
             crate::fs::ext4::flush_expired_lazytime_inodes_if_needed();
+            crate::net::poll_background();
         }
         let mut next_task = fetch_task();
         // Linux charges nvcsw/nivcsw only when scheduling selects a task other

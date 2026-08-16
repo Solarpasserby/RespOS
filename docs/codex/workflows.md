@@ -349,6 +349,64 @@ QEMU 必须附 `-snapshot`，并保存完整串口日志。`task_a_futex_cmp_req
   HART、256M 内存加载 `img/sdcard-rv-pub.img`，并显示 `Rust user shell` 的 `/>` 提示符；
   未进入 `testrunner`。LA 入口已做同样的配置检查，但尚未完成本轮启动验证。
 
+### virtio-net 用户态网络门禁与内核内 HTTP 诊断
+
+- 状态：用户态 DNS/HTTP/Git HTTPS 与可选内核 HTTP 均已验证
+- 适用范围：真实网卡链路、Git HTTPS 门禁、答辩现场“内核内网页”演示
+- 最后验证：2026-08-16
+- 用户态门禁：普通 software 构建启用 virtio-net，但不启用内核 HTTP。启动后运行：
+
+```bash
+make run-rv-software RV_SOFTWARE_MEM=4G RV_SOFTWARE_SMP=2
+# guest Alpine shell：
+/bin/sh /respos/software-network.sh
+
+# LA64 对称命令：
+make run-la-software LA_SOFTWARE_MEM=4G LA_SOFTWARE_SMP=2
+```
+
+判据为 `udp_dns`、`public_http`、`git_https_ls_remote`、`git_https_clone` 四项 PASS 与最终
+`SOFTWARE_NETWORK ALL PASS`。脚本只使用公开 URL，不保存凭据；依赖公网和 GitHub 可达，离线环境失败
+不能直接归因为内核回归。两张归档 Alpine 镜像的 `/etc/resolv.conf` 为空；software/final launcher
+仅在没有既有 `nameserver` 时写入 QEMU DNS `10.0.2.3`，不会覆盖镜像已有的 DNS 策略。
+
+- 内核 HTTP 诊断：`make run-{rv,la}-diagnostic` 自动为内核增加 `kernel_http` feature，在
+  `net::init()` 完成 virtio-net 后绑定 `0.0.0.0:80`。普通 preliminary/final/software/submission
+  构建不启用该服务。顶层 Makefile 的 `-netdev user` 已加
+  `hostfwd=tcp::8080-:80`，宿主机免 root：
+
+```bash
+make run-rv-diagnostic RV_DIAGNOSTIC_MEM=4G       # 进入 Rust user shell 后保持运行
+# 另一终端：
+curl -s http://127.0.0.1:8080/ -o /tmp/respos-http.html -w '%{http_code}\n'
+# 预期输出 200；页面含 /proc 同源的 uptime/memory/tasks/CPU/PageCache 实时状态
+```
+
+快速诊断也可用最小镜像 + 诊断辅助盘直接起 QEMU（`-snapshot`，`respos-diagnostic/profile`
+为 `mode=diagnostic`）：
+
+```bash
+make build-rv RV_KERNEL_FEATURES=kernel_http
+truncate -s 16M /tmp/respos-http.img && mkfs.ext4 -q -F -d respos-diagnostic /tmp/respos-http.img
+qemu-system-riscv64 -machine virt -kernel os/target/riscv64gc-unknown-none-elf/release/os \
+  -m 512M -nographic -snapshot -smp 2 -bios default \
+  -drive file=img/sdcard-rv.img,if=none,format=raw,id=x0 \
+  -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 -no-reboot \
+  -device virtio-net-device,netdev=net -netdev user,id=net,hostfwd=tcp::8080-:80 -rtc base=utc \
+  -drive file=/tmp/respos-http.img,if=none,format=raw,id=x1 \
+  -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1
+# LA64 把 virtio-blk-device/virtio-net-device 换成 virtio-blk-pci/virtio-net-pci，
+# kernel 换成 os/target/loongarch64-unknown-none/release/os
+```
+
+- 判据：串口出现 `[net] virtio-net up, mac=..., guest ip=10.0.2.15` 与
+  `[net] in-kernel HTTP server listening on port 80`；宿主 `curl` 返回 `200` 且正文含
+  `<title>RespOS 内核内 HTTP 服务器</title>`。2026-08-16 实测 RV64 `code=200 size=1274`、
+  LA64 `code=200 size=1281`。
+- 边界：该 HTTP 服务仍只是 RX/TX、listen/accept 与 ARP/TCP 的诊断工具；交付证据来自上面的用户态
+  非 loopback 门禁。Git HTTPS 已闭合，Git SSH 仍需 OpenSSH 用户态与独立日志；详见
+  [software-compatibility-network-plan.md](./software-compatibility-network-plan.md) 主线 B。
+
 ### 文件元数据 Linux/POSIX 对照
 
 Linux 参考程序不依赖 RespOS 私有输出：

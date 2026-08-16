@@ -1687,3 +1687,15 @@ socket 直接返回 `EAGAIN` 是可见 ABI 错误。accept 取走 endpoint 后�
   exit 清理，即使没有可枚举的最后 close。
 - 处理：flock entry 保存 open-file-description weak owner 并在竞争时剔除死亡项；record lock 在进程组
   退出提交点按 TGID 全表删除。不要把两种锁合并成同一种 owner 模型。
+
+## virtio-net 已 up 不代表用户态具备路由与 DNS
+
+- 适用范围：QEMU user networking、smoltcp 多 interface、Alpine Git/curl/wget
+- 现象：宿主通过 hostfwd 能访问内核 HTTP，用户态连接 `10.0.2.2` 却立即拒绝；或同网段访问和 DNS
+  成功，但公网 TCP 一直超时；域名也可能直接报 `bad address`。
+- 根因：入站 listener 不经过 TCP connect 的 interface context；若 connect 仍固定使用 loopback，真实
+  NIC 只能入站。只配置 `10.0.2.15/24` 没有 `0/0 via 10.0.2.2` 时，同网段和 `10.0.2.3` DNS 可成功，
+  公网仍无路由。当前两张 Alpine 软件镜像的 `/etc/resolv.conf` 为空，最后一种失败属于镜像配置。
+- 处理：分别验证 guest→宿主同网段、UDP DNS、公网 HTTP 和 Git HTTPS；检查默认路由确实安装在
+  Ethernet interface，而不是 loopback。launcher 只在 software/final guest 没有既有 nameserver 时安装
+  `10.0.2.3` fallback；运行使用 `-snapshot`，不要修改归档镜像或把空 resolv.conf 误报成 UDP 内核故障。

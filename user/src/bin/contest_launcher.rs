@@ -4,12 +4,15 @@
 extern crate user_lib;
 
 use user_lib::{
-    O_RDONLY, chdir, close, exec, execve, exit, fork, open, poweroff, println, read, waitpid,
+    O_CREATE, O_RDONLY, O_TRUNC, O_WRONLY, chdir, close, exec, execve, exit, fork, open, poweroff,
+    println, read, waitpid, write,
 };
 
 const PROFILE: &str = "/respos/profile\0";
 const GLIBC_DIR: &str = "/glibc\0";
 const GLIBC_BASH: &str = "/bin/bash\0";
+const RESOLV_CONF: &str = "/etc/resolv.conf\0";
+const QEMU_RESOLV_CONF: &[u8] = b"nameserver 10.0.2.3\n";
 
 // Final-round scripts published in the current official RV64 and LA64 images.
 // Keep this policy in user space; the kernel only provides mount and exec.
@@ -86,6 +89,7 @@ fn run_diagnostic() -> i32 {
 
 fn run_software() -> i32 {
     println!("[contest_launcher] software mode: starting Alpine /bin/sh");
+    ensure_qemu_dns();
     let argv = ["sh\0".as_ptr(), "-i\0".as_ptr(), core::ptr::null()];
     let envp = [
         "HOME=/tmp\0".as_ptr(),
@@ -99,6 +103,46 @@ fn run_software() -> i32 {
     println!("[contest_launcher] cannot exec /bin/sh: {}", ret);
     let _ = exit(127);
     127
+}
+
+/// Install the QEMU user-networking DNS proxy only when the image has no DNS
+/// configuration. Existing nameserver policy always wins.
+fn ensure_qemu_dns() {
+    let mut configured = false;
+    let fd = open(RESOLV_CONF, O_RDONLY, 0);
+    if fd >= 0 {
+        let mut data = [0u8; 512];
+        let size = read(fd as usize, &mut data);
+        let _ = close(fd as usize);
+        if size > 0 {
+            configured = core::str::from_utf8(&data[..size as usize]).is_ok_and(|text| {
+                text.lines()
+                    .any(|line| line.split_whitespace().next() == Some("nameserver"))
+            });
+        }
+    }
+    if configured {
+        return;
+    }
+
+    let fd = open(RESOLV_CONF, O_WRONLY | O_CREATE | O_TRUNC, 0o644);
+    if fd < 0 {
+        println!(
+            "[contest_launcher] cannot install QEMU DNS fallback: {}",
+            fd
+        );
+        return;
+    }
+    let written = write(fd as usize, QEMU_RESOLV_CONF);
+    let _ = close(fd as usize);
+    if written == QEMU_RESOLV_CONF.len() as isize {
+        println!("[contest_launcher] installed QEMU DNS fallback 10.0.2.3");
+    } else {
+        println!(
+            "[contest_launcher] short write installing QEMU DNS fallback: {}",
+            written
+        );
+    }
 }
 
 fn path_exists(path: &str) -> bool {
@@ -165,6 +209,7 @@ fn run_final_script(script: &str) {
 
 fn run_final() -> i32 {
     println!("[contest_launcher] final mode: running fixed scripts serially");
+    ensure_qemu_dns();
     if chdir(GLIBC_DIR) < 0 {
         println!("[contest_launcher] cannot enter /glibc; powering off");
         let _ = poweroff();

@@ -18,7 +18,7 @@ use spin::{Mutex, RwLock};
 
 use crate::{
     net::addr::{
-        LOOP_BACK_IP, from_ipendpoint_to_socketaddr, from_sockaddr_to_ipendpoint, is_unspecified,
+        UNSPECIFIED_IP, from_ipendpoint_to_socketaddr, from_sockaddr_to_ipendpoint, is_unspecified,
     },
     syscall::{Errno, SysResult},
     task::{current_task, yield_current_task},
@@ -26,7 +26,9 @@ use crate::{
 };
 
 use super::tcp::PollState;
-use super::{SocketSetWrapper, poll_interfaces, service_task_timers, socket_set};
+use super::{
+    SocketSetWrapper, poll_interfaces, service_task_timers, socket_set, source_address_for,
+};
 
 /// UDP 套接字。
 ///
@@ -116,7 +118,8 @@ impl UdpSocket {
         !self.is_nonblocking()
     }
 
-    /// 绑定本地地址和端口。若地址未指定则默认使用回环地址。
+    /// 绑定本地地址和端口。未指定地址保持 wildcard，以便同时接收
+    /// loopback 与 virtio-net 流量。
     pub fn bind(&self, mut bind_addr: SocketAddr) -> SysResult {
         let mut local_addr = self.local_addr.write();
         if local_addr.is_some() {
@@ -125,10 +128,7 @@ impl UdpSocket {
         if bind_addr.port() == 0 {
             bind_addr.set_port(get_ephemeral_port());
         }
-        let mut local_endpoint = from_sockaddr_to_ipendpoint(bind_addr);
-        if is_unspecified(local_endpoint.addr) {
-            local_endpoint.addr = LOOP_BACK_IP;
-        }
+        let local_endpoint = from_sockaddr_to_ipendpoint(bind_addr);
         let endpoint = IpListenEndpoint {
             addr: (!is_unspecified(local_endpoint.addr)).then_some(local_endpoint.addr),
             port: local_endpoint.port,
@@ -201,13 +201,13 @@ impl UdpSocket {
     /// 设置默认远程地址（connect 后可直接用 send/recv）。
     pub fn connect(&self, remote_addr: SocketAddr) -> Result<(), Errno> {
         let mut self_remote_addr = self.remote_addr.write();
+        let remote_endpoint = from_sockaddr_to_ipendpoint(remote_addr);
         if self.local_addr.read().is_none() {
             self.bind(from_ipendpoint_to_socketaddr(IpEndpoint::new(
-                LOOP_BACK_IP,
+                source_address_for(remote_endpoint.addr)?,
                 get_ephemeral_port(),
             )))?;
         }
-        let remote_endpoint = from_sockaddr_to_ipendpoint(remote_addr);
         let handle = unsafe { self.handle.get().read().unwrap() };
         socket_set()
             .lock()
@@ -362,7 +362,7 @@ impl UdpSocket {
         }
         if self.local_addr.read().is_none() {
             self.bind(from_ipendpoint_to_socketaddr(IpEndpoint::new(
-                LOOP_BACK_IP,
+                source_address_for(remote_addr.addr)?,
                 get_ephemeral_port(),
             )))?;
         }
@@ -452,7 +452,7 @@ pub fn get_ephemeral_port() -> u16 {
         }
         if socket_set()
             .lock()
-            .udp_bind_check(LOOP_BACK_IP, port)
+            .udp_bind_check(UNSPECIFIED_IP, port)
             .is_ok()
         {
             return port;
