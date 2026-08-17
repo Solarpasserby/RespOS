@@ -11,8 +11,6 @@ use user_lib::{
 const PROFILE: &str = "/respos/profile\0";
 const GLIBC_DIR: &str = "/glibc\0";
 const GLIBC_BASH: &str = "/bin/bash\0";
-// 2026 决赛镜像不再携带 /bin/bash，改用 busybox 作为 shell（回退项）。
-const GLIBC_BUSYBOX: &str = "/glibc/busybox\0";
 const BOOTSTRAP_SCRIPT: &str = "/respos/bootstrap.sh\0";
 const RESOLV_CONF: &str = "/etc/resolv.conf\0";
 const QEMU_RESOLV_CONF: &[u8] = b"nameserver 10.0.2.3\n";
@@ -237,22 +235,10 @@ fn run_final_script(script: &str) {
     println!("[contest_launcher] starting {}", display);
     let pid = fork();
     if pid == 0 {
+        let argv = ["bash\0".as_ptr(), script.as_ptr(), core::ptr::null()];
         let envp = [core::ptr::null()];
-        // 优先用 bash（2025 决赛镜像）；若不存在（ENOENT）则回退 busybox sh
-        // （2026 决赛镜像只带 busybox）。
-        let bash_argv = ["bash\0".as_ptr(), script.as_ptr(), core::ptr::null()];
-        let ret = execve(GLIBC_BASH, &bash_argv, &envp);
-        let bb_argv = [
-            "busybox\0".as_ptr(),
-            "sh\0".as_ptr(),
-            script.as_ptr(),
-            core::ptr::null(),
-        ];
-        let ret2 = execve(GLIBC_BUSYBOX, &bb_argv, &envp);
-        println!(
-            "[contest_launcher] cannot exec {}: bash={} busybox={}",
-            display, ret, ret2
-        );
+        let ret = execve(GLIBC_BASH, &argv, &envp);
+        println!("[contest_launcher] cannot exec {}: {}", display, ret);
         exit(127);
     }
     if pid < 0 {
