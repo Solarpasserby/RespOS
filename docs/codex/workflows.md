@@ -303,6 +303,46 @@ make run-la-final LA_FINAL_MEM=12G LA_FINAL_SMP=12  # 本机内存不足时的�
   `Bus 'virtio-mmio-bus.0' not found`，因此不能照抄。
 - 后续影响：建议顺序运行；端口转发和共享构建配置使并行运行收益有限且更难诊断。
 
+### Git SSH clone 与 guest 内初步自举
+
+- 状态：RV64/LA64 已验证
+- 适用范围：远端 Git SSH、真实编译工具链与初步自举门禁
+- 最后验证：2026-08-16
+- 证据：`respos-bootstrap/`、`scripts/build_bootstrap_disk.sh`、双架构日志见
+  [current-status.md](./current-status.md)
+- 内容：先在 GitHub 仓库配置只读 Deploy Key，并把对应私钥保存为仅本轮使用的宿主临时文件。不要把
+  key 放进仓库。宿主内存约 15 GiB 时两架构必须顺序运行，固定单个 QEMU、8 GiB/4 hart：
+
+```bash
+make run-rv-bootstrap \
+  BOOTSTRAP_SSH_KEY=/tmp/respos-bootstrap-key/id_ed25519 \
+  RV_BOOTSTRAP_MEM=8G RV_BOOTSTRAP_SMP=4 \
+  RV_BOOTSTRAP_OUTPUT=/tmp/respos-rv-bootstrap-current.log
+
+make run-la-bootstrap \
+  BOOTSTRAP_SSH_KEY=/tmp/respos-bootstrap-key/id_ed25519 \
+  LA_BOOTSTRAP_MEM=8G LA_BOOTSTRAP_SMP=4 \
+  LA_BOOTSTRAP_OUTPUT=/tmp/respos-la-bootstrap-current.log
+```
+
+脚本固定严格 host-key 检查、禁用交互和额外 identity，依次要求 `ssh_ls_remote`、`ssh_clone`、
+`rust_target`、`toolchain`、`build` 以及最终 `RESPOS_BOOTSTRAP ALL PASS`。RV64 使用根镜像已有 OpenSSH 和
+Rust target；LA64 Make 目标会先下载并校验固定 SHA-256 的 Debian Ports OpenSSH client 与官方 Rust
+target archive，再只注入临时辅助盘。所有根盘均由 QEMU `-snapshot` 只读使用。
+
+验证结束后，确认没有 QEMU 进程，再删除含私钥的临时 key 目录和两张 bootstrap 辅助盘，并在 GitHub
+撤销 Deploy Key。串口日志可保留，但需先确认未含私钥内容：
+
+```bash
+pgrep -af 'qemu-system-(riscv64|loongarch64)' || true
+rm -f /tmp/respos-rv-bootstrap.img /tmp/respos-la-bootstrap.img
+rm -rf /tmp/respos-bootstrap-key
+```
+
+- 边界：这里的“自举”是 guest 使用镜像内现成编译器从当前远端源码生成 RespOS 内核；不是从源代码
+  重建 Rust/GCC/CMake/toolchain 的完全自举。更换远端、branch、nightly 或公开依赖时需同步更新脚本、
+  固定 hash 与证据。
+
 iozone 专项可用编译时诊断开关：
 
 ```bash

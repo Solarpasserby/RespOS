@@ -11,6 +11,7 @@ use user_lib::{
 const PROFILE: &str = "/respos/profile\0";
 const GLIBC_DIR: &str = "/glibc\0";
 const GLIBC_BASH: &str = "/bin/bash\0";
+const BOOTSTRAP_SCRIPT: &str = "/respos/bootstrap.sh\0";
 const RESOLV_CONF: &str = "/etc/resolv.conf\0";
 const QEMU_RESOLV_CONF: &[u8] = b"nameserver 10.0.2.3\n";
 
@@ -29,6 +30,7 @@ enum ContestMode {
     Final,
     Diagnostic,
     Software,
+    Bootstrap,
 }
 
 fn contest_mode() -> ContestMode {
@@ -61,6 +63,7 @@ fn contest_mode() -> ContestMode {
             "mode=preliminary" | "preliminary" => return ContestMode::Preliminary,
             "mode=diagnostic" | "diagnostic" => return ContestMode::Diagnostic,
             "mode=software" | "software" => return ContestMode::Software,
+            "mode=bootstrap" | "bootstrap" => return ContestMode::Bootstrap,
             _ => {}
         }
     }
@@ -103,6 +106,54 @@ fn run_software() -> i32 {
     println!("[contest_launcher] cannot exec /bin/sh: {}", ret);
     let _ = exit(127);
     127
+}
+
+fn run_bootstrap() -> i32 {
+    println!("[contest_launcher] bootstrap mode: starting SSH clone and RespOS build");
+    ensure_qemu_dns();
+    let pid = fork();
+    if pid == 0 {
+        let argv = [
+            "bash\0".as_ptr(),
+            BOOTSTRAP_SCRIPT.as_ptr(),
+            core::ptr::null(),
+        ];
+        let envp = [
+            "HOME=/root\0".as_ptr(),
+            "TMPDIR=/tmp\0".as_ptr(),
+            "TERM=dumb\0".as_ptr(),
+            "LC_ALL=C\0".as_ptr(),
+            "RUSTUP_HOME=/root/.rustup\0".as_ptr(),
+            "CARGO_HOME=/root/.cargo\0".as_ptr(),
+            "PATH=/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\0"
+                .as_ptr(),
+            core::ptr::null(),
+        ];
+        let ret = execve(GLIBC_BASH, &argv, &envp);
+        println!("[contest_launcher] cannot exec bootstrap script: {}", ret);
+        exit(127);
+    }
+    if pid < 0 {
+        println!("[contest_launcher] cannot fork bootstrap script: {}", pid);
+        let _ = poweroff();
+        return 127;
+    }
+
+    let mut exit_code = 0;
+    let waited = waitpid(pid as usize, &mut exit_code);
+    if waited < 0 {
+        println!(
+            "[contest_launcher] waitpid bootstrap script failed: {}",
+            waited
+        );
+    } else {
+        println!(
+            "[contest_launcher] bootstrap script finished with exit code {}",
+            exit_code
+        );
+    }
+    let _ = poweroff();
+    exit_code
 }
 
 /// Install the QEMU user-networking DNS proxy only when the image has no DNS
@@ -235,5 +286,6 @@ fn main() -> i32 {
         ContestMode::Final => run_final(),
         ContestMode::Diagnostic => run_diagnostic(),
         ContestMode::Software => run_software(),
+        ContestMode::Bootstrap => run_bootstrap(),
     }
 }

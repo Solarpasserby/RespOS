@@ -3,6 +3,23 @@
 这里只收录能解释当前代码形态或避免重复踩坑的决策。日期是当前证据最后核验时间，不一定是
 最初提出时间。
 
+## SSH/self-build 验证使用临时辅助盘注入凭据和冻结依赖
+
+- 状态：已采用
+- 适用范围：Git SSH 兼容门禁、guest 内初步自举、RV64/LA64 本地验证
+- 最后验证：2026-08-16
+- 证据：`respos-bootstrap/`、`scripts/build_bootstrap_disk.sh`、
+  `scripts/get_bootstrap_{ssh,rust_std}.sh`、双架构日志见 [current-status.md](./current-status.md)
+- 决策：仓库只保存 GitHub host key 和无秘密的执行脚本。调用者通过 `BOOTSTRAP_SSH_KEY` 显式传入只读
+  Deploy Key；构建器把它以 0600 权限复制到一次性 `/tmp` ext4 辅助盘，QEMU 始终使用 `-snapshot`。
+  LA64 根镜像缺少 OpenSSH client 与 non-softfloat bare target 时，使用固定 URL 和 SHA-256 的公开包
+  注入辅助盘；不修改或重新发布官方根镜像。验证结束必须删除含私钥的辅助盘和临时 key，并撤销 Deploy
+  Key。
+- 原因：这样既能验证真实 `ssh`/Git/编译链，又不会把私钥、宿主 agent 或不可追踪的根镜像改动混入
+  提交产物。冻结公开依赖可区分内核兼容失败与 guest 在线下载波动。
+- 后续影响：不得把 private key、带 key 的 ext4、SSH debug 原文或 agent socket 加入 Git；换 key、包
+  版本或 Rust nightly 后必须记录 fingerprint/hash。该入口只属于本地验证，不能由 `mode=auto` 选择。
+
 ## 现场赛开发以真实软件首失败驱动，网络以 Git HTTP(S)/SSH 为交付目标
 
 - 状态：已采用

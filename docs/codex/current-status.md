@@ -1,5 +1,43 @@
 # RespOS 当前状态
 
+## 2026-08-16 Git SSH 与 guest 内初步自举双架构闭合（当前工作树，基线 `993fa3e0`）
+
+- **交付链路**：新增只用于本地验证的 `mode=bootstrap`、`run-{rv,la}-bootstrap` 与临时辅助盘生成脚本。
+  launcher 配置 QEMU DNS 后执行 `/respos/bootstrap.sh`；脚本以 `BatchMode`、`IdentitiesOnly`、严格
+  `known_hosts` 和只读 Deploy Key 运行 Git SSH `ls-remote`/浅克隆，再在 checkout 内执行目标架构的
+  `make build-rv` 或 `make build-la`。私钥只写入 `/tmp` 辅助镜像，不进入源码、官方根镜像或串口日志。
+- **真实 workload 修复**：CMake/libuv 在生成器命令中向 `/bin/sh -c` 传入约 11.6 KiB 单参数，暴露
+  `execve` 错把 4096-byte pathname 上限用于 argv/env 字符串的问题。当前路径仍为
+  `USER_CSTR_MAX_LEN=4096/ENAMETOOLONG`，exec 单字符串改为 Linux `MAX_ARG_STRLEN` 的 32 页并返回
+  `E2BIG`，既有 1 MiB 聚合预算保留。随后 CMake 暴露 epoll ABI 错位：RV64/LA64 的
+  `struct epoll_event` 为 16 bytes、`data` 偏移 8，不是旧 probe 和内核使用的 x86 packed 12/4；内核与
+  probe 已统一到 16/8，libuv 不再因错误 fd data 触发断言。
+- **LA64 活性修复**：持续 SSH/编译负载下曾出现 `Exception(Unknown(0))` panic。LoongArch ECODE=0
+  表示 interrupt；QEMU 在陷入后撤销最后一个 `ESTAT.IS` 位时可能留下零 source。用户 trap 现在把该状态
+  作为 spurious timer edge 清除、重编程并调度，而不是作为未知异常终止内核。修复后 LA64 clone、完整
+  自举及双架构 4 GiB/2 hart epoll/signal 专项均未再复现。
+- **RV64 证据**：8 GiB/4 hart、`-snapshot`，SSH checkout
+  `993fa3e09d61054c2203ea7db9d63e411948e590`；guest `make build-rv` 用时 837.58 s，产物
+  11,685,664 bytes，SHA-256 `9eed94a3fe69049598a517140b9525aeb06a8410a45a5f063f26cf37711e57f7`。
+  `/tmp/respos-rv-bootstrap-current.log` SHA-256
+  `19dbe035e36a8d9ae0166f5b58a629af95d45bed5aeab264c9975daeaf52ea88`，结尾
+  `RESPOS_BOOTSTRAP ALL PASS`。
+- **LA64 证据**：同为 8 GiB/4 hart，注入固定 SHA-256 的 Debian Ports OpenSSH client 和官方
+  2026-05-28 `loongarch64-unknown-none` Rust target；SSH checkout 同一提交，guest `make build-la` 用时
+  933.79 s，产物 14,885,792 bytes，SHA-256
+  `883de82d5390893d6e193b9b3f1a1aab2a1012959f3fc0f13771e3d31a8fd71b`。
+  `/tmp/respos-la-bootstrap-current.log` SHA-256
+  `5033d4412ce3ad297d0deee9d8c369cfb90737bf500f569241be5a64d3342e87`，结尾同为 ALL PASS。
+- **相邻回归**：RV64/LA64 no-feature release、4 GiB/2 hart 依次运行 `socket_phase5_probe`、
+  `tcp_half_close_probe`、`udp_shutdown_probe`、`signal_phase5_probe`，四项均 PASS 并正常关机。日志
+  `/tmp/respos-rv-epoll-regression.log`（SHA-256
+  `c9b5f5077cab4ebaf817d69b5577a272c94994ecd7a14870f8cd53f998dcab06`）与
+  `/tmp/respos-la-epoll-regression.log`（`f0a3b539db6b5b40a1ffc93509477c8eea51982f46b4ec36d26dff89e53af7cd`）。
+- **边界**：当前是“从远端取得当前源码并在同架构 guest 生成内核产物”的初步自举，不是由 RespOS
+  自己编译 Rust/GCC/CMake/toolchain 的完全自举，也尚未验证 SSH agent、口令登录、push、submodule、
+  断线恢复或大型历史仓库。LA64 的 OpenSSH 与 bare Rust target 是经固定哈希注入的验证依赖，不属于
+  提交镜像。
+
 ## 2026-08-16 virtio-net 用户态外连、DNS 与 Git HTTPS 双架构闭合（当前合并工作树）
 
 - **协议栈修正**：TCP `connect()` 不再固定借用 loopback context；未显式绑定时按目的地址选择

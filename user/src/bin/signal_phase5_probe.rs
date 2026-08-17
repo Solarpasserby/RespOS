@@ -7,12 +7,12 @@ extern crate user_lib;
 use core::ptr::{null, null_mut};
 use core::sync::atomic::{AtomicUsize, Ordering};
 use user_lib::{
-    clock_gettime_raw, clock_nanosleep_raw, close, epoll_create1, epoll_ctl, epoll_pwait, exec,
-    exit_group, fcntl, fork, futex_raw, getpid, getrusage_raw, kill, mmap_raw, munmap, nanosleep,
-    pipe, ppoll_raw, prlimit64_raw, pselect6_raw, read, readv, sigaction_raw, sigpending_raw,
-    sigprocmask_raw, sigqueueinfo_raw, sigtimedwait_raw, time_get, wait4_raw, write, writev,
-    yield_, IoVec, PollFd, RLimit, RUsage, SignalAction, TimeSpec, O_NONBLOCK, SIGCHLD, SIGCONT,
-    SIGKILL, SIGSTOP,
+    EPOLL_EVENT_SIZE, IoVec, O_NONBLOCK, PollFd, RLimit, RUsage, SIGCHLD, SIGCONT, SIGKILL,
+    SIGSTOP, SignalAction, TimeSpec, clock_gettime_raw, clock_nanosleep_raw, close, epoll_create1,
+    epoll_ctl, epoll_pwait, exec, exit_group, fcntl, fork, futex_raw, getpid, getrusage_raw, kill,
+    mmap_raw, munmap, nanosleep, pipe, ppoll_raw, prlimit64_raw, pselect6_raw, read, readv,
+    sigaction_raw, sigpending_raw, sigprocmask_raw, sigqueueinfo_raw, sigtimedwait_raw, time_get,
+    wait4_raw, write, writev, yield_,
 };
 
 const SIG_BLOCK: usize = 0;
@@ -904,7 +904,7 @@ fn run_timeout_signal_case(wait_kind: usize, restart: bool, default_ignored: boo
                 epfd
             } else {
                 let mut epoll_pipe = [-1i32; 2];
-                let mut event = [0u8; 12];
+                let mut event = [0u8; EPOLL_EVENT_SIZE];
                 event[..4].copy_from_slice(&1u32.to_ne_bytes());
                 let result = if pipe(&mut epoll_pipe) != 0
                     || epoll_ctl(epfd as usize, 1, epoll_pipe[0] as usize, event.as_ptr()) != 0

@@ -1,5 +1,6 @@
 use super::time::{ITimerSpec, clock_time_ms};
 use super::{Errno, SysResult};
+use crate::config::{EPOLL_DATA_OFFSET, EPOLL_EVENT_SIZE};
 use crate::fs::vfs::InodeType;
 use crate::fs::{
     FdEntry, FileOp, KStat, OpenFlags, POLL_READ, POLL_WRITE, PollEvents, PollWaiters, SpecialFd,
@@ -712,22 +713,30 @@ pub fn sys_epoll_ctl(epfd: usize, op: usize, fd: usize, event: *const u8) -> Sys
         const EPOLLRDHUP: u32 = 0x2000;
         const EPOLL_SUPPORTED_EVENTS: u32 =
             0x001 | EPOLLPRI | 0x004 | 0x008 | 0x010 | EPOLLRDHUP | (1 << 31) | (1 << 30);
-        let mut raw = [0u8; 12];
+        let mut raw = [0u8; EPOLL_EVENT_SIZE];
         copy_from_user(raw.as_mut_ptr(), event, raw.len())?;
         let events = u32::from_ne_bytes(raw[..4].try_into().unwrap());
         if events & !EPOLL_SUPPORTED_EVENTS != 0 {
             return Err(Errno::EOPNOTSUPP);
         }
-        Some((events, u64::from_ne_bytes(raw[4..].try_into().unwrap())))
+        Some((
+            events,
+            u64::from_ne_bytes(
+                raw[EPOLL_DATA_OFFSET..EPOLL_DATA_OFFSET + core::mem::size_of::<u64>()]
+                    .try_into()
+                    .unwrap(),
+            ),
+        ))
     };
     epoll.ctl(op, fd, event, target.file)
 }
 
 fn write_epoll_events(events: *mut u8, ready: &[EpollReady]) -> SysResult<usize> {
     for (idx, event) in ready.iter().enumerate() {
-        let mut raw = [0u8; 12];
+        let mut raw = [0u8; EPOLL_EVENT_SIZE];
         raw[..4].copy_from_slice(&event.events.to_ne_bytes());
-        raw[4..].copy_from_slice(&event.data.to_ne_bytes());
+        raw[EPOLL_DATA_OFFSET..EPOLL_DATA_OFFSET + core::mem::size_of::<u64>()]
+            .copy_from_slice(&event.data.to_ne_bytes());
         let dst = unsafe { events.add(idx * raw.len()) };
         copy_to_user(dst, raw.as_ptr(), raw.len())?;
     }

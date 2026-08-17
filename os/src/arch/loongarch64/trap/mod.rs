@@ -183,6 +183,20 @@ pub fn trap_handler(cx: &mut TrapContext) {
             crate::arch::smp::acknowledge_ipi();
             crate::timer::rearm_task_timer_request();
         }
+        // LoongArch ECODE=0 denotes an interrupt. QEMU may withdraw the last
+        // ESTAT.IS bit between taking the trap and this CSR read, leaving a
+        // zero ECODE with no source bit. Treat that state as a spurious timer
+        // edge instead of misclassifying it as an unsupported exception and
+        // panicking the whole kernel under sustained user-space activity.
+        estat::Trap::Exception(estat::Exception::Unknown(0)) => {
+            clear_timer_interrupt();
+            set_next_ti_trigger();
+            if crate::arch::smp::is_timer_service_hart() {
+                crate::timer::await_task_timer_deadline();
+                check_all_task_timers();
+            }
+            preempt_current_task();
+        }
         estat::Trap::Exception(estat::Exception::Syscall) => {
             crate::perf::user_syscall_trap(1);
             restart_syscall_arg0 = handle_user_syscall(cx);

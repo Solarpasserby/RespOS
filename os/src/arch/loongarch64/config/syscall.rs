@@ -1,8 +1,13 @@
 // 系统调用相关配置
 
 pub const USER_CSTR_MAX_LEN: usize = 4096; // 用户态字符串最大长度
+// Linux permits one exec argument/environment string up to MAX_ARG_STRLEN
+// (32 pages, including its terminating NUL). Keep pathname limits separate.
+pub const USER_ARG_STR_MAX_LEN: usize = 32 * 4096;
 pub const USER_ARG_MAX_COUNT: usize = 4096; // argv/envp 指针数上限
 pub const USER_ARG_MAX_BYTES: usize = 1024 * 1024; // argv 或 envp 的字符串总量上限
+pub const EPOLL_EVENT_SIZE: usize = 16;
+pub const EPOLL_DATA_OFFSET: usize = 8;
 
 /// 用户态 sigreturn 跳板代码。
 ///

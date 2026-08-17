@@ -15,6 +15,8 @@ use buddy_system_allocator::LockedHeap;
 
 const USER_HEAP_SIZE: usize = 8 * 4096;
 const USER_ARG_MAX_COUNT: usize = 32;
+pub const EPOLL_EVENT_SIZE: usize = 16;
+pub const EPOLL_DATA_OFFSET: usize = 8;
 
 static mut USER_SPACE: [u8; USER_HEAP_SIZE] = [0; USER_HEAP_SIZE];
 

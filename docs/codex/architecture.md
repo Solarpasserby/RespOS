@@ -82,16 +82,32 @@
   `EXT4_OP_LOCK`。关机路径先尝试 shutdown 辅助 superblock，再 shutdown 根 superblock；即使
   一个设备 flush 失败，也必须继续尝试另一个设备。
 - 启动入口：内嵌 `initproc` 启动内嵌 `contest_launcher`。launcher 从 `/respos/profile`
-  读取 `mode=auto|preliminary|final|diagnostic`。线上 `auto` 以及 profile 缺失、空白或无效时，先检查
+  读取 `mode=auto|preliminary|final|diagnostic|software|bootstrap`。线上 `auto` 以及 profile 缺失、空白或无效时，先检查
   根盘上的 CAgent/BuildStorm 决赛脚本，再检查 musl/glibc basic 初赛脚本；决赛标志优先，未知镜像
   打印告警并安全回退到 preliminary。preliminary exec 原内嵌 `testrunner`；final
   在 `/glibc` 中使用 `/bin/bash` 严格串行运行当前官方决赛镜像固定的
   `cagent_testcode.sh`、`buildstorm_testcode.sh`，全部结束后关机。diagnostic 只供显式本地 profile
-  使用，进入内嵌 `user_shell`，默认提交镜像不会选择它。dispatcher 失败时
+  使用，进入内嵌 `user_shell`；software 进入 Alpine 交互 shell；bootstrap 运行本地辅助盘上的
+  Git-over-SSH clone/self-build 脚本并关机。这三种本地模式都不会进入默认提交镜像。dispatcher 失败时
   `initproc` 仍依次回退到内嵌 `testrunner` 和 `user_shell`。测例策略不进入内核。
 - 后续影响：新增 inode-number lwext4 API 时必须传递所属 mountpoint；新增固有 VFS
   mountpoint 时必须同时插入并 pin 全局 dentry cache，否则 namei 会新建不同的
   dentry 并绕过 mount tree。
+
+### exec 字符串预算与 epoll event 布局按 Linux 目标 ABI 分离
+
+- 状态：RV64/LA64 已实现并经真实 CMake/libuv 与专项验证
+- 适用范围：`execve` argv/env、pathname 用户字符串、`epoll_ctl`、`epoll_pwait`
+- 最后验证：2026-08-16
+- 证据：`os/src/mm/mod.rs`、两架构 `config/syscall.rs`、`os/src/syscall/special_fd.rs`；双架构
+  guest 自举与 epoll/signal 日志见 [current-status.md](./current-status.md)
+- 内容：pathname C string 继续受 4096-byte 上限约束，越界为 `ENAMETOOLONG`；exec argv/env 的单个
+  string 独立允许至 32 pages（含结尾 NUL），越界为 `E2BIG`，并继续受参数个数和聚合预算约束。
+  RV64 与 LA64 Linux UAPI 的 `struct epoll_event` 均为自然对齐 16 bytes：`events` 在 offset 0，64-bit
+  `data` 在 offset 8。内核逐项按 16-byte stride 复制，必须保留 padding，不得套用 x86 的 packed
+  12-byte/offset-4 布局。
+- 后续影响：新增目标架构时必须由该架构 libc/UAPI 验证 epoll 布局；路径与 exec 参数不得重新共用一个
+  C-string 上限。涉及 exec 总量时还需保留 `ARG_MAX` 的整体门禁，不能只扩大单字符串上限。
 
 ### 初始化顺序不可随意交换
 

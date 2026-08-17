@@ -47,7 +47,13 @@ RV_DIAGNOSTIC_DISK_IMG ?= /tmp/respos-rv-diagnostic.img
 LA_DIAGNOSTIC_DISK_IMG ?= /tmp/respos-la-diagnostic.img
 RV_SOFTWARE_DISK_IMG ?= /tmp/respos-rv-software.img
 LA_SOFTWARE_DISK_IMG ?= /tmp/respos-la-software.img
+RV_BOOTSTRAP_DISK_IMG ?= /tmp/respos-rv-bootstrap.img
+LA_BOOTSTRAP_DISK_IMG ?= /tmp/respos-la-bootstrap.img
 LOCAL_AUX_FS_SIZE ?= 16M
+BOOTSTRAP_AUX_FS_SIZE ?= 64M
+BOOTSTRAP_SSH_KEY ?=
+LA_BOOTSTRAP_SSH_PACKAGE ?= /tmp/openssh-client_10.2p1-3_loong64.deb
+LA_BOOTSTRAP_RUST_STD_ARCHIVE ?= /tmp/rust-std-nightly-loongarch64-unknown-none-2026-05-28.tar.xz
 
 # Local resource profiles.  The final defaults mirror the latest contest
 # parameters recorded for RespOS; the platform itself supplies its QEMU args.
@@ -67,6 +73,10 @@ RV_SOFTWARE_MEM ?= 4G
 RV_SOFTWARE_SMP ?= 2
 LA_SOFTWARE_MEM ?= 4G
 LA_SOFTWARE_SMP ?= 2
+RV_BOOTSTRAP_MEM ?= 8G
+RV_BOOTSTRAP_SMP ?= 4
+LA_BOOTSTRAP_MEM ?= 8G
+LA_BOOTSTRAP_SMP ?= 4
 
 RV_PRE_OUTPUT ?= rv-output.txt
 LA_PRE_OUTPUT ?= la-output.txt
@@ -76,6 +86,8 @@ RV_DIAGNOSTIC_OUTPUT ?= /tmp/respos-rv-diagnostic.log
 LA_DIAGNOSTIC_OUTPUT ?= /tmp/respos-la-diagnostic.log
 RV_SOFTWARE_OUTPUT ?= /tmp/respos-rv-software.log
 LA_SOFTWARE_OUTPUT ?= /tmp/respos-la-software.log
+RV_BOOTSTRAP_OUTPUT ?= /tmp/respos-rv-bootstrap.log
+LA_BOOTSTRAP_OUTPUT ?= /tmp/respos-la-bootstrap.log
 
 QEMU_RV ?= qemu-system-riscv64
 QEMU_LA ?= qemu-system-loongarch64
@@ -150,8 +162,11 @@ endif
 	check-rv-final-image check-la-final-image \
 	prepare-la-software-root check-rv-software-image check-la-software-image \
 	build-rv-local-disk build-la-local-disk run-rv-qemu run-la-qemu \
+	build-rv-bootstrap-disk prepare-la-bootstrap-ssh prepare-la-bootstrap-rust-std \
+	build-la-bootstrap-disk \
 	run-rv-pre run-la-pre run-rv-final run-la-final \
 	run-rv-diagnostic run-la-diagnostic run-rv-software run-la-software \
+	run-rv-bootstrap run-la-bootstrap \
 	rv la run-rv-pub run-la-pub \
 	help clean
 
@@ -293,6 +308,20 @@ build-la-local-disk:
 	truncate -s $(LOCAL_AUX_FS_SIZE) $(LA_DISK_IMG)
 	mkfs.ext4 -q -F -d $(AUX_FS_DIR) $(LA_DISK_IMG)
 
+build-rv-bootstrap-disk:
+	@test -n "$(BOOTSTRAP_SSH_KEY)" || { echo "set BOOTSTRAP_SSH_KEY to a temporary read-only SSH key" >&2; exit 1; }
+	@bash scripts/build_bootstrap_disk.sh $(RV_BOOTSTRAP_DISK_IMG) $(BOOTSTRAP_AUX_FS_SIZE) $(BOOTSTRAP_SSH_KEY)
+
+prepare-la-bootstrap-ssh:
+	@bash scripts/get_bootstrap_ssh.sh $(LA_BOOTSTRAP_SSH_PACKAGE)
+
+prepare-la-bootstrap-rust-std:
+	@bash scripts/get_bootstrap_rust_std.sh $(LA_BOOTSTRAP_RUST_STD_ARCHIVE)
+
+build-la-bootstrap-disk: prepare-la-bootstrap-ssh prepare-la-bootstrap-rust-std
+	@test -n "$(BOOTSTRAP_SSH_KEY)" || { echo "set BOOTSTRAP_SSH_KEY to a temporary read-only SSH key" >&2; exit 1; }
+	@bash scripts/build_bootstrap_disk.sh $(LA_BOOTSTRAP_DISK_IMG) $(BOOTSTRAP_AUX_FS_SIZE) $(BOOTSTRAP_SSH_KEY) $(LA_BOOTSTRAP_SSH_PACKAGE) $(LA_BOOTSTRAP_RUST_STD_ARCHIVE)
+
 run-rv-qemu:
 	@test -r $(RV_FS_IMG) || { echo "missing root image $(RV_FS_IMG)" >&2; exit 1; }
 	@test -r $(RV_DISK_IMG) || { echo "missing auxiliary image $(RV_DISK_IMG)" >&2; exit 1; }
@@ -404,6 +433,23 @@ run-la-software: LA_SMP = $(LA_SOFTWARE_SMP)
 run-la-software: LA_OUTPUT = $(LA_SOFTWARE_OUTPUT)
 run-la-software: build-la check-la-software-image build-la-local-disk run-la-qemu
 
+# Bootstrap: clone RespOS through Git-over-SSH into the final root image and
+# build the matching architecture. The private key only enters a /tmp runtime
+# auxiliary image and is never copied into the repository or archived images.
+run-rv-bootstrap: RV_FS_IMG = $(RV_FINAL_FS_IMG)
+run-rv-bootstrap: RV_DISK_IMG = $(RV_BOOTSTRAP_DISK_IMG)
+run-rv-bootstrap: MEM = $(RV_BOOTSTRAP_MEM)
+run-rv-bootstrap: SMP = $(RV_BOOTSTRAP_SMP)
+run-rv-bootstrap: RV_OUTPUT = $(RV_BOOTSTRAP_OUTPUT)
+run-rv-bootstrap: build-rv check-rv-final-image build-rv-bootstrap-disk run-rv-qemu
+
+run-la-bootstrap: LA_FS_IMG = $(LA_FINAL_FS_IMG)
+run-la-bootstrap: LA_DISK_IMG = $(LA_BOOTSTRAP_DISK_IMG)
+run-la-bootstrap: LA_MEM = $(LA_BOOTSTRAP_MEM)
+run-la-bootstrap: LA_SMP = $(LA_BOOTSTRAP_SMP)
+run-la-bootstrap: LA_OUTPUT = $(LA_BOOTSTRAP_OUTPUT)
+run-la-bootstrap: build-la check-la-final-image build-la-bootstrap-disk run-la-qemu
+
 # Backward-compatible aliases.  New scripts and documentation should use the
 # explicit names above.
 rv:
@@ -448,6 +494,9 @@ help:
 	@echo "Alpine software compatibility:"
 	@echo "  make run-rv-software  default: 4 GiB / 2 harts"
 	@echo "  make run-la-software  default: 4 GiB / 2 harts; repairs only a /tmp copy"
+	@echo "Git-over-SSH clone and self-build (requires BOOTSTRAP_SSH_KEY):"
+	@echo "  make run-rv-bootstrap default: 8 GiB / 4 harts"
+	@echo "  make run-la-bootstrap default: 8 GiB / 4 harts"
 
 clean:
 	rm -f $(KERNEL_RV) $(KERNEL_LA) $(SUBMIT_RV_DISK_IMG) $(SUBMIT_LA_DISK_IMG)

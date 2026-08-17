@@ -1,5 +1,30 @@
 # RespOS 已确认易错点
 
+## x86 的 packed epoll_event 不能外推到 RV64/LA64
+
+- 状态：已确认并修复
+- 适用范围：`epoll_ctl`/`epoll_wait` 原始用户 ABI、Rust probe、libuv/其他 C runtime
+- 最后验证：2026-08-16
+- 证据：RV64/LA64 Linux UAPI headers；`os/src/syscall/special_fd.rs`；双架构 CMake 自举与
+  `socket_phase5/tcp_half_close/udp_shutdown/signal_phase5` 日志
+- 内容：旧内核和 Rust probe 都按 12-byte、data offset 4 互相通信，因此专项会自洽通过，却与目标
+  架构 libc 使用的自然对齐 16-byte、offset 8 不兼容。真实 CMake/libuv 随后把 padding/data 误读为 fd，
+  触发 watcher 数组断言。修正内核时必须同步修正 probe，否则旧 probe 反而会制造假回归。
+- 后续影响：手写 syscall struct 时先核对目标 UAPI 的 `sizeof`/`offsetof`，并用真实 libc workload 与
+  非零 64-bit sentinel 验证 round-trip；测试与实现共享同一个错误常量不是独立 oracle。
+
+## pathname 的 4096-byte 上限不能复用于 exec argv/env
+
+- 状态：已确认并修复
+- 适用范围：`execve`、shell `-c`、CMake/Ninja/Make 生成命令、ARG_MAX
+- 最后验证：2026-08-16
+- 证据：guest 内 CMake 约 11.6 KiB `/bin/sh -c` 参数；`os/src/mm/mod.rs`；双架构 self-build 日志
+- 内容：路径通常受 page-sized name buffer 约束，但 Linux 单个 argv/env string 的边界是 32 pages，
+  过长应为 `E2BIG`。旧 `extract_cstrings_from_user()` 复用 pathname helper，导致合法长参数先以
+  `ENAMETOOLONG` 失败，表面上只是 make/CMake 子命令异常退出。
+- 后续影响：pathname、exec 单字符串、argv/env 个数和总字节必须作为四类独立预算维护；扩大单项上限
+  不能绕过整体 ARG_MAX，也不能把 path 的错误码一起改掉。
+
 ## 对 detached pthread 调用 join 不能作为可移植内核 oracle
 
 - 状态：已确认；测试夹具已修正
