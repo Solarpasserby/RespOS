@@ -46,12 +46,22 @@ pub fn rust_main(hart_id: usize, opaque: usize) -> ! {
     arch::smp::init_current_hart(hart_id);
     #[cfg(feature = "board_jh7110")]
     {
-        // Stage 1 最小真机自检：到达此处即证明 _start、early page table、
-        // clear_bss、per-hart 初始化与 SBI console 均在 JH7110 上工作。
-        // 后续 stage 恢复 FDT/MM/驱动初始化后再放开这里。
         println!(
             "[vf2] Hello RespOS on VisionFive 2 (hart_id={}, dtb={:#x})",
             hart_id, opaque
+        );
+        // Stage 2：FDT 内存发现 + 正式 MMU（frame allocator + heap + direct map）。
+        // 之后暂驻留；用户态/块设备/网络/SMP 属于 Stage 3+。
+        config::init_physical_memory_end(opaque);
+        println!(
+            "[vf2] physical_memory_end = {:#x}",
+            config::physical_memory_end()
+        );
+        trap::init();
+        mm::init();
+        println!(
+            "[vf2] mm::init ok, free_frames = {}",
+            mm::free_frame_count()
         );
         loop {
             arch::wait_for_interrupt();

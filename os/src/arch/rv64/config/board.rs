@@ -25,6 +25,12 @@ pub const MAX_PHYSICAL_MEMORY_END: usize = 0x1_4000_0000;
 #[cfg(not(feature = "board_jh7110"))]
 pub const MAX_PHYSICAL_MEMORY_END: usize = 0x4_8000_0000;
 
+/// RAM 物理基址（direct map 首个 GiB 的起点 = RAM_BASE + 1 GiB 之前保留细粒度映射）。
+#[cfg(feature = "board_jh7110")]
+pub const RAM_BASE: usize = 0x4000_0000;
+#[cfg(not(feature = "board_jh7110"))]
+pub const RAM_BASE: usize = 0x8000_0000;
+
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 static PHYSICAL_MEMORY_END: AtomicUsize = AtomicUsize::new(MEMORY_END);
@@ -173,6 +179,13 @@ pub const VIRTIO_MMIO: &[(usize, usize)] = &[
     (0x1000_2000, 0x00_1000), // virtio-mmio-bus.1
 ];
 
+#[cfg(feature = "board_jh7110")]
+pub const MMIO: &[(usize, usize)] = &[
+    (0x1000_0000, 0x00_1000), // UART0
+    (0x0200_0000, 0x00_1000), // CLINT (aclint-mtimer @ 4000000Hz)
+    (0x0c00_0000, 0x400_0000), // PLIC (64 MiB)
+];
+#[cfg(not(feature = "board_jh7110"))]
 pub const MMIO: &[(usize, usize)] = &[
     (0x0010_1000, 0x00_1000), // QEMU goldfish RTC
     // QEMU riscv virt exposes up to 8 virtio-mmio slots at 0x10001000 +
