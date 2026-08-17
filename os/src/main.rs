@@ -73,8 +73,8 @@ pub fn rust_main(argc: usize, argv: usize) -> ! {
     }
 }
 
-/// 2K1000LA 高半区入口：Stage 2 验证 MMU/memory，Stage 3 验证 trap + 核心本地时钟中断。
-/// 暂不接 FS/net/SMP（Stage 4+），先让时钟中断周期性触发并打印 tick 计数。
+/// 2K1000LA 高半区入口：Stage 2 验证 MMU/memory，Stage 3 验证 trap + 核心本地时钟中断，
+/// Stage 4 接上 initproc + 调度器进入用户态。
 #[cfg(all(target_arch = "loongarch64", feature = "board_ls2k1000"))]
 fn rust_main_high_ls2k1000() -> ! {
     arch::enable_kernel_extensions();
@@ -92,34 +92,19 @@ fn rust_main_high_ls2k1000() -> ! {
     println!("[RespOS 2K1000LA] heap OK");
 
     // Stage 3：LIOINTC 最小初始化（真机 MMIO 走 uncached DMW0 窗口，全部屏蔽，
-    // Stage 4 起按需使能外部设备中断）+ 异常入口（EENTRY）+ 核心本地时钟中断。
+    // Stage 5/6 起按需使能外部设备中断）。
     arch::liointc::init();
     sbi::early_print("[RespOS 2K1000LA] LIOINTC masked\n");
 
-    // 时钟中断是 LoongArch 核内中断（ESTAT bit11），不经过 LIOINTC；配置 TCFG + ECFG.LIE，
-    // 显式开内核态中断（CRMD.IE），让 trap_from_kernel 周期处理 Timer 分支。
-    if let Some(freq) = timer::cpucfg_freq() {
-        sbi::early_print("[RespOS 2K1000LA] CPUCFG constant-timer freq=");
-        sbi::early_print_hex(freq);
-        sbi::early_print(" Hz\n");
-    }
+    // Stage 4：完整启动链——trap(EENTRY) → initproc + 空闲任务 → 时钟中断 → 调度器。
+    // 真机没有 QEMU 的 virtio-net / LS7A RTC(0x100d0100)，跳过 net::init 与
+    // syscall::init_realtime_from_rtc；SMP 是 Stage 7，暂只跑 boot hart（单核）。
     trap::init();
+    task::add_initproc();
+    task::init_per_cpu_idle_tasks();
     trap::enable_timer_interrupt();
     timer::set_next_ti_trigger();
-    unsafe {
-        arch::register::crmd::set_interrupt_enabled(true);
-    }
-
-    // 心跳循环：每个时钟中断都打印一次 tick 计数，验证中断周期性触发。
-    let mut last_ticks = timer::timer_tick_count();
-    loop {
-        let ticks = timer::timer_tick_count();
-        if ticks != last_ticks {
-            last_ticks = ticks;
-            println!("[RespOS 2K1000LA] timer tick {}", ticks);
-        }
-        arch::wait_for_interrupt();
-    }
+    task::run_tasks();
 }
 
 #[cfg(target_arch = "loongarch64")]
