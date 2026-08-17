@@ -45,15 +45,19 @@ pub fn console_putchar(c: usize) {
 
 /// Stage-1 早期控制台：只写 NS16550 THR，不依赖锁、格式化或 MMU 状态。
 ///
-/// 仅在进入完整 driver framework / MMU 之前使用；此时 entry 建立的 DMW0 identity
-/// 使物理地址可直接访问。UART_BASE 由板级配置决定：QEMU virt 0x1fe0_01e0 /
-/// 2K1000LA 0x1fe2_0000（byte stride，THR@0 / LSR@5）。
+/// 2K1000LA 真机 MMIO 必须走 uncached DMW 窗口（VSEG=0x8000），否则缓存写不达设备。
+/// UART_BASE 由板级配置决定：QEMU virt 0x1fe0_01e0 / 2K1000LA 0x1fe2_0000
+/// （byte stride，THR@0 / LSR@5）。
 #[cfg(feature = "board_ls2k1000")]
 pub fn early_putchar(c: u8) {
+    // 2K1000LA uncached 直映窗口基址（StarryOS addrspace 的 UNCACHE_BASE）。
+    const UNCACHE_BASE: usize = 0x8000_0000_0000_0000;
+    let lsr = (UNCACHE_BASE + UART_LSR) as *const u8;
+    let thr = (UNCACHE_BASE + UART_THR) as *mut u8;
     unsafe {
         // 等待发送寄存器为空，再写入一个字节。
-        while (core::ptr::read_volatile(UART_LSR as *const u8) & LSR_TX_EMPTY) == 0 {}
-        core::ptr::write_volatile(UART_THR as *mut u8, c);
+        while (core::ptr::read_volatile(lsr) & LSR_TX_EMPTY) == 0 {}
+        core::ptr::write_volatile(thr, c);
     }
 }
 
