@@ -1,5 +1,6 @@
 // os/src/driver.rs
 
+#[cfg(target_arch = "loongarch64")]
 mod ahci;
 mod device;
 mod disk;

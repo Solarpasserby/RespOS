@@ -26,11 +26,17 @@ impl Hal for RespOsAhciHal {
     }
 
     fn flush_dcache() {
-        // LoongArch `dbar 0` 数据屏障。这里假设 2K1000LA 的 SATA DMA 与 CPU 缓存
-        // 走一致性互连（Loongson SoC 常见）；若出现数据损坏，需改成 cacop 显式
-        // 刷/失效缓存（Stage 5 后续验证点）。
+        // LoongArch `cacop`：rj=$zero 时对整个缓存级别做索引操作（broadcast）。
+        // 0x9 = Index Writeback-Invalidate L1D（LEAF1）、0xa = L2（LEAF2）。
+        // 2K1000LA 的 SATA DMA 与 CPU 缓存不是一致的，必须在 DMA 前后刷/失效缓存，
+        // 否则控制器读不到 CPU 刚写的命令/数据，或 CPU 读到 DMA 前的旧数据。
         unsafe {
-            core::arch::asm!("dbar 0", options(nostack));
+            core::arch::asm!(
+                "cacop 0x9, $zero, 0",
+                "cacop 0xa, $zero, 0",
+                "dbar 0",
+                options(nostack)
+            );
         }
     }
 }
@@ -46,6 +52,7 @@ impl AhciBlockDevice {
     /// 从 2K1000LA 的 AHCI 基址初始化（MMIO 经 uncached 窗口访问）。
     pub fn new() -> DevResult<Self> {
         let base = UNCACHE_BASE | AHCI_BASE;
+        println!("[kernel] AHCI: probing base {:#x}...", base);
         let driver = unsafe { AhciDriver::try_new(base) }.ok_or(DevError::BadState)?;
         println!(
             "[kernel] AHCI disk: {} blocks x {} bytes",
