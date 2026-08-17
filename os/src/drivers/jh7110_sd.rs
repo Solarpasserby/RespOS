@@ -203,7 +203,7 @@ fn enable_clock(div: u32) -> DevResult {
     Ok(())
 }
 
-fn card_init() -> DevResult<u32> {
+fn card_init() -> DevResult<(u32, usize)> {
     // CMD0: GO_IDLE_STATE
     send_cmd(CMD_GO_IDLE_STATE, 0, RespType::None, 100)?;
     delay_ms(2);
@@ -237,6 +237,15 @@ fn card_init() -> DevResult<u32> {
     // CMD7: SELECT_CARD（R1）
     send_cmd(CMD_SELECT_CARD, rca << 16, RespType::R1, 100)?;
 
+    // CMD9: SEND_CSD（R2 长响应），解析 C_SIZE 得块数（CSD v2.0）
+    send_cmd(CMD_SEND_CSD, rca << 16, RespType::R2, 100)?;
+    // R2 128 位：CSD[127:96]=RESP3, [95:64]=RESP2, [63:32]=RESP1, [31:0]=RESP0。
+    // C_SIZE = CSD[69:48] = ((RESP2 & 0x3f) << 16) | (RESP1 >> 16)。
+    let resp1 = rd(0x034);
+    let resp2 = rd(0x038);
+    let c_size = ((resp2 & 0x3f) << 16) | (resp1 >> 16);
+    let num_blocks = (c_size as usize + 1) * 1024; // 每块 512 字节
+
     // ACMD6: SET_BUS_WIDTH（保持 1-bit，先不切 4-bit 求稳）
     send_cmd(CMD_APP_CMD, rca << 16, RespType::R1, 100)?;
     send_cmd(ACMD_SET_BUS_WIDTH, 0, RespType::R1, 100)?;
@@ -244,26 +253,12 @@ fn card_init() -> DevResult<u32> {
     // CMD16: SET_BLOCKLEN = 512
     send_cmd(CMD_SET_BLOCKLEN, BLOCK_SIZE as u32, RespType::R1, 100)?;
 
-    Ok(rca)
-}
-
-/// 从 CSD 寄存器计算容量（块数）。简化版：按 CSD v2.0（SDHC/SDXC）计算。
-fn card_capacity(rca: u32) -> DevResult<usize> {
-    send_cmd(CMD_SEND_CSD, rca << 16, RespType::R2, 100)?;
-    // R2 是 128 位，RESP0..RESP3 各 32 位（大端序排布）。
-    // CSD v2.0：C_SIZE 在 bits [69:48]（跨 RESP 边界），这里取近似容量。
-    // 简化：先用一个保守大值探测不到，改为读 RESP 计算。
-    let r0 = rd(RESP0);
-    let r1 = rd(0x034); // RESP1
-    let r2 = rd(0x038); // RESP2
-    // CSD v2.0: C_SIZE = bits[69:48]，即 RESP1 的高 22 位（取决于字节序）。
-    // 为稳妥，v1 先返回 0 触发上层探测错误，后续修正。
-    let _ = (r0, r1, r2);
-    Ok(0)
+    Ok((rca, num_blocks))
 }
 
 pub struct SdCard {
     rca: u32,
+    num_blocks: usize,
     block_size: usize,
 }
 
@@ -273,10 +268,15 @@ impl SdCard {
         crate::println!("[vf2] SD: controller reset ok (verid=0x{:08x})", rd(VERID));
         enable_clock(63)?; // 最慢分频，求稳（若 ciu=50MHz → ≈396kHz）
         crate::println!("[vf2] SD: clock enabled");
-        let rca = card_init()?;
-        crate::println!("[vf2] SD: card identified, rca=0x{:x}", rca);
+        let (rca, num_blocks) = card_init()?;
+        crate::println!(
+            "[vf2] SD: card identified, rca=0x{:x}, num_blocks={} ({} MiB)",
+            rca,
+            num_blocks,
+            num_blocks * 512 / 1024 / 1024
+        );
         let block_size = BLOCK_SIZE;
-        Ok(Self { rca, block_size })
+        Ok(Self { rca, num_blocks, block_size })
     }
 
     /// 单块读。block 为 512 字节块号。
@@ -331,6 +331,66 @@ impl SdCard {
         }
         Ok(())
     }
+
+    /// 单块写。block 为 512 字节块号。
+    fn write_single(&self, block: u32, buf: &[u8; 512]) -> DevResult {
+        wr(BLKSIZ, 512);
+        wr(BYTCNT, 512);
+        wr(CTRL, rd(CTRL) | CTRL_FIFO_RESET);
+        let arg = block * (BLOCK_SIZE as u32 / 512);
+        // CMD24: WRITE_BLOCK，写方向 bit10(RW)=1
+        wr(CMDARG, arg);
+        wr(
+            CMD,
+            CMD_WRITE_BLOCK
+                | CMD_RESP_EXP
+                | CMD_CHECK_CRC
+                | CMD_DATA_EXP
+                | CMD_WRITE
+                | CMD_USE_HOLD_REG
+                | CMD_PRV_DAT_WAIT
+                | CMD_START,
+        );
+
+        // 轮询写：TXDR 触发时写 4 字节进 FIFO
+        let mut off = 0usize;
+        let start = get_time_ms();
+        while off < 512 {
+            let st = rd(RINTSTS);
+            if st & RINT_ERR != 0 {
+                wr(RINTSTS, RINT_ERR);
+                return Err(DevError::Io);
+            }
+            if st & RINT_TXDR != 0 {
+                wr(RINTSTS, RINT_TXDR);
+                let mut word = [0u8; 4];
+                let n = (512 - off).min(4);
+                word[..n].copy_from_slice(&buf[off..off + n]);
+                wr(DATA, u32::from_ne_bytes(word));
+                off += n;
+            }
+            if get_time_ms().saturating_sub(start) > 2000 {
+                return Err(DevError::Again);
+            }
+        }
+        // 等 data transfer over（DTO）
+        let start = get_time_ms();
+        loop {
+            let st = rd(RINTSTS);
+            if st & RINT_ERR != 0 {
+                wr(RINTSTS, RINT_ERR);
+                return Err(DevError::Io);
+            }
+            if st & RINT_DTO != 0 {
+                wr(RINTSTS, RINT_DTO);
+                break;
+            }
+            if get_time_ms().saturating_sub(start) > 2000 {
+                return Err(DevError::Again);
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Device for SdCard {
@@ -344,14 +404,12 @@ impl Device for SdCard {
 
 impl BlockDevice for SdCard {
     fn num_blocks(&self) -> usize {
-        // v1：未解析 CSD，先用占位；上层会因 read 超范围而失败。
-        0
+        self.num_blocks
     }
     fn block_size(&self) -> usize {
         self.block_size
     }
     fn read_block(&self, block_id: usize, buf: &mut [u8]) -> DevResult {
-        // v1 只支持单个 512 字节块读；上层 Disk 会按块调用。
         for (i, chunk) in buf.chunks_mut(512).enumerate() {
             let mut tmp = [0u8; 512];
             self.read_single((block_id + i) as u32, &mut tmp)?;
@@ -360,9 +418,14 @@ impl BlockDevice for SdCard {
         }
         Ok(())
     }
-    fn write_block(&self, _block_id: usize, _buf: &[u8]) -> DevResult {
-        // v1 先只读（目标是读 ext4 superblock）；写后续补。
-        Err(DevError::Unsupported)
+    fn write_block(&self, block_id: usize, buf: &[u8]) -> DevResult {
+        for (i, chunk) in buf.chunks(512).enumerate() {
+            let mut tmp = [0u8; 512];
+            let n = chunk.len().min(512);
+            tmp[..n].copy_from_slice(&chunk[..n]);
+            self.write_single((block_id + i) as u32, &tmp)?;
+        }
+        Ok(())
     }
     fn flush(&self) -> DevResult {
         Ok(())
