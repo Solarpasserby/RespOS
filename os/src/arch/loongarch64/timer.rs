@@ -14,6 +14,18 @@ const USEC_PER_SEC: usize = 1_000_000;
 const TASK_TIMER_ADVANCE_US: usize = 800;
 static REQUESTED_TASK_TIMER: AtomicUsize = AtomicUsize::new(usize::MAX);
 static PROGRAMMED_SERVICE_TIMER: AtomicUsize = AtomicUsize::new(usize::MAX);
+/// 时钟中断累计次数（Stage 3 真机诊断用，观察时钟中断是否周期性触发）。
+static TIMER_TICKS: AtomicUsize = AtomicUsize::new(0);
+
+/// 每次时钟中断在 trap 路径里调用，累加 tick 计数。
+pub fn note_timer_tick() {
+    TIMER_TICKS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// 读取当前累计的时钟中断次数。
+pub fn timer_tick_count() -> usize {
+    TIMER_TICKS.load(Ordering::Relaxed)
+}
 
 const LS7A_RTC_BASE: usize = 0x100d_0100;
 const LS7A_TOY_READ0: usize = 0x2c;
@@ -203,6 +215,21 @@ pub fn get_user_clock_freq() -> usize {
 #[inline(always)]
 pub fn get_accounting_clock_freq() -> usize {
     ACCOUNTING_CLOCK_FREQ
+}
+
+/// 从 CPUCFG(4)/(5) 读取常数定时器频率（Hz），读不到时返回 None。
+/// 2K1000LA 的 rdtime/TCFG 常数定时器频率与 Linux `sched_clock` 的稳定计数器
+/// 频率可能不是同一个值；用它校准 `HARDWARE_CLOCK_FREQ`。
+pub fn cpucfg_freq() -> Option<usize> {
+    let base_freq = cpucfg(4) & 0xffff_ffff;
+    let cfg5 = cpucfg(5);
+    let mul = cfg5 & 0xffff;
+    let div = (cfg5 >> 16) & 0xffff;
+    if base_freq != 0 && mul != 0 && div != 0 {
+        Some(base_freq * mul / div)
+    } else {
+        None
+    }
 }
 
 /// Read CPUCFG only as a boot-time diagnostic. Runtime clock policy comes from board.rs.

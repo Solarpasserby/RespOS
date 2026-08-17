@@ -3,7 +3,10 @@
 mod context;
 
 use super::register::{badv, ecfg, eentry, estat};
-use super::{sbi::clear_timer_interrupt, timer::set_next_ti_trigger};
+use super::{
+    sbi::clear_timer_interrupt,
+    timer::{note_timer_tick, set_next_ti_trigger},
+};
 use crate::signal::{SiField, Sig, SigInfo};
 use crate::syscall::*;
 use crate::task::{
@@ -171,6 +174,7 @@ pub fn trap_handler(cx: &mut TrapContext) {
             crate::perf::user_timer_trap(1);
             crate::perf::sample_concurrency();
             clear_timer_interrupt();
+            note_timer_tick();
             set_next_ti_trigger();
             if crate::arch::smp::is_timer_service_hart() {
                 crate::timer::await_task_timer_deadline();
@@ -271,6 +275,7 @@ pub fn trap_from_kernel(cx: &mut TrapContext) {
         estat::Trap::Interrupt(estat::Interrupt::Timer) => {
             crate::perf::sample_concurrency();
             clear_timer_interrupt();
+            note_timer_tick();
             set_next_ti_trigger();
             if crate::arch::smp::is_timer_service_hart() && crate::task::current_task().is_none() {
                 crate::timer::await_task_timer_deadline();

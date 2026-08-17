@@ -73,8 +73,8 @@ pub fn rust_main(argc: usize, argv: usize) -> ! {
     }
 }
 
-/// 2K1000LA Stage 2 高半区入口：验证 40-bit VA 下 3 级页表 + frame allocator + direct map。
-/// 暂不接 interrupt/timer/FS/net/SMP（Stage 3+），打印里程碑后停在这里，方便逐层排障。
+/// 2K1000LA 高半区入口：Stage 2 验证 MMU/memory，Stage 3 验证 trap + 核心本地时钟中断。
+/// 暂不接 FS/net/SMP（Stage 4+），先让时钟中断周期性触发并打印 tick 计数。
 #[cfg(all(target_arch = "loongarch64", feature = "board_ls2k1000"))]
 fn rust_main_high_ls2k1000() -> ! {
     arch::enable_kernel_extensions();
@@ -90,7 +90,32 @@ fn rust_main_high_ls2k1000() -> ! {
 
     // heap 已就绪，验证 alloc/println! 路径（走 uncached UART）。
     println!("[RespOS 2K1000LA] heap OK");
-    arch::idle()
+
+    // Stage 3：接入异常入口（EENTRY）+ 核心本地时钟中断。
+    // 时钟中断是 LoongArch 核内中断（ESTAT bit11），不经过 LIOINTC；配置 TCFG + ECFG.LIE，
+    // 显式开内核态中断（CRMD.IE），让 trap_from_kernel 周期处理 Timer 分支。
+    if let Some(freq) = timer::cpucfg_freq() {
+        sbi::early_print("[RespOS 2K1000LA] CPUCFG constant-timer freq=");
+        sbi::early_print_hex(freq);
+        sbi::early_print(" Hz\n");
+    }
+    trap::init();
+    trap::enable_timer_interrupt();
+    timer::set_next_ti_trigger();
+    unsafe {
+        arch::register::crmd::set_interrupt_enabled(true);
+    }
+
+    // 心跳循环：每个时钟中断都打印一次 tick 计数，验证中断周期性触发。
+    let mut last_ticks = timer::timer_tick_count();
+    loop {
+        let ticks = timer::timer_tick_count();
+        if ticks != last_ticks {
+            last_ticks = ticks;
+            println!("[RespOS 2K1000LA] timer tick {}", ticks);
+        }
+        arch::wait_for_interrupt();
+    }
 }
 
 #[cfg(target_arch = "loongarch64")]
