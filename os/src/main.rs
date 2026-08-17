@@ -91,7 +91,11 @@ fn rust_main_high_ls2k1000() -> ! {
     // heap 已就绪，验证 alloc/println! 路径（走 uncached UART）。
     println!("[RespOS 2K1000LA] heap OK");
 
-    // Stage 3：接入异常入口（EENTRY）+ 核心本地时钟中断。
+    // Stage 3：LIOINTC 最小初始化（真机 MMIO 走 uncached DMW0 窗口，全部屏蔽，
+    // Stage 4 起按需使能外部设备中断）+ 异常入口（EENTRY）+ 核心本地时钟中断。
+    arch::liointc::init();
+    sbi::early_print("[RespOS 2K1000LA] LIOINTC masked\n");
+
     // 时钟中断是 LoongArch 核内中断（ESTAT bit11），不经过 LIOINTC；配置 TCFG + ECFG.LIE，
     // 显式开内核态中断（CRMD.IE），让 trap_from_kernel 周期处理 Timer 分支。
     if let Some(freq) = timer::cpucfg_freq() {
