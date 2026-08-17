@@ -1,6 +1,6 @@
 // os/src/ext4/super_block.rs
 
-use super::{EXT4_OP_LOCK, Ext4Inode, Ext4LockClass};
+use super::{EXT4_OP_LOCK, Ext4Inode, Ext4LockClass, flush_lazytime_inodes};
 use crate::drivers::Disk;
 use crate::fs::Statfs64;
 use crate::fs::vfs::{InodeOp, SuperBlockOp};
@@ -17,6 +17,7 @@ pub struct Ext4SuperBlock {
     inner: Mutex<Option<Ext4BlockWrapper<Disk>>>,
     root: Arc<dyn InodeOp>,
     mount_point: &'static [u8],
+    fs_id: usize,
 }
 
 impl Ext4SuperBlock {
@@ -41,6 +42,7 @@ impl Ext4SuperBlock {
             inner: Mutex::new(Some(inner)),
             root,
             mount_point,
+            fs_id,
         })
     }
 
@@ -64,6 +66,7 @@ impl Ext4SuperBlock {
 
     pub fn shutdown(&self) -> SysResult {
         super::reap_deferred_inodes();
+        flush_lazytime_inodes(self.fs_id)?;
         self.flush_cache()?;
         let op_guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Superblock);
         let mut inner = self.inner.lock();
@@ -84,6 +87,10 @@ impl SuperBlockOp for Ext4SuperBlock {
     }
     fn sync(&self) -> SysResult {
         self.flush_cache()
+    }
+
+    fn flush_lazy_metadata(&self) -> SysResult {
+        flush_lazytime_inodes(self.fs_id)
     }
 
     fn statfs(&self) -> SysResult<Statfs64> {

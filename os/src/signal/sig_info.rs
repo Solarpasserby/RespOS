@@ -1,4 +1,4 @@
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
 pub struct SigInfo {
     pub signo: i32,      // 信号值
@@ -16,7 +16,7 @@ impl SigInfo {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
 pub enum SiField {
     None,

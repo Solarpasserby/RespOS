@@ -107,6 +107,16 @@ impl LoopInode {
         Ok(loop_backend()?.get_stat()?.size)
     }
 
+    pub fn formatted_capacity(&self, fstype: &str) -> Option<usize> {
+        let file = loop_backend().ok()?;
+        let mut header = [0u8; 4096];
+        let read = file.read_at_offset(0, &mut header).ok()?;
+        if read < header.len() {
+            header[read..].fill(0);
+        }
+        super::formatted_capacity_from_header(&header, fstype, self.backing_size().ok()?)
+    }
+
     pub fn ioctl(&self, request: usize, arg: usize) -> SysResult<usize> {
         match request {
             LOOP_SET_FD => {

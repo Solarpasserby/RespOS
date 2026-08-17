@@ -6,9 +6,10 @@ _start:
     # OpenSBI enters S-mode with a0=hart id and a1=opaque.  Every hart needs
     # a private early stack before it can run Rust code.
     addi t1, a0, 1
-    # 每份 early stack 正好为 64 KiB；release RV64 target 不要求 M/Zmmul，
-    # 用基础整数左移而非 mul，以保持最小 ISA 配置可启动。
-    slli t0, t1, 16
+    # 每份 early stack 为 256 KiB。virtio-net + smoltcp 接口初始化需要
+    # 约 90 KiB 的启动期栈，原 64 KiB 会向下越界覆盖 .data（表现为
+    # `physical_memory_end` / `PER_CPUS` 被随机值破坏）。
+    slli t0, t1, 18
     la sp, boot_stack_lower_bound
     add sp, sp, t0
 
@@ -24,7 +25,7 @@ _start:
     .section .bss.stack
     .globl boot_stack_lower_bound
 boot_stack_lower_bound: # 区别于 loader.rs 中的内核栈，在开始任务调度前使用该内核栈
-    .space 4096 * 16 * 8
+    .space 4096 * 64 * 8
     .globl boot_stack_top
 boot_stack_top:
 

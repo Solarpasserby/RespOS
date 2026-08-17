@@ -240,6 +240,11 @@ int ext4_fs_get_inode_dblk_idx(struct ext4_inode_ref *inode_ref,
 				 ext4_lblk_t iblock, ext4_fsblk_t *fblock,
 				 bool support_unwritten);
 
+/**@brief Release one logical data block from an inode.
+ * Extent callers should prefer ext4_extent_remove_space() for ranges. */
+int ext4_fs_release_inode_block(struct ext4_inode_ref *inode_ref,
+				ext4_lblk_t iblock);
+
 /**@brief Initialize a part of unwritten range of the inode.
  * @param inode_ref I-node to proceed on.
  * @param iblock    Logical index of block

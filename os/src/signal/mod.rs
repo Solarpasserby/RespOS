@@ -38,7 +38,7 @@ fn make_sig_context(x: [usize; 32], pc: usize, mask: SigSet, info: usize) -> Sig
 pub fn handle_signal(restart_syscall_arg0: Option<usize>) {
     let task = current_task().unwrap();
 
-    while let Some((sig, siginfo)) = task.op_sig_pending_mut(|p| p.fetch_signal()) {
+    while let Some((sig, siginfo)) = task.fetch_pending_signal() {
         let old_mask = task
             .take_sigsuspend_saved_mask()
             .unwrap_or_else(|| task.op_sig_pending(|p| p.mask));
@@ -60,6 +60,11 @@ pub fn handle_signal(restart_syscall_arg0: Option<usize>) {
                         exit_by_signal_and_run_next(sig.raw());
                     }
                     ActionType::Stop => {
+                        // Publish Stopped before the parent can observe the
+                        // wait event.  A concurrent SIGCONT must see the
+                        // stopped state and enqueue this task; the final
+                        // handoff must not overwrite that Ready transition.
+                        task.set_stopped();
                         task.set_wait_event(SigInfo::CLD_STOPPED, sig.raw());
                         task.notify_parent_sigchld(SigInfo::CLD_STOPPED);
                         crate::task::stop_current_and_run_next();
@@ -73,11 +78,10 @@ pub fn handle_signal(restart_syscall_arg0: Option<usize>) {
         } else {
             let trap_cx = task.get_trap_cx();
 
-            // wait4/waitpid are restartable when the signal handler was
-            // installed with SA_RESTART. The trap path has already advanced
-            // the PC past the syscall and replaced a0 with -EINTR; rewrite
-            // the context before building the signal frame so sigreturn
-            // re-executes the syscall with its original first argument.
+            // Restart-class syscalls are re-executed when the delivered
+            // handler has SA_RESTART. The trap path has already advanced the
+            // PC and replaced a0 with -EINTR; restore the original arg0 before
+            // building the frame. Other argument registers remain untouched.
             if action.flags.contains(SigActionFlag::SA_RESTART) {
                 if let Some(arg0) = restart_syscall_arg0 {
                     trap_cx.set_a0(arg0);

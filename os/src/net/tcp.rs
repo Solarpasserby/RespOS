@@ -19,12 +19,14 @@ use core::{
 use smoltcp::{
     iface::SocketHandle,
     socket::tcp::{self, ConnectError, RecvError, SendError, State},
-    wire::{IpEndpoint, IpListenEndpoint, Ipv4Address},
+    wire::{IpEndpoint, IpListenEndpoint},
 };
 use spin::Mutex;
 
 use crate::{
-    net::addr::{LOOP_BACK_IP, UNSPECIFIED_ENDPOINT, from_sockaddr_to_ipendpoint, is_unspecified},
+    net::addr::{
+        UNSPECIFIED_ENDPOINT, UNSPECIFIED_IP, from_sockaddr_to_ipendpoint, is_unspecified,
+    },
     syscall::{Errno, SysResult, finish_task_timeout, register_task_timeout_us},
     task::{
         current_task, prepare_current_task_blocked, remove_task, switch_to_next_task,
@@ -34,8 +36,8 @@ use crate::{
 };
 
 use super::{
-    LISTEN_TABLE, SocketSetWrapper, poll_interfaces, register_tcp_waiter, service_task_timers,
-    socket_set, unregister_tcp_waiter,
+    LISTEN_TABLE, SocketSetWrapper, connect_tcp_socket, poll_interfaces, register_tcp_waiter,
+    service_task_timers, socket_set, source_address_for, unregister_tcp_waiter,
 };
 
 /// 描述 socket 的当前可读/可写状态。
@@ -155,7 +157,8 @@ impl TcpSocket {
         }
     }
 
-    /// 构造 `IpListenEndpoint`，若地址未指定则默认使用回环地址。
+    /// 构造 `IpListenEndpoint`。未显式绑定地址时保留 wildcard，供
+    /// connect 根据目的接口自动选择源地址，listen 则监听所有本地接口。
     fn bound_endpoint(&self) -> IpListenEndpoint {
         let local_addr = unsafe { self.local_addr.get().read() };
         let port = if local_addr.port != 0 {
@@ -164,13 +167,7 @@ impl TcpSocket {
             get_ephemeral_port()
         };
         debug_assert!(port != 0);
-        let addr = if is_unspecified(local_addr.addr) {
-            Some(smoltcp::wire::IpAddress::Ipv4(Ipv4Address::new(
-                127, 0, 0, 1,
-            )))
-        } else {
-            Some(local_addr.addr)
-        };
+        let addr = (!is_unspecified(local_addr.addr)).then_some(local_addr.addr);
         IpListenEndpoint { addr, port }
     }
 
@@ -502,23 +499,15 @@ impl TcpSocket {
             if bound_endpoint.port == remote_ipendpoint.port {
                 return Err(Errno::ECONNREFUSED);
             }
+            if bound_endpoint.addr.is_none() {
+                source_address_for(remote_ipendpoint.addr)?;
+            }
 
-            let iface = &*LOOPBACK_IFACE;
-            let (local_endpoint, remote_endpoint) = socket_set()
-                .lock()
-                .with_socket_mut::<_, tcp::Socket, Result<(IpEndpoint, IpEndpoint), Errno>>(
-                    handle,
-                    |socket| {
-                        socket
-                            .connect(iface.lock().context(), remote_ipendpoint, bound_endpoint)
-                            .map_err(|e| match e {
-                                ConnectError::InvalidState => Errno::ECONNREFUSED,
-                                ConnectError::Unaddressable => Errno::ECONNREFUSED,
-                            })?;
-                        Ok((
-                            socket.local_endpoint().unwrap(),
-                            socket.remote_endpoint().unwrap(),
-                        ))
+            let (local_endpoint, remote_endpoint) =
+                connect_tcp_socket(handle, remote_ipendpoint, bound_endpoint).map_err(
+                    |e| match e {
+                        ConnectError::InvalidState => Errno::ECONNREFUSED,
+                        ConnectError::Unaddressable => Errno::EADDRNOTAVAIL,
                     },
                 )?;
             unsafe {
@@ -1001,7 +990,7 @@ fn get_ephemeral_port() -> u16 {
         if LISTEN_TABLE.lock().can_listen(port)
             && socket_set()
                 .lock()
-                .tcp_bind_check(LOOP_BACK_IP, port)
+                .tcp_bind_check(UNSPECIFIED_IP, port)
                 .is_ok()
         {
             return port;
@@ -1019,5 +1008,3 @@ impl Drop for TcpSocket {
         }
     }
 }
-
-use super::LOOPBACK_IFACE;

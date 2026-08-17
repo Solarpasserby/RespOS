@@ -4,8 +4,8 @@
 //! 主动让出、阻塞或退出时选择下一个任务。
 //! 当前架构层 `__switch` 接收下一个任务的内核栈指针，因此这里会完成最后一步切换。
 
-use super::processor::{current_task, handoff_current_to_idle};
-use super::task::{TaskControlBlock, task_exit, task_exit_by_signal, task_group_exit};
+use super::processor::{current_task, handoff_current_to_idle, ContextSwitchKind};
+use super::task::{task_exit, task_exit_by_signal, task_group_exit, TaskControlBlock};
 use crate::mutex::SpinNoIrqLock;
 use alloc::{collections::vec_deque::VecDeque, sync::Arc, vec::Vec};
 use bitflags::bitflags;
@@ -169,7 +169,6 @@ pub fn switch_to_next_task() {
         crate::arch::idle();
     };
     crate::perf::blocking_switch(1);
-
     loop {
         // A timer interrupt may have switched away from this blocked context.
         // Once a real wake schedules it again, resume the syscall that blocked.
@@ -181,7 +180,7 @@ pub fn switch_to_next_task() {
         // A blocked task can be woken by another CPU before it reaches idle.
         // Keep its owner until this CPU has saved the context; fetch_task()
         // will leave the newly-ready task queued until then.
-        handoff_current_to_idle(current.clone());
+        handoff_current_to_idle(current.clone(), ContextSwitchKind::Voluntary);
     }
 }
 
@@ -196,7 +195,7 @@ pub fn yield_current_task() {
         return;
     };
     crate::perf::scheduler_yield(1);
-    handoff_current_to_idle(task);
+    handoff_current_to_idle(task, ContextSwitchKind::Voluntary);
 }
 
 /// 时间片抢占当前任务。
@@ -217,7 +216,12 @@ pub fn preempt_current_task() {
     // context back into a ready task; only dispatch work that was genuinely
     // woken. If the current task itself was woken, fetching it below restores
     // Running and the interrupted scheduling loop returns to its caller.
-    handoff_current_to_idle(task);
+    let switch_kind = if task.is_running() {
+        ContextSwitchKind::Involuntary
+    } else {
+        ContextSwitchKind::None
+    };
+    handoff_current_to_idle(task, switch_kind);
 }
 
 /// 阻塞当前任务并运行下一个任务。
@@ -240,8 +244,10 @@ pub fn stop_current_and_run_next() {
         return;
     };
 
-    task.set_stopped();
-    handoff_current_to_idle(task);
+    // The signal path publishes Stopped before notifying the parent.  The
+    // parent may already have changed it to Ready with SIGCONT, so do not
+    // overwrite the concurrent wake here; just finish saving this context.
+    handoff_current_to_idle(task, ContextSwitchKind::Voluntary);
     cleanup_dead_tasks();
 }
 
@@ -253,7 +259,7 @@ fn switch_to_next_task_after_exit() -> ! {
 
     loop {
         defer_drop_task(current.clone());
-        handoff_current_to_idle(current);
+        handoff_current_to_idle(current, ContextSwitchKind::None);
         unreachable!("returned to exited task");
     }
 }

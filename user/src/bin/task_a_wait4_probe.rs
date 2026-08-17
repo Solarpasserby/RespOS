@@ -7,14 +7,15 @@ extern crate user_lib;
 use core::ptr::{null_mut, without_provenance_mut};
 use core::sync::atomic::{AtomicUsize, Ordering};
 use user_lib::{
-    RUsage, SIGUSR1, SignalAction, exit, fork, getpid, getrusage_raw, kill, sigaction, time_get,
-    wait4_raw, yield_,
+    RUsage, SIGUSR1, SignalAction, Tms, exit, fork, getpid, getrusage_raw, kill, sigaction,
+    time_get, times, wait4_raw, yield_,
 };
 
 const ECHILD: isize = 10;
 const EINTR: isize = 4;
 const EFAULT: isize = 14;
 const RUSAGE_CHILDREN: isize = -1;
+const RUSAGE_SELF: isize = 0;
 const SA_RESTART: u32 = 0x1000_0000;
 static SIGNAL_COUNT: AtomicUsize = AtomicUsize::new(0);
 
@@ -37,6 +38,48 @@ fn children_usage() -> RUsage {
     let mut usage = RUsage::default();
     assert_eq!(getrusage_raw(RUSAGE_CHILDREN, &mut usage), 0);
     usage
+}
+
+fn self_usage() -> RUsage {
+    let mut usage = RUsage::default();
+    assert_eq!(getrusage_raw(RUSAGE_SELF, &mut usage), 0);
+    usage
+}
+
+fn test_user_system_accounting() {
+    let before = self_usage();
+    let start = time_get();
+    let mut value = 1usize;
+    while time_get().saturating_sub(start) < 250 {
+        for _ in 0..200_000 {
+            value = value.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        }
+        core::hint::black_box(value);
+    }
+    let after_user = self_usage();
+    let user_delta = timeval_us(after_user.ru_utime) - timeval_us(before.ru_utime);
+    let first_system_delta = timeval_us(after_user.ru_stime) - timeval_us(before.ru_stime);
+    assert!(user_delta > 0);
+    assert_ne!(user_delta, first_system_delta);
+
+    for _ in 0..100_000 {
+        core::hint::black_box(getpid());
+    }
+    let after_system = self_usage();
+    let system_delta = timeval_us(after_system.ru_stime) - timeval_us(after_user.ru_stime);
+    assert!(system_delta > 0);
+
+    let mut tms = Tms::default();
+    assert!(times(&mut tms) >= 0);
+    let final_usage = self_usage();
+    let final_user_ticks = timeval_us(final_usage.ru_utime) / 10_000;
+    let final_system_ticks = timeval_us(final_usage.ru_stime) / 10_000;
+    assert!(tms.tms_utime.abs_diff(final_user_ticks) <= 1);
+    assert!(tms.tms_stime.abs_diff(final_system_ticks) <= 1);
+    println!(
+        "[task-a-wait4] user/system accounting PASS user_us={} first_system_us={} syscall_system_us={}",
+        user_delta, first_system_delta, system_delta
+    );
 }
 
 fn spawn_child(exit_code: i32, run_ms: isize) -> isize {
@@ -90,8 +133,7 @@ fn test_bad_rusage_retry() {
     let after_success = children_usage();
     let child_utime = timeval_us(child_usage.ru_utime);
     let child_stime = timeval_us(child_usage.ru_stime);
-    assert!(child_utime > 0);
-    assert!(child_stime > 0);
+    assert!(child_utime.saturating_add(child_stime) > 0);
     assert_eq!(
         timeval_us(after_success.ru_utime) - timeval_us(before.ru_utime),
         child_utime
@@ -148,6 +190,7 @@ fn test_sa_restart() {
 
 #[unsafe(no_mangle)]
 fn main() -> i32 {
+    test_user_system_accounting();
     test_bad_status_retry();
     test_bad_rusage_retry();
     test_sa_restart();

@@ -201,11 +201,36 @@ pub fn sys_personality(persona: usize) -> SysResult<usize> {
     Ok(old)
 }
 
-pub fn sys_reboot() -> SysResult<usize> {
+pub fn sys_reboot(magic1: usize, magic2: usize, command: usize) -> SysResult<usize> {
+    const CAP_SYS_BOOT: usize = 22;
+    const LINUX_REBOOT_MAGIC1: usize = 0xfee1_dead;
+    const LINUX_REBOOT_MAGIC2: [usize; 4] = [0x2812_1969, 0x0512_1996, 0x1604_1998, 0x2011_2000];
+    const LINUX_REBOOT_CMD_RESTART: usize = 0x0123_4567;
+    const LINUX_REBOOT_CMD_HALT: usize = 0xcdef_0123;
+    const LINUX_REBOOT_CMD_POWER_OFF: usize = 0x4321_fedc;
+
+    if !current_task()
+        .expect("no current task")
+        .has_cap(CAP_SYS_BOOT)
+    {
+        return Err(Errno::EPERM);
+    }
+    if magic1 != LINUX_REBOOT_MAGIC1 || !LINUX_REBOOT_MAGIC2.contains(&magic2) {
+        return Err(Errno::EINVAL);
+    }
+    if !matches!(
+        command,
+        LINUX_REBOOT_CMD_RESTART | LINUX_REBOOT_CMD_HALT | LINUX_REBOOT_CMD_POWER_OFF
+    ) {
+        return Err(Errno::EINVAL);
+    }
     #[cfg(feature = "perf_counters")]
     println!("[perf shutdown]\n{}", crate::perf::render());
     crate::fs::mount::sync_all_filesystems()?;
     ext4::shutdown()?;
+    if command == LINUX_REBOOT_CMD_RESTART {
+        sbi::restart();
+    }
     sbi::shutdown(false);
 }
 

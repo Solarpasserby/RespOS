@@ -11,6 +11,7 @@ mod context;
 mod futex;
 mod kstack;
 mod manager;
+mod process;
 mod processor;
 mod scheduler;
 mod task;
@@ -23,6 +24,7 @@ pub use context::TaskContext;
 pub use futex::{check_futex_timeouts, do_futex};
 use lazy_static::lazy_static;
 pub use manager::TASK_MANAGER;
+pub use process::{PROCESS_MANAGER, ProcessLifecycle, ProcessState, ResourceUsageSnapshot};
 pub use processor::{
     current_task, current_user_token, init_per_cpu_idle_tasks, run_tasks, system_idle_time_us,
     take_current_task,
@@ -35,7 +37,9 @@ pub use scheduler::{
     wakeup_task, yield_current_task,
 };
 pub use task::TaskStatus;
-pub use task::{CloneFlags, CpuClockHandle, TaskControlBlock, check_active_itimers};
+pub use task::{
+    CloneFlags, CpuClockHandle, RLIMIT_SIGPENDING, TaskControlBlock, check_active_itimers,
+};
 
 lazy_static! {
     pub static ref INITPROC: Arc<TaskControlBlock> = {

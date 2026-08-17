@@ -14,7 +14,8 @@ mod memory_set;
 
 use crate::arch::mm::{PTEFlags, PageTable, PageTableEntry};
 use crate::config::{
-    PAGE_SIZE, TRAMPOLINE, USER_ARG_MAX_BYTES, USER_ARG_MAX_COUNT, USER_CSTR_MAX_LEN,
+    PAGE_SIZE, TRAMPOLINE, USER_ARG_MAX_BYTES, USER_ARG_MAX_COUNT, USER_ARG_STR_MAX_LEN,
+    USER_CSTR_MAX_LEN,
 };
 use crate::syscall::{Errno, SysResult};
 use crate::task::current_task;
@@ -23,14 +24,15 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use frame_allocator::init_frame_allocator;
-pub use frame_allocator::{FrameTracker, frame_alloc};
+pub use frame_allocator::{frame_alloc, FrameTracker};
 use heap_allocator::init_heap;
-pub use io_buffer::{IoBufferKind, KernelIoBuffer, drain_io_buffers};
-pub use memory_set::{KERNEL_SPACE, MapPermission, MemorySet};
+pub use io_buffer::{drain_io_buffers, IoBufferKind, KernelIoBuffer};
 pub(crate) use memory_set::{
-    MmapBacking, mmap_file_backing, overlay_shared_file_pages, shared_file_page_entry_count,
-    truncate_shared_file_pages, update_shared_file_pages, writeback_file_pages,
+    mmap_file_backing, overlay_shared_file_pages, punch_file_mappings, punch_shared_file_pages,
+    protect_extended_file_mappings, shared_file_page_entry_count, truncate_file_mappings,
+    truncate_shared_file_pages, update_shared_file_pages, writeback_file_pages, MmapBacking,
 };
+pub use memory_set::{MapPermission, MemorySet, PageFaultOutcome, KERNEL_SPACE};
 
 static KERNEL_MMU_TOKEN: AtomicUsize = AtomicUsize::new(0);
 
@@ -116,6 +118,14 @@ pub fn ensure_kernel_space_active() {
 
 /// 将 C 风格的字符串转换为 Rust 型字符串
 pub fn copy_cstr_from_user(ptr: *const u8) -> SysResult<String> {
+    copy_cstr_from_user_bounded(ptr, USER_CSTR_MAX_LEN, Errno::ENAMETOOLONG)
+}
+
+fn copy_cstr_from_user_bounded(
+    ptr: *const u8,
+    max_len: usize,
+    too_long: Errno,
+) -> SysResult<String> {
     if ptr.is_null() {
         return Err(Errno::EFAULT);
     }
@@ -123,10 +133,10 @@ pub fn copy_cstr_from_user(ptr: *const u8) -> SysResult<String> {
     let mut ret = String::new();
     let mut offset = 0usize;
     let mut chunk = [0u8; 256];
-    while offset < USER_CSTR_MAX_LEN {
+    while offset < max_len {
         let cur = (ptr as usize).checked_add(offset).ok_or(Errno::EFAULT)?;
         let chunk_len = (PAGE_SIZE - VirtAddr::from(cur).page_offset())
-            .min(USER_CSTR_MAX_LEN - offset)
+            .min(max_len - offset)
             .min(chunk.len());
         copy_from_user(chunk.as_mut_ptr(), cur as *const u8, chunk_len)?;
         for &ch in &chunk[..chunk_len] {
@@ -138,7 +148,7 @@ pub fn copy_cstr_from_user(ptr: *const u8) -> SysResult<String> {
         }
     }
 
-    Err(Errno::ENAMETOOLONG)
+    Err(too_long)
 }
 
 pub fn extract_cstrings_from_user(mut ptr: *const usize) -> SysResult<Vec<String>> {
@@ -154,7 +164,10 @@ pub fn extract_cstrings_from_user(mut ptr: *const usize) -> SysResult<Vec<String
         if count >= USER_ARG_MAX_COUNT {
             return Err(Errno::E2BIG); // 参数过多
         }
-        let string = copy_cstr_from_user(str_ptr)?;
+        // exec strings have Linux's much larger MAX_ARG_STRLEN boundary and
+        // report E2BIG when either the per-string or aggregate budget is
+        // exceeded. Pathname callers retain USER_CSTR_MAX_LEN/ENAMETOOLONG.
+        let string = copy_cstr_from_user_bounded(str_ptr, USER_ARG_STR_MAX_LEN, Errno::E2BIG)?;
         total_bytes = total_bytes
             .checked_add(string.len() + 1)
             .ok_or(Errno::E2BIG)?;

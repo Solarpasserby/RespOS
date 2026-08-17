@@ -6,15 +6,14 @@ use super::frame_allocator::{FrameTracker, frame_alloc};
 use super::{PTEFlags, PageTable, PageTableEntry};
 use crate::arch::{sfence, write_mmu_token};
 use crate::config::{
-    CLK_TCK, DL_INTERP_OFFSET, KERNEL_BASE, KERNEL_STACK_SIZE, MMAP_MAX_ADDR, MMAP_MIN_ADDR,
-    PAGE_SIZE, PAGE_SIZE_BITS, TRAMPOLINE, TRAMPOLINE_CODE, USER_STACK_SIZE, VIRTIO_MMIO,
-    physical_memory_end,
+    CLK_TCK, DL_INTERP_OFFSET, KERNEL_BASE, KERNEL_STACK_SIZE, MMAP_MAX_ADDR, MMAP_MIN_ADDR, MMIO,
+    PAGE_SIZE, PAGE_SIZE_BITS, TRAMPOLINE, TRAMPOLINE_CODE, USER_STACK_SIZE, physical_memory_end,
 };
 use crate::fs::{AT_FDCWD, File, FileOp, path_open};
 use crate::syscall::{Errno, SysResult};
 use crate::task::{
     AT_BASE, AT_CLKTCK, AT_EGID, AT_ENTRY, AT_EUID, AT_GID, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM,
-    AT_UID, AuxHeader,
+    AT_UID, AuxHeader, TASK_MANAGER,
 };
 use crate::trap::PageFaultCause;
 use alloc::collections::{BTreeMap, BTreeSet};
@@ -198,6 +197,7 @@ fn read_elf_metadata(file: Arc<dyn FileOp>) -> SysResult<Vec<u8>> {
     const ELF64_HEADER_SIZE: usize = 64;
     const ELF64_PROGRAM_HEADER_SIZE: usize = 56;
     const ELF_METADATA_LIMIT: usize = 1024 * 1024;
+    const ELF_INTERP_LIMIT: usize = 4096;
 
     let file_size = file.get_stat()?.size;
     if file_size < ELF64_HEADER_SIZE {
@@ -226,22 +226,54 @@ fn read_elf_metadata(file: Arc<dyn FileOp>) -> SysResult<Vec<u8>> {
 
     let mut metadata = alloc::vec![0u8; ph_end.max(ELF64_HEADER_SIZE)];
     read_file_exact_at(file.clone(), 0, &mut metadata)?;
-    let header_elf = xmas_elf::ElfFile::new(&metadata).map_err(|_| Errno::ENOEXEC)?;
-    let mut metadata_len = metadata.len();
-    for i in 0..header_elf.header.pt2.ph_count() {
-        let ph = header_elf.program_header(i).map_err(|_| Errno::ENOEXEC)?;
-        if ph.get_type().map_err(|_| Errno::ENOEXEC)? == xmas_elf::program::Type::Interp {
-            metadata_len = metadata_len.max(
-                (ph.offset() as usize)
-                    .checked_add(ph.file_size() as usize)
-                    .filter(|end| *end <= file_size && *end <= ELF_METADATA_LIMIT)
-                    .ok_or(Errno::ENOEXEC)?,
-            );
+    let interp_headers = {
+        let header_elf = xmas_elf::ElfFile::new(&metadata).map_err(|_| Errno::ENOEXEC)?;
+        let mut headers = Vec::new();
+        for i in 0..header_elf.header.pt2.ph_count() {
+            let ph = header_elf.program_header(i).map_err(|_| Errno::ENOEXEC)?;
+            if ph.get_type().map_err(|_| Errno::ENOEXEC)? == xmas_elf::program::Type::Interp {
+                let offset = usize::try_from(ph.offset()).map_err(|_| Errno::ENOEXEC)?;
+                let len = usize::try_from(ph.file_size()).map_err(|_| Errno::ENOEXEC)?;
+                offset
+                    .checked_add(len)
+                    .filter(|end| *end <= file_size)
+                    .ok_or(Errno::ENOEXEC)?;
+                if len == 0 || len > ELF_INTERP_LIMIT {
+                    return Err(Errno::ENOEXEC);
+                }
+                headers.push((i as usize, offset, len));
+            }
         }
-    }
-    if metadata_len > metadata.len() {
-        metadata.resize(metadata_len, 0);
-        read_file_exact_at(file, 0, &mut metadata)?;
+        headers
+    };
+
+    // A valid PT_INTERP may live near the end of a large ELF (Alpine's Cargo
+    // places it around 19 MiB). Do not retain the entire prefix in the kernel
+    // heap. Append only the interpreter string to the compact metadata image
+    // and redirect that program header's p_offset to the appended copy. LOAD
+    // offsets remain the real file offsets used by lazy page faults.
+    for (index, file_offset, len) in interp_headers {
+        let relocated_offset = metadata.len();
+        let relocated_end = relocated_offset
+            .checked_add(len)
+            .filter(|end| *end <= ELF_METADATA_LIMIT)
+            .ok_or(Errno::ENOEXEC)?;
+        metadata.resize(relocated_end, 0);
+        read_file_exact_at(
+            file.clone(),
+            file_offset,
+            &mut metadata[relocated_offset..relocated_end],
+        )?;
+
+        let ph_start = ph_offset
+            .checked_add(index.checked_mul(ph_entry_size).ok_or(Errno::ENOEXEC)?)
+            .ok_or(Errno::ENOEXEC)?;
+        let offset_field = ph_start.checked_add(8).ok_or(Errno::ENOEXEC)?;
+        let offset_end = offset_field.checked_add(8).ok_or(Errno::ENOEXEC)?;
+        let field = metadata
+            .get_mut(offset_field..offset_end)
+            .ok_or(Errno::ENOEXEC)?;
+        field.copy_from_slice(&(relocated_offset as u64).to_le_bytes());
     }
     Ok(metadata)
 }
@@ -342,15 +374,18 @@ pub(crate) fn writeback_file_pages(writebacks: Vec<FileWriteback>, sync: bool) -
     Ok(())
 }
 
-fn shared_file_frame(backing: &FileBacking, page_offset: usize) -> SysResult<Arc<FrameTracker>> {
+fn shared_file_frame(
+    backing: &FileBacking,
+    page_offset: usize,
+) -> SysResult<(Arc<FrameTracker>, bool)> {
     let file_offset = backing.offset.checked_add(page_offset).ok_or(Errno::EIO)?;
 
     // Regular files use their PageCache frame as the mmap frame.  Besides
     // eliminating a duplicate physical page, this avoids accumulating one
     // global weak-map node for every file page ever mapped by a linker.
     if let Some(file) = backing.file.as_any().downcast_ref::<File>() {
-        if let Some(frame) = file.shared_page_frame(file_offset)? {
-            return Ok(frame);
+        if let Some((frame, required_io)) = file.shared_page_frame(file_offset)? {
+            return Ok((frame, required_io));
         }
     }
 
@@ -366,11 +401,12 @@ fn shared_file_frame(backing: &FileBacking, page_offset: usize) -> SysResult<Arc
         .get(&key)
         .and_then(|weak| weak.upgrade())
     {
-        return Ok(frame);
+        return Ok((frame, false));
     }
 
     let frame = Arc::new(frame_alloc().ok_or(Errno::ENOMEM)?);
-    if page_offset < backing.len {
+    let required_io = page_offset < backing.len;
+    if required_io {
         let read_len = (backing.len - page_offset).min(PAGE_SIZE);
         read_file_at(
             backing.file.clone(),
@@ -381,13 +417,13 @@ fn shared_file_frame(backing: &FileBacking, page_offset: usize) -> SysResult<Arc
 
     let mut pages = SHARED_FILE_PAGES.lock();
     if let Some(existing) = pages.get(&key).and_then(|weak| weak.upgrade()) {
-        return Ok(existing);
+        return Ok((existing, false));
     }
     // Compatibility mappings are uncommon, so an O(n) prune on insertion is
     // preferable to letting dead Weak keys consume kernel heap indefinitely.
     pages.retain(|_, weak| weak.strong_count() != 0);
     pages.insert(key, Arc::downgrade(&frame));
-    Ok(frame)
+    Ok((frame, required_io))
 }
 
 pub(crate) fn shared_file_page_entry_count() -> usize {
@@ -467,6 +503,143 @@ pub(crate) fn truncate_shared_file_pages(dev: u64, ino: u64, new_size: usize) {
     }
 }
 
+/// Keep compatibility MAP_SHARED frames coherent with a lower-filesystem
+/// hole punch. Regular files use PageCache::punch_hole instead.
+pub(crate) fn punch_shared_file_pages(dev: u64, ino: u64, offset: usize, len: usize) {
+    let Some(end) = offset.checked_add(len) else {
+        return;
+    };
+    let pages = SHARED_FILE_PAGES.lock();
+    let mut position = offset;
+    while position < end {
+        let page_index = position / PAGE_SIZE;
+        let page_offset = position % PAGE_SIZE;
+        let count = (end - position).min(PAGE_SIZE - page_offset);
+        let key = SharedFilePageKey {
+            dev,
+            ino,
+            page_index,
+        };
+        if let Some(frame) = pages.get(&key).and_then(Weak::upgrade) {
+            frame.ppn().get_bytes_array()[page_offset..page_offset + count].fill(0);
+        }
+        position += count;
+    }
+}
+
+/// Invalidate resident whole pages beyond a newly shortened EOF in every
+/// live address space. Candidate file handles are collected without holding
+/// their MemorySet lock while statting, avoiding File-lock/MemorySet-lock
+/// inversion with the page-fault path.
+pub(crate) fn truncate_file_mappings(dev: u64, ino: u64, new_size: usize) {
+    let mut seen = BTreeSet::new();
+    for task in TASK_MANAGER.snapshot() {
+        let memory_set = task.memory_set_arc();
+        let key = Arc::as_ptr(&memory_set) as usize;
+        if !seen.insert(key) {
+            continue;
+        }
+        let files = task.op_memory_set_read(MemorySet::mapped_file_handles);
+        let matching = files
+            .into_iter()
+            .filter(|file| {
+                file.get_stat()
+                    .is_ok_and(|stat| stat.dev == dev && stat.ino == ino)
+            })
+            .collect::<Vec<_>>();
+        if matching.is_empty() {
+            continue;
+        }
+        task.op_memory_set_write(|memory_set| {
+            for file in &matching {
+                memory_set.invalidate_truncated_file(file, new_size);
+            }
+            memory_set.flush_tlb();
+        });
+    }
+}
+
+/// Linux pagecache_isize_extended(): if extending i_size exposes another
+/// filesystem block inside an already resident VM page, write-protect that
+/// page so its next store must pass through page_mkwrite allocation.
+pub(crate) fn protect_extended_file_mappings(
+    dev: u64,
+    ino: u64,
+    old_size: usize,
+    new_size: usize,
+    block_size: usize,
+) {
+    if old_size >= new_size || block_size >= PAGE_SIZE || block_size == 0 {
+        return;
+    }
+    let rounded_old = old_size.div_ceil(block_size).saturating_mul(block_size);
+    if new_size <= rounded_old || rounded_old % PAGE_SIZE == 0 {
+        return;
+    }
+
+    let mut seen = BTreeSet::new();
+    for task in TASK_MANAGER.snapshot() {
+        let memory_set = task.memory_set_arc();
+        let key = Arc::as_ptr(&memory_set) as usize;
+        if !seen.insert(key) {
+            continue;
+        }
+        let files = task.op_memory_set_read(MemorySet::mapped_file_handles);
+        let matching = files
+            .into_iter()
+            .filter(|file| {
+                file.get_stat()
+                    .is_ok_and(|stat| stat.dev == dev && stat.ino == ino)
+            })
+            .collect::<Vec<_>>();
+        if matching.is_empty() {
+            continue;
+        }
+        task.op_memory_set_write(|memory_set| {
+            for file in &matching {
+                memory_set.write_protect_file_page(file, old_size / PAGE_SIZE);
+            }
+            memory_set.flush_tlb();
+        });
+    }
+}
+
+/// Invalidate fully punched resident file pages in every address space.
+/// Shared mappings and clean private pages must refault the new hole, while a
+/// writable MAP_PRIVATE page that has already completed COW remains anonymous
+/// and keeps its bytes, matching the private anonymous-page boundary observed
+/// by the Linux oracle.
+pub(crate) fn punch_file_mappings(dev: u64, ino: u64, offset: usize, len: usize) {
+    let Some(end) = offset.checked_add(len) else {
+        return;
+    };
+    let mut seen = BTreeSet::new();
+    for task in TASK_MANAGER.snapshot() {
+        let memory_set = task.memory_set_arc();
+        let key = Arc::as_ptr(&memory_set) as usize;
+        if !seen.insert(key) {
+            continue;
+        }
+        let files = task.op_memory_set_read(MemorySet::mapped_file_handles);
+        let matching = files
+            .into_iter()
+            .filter(|file| {
+                file.get_stat()
+                    .is_ok_and(|stat| stat.dev == dev && stat.ino == ino)
+            })
+            .collect::<Vec<_>>();
+        if matching.is_empty() {
+            continue;
+        }
+        task.op_memory_set_write(|memory_set| {
+            for file in &matching {
+                memory_set.invalidate_punched_file(file, offset, end);
+            }
+            memory_set.flush_tlb();
+        });
+    }
+}
+
 /// 地址空间
 ///
 /// 一系列有关联的逻辑段 [`MapArea`]，地址不一定连续
@@ -490,6 +663,13 @@ pub struct MemorySet {
     tlb_hart_mask: AtomicUsize,
     #[cfg(target_arch = "loongarch64")]
     asid: AtomicUsize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PageFaultOutcome {
+    Minor,
+    Major,
+    Retry,
 }
 
 impl Drop for MemorySet {
@@ -538,6 +718,7 @@ pub(crate) enum MmapBacking<'a> {
         file: Arc<dyn FileOp>,
         offset: usize,
         len: usize,
+        valid_len: usize,
         frames: Vec<Arc<FrameTracker>>,
     },
 }
@@ -569,6 +750,7 @@ pub(crate) fn mmap_file_backing(
             // the current EOF, so this cannot re-extend a subsequently
             // truncated file.
             len: map_len,
+            valid_len: file_len,
             frames,
         })
     } else {
@@ -586,15 +768,138 @@ pub(crate) fn mmap_shared_file_frames(
     len: usize,
     map_len: usize,
 ) -> SysResult<Vec<Arc<FrameTracker>>> {
-    let backing = FileBacking { file, offset, len };
+    let backing = FileBacking {
+        file,
+        offset,
+        len,
+        live_eof: true,
+    };
     let mut frames = Vec::with_capacity(map_len / PAGE_SIZE);
     for page in 0..(map_len / PAGE_SIZE) {
-        frames.push(shared_file_frame(&backing, page * PAGE_SIZE)?);
+        frames.push(shared_file_frame(&backing, page * PAGE_SIZE)?.0);
     }
     Ok(frames)
 }
 
 impl MemorySet {
+    pub fn resident_page_count(&self) -> usize {
+        self.areas
+            .iter()
+            .filter(|area| area.map_perm.contains(MapPermission::USER))
+            .map(|area| area.data_frames.len())
+            .sum()
+    }
+    fn mapped_file_handles(&self) -> Vec<Arc<dyn FileOp>> {
+        let mut files: Vec<Arc<dyn FileOp>> = Vec::new();
+        for area in &self.areas {
+            let Some(backing) = &area.file_backing else {
+                continue;
+            };
+            if !files.iter().any(|file| Arc::ptr_eq(file, &backing.file)) {
+                files.push(backing.file.clone());
+            }
+        }
+        files
+    }
+
+    fn invalidate_truncated_file(&mut self, file: &Arc<dyn FileOp>, new_size: usize) {
+        for area in self.areas.iter_mut() {
+            let Some(backing) = &area.file_backing else {
+                continue;
+            };
+            if !Arc::ptr_eq(&backing.file, file) {
+                continue;
+            }
+            let victims = area
+                .data_frames
+                .keys()
+                .copied()
+                .filter(|vpn| {
+                    let page_offset = (*vpn - area.vpn_range.get_start()) * PAGE_SIZE;
+                    backing.offset.saturating_add(page_offset) >= new_size
+                })
+                .collect::<Vec<_>>();
+            for vpn in victims {
+                area.unmap_one(&mut self.page_table, vpn);
+            }
+        }
+    }
+
+    fn write_protect_file_page(&mut self, file: &Arc<dyn FileOp>, file_page: usize) {
+        for area in self.areas.iter_mut() {
+            let Some(backing) = &area.file_backing else {
+                continue;
+            };
+            if !Arc::ptr_eq(&backing.file, file)
+                || !area.shared
+                || !area.map_perm.contains(MapPermission::WRITE)
+            {
+                continue;
+            }
+            let victims = area
+                .data_frames
+                .keys()
+                .copied()
+                .filter(|vpn| {
+                    let page_offset = (*vpn - area.vpn_range.get_start()) * PAGE_SIZE;
+                    backing
+                        .offset
+                        .checked_add(page_offset)
+                        .is_some_and(|offset| offset / PAGE_SIZE == file_page)
+                })
+                .collect::<Vec<_>>();
+            for vpn in victims {
+                if let Some(pte) = self.page_table.translate(vpn) {
+                    let mut flags = pte.flags();
+                    // LoongArch raises PageModifyFault from its hardware D
+                    // bit, while RV uses W. Clear both representations so the
+                    // next store reaches the common page_mkwrite path.
+                    flags.remove(PTEFlags::WRITE | PTEFlags::DIRTY);
+                    self.page_table.modify_pte(vpn, flags);
+                }
+            }
+        }
+    }
+
+    fn invalidate_punched_file(&mut self, file: &Arc<dyn FileOp>, start: usize, end: usize) {
+        for area_index in 0..self.areas.len() {
+            let victims = {
+                let area = &self.areas[area_index];
+                let Some(backing) = &area.file_backing else {
+                    continue;
+                };
+                if !Arc::ptr_eq(&backing.file, file) {
+                    continue;
+                }
+                area.data_frames
+                    .keys()
+                    .copied()
+                    .filter(|vpn| {
+                        let page_offset = (*vpn - area.vpn_range.get_start()) * PAGE_SIZE;
+                        let Some(file_start) = backing.offset.checked_add(page_offset) else {
+                            return false;
+                        };
+                        let Some(file_end) = file_start.checked_add(PAGE_SIZE) else {
+                            return false;
+                        };
+                        if file_start < start || file_end > end {
+                            return false;
+                        }
+                        if area.shared || !area.map_perm.contains(MapPermission::WRITE) {
+                            return true;
+                        }
+                        self.page_table
+                            .translate(*vpn)
+                            .is_some_and(|pte| pte.is_cow())
+                    })
+                    .collect::<Vec<_>>()
+            };
+            for vpn in victims {
+                self.areas[area_index].unmap_one(&mut self.page_table, vpn);
+            }
+        }
+    }
+
     #[cfg(target_arch = "loongarch64")]
     fn initial_mmap_start() -> usize {
         MMAP_MIN_ADDR
@@ -976,6 +1281,7 @@ impl MemorySet {
             && right.shm_attach_id.is_none()
             && left.map_perm == right.map_perm
             && left.locked == right.locked
+            && left.grows_down == right.grows_down
             && left.wipe_on_fork == right.wipe_on_fork
             && left.dontfork == right.dontfork
     }
@@ -1045,6 +1351,7 @@ impl MemorySet {
         replace: bool,
         noreplace: bool,
         locked: bool,
+        grows_down: bool,
         backing: MmapBacking<'_>,
     ) -> SysResult<usize> {
         if let MmapBacking::SharedFrames { frames, .. } = &backing {
@@ -1064,14 +1371,16 @@ impl MemorySet {
 
         match backing {
             MmapBacking::LazyAnonymous => {
-                self.push_map_area_lazy(MapArea::new_with_flags(
+                let mut area = MapArea::new_with_flags(
                     VirtAddr::from(placement.start),
                     VirtAddr::from(placement.end),
                     MapType::Framed,
                     placement.map_perm,
                     false,
                     placement.locked,
-                ));
+                );
+                area.grows_down = grows_down;
+                self.push_map_area_lazy(area);
             }
             MmapBacking::SharedAnonymous => {
                 let mut area = MapArea::new_shared(
@@ -1080,6 +1389,7 @@ impl MemorySet {
                     placement.map_perm,
                 );
                 area.locked = placement.locked;
+                area.grows_down = grows_down;
                 self.push_empty_map_area(area, None, 0);
             }
             MmapBacking::SharedFrames { attach_id, frames } => {
@@ -1089,6 +1399,7 @@ impl MemorySet {
                     placement.map_perm,
                 );
                 area.locked = placement.locked;
+                area.grows_down = grows_down;
                 area.shm_attach_id = Some(attach_id);
                 let mut mapped_vpns = Vec::new();
                 for (vpn, frame) in area.vpn_range.into_iter().zip(frames.iter()) {
@@ -1107,7 +1418,7 @@ impl MemorySet {
                 self.areas.push(area);
             }
             MmapBacking::PrivateFile { file, offset, len } => {
-                self.push_map_area_lazy(MapArea::new_file_backed(
+                let mut area = MapArea::new_file_backed(
                     VirtAddr::from(placement.start),
                     VirtAddr::from(placement.end),
                     placement.map_perm,
@@ -1116,12 +1427,16 @@ impl MemorySet {
                     file,
                     offset,
                     len,
-                ));
+                );
+                area.grows_down = grows_down;
+                area.file_backing.as_mut().unwrap().live_eof = true;
+                self.push_map_area_lazy(area);
             }
             MmapBacking::SharedFileFrames {
                 file,
                 offset,
                 len,
+                valid_len,
                 frames,
             } => {
                 if frames.len() != map_len / PAGE_SIZE {
@@ -1137,12 +1452,26 @@ impl MemorySet {
                     offset,
                     len,
                 );
+                area.grows_down = grows_down;
+                area.file_backing.as_mut().unwrap().live_eof = true;
                 let mut mapped_vpns = Vec::new();
-                for (vpn, frame) in area.vpn_range.into_iter().zip(frames.into_iter()) {
-                    if let Err(err) =
-                        self.page_table
-                            .map(vpn, frame.ppn(), PTEFlags::from(placement.map_perm))
-                    {
+                for (page_index, (vpn, frame)) in area
+                    .vpn_range
+                    .into_iter()
+                    .zip(frames.into_iter())
+                    .enumerate()
+                {
+                    // Whole pages beyond EOF stay non-resident so the first
+                    // access can report SIGBUS. If the file later grows,
+                    // map_one() rechecks the live size and faults them in.
+                    if page_index * PAGE_SIZE >= valid_len {
+                        continue;
+                    }
+                    let mut pte_flags = PTEFlags::from(placement.map_perm);
+                    if placement.map_perm.contains(MapPermission::WRITE) {
+                        pte_flags.remove(PTEFlags::WRITE);
+                    }
+                    if let Err(err) = self.page_table.map(vpn, frame.ppn(), pte_flags) {
                         for mapped_vpn in mapped_vpns {
                             self.page_table.try_unmap(mapped_vpn);
                         }
@@ -1564,8 +1893,12 @@ impl MemorySet {
 
             // 修改中间段已映射页的 PTE 权限
             let mapped_vpns: Vec<_> = middle.data_frames.keys().copied().collect();
+            let mut resident_perm = new_map_perm;
+            if middle.shared && middle.file_backing.is_some() && new_writable {
+                resident_perm.remove(MapPermission::WRITE);
+            }
             for vpn in mapped_vpns {
-                self.modify_user_pte_perm(vpn, new_map_perm);
+                self.modify_user_pte_perm(vpn, resident_perm);
             }
             middle.map_perm = new_map_perm;
             if !old_writable && new_writable {
@@ -2096,9 +2429,14 @@ impl MemorySet {
                 debug_assert!(!(area.shared && pte.is_cow()));
                 debug_assert!(!(pte.is_cow() && flags.contains(PTEFlags::WRITE)));
                 if !pte.is_cow() {
-                    debug_assert_eq!(
-                        flags.contains(PTEFlags::WRITE),
-                        area.map_perm.contains(MapPermission::WRITE)
+                    let shared_file_write_protected = area.shared
+                        && area.file_backing.is_some()
+                        && area.map_perm.contains(MapPermission::WRITE)
+                        && !flags.contains(PTEFlags::WRITE);
+                    debug_assert!(
+                        shared_file_write_protected
+                            || flags.contains(PTEFlags::WRITE)
+                                == area.map_perm.contains(MapPermission::WRITE)
                     );
                 }
             }
@@ -2278,7 +2616,7 @@ impl MemorySet {
             ));
         }
         // 设备 MMIO 区域
-        for (start, len) in VIRTIO_MMIO.iter().copied() {
+        for (start, len) in MMIO.iter().copied() {
             memory_set.push_empty_map_area(
                 MapArea::new(
                     VirtAddr::from(KERNEL_BASE + start),
@@ -2852,17 +3190,21 @@ impl MemorySet {
     }
 
     /// 尝试处理用户态页错误，解决 COW 或惰性分配
-    pub fn handle_page_fault(&mut self, cause: PageFaultCause, stval: usize) -> SysResult {
+    pub fn handle_page_fault(
+        &mut self,
+        cause: PageFaultCause,
+        stval: usize,
+        user_sp: Option<usize>,
+    ) -> SysResult<PageFaultOutcome> {
         if stval == 0 || stval >= TRAMPOLINE {
             return Err(Errno::EFAULT);
         }
         let vpn = VirtAddr::from(stval).floor();
 
-        let area_idx = self
-            .areas
-            .iter()
-            .position(|a| a.vpn_range.contain(&vpn))
-            .ok_or(Errno::EFAULT)?;
+        let area_idx = match self.areas.iter().position(|a| a.vpn_range.contain(&vpn)) {
+            Some(index) => index,
+            None => self.expand_grows_down(vpn, user_sp).ok_or(Errno::EFAULT)?,
+        };
 
         let area_perm = self.areas[area_idx].map_perm;
         if !area_perm.contains(MapPermission::USER) {
@@ -2894,8 +3236,9 @@ impl MemorySet {
                 .get(&vpn)
                 .ok_or(Errno::EFAULT)?;
             let count = Arc::strong_count(old_frame);
+            let private_file_page = self.areas[area_idx].file_backing.is_some();
 
-            if count == 1 {
+            if count == 1 && !private_file_page {
                 // 无其他进程共享，直接恢复可写
                 let flags = PTEFlags::from(area_perm);
                 self.page_table.modify_pte(vpn, flags);
@@ -2909,7 +3252,38 @@ impl MemorySet {
             self.flush_tlb();
             crate::perf::cow_fault(1);
             self.debug_check_invariants();
-            return Ok(());
+            return Ok(PageFaultOutcome::Minor);
+        }
+
+        // Resolve writable shared file mappings through a page_mkwrite-like
+        // boundary: persistent backing must exist before the PTE becomes
+        // writable. ENOSPC is returned to the architecture trap layer, which
+        // delivers SIGBUS instead of delaying the failure until msync/fsync.
+        if is_store
+            && pte.is_some_and(|pte| pte.is_valid() && !pte.writable())
+            && self.areas[area_idx].shared
+            && self.areas[area_idx].file_backing.is_some()
+            && area_perm.contains(MapPermission::WRITE)
+        {
+            let area = &self.areas[area_idx];
+            let backing = area.file_backing.as_ref().unwrap();
+            let page_offset = (vpn - area.vpn_range.get_start()) * PAGE_SIZE;
+            let file_offset = backing.offset.checked_add(page_offset).ok_or(Errno::EIO)?;
+            let file_size = backing.file.get_stat()?.size;
+            if file_offset >= file_size {
+                return Err(Errno::EIO);
+            }
+            let write_len = (file_size - file_offset).min(PAGE_SIZE);
+            let frame = area.data_frames.get(&vpn).ok_or(Errno::EFAULT)?;
+            backing.file.reserve_shared_mmap_write(
+                file_offset,
+                &frame.ppn().get_bytes_array()[..write_len],
+            )?;
+
+            self.page_table.modify_pte(vpn, PTEFlags::from(area_perm));
+            self.flush_tlb();
+            self.debug_check_invariants();
+            return Ok(PageFaultOutcome::Minor);
         }
 
         // 惰性分配：PTE 无效 + 在有效 area 内
@@ -2920,7 +3294,7 @@ impl MemorySet {
 
             let file_backed = self.areas[area_idx].file_backing.is_some();
             let shared = self.areas[area_idx].shared;
-            self.areas[area_idx].map_one(&mut self.page_table, vpn)?;
+            let required_io = self.areas[area_idx].map_one(&mut self.page_table, vpn)?;
             if file_backed {
                 if shared {
                     crate::perf::shared_file_fault(1);
@@ -2933,7 +3307,11 @@ impl MemorySet {
             crate::perf::tlb_fresh_map_flush(1);
             self.flush_tlb();
             self.debug_check_invariants();
-            return Ok(());
+            return Ok(if required_io {
+                PageFaultOutcome::Major
+            } else {
+                PageFaultOutcome::Minor
+            });
         }
 
         // A shared address-space update can race with a fault that was already
@@ -2949,10 +3327,39 @@ impl MemorySet {
             })
         {
             sfence();
-            return Ok(());
+            return Ok(PageFaultOutcome::Retry);
         }
 
         Err(Errno::EFAULT)
+    }
+
+    /// Expand a MAP_GROWSDOWN VMA by one guard page when the saved user stack
+    /// pointer is inside that page, while preserving Linux's default
+    /// 256-page separation from the preceding mapping.
+    fn expand_grows_down(
+        &mut self,
+        fault_vpn: VirtPageNum,
+        user_sp: Option<usize>,
+    ) -> Option<usize> {
+        const STACK_GUARD_GAP_PAGES: usize = 256;
+
+        let stack_vpn = VirtAddr::from(user_sp?).floor();
+        if stack_vpn != fault_vpn {
+            return None;
+        }
+        let index = self.areas.iter().position(|area| {
+            area.grows_down
+                && area.vpn_range.get_start().0 == fault_vpn.0.checked_add(1).unwrap_or(0)
+        })?;
+        if index != 0 {
+            let previous_end = self.areas[index - 1].vpn_range.get_end().0;
+            if fault_vpn.0.saturating_sub(previous_end) < STACK_GUARD_GAP_PAGES {
+                return None;
+            }
+        }
+        let end = self.areas[index].vpn_range.get_end();
+        self.areas[index].vpn_range = VPNRange::new(fault_vpn, end);
+        Some(index)
     }
 
     pub fn ensure_user_page_access(
@@ -2983,7 +3390,7 @@ impl MemorySet {
                 PageFaultCause::Load
             };
             let va = usize::from(VirtAddr::from(vpn));
-            self.handle_page_fault(cause, va)?;
+            let _ = self.handle_page_fault(cause, va, None)?;
         }
         Ok(())
     }
@@ -2999,6 +3406,7 @@ struct MapArea {
     map_perm: MapPermission,
     shared: bool,
     locked: bool,
+    grows_down: bool,
     wipe_on_fork: bool,
     dontfork: bool,
     file_backing: Option<FileBacking>,
@@ -3010,6 +3418,7 @@ struct FileBacking {
     file: Arc<dyn FileOp>,
     offset: usize,
     len: usize,
+    live_eof: bool,
 }
 
 #[derive(Clone)]
@@ -3018,6 +3427,7 @@ struct MapAreaMeta {
     map_perm: MapPermission,
     shared: bool,
     locked: bool,
+    grows_down: bool,
     wipe_on_fork: bool,
     dontfork: bool,
     file_backing: Option<FileBacking>,
@@ -3049,6 +3459,7 @@ impl MapArea {
             map_perm,
             shared: false,
             locked: false,
+            grows_down: false,
             wipe_on_fork: false,
             dontfork: false,
             file_backing: None,
@@ -3089,7 +3500,12 @@ impl MapArea {
         let mut area = Self::new(start_va, end_va, MapType::Framed, map_perm);
         area.shared = shared;
         area.locked = locked;
-        area.file_backing = Some(FileBacking { file, offset, len });
+        area.file_backing = Some(FileBacking {
+            file,
+            offset,
+            len,
+            live_eof: false,
+        });
         area
     }
 
@@ -3099,6 +3515,7 @@ impl MapArea {
             map_perm: self.map_perm,
             shared: self.shared,
             locked: self.locked,
+            grows_down: self.grows_down,
             wipe_on_fork: self.wipe_on_fork,
             dontfork: self.dontfork,
             file_backing: self.file_backing.clone(),
@@ -3118,6 +3535,7 @@ impl MapArea {
             map_perm: meta.map_perm,
             shared: meta.shared,
             locked: meta.locked,
+            grows_down: meta.grows_down,
             wipe_on_fork: meta.wipe_on_fork,
             dontfork: meta.dontfork,
             file_backing: meta.file_backing,
@@ -3349,8 +3767,9 @@ impl MapArea {
     }
 
     /// 依据逻辑段的不同映射策略，为虚拟页分配物理页帧，并建立映射关系
-    pub fn map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) -> SysResult {
+    pub fn map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) -> SysResult<bool> {
         let ppn: PhysPageNum;
+        let mut required_io = false;
         match self.map_type {
             // 直接映射，物理页号和虚拟页号存在线性偏移，一般用于内核，无需分配页帧管理，因为内存地址固定
             MapType::Direct => {
@@ -3359,49 +3778,97 @@ impl MapArea {
             // 随机映射，物理页号和虚拟页号无关，用于用户程序，分配页帧统一管理
             MapType::Framed => {
                 let page_offset = (vpn - self.vpn_range.get_start()) * PAGE_SIZE;
-                let frame = match &self.file_backing {
-                    // Clean read-only MAP_PRIVATE pages have the same bytes
-                    // as PageCache and cannot be modified through this PTE.
-                    // Sharing avoids one frame allocation and 4 KiB copy per
-                    // process while writable private mappings retain their
-                    // existing copy-on-fault behavior.
-                    Some(backing)
-                        if self.shared || !self.map_perm.contains(MapPermission::WRITE) =>
-                    {
-                        shared_file_frame(backing, page_offset)?
-                    }
-                    Some(backing) if self.shared => shared_file_frame(backing, page_offset)?,
-                    None if self.shared => Arc::new(frame_alloc().ok_or(Errno::ENOMEM)?),
-                    backing => {
-                        let frame = frame_alloc().ok_or(Errno::ENOMEM)?;
-                        let frame_ppn = frame.ppn();
-                        if let Some(backing) = backing {
-                            if page_offset < backing.len {
-                                let file_offset =
-                                    backing.offset.checked_add(page_offset).ok_or(Errno::EIO)?;
-                                let read_len = (backing.len - page_offset).min(PAGE_SIZE);
-                                read_file_at(
-                                    backing.file.clone(),
-                                    file_offset,
-                                    &mut frame_ppn.get_bytes_array()[..read_len],
-                                )?;
-                            }
+                let fixed_partial_file_page = self.file_backing.as_ref().is_some_and(|backing| {
+                    !backing.live_eof
+                        && page_offset < backing.len
+                        && page_offset.saturating_add(PAGE_SIZE) > backing.len
+                });
+                let live_backing = if let Some(backing) = &self.file_backing {
+                    if !backing.live_eof && page_offset >= backing.len {
+                        // ELF PT_LOAD BSS after the fixed file-backed prefix
+                        // is anonymous zero memory, not a dynamic EOF page.
+                        None
+                    } else {
+                        let file_offset =
+                            backing.offset.checked_add(page_offset).ok_or(Errno::EIO)?;
+                        let file_size = backing.file.get_stat()?.size;
+                        if file_offset >= file_size {
+                            return Err(Errno::EIO);
                         }
+                        Some(FileBacking {
+                            file: backing.file.clone(),
+                            offset: backing.offset,
+                            len: if backing.live_eof {
+                                file_size.saturating_sub(backing.offset)
+                            } else {
+                                backing.len.min(file_size.saturating_sub(backing.offset))
+                            },
+                            live_eof: backing.live_eof,
+                        })
+                    }
+                } else {
+                    None
+                };
+                let private_file_cow = live_backing.is_some()
+                    && !fixed_partial_file_page
+                    && !self.shared
+                    && self.map_perm.contains(MapPermission::WRITE);
+                let frame = match &live_backing {
+                    // All clean file pages initially share their backing
+                    // frame. Writable MAP_PRIVATE installs it read-only+COW;
+                    // the first store creates the anonymous private copy.
+                    Some(backing) if !fixed_partial_file_page => {
+                        let (frame, frame_required_io) = shared_file_frame(backing, page_offset)?;
+                        required_io = frame_required_io;
+                        frame
+                    }
+                    Some(backing) => {
+                        let frame = frame_alloc().ok_or(Errno::ENOMEM)?;
+                        let file_offset =
+                            backing.offset.checked_add(page_offset).ok_or(Errno::EIO)?;
+                        let read_len = backing.len.saturating_sub(page_offset).min(PAGE_SIZE);
+                        read_file_at(
+                            backing.file.clone(),
+                            file_offset,
+                            &mut frame.ppn().get_bytes_array()[..read_len],
+                        )?;
+                        required_io = read_len != 0;
+                        Arc::new(frame)
+                    }
+                    None if self.shared => Arc::new(frame_alloc().ok_or(Errno::ENOMEM)?),
+                    None => {
+                        let frame = frame_alloc().ok_or(Errno::ENOMEM)?;
                         Arc::new(frame)
                     }
                 };
                 ppn = frame.ppn();
                 self.data_frames.insert(vpn, frame);
+                if private_file_cow {
+                    let mut pte_flags = PTEFlags::from(self.map_perm);
+                    pte_flags.remove(PTEFlags::WRITE);
+                    if let Err(err) = page_table.map(vpn, ppn, pte_flags) {
+                        self.data_frames.remove(&vpn);
+                        return Err(err);
+                    }
+                    page_table.set_pte_cow(vpn);
+                    return Ok(required_io);
+                }
             }
         }
-        let pte_flags = PTEFlags::from(self.map_perm);
+        let mut pte_flags = PTEFlags::from(self.map_perm);
+        if self.shared
+            && self.file_backing.is_some()
+            && self.map_perm.contains(MapPermission::WRITE)
+        {
+            pte_flags.remove(PTEFlags::WRITE);
+        }
         if let Err(err) = page_table.map(vpn, ppn, pte_flags) {
             if self.map_type == MapType::Framed {
                 self.data_frames.remove(&vpn);
             }
             return Err(err);
         }
-        Ok(())
+        Ok(required_io)
     }
 
     fn privatize_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) -> SysResult {

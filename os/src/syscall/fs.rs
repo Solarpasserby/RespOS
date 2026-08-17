@@ -6,15 +6,15 @@ use crate::fs::dev::{LoopControlInode, LoopInode, VirtBlkInode};
 use crate::fs::mount::{do_mount, do_umount2, sync_all_filesystems, sync_filesystem};
 use crate::fs::vfs::{InodeOp, InodeType};
 use crate::fs::{
-    AT_EMPTY_PATH, AT_FDCWD, AT_NO_AUTOMOUNT, AT_SYMLINK_NOFOLLOW, FdEntry, File, FileOp, KStat,
-    OpenFlags, POLL_READ, POLL_WRITE, Pipe, PollEvents, SpecialFd, Stat, Statfs64,
     check_dir_search_permission, filename_create, filename_link, filename_link_tmpfile,
     filename_lookup, filename_lookup_no_follow_final_symlink, filename_mknod, filename_rename,
-    filename_symlink, filename_unlink, init_fdset, make_pipe, open_named_fifo, path_open,
+    filename_symlink, filename_unlink, init_fdset, make_pipe, open_named_fifo, path_open, FdEntry,
+    File, FileOp, KStat, OpenFlags, Pipe, PollEvents, SpecialFd, Stat, Statfs64, AT_EMPTY_PATH,
+    AT_FDCWD, AT_NO_AUTOMOUNT, AT_SYMLINK_NOFOLLOW, POLL_READ, POLL_WRITE,
 };
 use crate::mm::{
-    IoBufferKind, KernelIoBuffer, VPNRange, VirtAddr, check_user_readable, check_user_writable,
-    copy_cstr_from_user, copy_from_user, copy_to_user, writeback_file_pages,
+    check_user_readable, check_user_writable, copy_cstr_from_user, copy_from_user, copy_to_user,
+    writeback_file_pages, IoBufferKind, KernelIoBuffer, VPNRange, VirtAddr,
 };
 use crate::mutex::SpinLock;
 use crate::signal::sig_struct::{Sig, SigSet};
@@ -23,7 +23,7 @@ use crate::task::{
     current_task, prepare_current_task_blocked, remove_task, switch_to_next_task,
     yield_current_task,
 };
-use crate::timer::{TimeSpec, get_time_ms, get_timeout_us};
+use crate::timer::{get_timeout_us, TimeSpec};
 use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 use lazy_static::lazy_static;
 
@@ -42,6 +42,7 @@ const XATTR_SIZE_MAX: usize = 65_536;
 const CHOWN_ID_UNCHANGED: usize = u32::MAX as usize;
 const CLOSE_RANGE_UNSHARE: usize = 1 << 1;
 const CLOSE_RANGE_CLOEXEC: usize = 1 << 2;
+const CAP_SYS_TIME: usize = 25;
 
 const LOCK_SH: usize = 1;
 const LOCK_EX: usize = 2;
@@ -71,9 +72,9 @@ enum FlockKind {
     Exclusive,
 }
 
-#[derive(Copy, Clone)]
 struct FlockEntry {
     owner: usize,
+    owner_ref: alloc::sync::Weak<dyn FileOp>,
     kind: FlockKind,
 }
 
@@ -685,6 +686,14 @@ pub fn sys_fadvise64(fd: usize, offset: isize, len: isize, advice: usize) -> Sys
     let task = current_task().expect("[kernel] current task is None.");
     let file = task.get_fd_entry(fd)?.file;
     file.can_seek()?;
+    let offset = offset as usize;
+    let len = len as usize;
+    if len != 0 {
+        offset.checked_add(len).ok_or(Errno::EINVAL)?;
+    }
+    if let Some(file) = file.as_any().downcast_ref::<File>() {
+        return file.fadvise(offset, len, advice);
+    }
     Ok(0)
 }
 
@@ -704,7 +713,10 @@ pub fn sys_write(fd: usize, buf: *mut u8, len: usize) -> SysResult<usize> {
     let mut kbuf = KernelIoBuffer::new(len.min(IO_CHUNK_SIZE), IoBufferKind::Write);
     let mut total = 0usize;
     while total < len {
-        if file.get_flags().contains(OpenFlags::O_NONBLOCK) && !file.write_ready() {
+        if file.get_flags().contains(OpenFlags::O_NONBLOCK)
+            && !is_pipe(&file)
+            && !file.write_ready()
+        {
             if total == 0 {
                 return Err(Errno::EAGAIN);
             }
@@ -793,6 +805,43 @@ enum IovecBufferPerm {
 pub fn sys_writev(fd: usize, iov: *const IoVec, iovcnt: usize) -> SysResult<usize> {
     let items = read_iovecs(iov, iovcnt)?;
     check_iovec_buffers(&items, IovecBufferPerm::Read)?;
+    let vector_len = items
+        .iter()
+        .try_fold(0usize, |total, item| total.checked_add(item.len))
+        .ok_or(Errno::EINVAL)?;
+    let task = current_task().expect("[kernel] current task is None.");
+    let file = task.get_fd_entry(fd)?.file;
+    if is_pipe(&file) && vector_len <= PAGE_SIZE {
+        if !file.writable() {
+            return Err(Errno::EBADF);
+        }
+        if vector_len == 0 {
+            return Ok(0);
+        }
+        let mut record = alloc::vec![0u8; vector_len];
+        let mut offset = 0usize;
+        for item in &items {
+            if item.len == 0 {
+                continue;
+            }
+            unsafe {
+                copy_from_user(
+                    record.as_mut_ptr().add(offset),
+                    item.base as *const u8,
+                    item.len,
+                )?;
+            }
+            offset += item.len;
+        }
+        return match file.write(record.as_slice()) {
+            Err(Errno::EPIPE) => {
+                let siginfo = SigInfo::new(Sig::SIGPIPE.raw(), SigInfo::KERNEL, SiField::None);
+                task.receive_siginfo(siginfo, false);
+                Err(Errno::EPIPE)
+            }
+            result => result,
+        };
+    }
     let mut total: usize = 0;
     for item in items {
         if item.len == 0 {
@@ -815,6 +864,12 @@ pub fn sys_readv(fd: usize, iov: *const IoVec, iovcnt: usize) -> SysResult<usize
     check_iovec_buffers(&items, IovecBufferPerm::Write)?;
     let mut total: usize = 0;
     for item in items {
+        if total != 0 {
+            let task = current_task().expect("[kernel] current task is None.");
+            if !task.get_fd_entry(fd)?.file.read_ready() {
+                break;
+            }
+        }
         if item.len == 0 {
             continue;
         }
@@ -1492,24 +1547,6 @@ fn release_flock_for_file(file: &alloc::sync::Arc<dyn FileOp>) {
     }
 }
 
-fn release_flock_for_file_if_last_fd(fd: usize, file: &alloc::sync::Arc<dyn FileOp>) {
-    let Some(task) = current_task() else {
-        release_flock_for_file(file);
-        return;
-    };
-    let owner = flock_owner(file);
-    let has_other_fd = task.open_fds().into_iter().any(|other_fd| {
-        other_fd != fd
-            && task
-                .get_fd_entry(other_fd)
-                .map(|entry| flock_owner(&entry.file) == owner)
-                .unwrap_or(false)
-    });
-    if !has_other_fd {
-        release_flock_for_file(file);
-    }
-}
-
 fn release_posix_locks_for_file(file: &alloc::sync::Arc<dyn FileOp>) {
     let Ok(key) = flock_key(file) else {
         return;
@@ -1527,6 +1564,14 @@ fn release_posix_locks_for_file(file: &alloc::sync::Arc<dyn FileOp>) {
     }
 }
 
+pub(crate) fn release_posix_locks_for_process(owner_pid: usize) {
+    let mut locks = POSIX_LOCKS.lock();
+    locks.retain(|_, entries| {
+        entries.retain(|entry| entry.owner_pid != owner_pid);
+        !entries.is_empty()
+    });
+}
+
 fn flock_conflicts(entries: &[FlockEntry], owner: usize, kind: FlockKind) -> bool {
     entries.iter().any(|entry| {
         entry.owner != owner && (entry.kind == FlockKind::Exclusive || kind == FlockKind::Exclusive)
@@ -1538,11 +1583,16 @@ fn set_flock(file: &alloc::sync::Arc<dyn FileOp>, kind: FlockKind) -> SysResult 
     let owner = flock_owner(file);
     let mut locks = FLOCKS.lock();
     let entries = locks.entry(key).or_default();
+    entries.retain(|entry| entry.owner_ref.upgrade().is_some());
     if flock_conflicts(entries, owner, kind) {
         return Err(Errno::EAGAIN);
     }
     entries.retain(|entry| entry.owner != owner);
-    entries.push(FlockEntry { owner, kind });
+    entries.push(FlockEntry {
+        owner,
+        owner_ref: alloc::sync::Arc::downgrade(file),
+        kind,
+    });
     Ok(())
 }
 
@@ -1592,7 +1642,6 @@ pub fn sys_flock(fd: usize, operation: usize) -> SysResult<usize> {
 pub fn sys_close(fd: usize) -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
     if let Ok(fd_entry) = task.get_fd_entry(fd) {
-        release_flock_for_file_if_last_fd(fd, &fd_entry.file);
         release_posix_locks_for_file(&fd_entry.file);
     }
     task.close(fd)?;
@@ -1620,7 +1669,6 @@ pub fn sys_close_range(first: usize, last: usize, flags: usize) -> SysResult<usi
             let _ = task.set_fd(fd, entry)?;
         } else {
             if let Ok(fd_entry) = task.get_fd_entry(fd) {
-                release_flock_for_file_if_last_fd(fd, &fd_entry.file);
                 release_posix_locks_for_file(&fd_entry.file);
             }
             let _ = task.close(fd);
@@ -1802,11 +1850,7 @@ fn validate_utimens_time(ts: TimeSpec) -> SysResult<TimeSpec> {
 }
 
 fn current_timespec() -> TimeSpec {
-    let ms = get_time_ms();
-    TimeSpec {
-        sec: (ms / 1000) as isize,
-        nsec: ((ms % 1000) * 1_000_000) as isize,
-    }
+    super::time::realtime_timespec()
 }
 
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -2549,11 +2593,29 @@ pub fn sys_ioctl(fd: usize, request: usize, arg: usize) -> SysResult<usize> {
     const FIONREAD: usize = 0x541b;
     const FIONBIO: usize = 0x5421;
     const RTC_RD_TIME: usize = 0x8024_7009;
+    const RTC_SET_TIME: usize = 0x4024_700a;
+    // Linux declares ioctl(2)'s command as unsigned int.  Some libc paths
+    // sign-extend constants whose direction bit is set when loading them into
+    // a syscall register, so normalize at the ABI boundary before dispatch.
+    let request = request as u32 as usize;
 
     let task = current_task().expect("[kernel] current task is None.");
     let fd_entry = task.get_fd_entry(fd)?;
 
     match request {
+        crate::fs::tty::TCGETS
+        | crate::fs::tty::TCSETS
+        | crate::fs::tty::TCSETSW
+        | crate::fs::tty::TCSETSF
+        | crate::fs::tty::TIOCSCTTY
+        | crate::fs::tty::TIOCGPGRP
+        | crate::fs::tty::TIOCSPGRP
+        | crate::fs::tty::TIOCNOTTY
+        | crate::fs::tty::TIOCGSID
+            if fd_entry.file.is_tty() =>
+        {
+            crate::fs::tty::console_ioctl(request, arg)
+        }
         TIOCGWINSZ if fd_entry.file.is_tty() => {
             let winsize = WinSize {
                 row: 24,
@@ -2581,13 +2643,37 @@ pub fn sys_ioctl(fd: usize, request: usize, arg: usize) -> SysResult<usize> {
                 let nbytes = pipe.available_bytes() as i32;
                 copy_to_user(arg as *mut i32, &nbytes as *const i32, 1)?;
                 Ok(0)
+            } else if fd_entry.file.is_tty() {
+                let nbytes = crate::fs::tty::console_available_bytes() as i32;
+                copy_to_user(arg as *mut i32, &nbytes as *const i32, 1)?;
+                Ok(0)
             } else {
                 Err(Errno::ENOTTY)
             }
         }
         RTC_RD_TIME if is_rtc_file(&fd_entry.file) => {
-            let rtc_time = rtc_time_from_unix(get_time_ms() / 1000);
+            let epoch_ns = crate::timer::rtc_epoch_ns().ok_or(Errno::EIO)?;
+            let seconds = usize::try_from(epoch_ns / 1_000_000_000).map_err(|_| Errno::EINVAL)?;
+            let rtc_time = rtc_time_from_unix(seconds);
             copy_to_user(arg as *mut RtcTime, &rtc_time as *const RtcTime, 1)?;
+            Ok(0)
+        }
+        RTC_SET_TIME if is_rtc_file(&fd_entry.file) => {
+            // Linux performs the RTC class capability check before touching
+            // the user pointer and reports EACCES for this ioctl.
+            if !task.has_cap(CAP_SYS_TIME) {
+                return Err(Errno::EACCES);
+            }
+            let mut rtc_time = RtcTime::default();
+            copy_from_user(&mut rtc_time as *mut RtcTime, arg as *const RtcTime, 1)?;
+            let seconds = rtc_time_to_unix(&rtc_time)?;
+            let epoch_ns = u64::try_from(seconds)
+                .ok()
+                .and_then(|seconds| seconds.checked_mul(1_000_000_000))
+                .ok_or(Errno::EINVAL)?;
+            if !crate::timer::rtc_set_epoch_ns(epoch_ns) {
+                return Err(Errno::EIO);
+            }
             Ok(0)
         }
         _ => device_ioctl(&fd_entry.file, request, arg),
@@ -2618,7 +2704,10 @@ fn device_ioctl(
 fn is_rtc_file(file: &alloc::sync::Arc<dyn FileOp>) -> bool {
     file.as_any()
         .downcast_ref::<File>()
-        .map(|file| file.path().abs_path().as_str().ends_with("/rtc"))
+        .map(|file| {
+            let path = file.path().abs_path();
+            path.as_str().ends_with("/rtc") || path.as_str().ends_with("/rtc0")
+        })
         .unwrap_or(false)
 }
 
@@ -2669,6 +2758,56 @@ fn rtc_time_from_unix(secs: usize) -> RtcTime {
         tm_yday: day_of_year as i32,
         tm_isdst: 0,
     }
+}
+
+fn rtc_time_to_unix(time: &RtcTime) -> SysResult<usize> {
+    let year = time.tm_year.checked_add(1900).ok_or(Errno::EINVAL)?;
+    if !(1970..=9999).contains(&year)
+        || !(0..=11).contains(&time.tm_mon)
+        || !(0..=23).contains(&time.tm_hour)
+        || !(0..=59).contains(&time.tm_min)
+        || !(0..=59).contains(&time.tm_sec)
+    {
+        return Err(Errno::EINVAL);
+    }
+    let year = year as usize;
+    let month = time.tm_mon as usize;
+    let month_days = [
+        31usize,
+        if is_leap_year(year) { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    if time.tm_mday < 1 || time.tm_mday as usize > month_days[month] {
+        return Err(Errno::EINVAL);
+    }
+    let years_before = year - 1;
+    let leap_days_before_year = years_before / 4 - years_before / 100 + years_before / 400;
+    let base_year = 1969usize;
+    let leap_days_before_epoch = base_year / 4 - base_year / 100 + base_year / 400;
+    let mut days = (year - 1970)
+        .checked_mul(365)
+        .and_then(|days| {
+            days.checked_add(leap_days_before_year.saturating_sub(leap_days_before_epoch))
+        })
+        .ok_or(Errno::EINVAL)?;
+    days = days
+        .checked_add(month_days[..month].iter().sum())
+        .and_then(|days| days.checked_add(time.tm_mday as usize - 1))
+        .ok_or(Errno::EINVAL)?;
+    days.checked_mul(86_400)
+        .and_then(|seconds| seconds.checked_add(time.tm_hour as usize * 3_600))
+        .and_then(|seconds| seconds.checked_add(time.tm_min as usize * 60))
+        .and_then(|seconds| seconds.checked_add(time.tm_sec as usize))
+        .ok_or(Errno::EINVAL)
 }
 
 fn is_leap_year(year: usize) -> bool {

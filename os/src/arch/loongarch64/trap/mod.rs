@@ -47,12 +47,28 @@ fn is_page_fault(exception: estat::Exception) -> bool {
     )
 }
 
-fn handle_user_page_fault(_cx: &TrapContext, exception: estat::Exception) {
+fn handle_user_page_fault(cx: &TrapContext, exception: estat::Exception) {
     let badv = badv::read();
     let cause = page_fault_cause(exception);
     let result = current_task()
         .expect("[kernel] current task is None.")
-        .op_memory_set_write(|memory_set| memory_set.handle_page_fault(cause, badv));
+        .op_memory_set_write(|memory_set| {
+            memory_set.handle_page_fault(cause, badv, Some(cx.get_sp()))
+        });
+    if let Ok(outcome) = result {
+        if let Some(task) = current_task() {
+            match outcome {
+                crate::mm::PageFaultOutcome::Minor => task.note_minor_fault(),
+                crate::mm::PageFaultOutcome::Major => task.note_major_fault(),
+                crate::mm::PageFaultOutcome::Retry => {}
+            }
+            if outcome != crate::mm::PageFaultOutcome::Retry {
+                let resident =
+                    task.op_memory_set_read(|memory_set| memory_set.resident_page_count());
+                task.note_maxrss_pages(resident);
+            }
+        }
+    }
     if let Err(err) = result {
         let task = current_task().expect("[kernel] current task is None.");
         #[cfg(feature = "fault_trace")]
@@ -72,7 +88,7 @@ fn handle_user_page_fault(_cx: &TrapContext, exception: estat::Exception) {
             _cx.x[1],
             err
         );
-        let sig = if err == Errno::EIO {
+        let sig = if matches!(err, Errno::EIO | Errno::ENOSPC) {
             Sig::SIGBUS
         } else {
             Sig::SIGSEGV
@@ -88,6 +104,7 @@ fn handle_user_page_fault(_cx: &TrapContext, exception: estat::Exception) {
 fn handle_user_syscall(cx: &mut TrapContext) -> Option<usize> {
     let syscall_id = cx.syscall_id();
     let syscall_args = cx.syscall_args();
+    let syscall_is_restartable = is_restartable_syscall(syscall_id, &syscall_args);
     cx.era += 4;
     let ret = syscall(syscall_id, syscall_args);
     if syscall_id == SYSCALL_SIGRETURN && ret.is_ok() {
@@ -95,7 +112,7 @@ fn handle_user_syscall(cx: &mut TrapContext) -> Option<usize> {
     }
 
     let restart_syscall_arg0 =
-        (ret == Err(Errno::EINTR) && syscall_id == SYSCALL_WAIT4).then_some(syscall_args[0]);
+        (ret == Err(Errno::EINTR) && syscall_is_restartable).then_some(syscall_args[0]);
 
     cx.x[4] = match ret {
         Ok(ret) => ret,
@@ -140,6 +157,9 @@ fn read_badi() -> usize {
 #[unsafe(no_mangle)]
 pub fn trap_handler(cx: &mut TrapContext) {
     crate::perf::user_trap(1);
+    if let Some(task) = current_task() {
+        task.enter_kernel_accounting();
+    }
     // 未使用过 FP/LSX 的任务在汇编入口跳过扩展状态保存。任务首次
     // 触发 FPD/SXD 后仍采用 eager save/restore，以保持跨核迁移语义简单可靠。
     if cx.extension_state_active() {
@@ -162,6 +182,20 @@ pub fn trap_handler(cx: &mut TrapContext) {
             crate::perf::user_ipi_trap(1);
             crate::arch::smp::acknowledge_ipi();
             crate::timer::rearm_task_timer_request();
+        }
+        // LoongArch ECODE=0 denotes an interrupt. QEMU may withdraw the last
+        // ESTAT.IS bit between taking the trap and this CSR read, leaving a
+        // zero ECODE with no source bit. Treat that state as a spurious timer
+        // edge instead of misclassifying it as an unsupported exception and
+        // panicking the whole kernel under sustained user-space activity.
+        estat::Trap::Exception(estat::Exception::Unknown(0)) => {
+            clear_timer_interrupt();
+            set_next_ti_trigger();
+            if crate::arch::smp::is_timer_service_hart() {
+                crate::timer::await_task_timer_deadline();
+                check_all_task_timers();
+            }
+            preempt_current_task();
         }
         estat::Trap::Exception(estat::Exception::Syscall) => {
             crate::perf::user_syscall_trap(1);
@@ -208,6 +242,9 @@ pub fn trap_handler(cx: &mut TrapContext) {
         }
     }
     handle_signals(restart_syscall_arg0);
+    if let Some(task) = current_task() {
+        task.leave_kernel_accounting();
+    }
 }
 
 #[unsafe(no_mangle)]

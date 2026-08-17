@@ -58,7 +58,12 @@ mode=auto
 - 内容：
 
 ```bash
-bash scripts/get_img.sh
+bash scripts/get_img.sh                 # 默认 standard：初赛 + 当前决赛，两架构
+bash scripts/get_img.sh preliminary rv  # 只取 RV64 初赛镜像
+bash scripts/get_img.sh final la        # 只取 LA64 当前决赛镜像
+bash scripts/get_img.sh software rv     # 只取 2025 Alpine RV64 软件镜像
+bash scripts/get_img.sh software both   # 取 2025 Alpine 双架构软件镜像
+bash scripts/get_img.sh all both        # 取全部镜像
 ls -lh img/sdcard-rv.img img/sdcard-la.img \
   img/sdcard-rv-pub.img img/sdcard-la-pub.img
 ```
@@ -66,8 +71,91 @@ ls -lh img/sdcard-rv.img img/sdcard-la.img \
 脚本从上游 `pre-20250615` Release 获取 `sdcard-rv.img`、`sdcard-la.img`，并从 RespOS 的
 `contest-images-2026` Release 获取 `sdcard-rv-pub.img`、`sdcard-la-pub.img`。脚本优先复用
 `img/` 中已有的 `.xz`/`.gz` 压缩包；LA pub 的 `.gz` 在 Release 中分为两个 `.part`，脚本会
-下载并合并后再解压。解压时保留压缩包及分卷。运行中的内核会修改 ext4 镜像；需要干净基线
-时，应从保留的压缩包重新解压，而不是假定上一次运行后的镜像未变化。
+下载并合并后再解压。`software` 组从同一 RespOS Release 获取
+`alpine-linux-{riscv64,loongarch64}-ext4fs.img.xz`，下载后校验 Release API 提供的 SHA-256，再执行
+XZ 完整性检查和解压。无参数时仍保持原 `standard` 行为，不会额外占用软件镜像的解压空间；使用
+`all` 才会获取三组。所有组都保留压缩包及分卷。运行中的内核会修改 ext4 镜像；需要干净基线时，
+应从保留的压缩包重新解压，而不是假定上一次运行后的镜像未变化。
+
+2026-08-16 实际核验的软件镜像压缩包 SHA-256 为：
+
+```text
+0def50e343fa287b86c89346b53a835405c300fe45744a664833a4fbdb378a1c  alpine-linux-riscv64-ext4fs.img.xz
+8516d117d7d0f95f407a92e05ec28f92cde6171cd4946302a677b0f94d8e8dfd  alpine-linux-loongarch64-ext4fs.img.xz
+```
+
+RV64 解压镜像 superblock 为 clean。LA64 上传基线的 superblock 标记为 `not clean with errors`，虽然
+`e2fsck -fn` 未发现结构错误；不得原地修复或直接把状态清理后的 hash 当成上传基线。LA64 测试先复制
+raw 镜像或从保留的 `.xz` 重新展开，再只在副本上运行 `e2fsck`，同时记录修复后 hash。
+
+### 运行 Alpine 软件兼容性烟测
+
+```bash
+make run-rv-software
+# guest 直接出现 Alpine 的 / # 后输入：
+sh /respos/software-smoke.sh
+
+make run-la-software
+# guest 出现 /> 后输入同一命令
+```
+
+两目标均使用 release、4 GiB/2 hart、`-snapshot`、`respos-software/profile` 的 software mode；launcher
+直接进入 Alpine `/bin/sh -i` 并设置 PATH/HOME/TERM/LC_ALL。输出默认
+写入 `/tmp/respos-{rv,la}-software.log`。辅助盘中的脚本依次验证 Git 本地仓库闭环、Vim 批处理编辑、
+GCC 和 rustc 单文件编译/运行，并以 `SOFTWARE_COMPAT ALL PASS` 与 shell child exit 0 为成功条件。
+LA 目标将上传 raw 基线复制到 `/tmp/respos-la-software-root.img`，只在该副本执行一次 `e2fsck -p`；
+只要源镜像 mtime 没有变化，后续运行复用同一 clean 副本和 hash。
+
+需要覆盖更深的本地软件路径时，在同一 software shell 中运行：
+
+```sh
+sh /respos/software-extended.sh
+```
+
+该脚本验证 Git 分支/合并及 `gc/repack/fsck`、Vim crash 后 swap recovery、GNU Make `-j2` 静态库构建，
+以及 Cargo offline workspace 的 release 构建和增量重编译。成功标志为四项
+`SOFTWARE_EXTENDED ... PASS` 和最终 `SOFTWARE_EXTENDED ALL PASS`。脚本会写入 `/tmp`，不修改只读
+软件根盘；software image 预检要求 `git/vim/gcc/rustc/make/ar/cargo` 全部存在。
+
+需要覆盖并发 POSIX/文件工具语义时运行：
+
+```sh
+sh /respos/software-posix.sh
+```
+
+成功时应依次得到 `pipeline_fifo_parallel`、`archive_link_pipeline`、`pipe_nonblock_atomic`、
+`flock_contention_release`、`lock_lifecycle`、`apk_local_database` 六项 PASS 与
+`SOFTWARE_POSIX ALL PASS`。其中两个 lifecycle/atomic 项会在 guest 内调用 GCC 编译 C probe；pipeline
+会用 `xargs -P2` 制造真实 pipe/writev 并发。修改 pipe、FIFO、flock、fcntl record lock 或 process fd
+cleanup 后，至少双架构各跑一轮；修改小写原子性时额外在较慢的 LA64 同一 QEMU 连续跑三轮，并复跑
+本文后面的双 libc FIFO 五项 LTP。
+
+### pthread 与 posix_spawn libc 组合矩阵
+
+先在宿主 Linux 运行同源 oracle：
+
+```bash
+scripts/run_libc_combination_linux.sh
+```
+
+再按上节方式启动 RV64 或 LA64 software guest，在 Alpine shell 中执行：
+
+```sh
+sh /respos/software-libc.sh
+```
+
+成功时依次输出 `pthread_core`、`pthread_detach_reuse`、`pthread_robust`、`pthread_pshared`、
+`pthread_fork_exec`、`posix_spawn` 六项 `LIBC_COMBINATION ... PASS`，最后输出
+`LIBC_COMBINATION ALL PASS` 和
+`SOFTWARE_LIBC ALL PASS`。guest 脚本使用镜像内 GCC 严格编译 `/respos/libc-combination.c`，覆盖 TLS
+destructor、robust/pshared futex、线程资源复用，以及 spawn file actions/signal/pgroup/PATH/ENOENT。
+高风险 task/futex 修改后可在同一 guest 直接对 `/tmp/respos-software-libc/libc-combination` 循环至少 8 轮。
+
+脚本当前对齐官方 `on-site-final-2025@9ea291d` 的离线命令：四个程序均执行 help 加载；Git 走
+`README.md → add . → commit → status/log`，GCC/rustc 使用各自默认输出名并运行，Vim 以 ex 模式真实
+修改和保存文件。全屏交互验证可执行 `vim -Nu NONE -n /tmp/test.txt`，完成插入、`:wq`，再用 `cat`
+检查落盘；2026-08-16 已在 Codex PTY 下完成 RV64/LA64 闭环。日志中出现 cursor/terminal capability
+查询本身不是失败，必须同时检查 Vim 是否响应按键、能否退出和文件内容。
 
 - 后续影响：对比两次测试前记录镜像来源；不要把本地大镜像提交到 Git。
 
@@ -215,6 +303,46 @@ make run-la-final LA_FINAL_MEM=12G LA_FINAL_SMP=12  # 本机内存不足时的�
   `Bus 'virtio-mmio-bus.0' not found`，因此不能照抄。
 - 后续影响：建议顺序运行；端口转发和共享构建配置使并行运行收益有限且更难诊断。
 
+### Git SSH clone 与 guest 内初步自举
+
+- 状态：RV64/LA64 已验证
+- 适用范围：远端 Git SSH、真实编译工具链与初步自举门禁
+- 最后验证：2026-08-16
+- 证据：`respos-bootstrap/`、`scripts/build_bootstrap_disk.sh`、双架构日志见
+  [current-status.md](./current-status.md)
+- 内容：先在 GitHub 仓库配置只读 Deploy Key，并把对应私钥保存为仅本轮使用的宿主临时文件。不要把
+  key 放进仓库。宿主内存约 15 GiB 时两架构必须顺序运行，固定单个 QEMU、8 GiB/4 hart：
+
+```bash
+make run-rv-bootstrap \
+  BOOTSTRAP_SSH_KEY=/tmp/respos-bootstrap-key/id_ed25519 \
+  RV_BOOTSTRAP_MEM=8G RV_BOOTSTRAP_SMP=4 \
+  RV_BOOTSTRAP_OUTPUT=/tmp/respos-rv-bootstrap-current.log
+
+make run-la-bootstrap \
+  BOOTSTRAP_SSH_KEY=/tmp/respos-bootstrap-key/id_ed25519 \
+  LA_BOOTSTRAP_MEM=8G LA_BOOTSTRAP_SMP=4 \
+  LA_BOOTSTRAP_OUTPUT=/tmp/respos-la-bootstrap-current.log
+```
+
+脚本固定严格 host-key 检查、禁用交互和额外 identity，依次要求 `ssh_ls_remote`、`ssh_clone`、
+`rust_target`、`toolchain`、`build` 以及最终 `RESPOS_BOOTSTRAP ALL PASS`。RV64 使用根镜像已有 OpenSSH 和
+Rust target；LA64 Make 目标会先下载并校验固定 SHA-256 的 Debian Ports OpenSSH client 与官方 Rust
+target archive，再只注入临时辅助盘。所有根盘均由 QEMU `-snapshot` 只读使用。
+
+验证结束后，确认没有 QEMU 进程，再删除含私钥的临时 key 目录和两张 bootstrap 辅助盘，并在 GitHub
+撤销 Deploy Key。串口日志可保留，但需先确认未含私钥内容：
+
+```bash
+pgrep -af 'qemu-system-(riscv64|loongarch64)' || true
+rm -f /tmp/respos-rv-bootstrap.img /tmp/respos-la-bootstrap.img
+rm -rf /tmp/respos-bootstrap-key
+```
+
+- 边界：这里的“自举”是 guest 使用镜像内现成编译器从当前远端源码生成 RespOS 内核；不是从源代码
+  重建 Rust/GCC/CMake/toolchain 的完全自举。更换远端、branch、nightly 或公开依赖时需同步更新脚本、
+  固定 hash 与证据。
+
 iozone 专项可用编译时诊断开关：
 
 ```bash
@@ -260,6 +388,64 @@ QEMU 必须附 `-snapshot`，并保存完整串口日志。`task_a_futex_cmp_req
 - 2026-08-02 实测 `make run-rv-pub` 已完成用户程序、lwext4 和内核构建，QEMU 以 1 个
   HART、256M 内存加载 `img/sdcard-rv-pub.img`，并显示 `Rust user shell` 的 `/>` 提示符；
   未进入 `testrunner`。LA 入口已做同样的配置检查，但尚未完成本轮启动验证。
+
+### virtio-net 用户态网络门禁与内核内 HTTP 诊断
+
+- 状态：用户态 DNS/HTTP/Git HTTPS 与可选内核 HTTP 均已验证
+- 适用范围：真实网卡链路、Git HTTPS 门禁、答辩现场“内核内网页”演示
+- 最后验证：2026-08-16
+- 用户态门禁：普通 software 构建启用 virtio-net，但不启用内核 HTTP。启动后运行：
+
+```bash
+make run-rv-software RV_SOFTWARE_MEM=4G RV_SOFTWARE_SMP=2
+# guest Alpine shell：
+/bin/sh /respos/software-network.sh
+
+# LA64 对称命令：
+make run-la-software LA_SOFTWARE_MEM=4G LA_SOFTWARE_SMP=2
+```
+
+判据为 `udp_dns`、`public_http`、`git_https_ls_remote`、`git_https_clone` 四项 PASS 与最终
+`SOFTWARE_NETWORK ALL PASS`。脚本只使用公开 URL，不保存凭据；依赖公网和 GitHub 可达，离线环境失败
+不能直接归因为内核回归。两张归档 Alpine 镜像的 `/etc/resolv.conf` 为空；software/final launcher
+仅在没有既有 `nameserver` 时写入 QEMU DNS `10.0.2.3`，不会覆盖镜像已有的 DNS 策略。
+
+- 内核 HTTP 诊断：`make run-{rv,la}-diagnostic` 自动为内核增加 `kernel_http` feature，在
+  `net::init()` 完成 virtio-net 后绑定 `0.0.0.0:80`。普通 preliminary/final/software/submission
+  构建不启用该服务。顶层 Makefile 的 `-netdev user` 已加
+  `hostfwd=tcp::8080-:80`，宿主机免 root：
+
+```bash
+make run-rv-diagnostic RV_DIAGNOSTIC_MEM=4G       # 进入 Rust user shell 后保持运行
+# 另一终端：
+curl -s http://127.0.0.1:8080/ -o /tmp/respos-http.html -w '%{http_code}\n'
+# 预期输出 200；页面含 /proc 同源的 uptime/memory/tasks/CPU/PageCache 实时状态
+```
+
+快速诊断也可用最小镜像 + 诊断辅助盘直接起 QEMU（`-snapshot`，`respos-diagnostic/profile`
+为 `mode=diagnostic`）：
+
+```bash
+make build-rv RV_KERNEL_FEATURES=kernel_http
+truncate -s 16M /tmp/respos-http.img && mkfs.ext4 -q -F -d respos-diagnostic /tmp/respos-http.img
+qemu-system-riscv64 -machine virt -kernel os/target/riscv64gc-unknown-none-elf/release/os \
+  -m 512M -nographic -snapshot -smp 2 -bios default \
+  -drive file=img/sdcard-rv.img,if=none,format=raw,id=x0 \
+  -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 -no-reboot \
+  -device virtio-net-device,netdev=net -netdev user,id=net,hostfwd=tcp::8080-:80 -rtc base=utc \
+  -drive file=/tmp/respos-http.img,if=none,format=raw,id=x1 \
+  -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1
+# LA64 把 virtio-blk-device/virtio-net-device 换成 virtio-blk-pci/virtio-net-pci，
+# kernel 换成 os/target/loongarch64-unknown-none/release/os
+```
+
+- 判据：串口出现 `[net] virtio-net up, mac=..., guest ip=10.0.2.15` 与
+  `[net] in-kernel HTTP server listening on port 80`；宿主 `curl` 返回 `200` 且正文含
+  `<title>RespOS 内核内 HTTP 服务器</title>`。2026-08-16 实测 RV64 `code=200 size=1274`、
+  LA64 `code=200 size=1281`。
+- 边界：该 HTTP 服务仍只是 RX/TX、listen/accept 与 ARP/TCP 的诊断工具；交付证据来自上面的用户态
+  非 loopback 门禁。Git HTTPS 已闭合，Git SSH 仍需 OpenSSH 用户态与独立日志；详见
+  [software-compatibility-network-plan.md](./software-compatibility-network-plan.md) 主线 B。
 
 ### 文件元数据 Linux/POSIX 对照
 
@@ -309,7 +495,125 @@ missing_double_omit=pass permission=pass|skip`，guest 必须输出对应无 `_L
 并落在按文件系统精度容许的 realtime 窗口内；任一普通 `tv_nsec` 为 `1000000000` 或 `-1` 时，两个字段及 ctime 均
 保持不变并返回 `EINVAL`。降权向量对 pathname 和继承 fd 验证：双 OMIT 始终成功；双 NOW 在 mode
 `0666` 时成功、在 `0000` 时返回 `EACCES`；显式时间和 `NOW+OMIT` 均返回 `EPERM`。该门禁不用于宣称
-ext4 已持久化纳秒或负秒；两架构仍须顺序运行。
+ext4 已持久化纳秒或负秒；两架构仍须顺序运行。扩展时间戳持久化使用下面的独立跨启动门禁关闭。
+
+ext4 负秒、2-bit epoch、纳秒与自动 realtime 跨启动门禁：
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror -O2 scripts/ext4_timestamp_phase5_probe_linux.c \
+  -o /tmp/ext4_timestamp_phase5_probe_linux
+/tmp/ext4_timestamp_phase5_probe_linux
+
+# 分别用目标架构构建，环境变量会把两阶段 probe 嵌入 testrunner。
+TASK_A_EXT4_TIMESTAMP_PERSIST_PROBE=1 RUSTUP_TOOLCHAIN=nightly-2025-01-18 make build-rv
+TASK_A_EXT4_TIMESTAMP_PERSIST_PROBE=1 RUSTUP_TOOLCHAIN=nightly-2025-01-18 make build-la
+```
+
+每个架构必须使用私有 root 镜像副本与同一可写辅助 ext4 镜像连续启动两次，且 QEMU 命令不得带
+`-snapshot`；第一轮保留 `EXT4_TIMESTAMP_PERSIST PREPARE PASS` 日志，第二轮保留
+`VERIFY PASS negative_sec=pass epoch=pass nsec=pass clamp=pass automatic_realtime=pass`。不得直接写官方 root/pub
+镜像；可使用 `cp --reflink=auto` 的 `/tmp` raw 副本或私有 qcow2 overlay。当前证据日志为
+`/tmp/respos-{rv,la}-ext4-persist-{prepare,verify}.log`。
+
+128-byte 无 extra-field inode 使用独立私有辅助盘，不能用默认 `mkfs.ext4` 镜像代替：
+
+```bash
+truncate -s 32M /tmp/respos-rv-legacy-aux.img
+mkfs.ext4 -q -F -I 128 /tmp/respos-rv-legacy-aux.img
+dumpe2fs -h /tmp/respos-rv-legacy-aux.img 2>/dev/null | rg 'Inode size:\s+128'
+
+TASK_A_EXT4_TIMESTAMP_PERSIST_PROBE=1 TASK_A_EXT4_LEGACY_LAYOUT=1 make build-rv
+TASK_A_EXT4_TIMESTAMP_PERSIST_PROBE=1 TASK_A_EXT4_LEGACY_LAYOUT=1 make build-la
+```
+
+随后各架构仍按上面的私有 root、同一辅助盘、无 `-snapshot` 方法连续启动两次。第一轮 marker 为
+`EXT4_TIMESTAMP_LEGACY PREPARE PASS signed32_clamp=pass seconds_granularity=pass
+automatic_realtime=pass`，第二轮把 `PREPARE` 换为 `VERIFY`；当前日志为
+`/tmp/respos-{rv,la}-ext4-legacy-{prepare,verify}.log`。该门禁同时检查新 inode 自动时间与显式越界值的
+立即 stat，不能只保留第二轮重读断言，否则抓不到 Rust cache 与 lower layout 不一致。
+
+即时专项与相邻 LTP：
+
+```bash
+TASK_A_UTIMENS_SPECIAL_PROBE=1 make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-ext4-timestamp-immediate.log
+TASK_A_UTIMENS_SPECIAL_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-ext4-timestamp-immediate.log
+
+TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=utimensat01,statx02,statx03 \
+  make run-rv-pre PRE_MEM=4G PRE_SMP=2 RV_PRE_OUTPUT=/tmp/respos-rv-ext4-timestamp-ltp.log
+TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=utimensat01,statx02,statx03 \
+  make run-la-pre PRE_MEM=4G PRE_SMP=2 LA_PRE_OUTPUT=/tmp/respos-la-ext4-timestamp-ltp.log
+```
+
+RTC 修改还必须双架构运行 `TASK_A_CLOCK_PROBE=1` 各 20 轮，并看到
+`realtime calendar epoch PASS`；只通过 realtime/monotonic independence 不足以证明平台 RTC 已初始化。
+
+RTC read/set、libc hwclock 与 reset persistence 门禁：
+
+```bash
+TASK_A_RTC_SET_PROBE=1 make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-rtc-set-phase5-current.log
+TASK_A_RTC_SET_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-rtc-set-phase5-current.log
+
+TASK_A_RTC_SET_PROBE=1 TASK_A_RTC_RESET_PERSIST_PROBE=1 make build-rv
+TASK_A_RTC_SET_PROBE=1 TASK_A_RTC_RESET_PERSIST_PROBE=1 make build-la
+```
+
+普通门禁必须同时看到 musl/glibc BusyBox `hwclock -r` 的日期输出，以及
+`RTC_SET_PHASE5 PASS hardware_read_write=pass clock_domains=pass validation=pass permission=pass restore=pass
+hwclock=pass`。reset 门禁必须手工运行对应 QEMU 命令并移除 `-no-reboot`，保留同一个 QEMU 进程和辅助盘；
+`-snapshot` 可以使用，因为临时 overlay 会跨 system reset 保持、只在 QEMU 退出时丢弃。日志必须在一次
+进程内先后出现 `RTC_RESET_PERSIST PREPARE PASS`、第二次架构启动 marker 和
+`VERIFY PASS device_reset=pass boot_reinitialize=pass restore=pass`。当前日志为
+`/tmp/respos-{rv,la}-rtc-reset-persist-phase5.log`。若退出并启动新的 `-rtc base=utc` QEMU，设备会从宿主
+时间重新 realize，不能把该结果记为跨进程电池后备持久化。
+
+regular-file/directory atime policy 门禁：
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror -O2 scripts/atime_phase5_probe_linux.c \
+  -o /tmp/atime_phase5_probe_linux
+/tmp/atime_phase5_probe_linux
+
+TASK_A_ATIME_PHASE5_PROBE=1 make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-atime-dirtytime-eviction-phase5.log
+TASK_A_ATIME_PHASE5_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-atime-dirtytime-eviction-phase5.log
+
+TASK_A_ATIME_PHASE5_PROBE=1 make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_KERNEL_FEATURES=perf_counters \
+  RV_PRE_OUTPUT=/tmp/respos-rv-atime-dirtytime-eviction-phase5-perf.log
+TASK_A_ATIME_PHASE5_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_KERNEL_FEATURES=perf_counters \
+  LA_PRE_OUTPUT=/tmp/respos-la-atime-dirtytime-eviction-phase5-perf.log
+```
+
+Linux marker 固定 regular/directory default relatime 抑制/触发、重复 read/readdir、ctime 不变和 owner
+`O_NOATIME`；guest 还会对辅助 ext4 mount 依次 remount default、`MS_STRICTATIME`、`MS_NOATIME`、
+`MS_NODIRATIME`、`MS_LAZYTIME` 并恢复 default，且验证 nodiratime 不影响 regular file。guest 通过推进
+system realtime 隔离只由 24 小时阈值触发的 relatime；lazytime 在普通构建验证立即 stat 可见以及
+`fsync/sync` 成功，在 `perf_counters` 构建额外断言 lazy read 后 lower `atime_updates=0`、对应同步后恰为
+1；还把 `/proc/sys/vm/dirtytime_expire_seconds` 依次设为 0/1，验证 monotonic background expiry 不落盘/
+恰落盘一次，并在 close 后强制 dentry cleanup，fresh stat 验证 eviction 已提交 lower atime。通过 marker 为
+`ATIME_PHASE5 PASS relatime=pass relatime_24h=pass repeated=pass strictatime=pass mount_noatime=pass
+open_noatime=pass directory=pass nodiratime=pass lazytime=pass lazytime_background=pass
+lazytime_eviction=pass ctime=pass`。
+
+lazytime 无显式 sync crash-image 门禁使用 `TASK_A_LAZYTIME_PERSIST_PROBE=1` 构建两架构，并为每架构准备
+独立、可写且不会被 `make build-*-local-disk` 重建的 auxiliary raw image。QEMU 命令以 Makefile 对应架构
+模板为基线，但必须移除 `-snapshot`，把 x1 指向该 private image：
+
+1. 首次冷启动等待 `LAZYTIME_CRASH_IMAGE PREPARE PASS background_without_fsync=pass`；probe 已完成后台
+   expiry，但不会调用 fsync/sync/unmount/reboot/poweroff。
+2. marker 出现后由宿主向 QEMU 进程发送 SIGKILL。不得通过 guest 关机代替，否则会走正常同步边界。
+3. 使用同一 x1 raw image 启动一个全新的 QEMU 进程；必须出现
+   `LAZYTIME_CRASH_IMAGE VERIFY PASS persisted_background_atime=pass`，随后 probe 会清理文件并正常同步。
+
+2026-08-16 双架构证据分别为
+`/tmp/respos-{rv,la}-lazytime-crash-{prepare,verify}.log`。该流程验证 QEMU/VirtIO/ext4 的进程级 crash image，
+不等价于真实断电或设备 volatile write cache 保证。
 
 namespace identity/rename/unlink 对照：
 
@@ -366,6 +670,27 @@ TASK_A_TASK_PHASE5_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
 修复前入口会在 probe 非零后打印 status 并安全 poweroff；判断必须看 guest marker，不能因宿主 QEMU/make
 返回 0 就误判通过。修复后两份日志都必须出现 `TASK_PHASE5 ALL PASS`，且不得出现
 `TASK_PHASE5_EXPECTED_FAIL` 或 `CURRENT DIFFERENCES CONFIRMED`。
+
+Phase 5 controlling tty/job-control 对照与双架构入口：
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror -O2 scripts/job_control_phase5_probe_linux.c \
+  -o /tmp/job_control_phase5_probe_linux
+/tmp/job_control_phase5_probe_linux
+
+TASK_A_JOB_CONTROL_PROBE=1 make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-job-control-stop.log
+TASK_A_JOB_CONTROL_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-job-control-stop.log
+```
+
+Linux oracle 使用 PTY；guest 使用唯一物理 console。三者必须输出对应的 `JOB_CONTROL_* ALL PASS`，并
+覆盖 controlling tty/foreground pgrp、默认 `SIGTTIN` stop + `WUNTRACED`、`SIGCONT` +
+`WCONTINUED`、ignored `SIGTTIN` 的 `EIO`、termios `TOSTOP` round-trip/ignored `SIGTTOU` 写和
+`TIOCNOTTY`，以及停止子组因桥接父退出/reparent 形成孤儿后的 `SIGHUP`→`SIGCONT`。涉及 exit/reparent
+时序时两架构各连续运行 8 轮，日志为 `/tmp/respos-{rv,la}-job-control-orphan-stress8.log`。修改该状态机
+后还须顺序复跑双架构 `TASK_A_TASK_PHASE5_PROBE=1` 与
+`TASK_A_SESSION_PROBE=1`；本专项不覆盖 PTY 实现、canonical/echo/control chars 或完整 hangup I/O。
 
 Phase 5 `CLONE_VFORK|CLONE_VM` 共享可见性：
 
@@ -970,12 +1295,15 @@ timeout 240s env TASK_A_NETWORK_ORDER_PROBE=1 \
 RV64 2 hart 与 LA64 1 hart 通过；LA64 2 hart 连续两轮停在 musl BASIC_UDP 后的 BASIC_TCP connect，
 当前预期暴露未闭合阻断，不能以单核结果关闭 M1。
 
-Phase 5 mmap EOF/SIGBUS Linux 对照：
+Phase 5 mmap EOF/truncate/punch/SIGBUS Linux 对照：
 
 ```bash
 cc -std=c11 -Wall -Wextra -Werror -O2 scripts/mmap_phase5_probe_linux.c \
   -o /tmp/mmap_phase5_probe_linux
 /tmp/mmap_phase5_probe_linux
+
+# 可选：在调用者明确准备的 disposable small filesystem 上运行宿主满盘 SIGBUS 项
+RESPOS_MMAP_ENOSPC_DIR=/mnt/disposable-small-ext4 /tmp/mmap_phase5_probe_linux
 
 TASK_A_MMAP_PHASE5_PROBE=1 make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
   RV_PRE_OUTPUT=/tmp/respos-rv-mmap-phase5.log
@@ -987,10 +1315,63 @@ TASK_A_MMAP_PHASE5_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
 上述 `testrunner` 入口运行 `mmap_phase5_probe`。修复前预期打印 shared/private 的
 `MMAP_PHASE5_EXPECTED_FAIL` 和 `MMAP_PHASE5 CURRENT DIFFERENCES CONFIRMED`，并以非零状态退出；它们
 覆盖初始 EOF 整页 SIGBUS、truncate 后 resident PTE 失效、未 COW EOF 部分页清零、已 COW private
-部分页保留匿名字节，以及 mmap 后动态扩容。完成 MM 修复后必须同时出现 `MMAP_PHASE5 shared PASS`、
-`MMAP_PHASE5 private PASS`、`MMAP_PHASE5 private_cow_truncate PASS` 与
-`MMAP_PHASE5 ALL PASS`，并复跑 `buildstorm_file_probe` 的 mmap 扩容/写回竞态。宿主 `make`/QEMU
+部分页保留匿名字节、mmap 后动态扩容、独立 truncator 对 resident/unfaulted mapper 的跨 MemorySet
+失效、16 轮 truncate-vs-fault/store 竞态，以及 partial/full punch、物理块释放、cache eviction 后 lower
+零读、跨进程 shared/clean-private 失效、private-COW 保留和 punch 错误矩阵。完成 MM 修复后必须同时出现
+`MMAP_PHASE5 shared PASS`、`MMAP_PHASE5 private PASS`、`MMAP_PHASE5 private_cow_truncate PASS`、
+`MMAP_PHASE5 cross_process_truncate PASS`、`MMAP_PHASE5 cross_process_fault_store_race PASS` 与
+`MMAP_PHASE5 punch_hole PASS`、`MMAP_PHASE5 cross_process_punch_hole PASS`、
+`MMAP_PHASE5 punch_hole_errors PASS`、`MMAP_PHASE5 punch_msync_race PASS`、
+`MMAP_PHASE5 shared_write_enospc_sigbus PASS`、
+`MMAP_PHASE5 ALL PASS`，并复跑 `buildstorm_file_probe` 的 mmap
+扩容/写回竞态及 fadvise 专项。宿主 `make`/QEMU
 管线即使在 guest probe 非零后仍可能返回 0，因此必须以 guest marker 判定，不能只看宿主退出状态。
+
+当前另有自动相邻门禁：
+
+```bash
+TASK_A_BUILDSTORM_FILE_PROBE=1 make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-mmap-buildstorm-private-final.log
+TASK_A_BUILDSTORM_FILE_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-mmap-buildstorm-cross-process.log
+```
+
+该入口顺序运行 `buildstorm_file_probe` 与 RV64 64 MiB/4-worker `buildstorm_private_map_probe`（LA64
+按既有规则跳过后者）；前者验证
+mmap 扩容/写回，后者验证 clean private sharing、mprotect 后私有写和多进程 page walk。修改
+file-backed fault/COW 后还须双架构运行 `LTP_CASE_FILTER=mmap05`，防止把普通 mmap 的 live EOF 错用于
+ELF fixed `PT_LOAD` 并污染 loader BSS。
+
+`LTP_CASE_FILTER=fallocate04` 是普通预分配测试；在 default/KEEP_SIZE 仍不支持时预期为 skip，不能作为
+punch-hole 门禁，也不能将其 skip 记作 punch 失败。punch 证据以 Linux oracle、guest 专项中的
+`st_blocks` 下降和 eviction 后 lower 零读为准。
+
+ENOSPC 项必须使用 disposable 小文件系统，先预建 sparse target，再由 filler+fsync 压满；断言 child
+首次 shared store 收到 SIGBUS，随后释放 filler 并验证新映射 store/msync/lower read 恢复。宿主没有
+mount capability 时 Linux oracle 会明确打印 SKIP；双架构正式门禁使用 make 自动创建的 16 MiB
+`/respos` auxiliary ext4，不依赖根盘剩余空间。
+
+LTP `mmap16` 已加入默认列表，也可用 `LTP_CASE_FILTER=mmap16` 聚焦。正式门禁要求 RV64/LA64、
+musl/glibc 均出现 10 个 `TPASS: bug is not reproduced`。它依赖 `/dev/vda2` 的 device size 足以通过 LTP
+scratch admission，同时 no-op mkfs 将请求的 filesystem capacity/block size 交给 synthetic mount；不得
+把两者合并。该 case 还覆盖 `ftruncate` grow 跨 sub-page filesystem block 后，resident shared PTE
+重新写保护并在下一次 store 经 page-mkwrite 得到 ENOSPC/SIGBUS。
+
+更宽 mmap 簇使用同一个精确 filter 在两架构顺序运行：
+
+```bash
+MMAP_WIDE='mmap001,mmap01,mmap02,mmap03,mmap04,mmap05,mmap06,mmap08,mmap09,mmap10,mmap11,mmap12,mmap13,mmap14,mmap15,mmap16,mmap17,mmap18,mmap19,mmap20,munmap01,munmap02,munmap03,mprotect05,mremap05,mremap06'
+LTP_CASE_FILTER="$MMAP_WIDE" make rv
+LTP_CASE_FILTER="$MMAP_WIDE" make la
+```
+
+2026-08-16 当前预期是每个架构的 musl/glibc 均 `25 passed, 1 failed`；只允许
+`mremap06` 因 fixture 的 `fallocate()` 返回 `EOPNOTSUPP` 而 TBROK。`mmap10` 必须 1/1，
+`mmap18` 必须 4/4。实现 default/`KEEP_SIZE` 预分配后必须将预期改为 26/0，并核对
+`mremap06` 是否真正进入 mremap 断言，不能把前置 TBROK 记为 mremap 通过。
+
+需要复核 checkpoint 时可在 `debug_traces` 构建中设置 `TASK_A_FUTEX_TRACE=1`；默认 release 构建不会
+产生该诊断输出。证据应同时核对 wake/wait 的 scope、uaddr 和发生顺序。
 
 Phase 5 `mprotect()` 失败权限边界：
 
@@ -1021,9 +1402,133 @@ cc -std=c11 -Wall -Wextra -Werror -O2 scripts/signal_phase5_probe_linux.c \
 ```
 
 无 feature guest 中运行 `signal_phase5_probe`，以 `SIGNAL_PHASE5 ALL PASS` 为通过标志。它覆盖
-query-only `rt_sigprocmask`、`rt_sigaction` size/EFAULT、`rt_sigqueueinfo(sig=0)` 和 pending signal
-跨 exec。修改 signal wait/timer 唤醒后还应复跑 `task_a_clock_probe` 与
+query-only `rt_sigprocmask`、`rt_sigaction` size/EFAULT、`rt_sigqueueinfo(sig=0)`、pending signal
+跨 exec，以及默认 SIGCHLD wait、显式 `SIG_IGN` 自动回收、`SA_NOCLDWAIT` handler + `ECHILD`。
+probe 还要求 `SA_NOCLDSTOP` 在抑制 handler 的同时不隐藏 `wait4(WUNTRACED)` stop status，并覆盖
+标准信号合并保留首个 queued value、实时信号同号三实例 FIFO、`RLIMIT_SIGPENDING=2` 填满返回
+`EAGAIN` 及消费后额度恢复。它还以空/满 pipe 阻塞标量及向量 read/write，覆盖无 `SA_RESTART` 的
+`EINTR`、有标志的自动重启、默认忽略信号不中断和 partial-result 优先级；feature runner 连续运行 8 轮
+以门禁 stop/wait 和 signal/data SMP 时序。它还覆盖 null-timeout
+`FUTEX_WAIT/FUTEX_WAIT_BITSET` 的普通 handler/`SA_RESTART`/默认忽略三态；带 timeout 的非重启边界用
+`TASK_A_FUTEX_RACE_PROBE=1 make run-{rv,la}-pre PRE_MEM=4G PRE_SMP=2` 验证 wake-first、signal-first
+`EINTR` 与 timeout-first `ETIMEDOUT`，runner 固定连续 20 轮。
+配额路径同时运行
+`TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=tgkill02 make run-{rv,la}-pre PRE_MEM=4G PRE_SMP=2`。
+双架构 guest 命令为 `TASK_A_SIGNAL_PHASE5_PROBE=1 make run-{rv,la}-pre PRE_MEM=4G PRE_SMP=2`；修改
+child exit/wait 优先级后还必须复跑 `TASK_A_WAIT4_PROBE=1` 与 `TASK_A_TASK_PHASE5_PROBE=1`。修改
+signal wait/timer 唤醒后还应复跑 `task_a_clock_probe` 与
 `/glibc/busybox timeout 1 /glibc/busybox sleep 10`；只通过 ABI 探针不能替代阻塞路径门禁。
+当前 futex/wait 修复证据为 `/tmp/respos-{rv,la}-signal-futex-waitfix-stress8.log`、
+`/tmp/respos-{rv,la}-futex-timed-norestart-waitfix.log` 与
+`/tmp/respos-{rv,la}-wait4-child-generation-gate.log`。
+
+修改 CPU accounting、trap mode transition、process exit snapshot 或 wait child usage 时，先运行 Linux
+对照，再顺序运行双架构 wait4 与 CPU total clock 门禁：
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror -O2 -pthread scripts/cpu_accounting_phase5_probe_linux.c \
+  -o /tmp/cpu_accounting_phase5_probe_linux
+/tmp/cpu_accounting_phase5_probe_linux
+
+TASK_A_WAIT4_PROBE=1 make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-cpu-accounting-phase5.log
+TASK_A_WAIT4_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-cpu-accounting-phase5.log
+```
+
+必须出现 `[task-a-wait4] user/system accounting PASS`、既有 rusage retry/accounting 与 `ALL PASS`；
+随后按 clock 章节让 `TASK_A_CLOCK_PROBE=1` 双架构各完成 20/20；当前日志为
+`/tmp/respos-{rv,la}-rusage-fields-phase5-final.log`。probe 的 user burn 与 syscall burn
+分别要求 utime/stime 有独立增量，且 `times` 字段在一个 100 Hz tick 内匹配 getrusage；不能只断言两字段
+都非零，因为这无法识别把同一 total 复制两次的旧实现。Linux pthread 与 guest clone 向量还要求
+`RUSAGE_THREAD` 分离 main/worker，并核对 process aggregate；每个线程独立运行到跨过至少一个 100 Hz
+导出 tick，避免用亚 10 ms 固定工作量制造假失败。
+
+修改 rusage 非时间字段时，同一 20 轮 probe 还必须逐轮出现
+`rusage fault/rss/context-switch PASS`、`rusage actual-switch accounting PASS`、
+`rusage Linux-zero legacy fields PASS`、`rusage wait4/children fields PASS` 与
+`raw waitid rusage/children fields PASS`；当前还应出现 `rusage block-io/cold-major PASS`。匿名逐页触碰用于
+验证 thread/process minor-fault 增量和 KiB
+maxrss high-water，yield/timer 用于区分 voluntary/involuntary；wait4 与 raw waitid 必须核对 reap 后
+CHILDREN 求和及 maxrss 取最大值。block-I/O fixture 写两个页并确认首次 dirty 增加 `oublock`、重复写同一
+dirty page 不增加，随后 `fsync + fadvise64(POSIX_FADV_DONTNEED)`；首个 private-file access 必须同时增加
+`majflt/inblock`，相邻 readahead cache hit 只增加 minor。20/20 日志为
+`/tmp/respos-{rv,la}-rusage-actual-switch-phase5.log`。actual-switch 向量先把唯一 runnable child 固定到一个
+CPU，跨过多个 timer tick 后要求 `nivcsw` 不变；再用 pipe gate 发布固定同 CPU 的 competitor，要求真实
+timer switch 增加 involuntary。无竞争 yield 必须保持 voluntary 不变；children voluntary 使用真实
+`nanosleep` block，不能恢复旧的“yield 一定计数”假设。相邻 `TASK_A_WAIT4_PROBE=1` 双架构日志当前为
+`/tmp/respos-{rv,la}-rusage-actual-switch-wait4.log`，用于守住 bad status/rusage copyout retry；修改 cache
+eviction/fault 分类后还必须运行 `TASK_A_MMAP_PHASE5_PROBE=1`，当前日志为
+`/tmp/respos-{rv,la}-rusage-io-mmap-regression.log`。
+
+完整 `posix_fadvise` 修改先运行 Linux oracle，再顺序跑双架构专项与 LTP（构建会共享 `.cargo/config`，
+不得并行两架构）：
+
+```bash
+cc -std=c11 -O2 -Wall -Wextra -Werror scripts/fadvise_phase5_probe_linux.c \
+  -o /tmp/fadvise_phase5_probe_linux
+/tmp/fadvise_phase5_probe_linux
+
+TASK_A_FADVISE_PHASE5_PROBE=1 make run-rv-pre PRE_MEM=4G PRE_SMP=2 \
+  RV_PRE_OUTPUT=/tmp/respos-rv-fadvise-phase5.log
+TASK_A_FADVISE_PHASE5_PROBE=1 make run-la-pre PRE_MEM=4G PRE_SMP=2 \
+  LA_PRE_OUTPUT=/tmp/respos-la-fadvise-phase5.log
+
+TASK_A_LTP_ONLY=1 \
+  LTP_CASE_FILTER=posix_fadvise01,posix_fadvise01_64,posix_fadvise02,posix_fadvise02_64,posix_fadvise03,posix_fadvise03_64,posix_fadvise04,posix_fadvise04_64 \
+  make run-rv-pre PRE_MEM=4G PRE_SMP=2 RV_PRE_OUTPUT=/tmp/respos-rv-fadvise-phase5-ltp.log
+TASK_A_LTP_ONLY=1 \
+  LTP_CASE_FILTER=posix_fadvise01,posix_fadvise01_64,posix_fadvise02,posix_fadvise02_64,posix_fadvise03,posix_fadvise03_64,posix_fadvise04,posix_fadvise04_64 \
+  make run-la-pre PRE_MEM=4G PRE_SMP=2 LA_PRE_OUTPUT=/tmp/respos-la-fadvise-phase5-ltp.log
+```
+
+专项必须连续 8/8 并包含五组 `FADVISE_PHASE5 ... PASS`；两套 libc 都必须为 `8 passed, 0 failed`。
+修改 PageCache window/eviction/writeback 后还要运行 `TASK_A_MMAP_PHASE5_PROBE=1` 与
+`TASK_A_CLOCK_PROBE=1` 双架构门禁，当前日志为
+`/tmp/respos-{rv,la}-fadvise-{mmap,rusage}-regression.log`，后者必须 20/20 且逐轮包含
+`rusage block-io/cold-major PASS`。Linux WILLNEED 是异步 best effort，不用立即 `mincore` residency 作
+oracle；DONTNEED 则要分别覆盖部分页保留、完整页失效、脏页数据不丢与 mmap pin。
+
+修改 signal accounting 或 `struct rusage` 字段时，还要运行
+`TASK_A_SIGNAL_PHASE5_PROBE=1 make run-{rv,la}-pre PRE_MEM=4G PRE_SMP=2`。当前 Linux 契约和 RespOS probe
+要求完整 signal suite 后 `ru_nsignals == 0`，双架构 8/8 日志为
+`/tmp/respos-{rv,la}-rusage-actual-switch-signal.log`；不能把“收到几个信号”直接写入该 Linux-zero ABI
+字段。修改 processor handoff 后还必须复跑 `TASK_A_TASK_PHASE5_PROBE=1`，当前双架构日志为
+`/tmp/respos-{rv,la}-rusage-actual-switch-task-phase5.log`。
+
+最后运行双 libc LTP：
+
+```bash
+TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=getrusage01,getrusage02,times01,times03 \
+  make run-rv-pre PRE_MEM=4G PRE_SMP=2 RV_PRE_OUTPUT=/tmp/respos-rv-rusage-actual-switch-ltp.log
+TASK_A_LTP_ONLY=1 LTP_CASE_FILTER=getrusage01,getrusage02,times01,times03 \
+  make run-la-pre PRE_MEM=4G PRE_SMP=2 LA_PRE_OUTPUT=/tmp/respos-la-rusage-actual-switch-ltp.log
+```
+
+musl/glibc 各必须为 `4 passed, 0 failed`；尤其检查 `times03` 的 utime/stime 增长和 wait 后
+cutime/cstime 非零，而不只看 runner 宿主退出码。
+
+同一 signal probe 还必须覆盖 400 ms 的 `nanosleep/ppoll/pselect6/epoll_pwait` 及 relative/absolute
+`clock_nanosleep`：普通与 `SA_RESTART`
+handler 均在 signal 后返回 `EINTR`，默认忽略 `SIGWINCH` 等到 timeout；relative nanosleep/clock_nanosleep
+校验 remainder，absolute clock_nanosleep 保持 remainder sentinel 不变。
+epoll guest 向量需注册保持未就绪的 pipe 读端，不能用空 interest 集合的主动让步路径替代真实阻塞。
+`SA_NOCLDSTOP` 子项先用 pipe handshake 确认 child 已首次运行，Linux/guest 保持同一前置条件。当前最终
+证据为 `/tmp/respos-{rv,la}-signal-clock-nanosleep-stress8.log`（RV64 `-s` 只开未连接 listener）；修改
+signal wake hint 或 stop/continue 发布顺序后还须复跑双架构
+wait4、task Phase 5 与 socket 8 轮门禁。
+
+阻塞 `accept/accept4` restart 修改还须严格编译运行 `scripts/socket_phase5_probe_linux.c`，并在双架构
+release、4 GiB、2 hart 下运行
+`TASK_A_SOCKET_PHASE5_PROBE=1 make run-{rv,la}-pre PRE_MEM=4G PRE_SMP=2`。probe 用三个独立 AF_UNIX
+listener 覆盖普通 handler 返回 `EINTR`、`SA_RESTART` 后由稍后连接完成、默认忽略 `SIGWINCH` 后继续等待；
+同轮还以空/满 AF_UNIX socketpair 覆盖 `recvfrom/sendto/sendmsg/recvmsg/sendmmsg/recvmmsg` 的三种信号
+路径，并验证 `recvmsg(MSG_WAITALL)` 的 partial-result 与 `recvmmsg` 的 partial-count 优先级。当前
+`recvmmsg` 还覆盖非空 timeout：超期后 message 才到达时仍返回 count 且 remainder=0；普通 EINTR 不改
+timespec；SA_RESTART 后成功、partial-count、默认 ignored signal 与 `MSG_WAITFORONE` 首条后 nonblock
+都必须通过。不要写“完全无消息等 timeout 返回”的 Linux oracle，因为该调用不会由 timeout 自行唤醒；
+必须用有界 sender/signal 保证退出。涉及 wait/signal 时序的变更应各连续运行 8 轮，当前最终日志为
+`/tmp/respos-{rv,la}-socket-recvmmsg-timeout-stress8.log`。
 
 CPU clock/CPU timer 专项使用无 feature release；两架构必须顺序构建：
 
@@ -1077,7 +1582,11 @@ cc -std=c11 -Wall -Wextra -Werror -O2 scripts/socket_phase5_probe_linux.c \
 RV64 no-feature release、`-m 16G -smp 8 -snapshot` guest 中运行 `socket_phase5_probe`，以
 `SOCKET_PHASE5 ALL PASS` 为通过标志。它覆盖 pathname accept/connect、非阻塞 accept、EOF/EPIPE、
 AF_UNIX buffered shutdown 的 poll/epoll `IN|RDHUP`、阻塞 ppoll 数据唤醒、pipe 的无条件 HUP/ERR、
-epoll HUP 和 accept EINTR。Linux/guest 还必须分别输出 `shutdown_poll_rdhup PASS` 与
+epoll HUP 和 accept EINTR。restart 簇还会用非阻塞 clients 动态填满 accept queue，验证阻塞 connect
+普通 handler=`EINTR`、`SA_RESTART`/默认忽略后由 accept 释放槽位完成。accept/recvfrom/sendto/connect
+还设置 `SO_RCVTIMEO/SO_SNDTIMEO` 并要求带 `SA_RESTART` 仍返回 `EINTR`；feature runner 固定连续 8 轮，
+当前双架构日志为 `/tmp/respos-{rv,la}-socket-restart-entry-snapshot-stress8.log`。Linux/guest 还必须分别输出
+`shutdown_poll_rdhup PASS` 与
 `rdhup_blocking_edge_oneshot PASS`；后者覆盖只订阅 RDHUP 的阻塞 ppoll/epoll、ET 去重、ONESHOT
 禁用及 `EPOLL_CTL_MOD` rearm。修改
 Unix buffer/waiter 后还必须复跑 `unix_socket_block_probe` 的 128 KiB 满缓冲区传输；宿主 QEMU

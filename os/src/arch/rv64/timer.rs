@@ -14,6 +14,42 @@ const TASK_TIMER_ADVANCE_US: usize = 800;
 static REQUESTED_TASK_TIMER: AtomicUsize = AtomicUsize::new(usize::MAX);
 static PROGRAMMED_SERVICE_TIMER: AtomicUsize = AtomicUsize::new(usize::MAX);
 
+const GOLDFISH_RTC_BASE: usize = 0x0010_1000;
+const GOLDFISH_RTC_TIME_LOW: usize = 0x00;
+const GOLDFISH_RTC_TIME_HIGH: usize = 0x04;
+
+/// Read QEMU virt's goldfish RTC as nanoseconds since the Unix epoch.
+pub fn rtc_epoch_ns() -> Option<u64> {
+    let base = crate::config::KERNEL_BASE.checked_add(GOLDFISH_RTC_BASE)?;
+    for _ in 0..4 {
+        let high_before =
+            unsafe { core::ptr::read_volatile((base + GOLDFISH_RTC_TIME_HIGH) as *const u32) };
+        let low = unsafe { core::ptr::read_volatile((base + GOLDFISH_RTC_TIME_LOW) as *const u32) };
+        let high_after =
+            unsafe { core::ptr::read_volatile((base + GOLDFISH_RTC_TIME_HIGH) as *const u32) };
+        if high_before == high_after {
+            return Some(((high_after as u64) << 32) | low as u64);
+        }
+    }
+    None
+}
+
+/// Set QEMU virt's goldfish RTC.  Goldfish follows the same high-then-low
+/// programming order used by Linux's rtc-goldfish driver.
+pub fn rtc_set_epoch_ns(epoch_ns: u64) -> bool {
+    let Some(base) = crate::config::KERNEL_BASE.checked_add(GOLDFISH_RTC_BASE) else {
+        return false;
+    };
+    unsafe {
+        core::ptr::write_volatile(
+            (base + GOLDFISH_RTC_TIME_HIGH) as *mut u32,
+            (epoch_ns >> 32) as u32,
+        );
+        core::ptr::write_volatile((base + GOLDFISH_RTC_TIME_LOW) as *mut u32, epoch_ns as u32);
+    }
+    rtc_epoch_ns().is_some_and(|actual| actual.abs_diff(epoch_ns) < 1_000_000_000)
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 #[repr(C)]
 pub struct TimeSpec {

@@ -3,7 +3,7 @@
 use super::vfs::{InodeOp, SuperBlockOp};
 use crate::config::PAGE_CACHE_GLOBAL_MAX_PAGES;
 use crate::config::PAGE_SIZE;
-use crate::mm::{FrameTracker, frame_alloc};
+use crate::mm::{frame_alloc, FrameTracker};
 use crate::syscall::{Errno, SysResult};
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
@@ -36,7 +36,9 @@ static WRITEBACK_FAULT_ARMED: AtomicBool = AtomicBool::new(false);
 
 const WRITEBACK_BATCH_PAGES: usize = 32;
 const DIRTY_PAGES_PER_CACHE_HIGH_WATERMARK: usize = 256;
-const READ_AHEAD_PAGES: usize = 16;
+pub(crate) const DEFAULT_READ_AHEAD_PAGES: usize = 16;
+pub(crate) const SEQUENTIAL_READ_AHEAD_PAGES: usize = DEFAULT_READ_AHEAD_PAGES * 2;
+const MAX_READ_AHEAD_PAGES: usize = SEQUENTIAL_READ_AHEAD_PAGES;
 const DIRTY_OWNER_HIGH_WATERMARK: usize = 128;
 const BACKGROUND_WRITEBACK_OWNERS: usize = 8;
 
@@ -286,6 +288,10 @@ pub struct PageCache {
     size_version: AtomicUsize,
     dirty_pages: AtomicUsize,
     writeback_error: Mutex<WritebackErrorState>,
+    /// Prefix of each file page for which page_mkwrite has established
+    /// persistent backing. This matters when filesystem blocks are smaller
+    /// than a VM page and ftruncate extends a resident tail page.
+    mmap_reserved_prefixes: Mutex<BTreeMap<usize, usize>>,
     /// Serializes lower-file writeback against lower truncate. Buffered
     /// writers stay concurrent and are resolved by page/size generations.
     writeback_lock: Mutex<()>,
@@ -304,6 +310,7 @@ impl PageCache {
                 sequence: 0,
                 error: None,
             }),
+            mmap_reserved_prefixes: Mutex::new(BTreeMap::new()),
             writeback_lock: Mutex::new(()),
         });
         PAGE_CACHE_REGISTRY
@@ -327,6 +334,22 @@ impl PageCache {
 
     pub fn has_dirty_pages(&self) -> bool {
         self.dirty_pages.load(Ordering::Relaxed) != 0
+    }
+
+    pub fn reserve_mmap_prefix<T>(
+        &self,
+        page_idx: usize,
+        prefix_len: usize,
+        reserve: impl FnOnce(usize) -> SysResult<T>,
+    ) -> SysResult<Option<T>> {
+        let mut prefixes = self.mmap_reserved_prefixes.lock();
+        let current = prefixes.get(&page_idx).copied().unwrap_or(0);
+        if prefix_len <= current {
+            return Ok(None);
+        }
+        let result = reserve(current)?;
+        prefixes.insert(page_idx, prefix_len);
+        Ok(Some(result))
     }
 
     /// Start an open-file-description error cursor at the current sequence.
@@ -479,11 +502,73 @@ impl PageCache {
                     page.write_version = page.write_version.wrapping_add(1);
                 }
             }
+            let mut prefixes = self.mmap_reserved_prefixes.lock();
+            prefixes.retain(|page_idx, prefix| {
+                let page_start = page_idx.saturating_mul(PAGE_SIZE);
+                if page_start >= new_size {
+                    return false;
+                }
+                *prefix = (*prefix).min(new_size - page_start);
+                *prefix != 0
+            });
         }
         if removed_pages != 0 {
             PAGE_CACHE_PAGE_COUNT.fetch_sub(removed_pages, Ordering::Relaxed);
         }
         *size = new_size;
+        self.size_version.fetch_add(1, Ordering::Release);
+    }
+
+    /// Publish a successful lower-filesystem hole punch into the shared page
+    /// cache. Fully covered pages are discarded; partial boundary pages stay
+    /// cache-coherent and have only the requested bytes zeroed. MAP_PRIVATE
+    /// COW frames are separate allocations and therefore remain untouched.
+    pub fn punch_hole(&self, offset: usize, len: usize) {
+        if len == 0 {
+            return;
+        }
+        let file_size = *self.file_size.lock();
+        let end = offset.saturating_add(len).min(file_size);
+        if offset >= end {
+            return;
+        }
+
+        let start_page = offset / PAGE_SIZE;
+        let end_page = end.div_ceil(PAGE_SIZE);
+        let mut removed_pages = 0usize;
+        let mut pages = self.pages.lock();
+        for page_idx in start_page..end_page {
+            let page_start = page_idx.saturating_mul(PAGE_SIZE);
+            let zero_start = offset.saturating_sub(page_start).min(PAGE_SIZE);
+            let zero_end = end.saturating_sub(page_start).min(PAGE_SIZE);
+            if zero_start >= zero_end {
+                continue;
+            }
+            let fully_covered = zero_start == 0 && zero_end == PAGE_SIZE;
+            if fully_covered {
+                if let Some(page) = pages.remove(&page_idx) {
+                    let mut page = page.lock();
+                    page.bytes().fill(0);
+                    page.write_version = page.write_version.wrapping_add(1);
+                    if page.dirty {
+                        page.dirty = false;
+                        self.dirty_pages.fetch_sub(1, Ordering::Relaxed);
+                        PAGE_CACHE_DIRTY_PAGE_COUNT.fetch_sub(1, Ordering::Relaxed);
+                    }
+                    removed_pages += 1;
+                }
+            } else if let Some(page) = pages.get(&page_idx) {
+                let mut page = page.lock();
+                page.bytes()[zero_start..zero_end].fill(0);
+                page.write_version = page.write_version.wrapping_add(1);
+            }
+        }
+        drop(pages);
+        if removed_pages != 0 {
+            PAGE_CACHE_PAGE_COUNT.fetch_sub(removed_pages, Ordering::Relaxed);
+        }
+        // A concurrent writeback snapshot must observe that the file content,
+        // though not its logical size, crossed a destructive mutation.
         self.size_version.fetch_add(1, Ordering::Release);
     }
 
@@ -496,24 +581,27 @@ impl PageCache {
     }
 
     /// 查 BTreeMap 获取页（不触发 I/O）
-    fn lookup_page(&self, page_idx: usize) -> Option<Arc<Mutex<Page>>> {
+    fn lookup_page(&self, page_idx: usize, mark_accessed: bool) -> Option<Arc<Mutex<Page>>> {
         let page = self.pages.lock().get(&page_idx).cloned();
-        if let Some(page) = page.as_ref() {
-            self.touch_page(page_idx, page);
+        if mark_accessed {
+            if let Some(page) = page.as_ref() {
+                self.touch_page(page_idx, page);
+            }
         }
         page
     }
 
     /// 获取页（懒加载）。I/O 成功后再插入缓存，避免失败时留下零页。
-    fn get_or_load(
+    fn get_or_load_with_status(
         &self,
         page_idx: usize,
         lower: Option<(&Arc<dyn InodeOp>, &str)>,
         read_ahead_pages: usize,
-    ) -> SysResult<Arc<Mutex<Page>>> {
-        if let Some(page) = self.lookup_page(page_idx) {
+        mark_accessed: bool,
+    ) -> SysResult<(Arc<Mutex<Page>>, bool)> {
+        if let Some(page) = self.lookup_page(page_idx, mark_accessed) {
             crate::perf::page_cache_hit(1);
-            return Ok(page);
+            return Ok((page, false));
         }
         crate::perf::page_cache_miss(1);
 
@@ -523,7 +611,7 @@ impl PageCache {
         let available_pages = file_size.div_ceil(PAGE_SIZE).saturating_sub(page_idx);
         let mut load_pages = if lower.is_some() && page_start < file_size {
             read_ahead_pages
-                .clamp(1, READ_AHEAD_PAGES)
+                .clamp(1, MAX_READ_AHEAD_PAGES)
                 .min(available_pages)
         } else {
             1
@@ -542,9 +630,9 @@ impl PageCache {
             }
         }
 
-        // Read a sequential run while outside the PageCache lock.  One 64 KiB
-        // lwext4 operation replaces up to sixteen 4 KiB operations and lets
-        // the lower block layer preserve its multi-block request batching.
+        // Read a sequential run while outside the PageCache lock.  NORMAL
+        // batches up to 64 KiB and SEQUENTIAL up to 128 KiB, letting the lower
+        // block layer preserve its multi-block request batching.
         let read_len = if lower.is_some() && page_start < file_size {
             (file_size - page_start).min(load_pages * PAGE_SIZE)
         } else {
@@ -586,7 +674,7 @@ impl PageCache {
         let mut pages = self.pages.lock();
         if self.size_version.load(Ordering::Acquire) != load_version {
             drop(pages);
-            return self.get_or_load(page_idx, lower, read_ahead_pages);
+            return self.get_or_load_with_status(page_idx, lower, read_ahead_pages, mark_accessed);
         }
         let mut requested = None;
         let mut inserted_count = 0usize;
@@ -618,8 +706,21 @@ impl PageCache {
             Self::reclaim_global();
         }
         let requested = requested.ok_or(Errno::EIO)?;
-        self.touch_page(page_idx, &requested);
-        Ok(requested)
+        if mark_accessed {
+            self.touch_page(page_idx, &requested);
+        }
+        Ok((requested, did_lower_fill))
+    }
+
+    fn get_or_load(
+        &self,
+        page_idx: usize,
+        lower: Option<(&Arc<dyn InodeOp>, &str)>,
+        read_ahead_pages: usize,
+        mark_accessed: bool,
+    ) -> SysResult<Arc<Mutex<Page>>> {
+        self.get_or_load_with_status(page_idx, lower, read_ahead_pages, mark_accessed)
+            .map(|(page, _)| page)
     }
 
     /// Return the physical cache page used by a shared file mapping.
@@ -632,10 +733,13 @@ impl PageCache {
         &self,
         page_idx: usize,
         lower: Option<(&Arc<dyn InodeOp>, &str)>,
-    ) -> SysResult<Arc<FrameTracker>> {
-        let page = self.get_or_load(page_idx, lower, READ_AHEAD_PAGES)?;
+        read_ahead_pages: usize,
+        mark_accessed: bool,
+    ) -> SysResult<(Arc<FrameTracker>, bool)> {
+        let (page, did_lower_fill) =
+            self.get_or_load_with_status(page_idx, lower, read_ahead_pages, mark_accessed)?;
         let frame = page.lock().frame.clone();
-        Ok(frame)
+        Ok((frame, did_lower_fill))
     }
 
     /// 从页缓存读取数据到 buf
@@ -645,6 +749,17 @@ impl PageCache {
         buf: &mut [u8],
         lower: Option<(&Arc<dyn InodeOp>, &str)>,
     ) -> SysResult<usize> {
+        self.read_at_advised(offset, buf, lower, DEFAULT_READ_AHEAD_PAGES, true)
+    }
+
+    pub fn read_at_advised(
+        &self,
+        offset: usize,
+        buf: &mut [u8],
+        lower: Option<(&Arc<dyn InodeOp>, &str)>,
+        read_ahead_pages: usize,
+        mark_accessed: bool,
+    ) -> SysResult<usize> {
         let file_size = *self.file_size.lock();
         let mut copied = 0;
         let mut pos = offset.min(file_size);
@@ -653,7 +768,7 @@ impl PageCache {
             let page_idx = pos / PAGE_SIZE;
             let page_off = pos % PAGE_SIZE;
             let n = (end - pos).min(PAGE_SIZE - page_off);
-            let page = self.get_or_load(page_idx, lower, READ_AHEAD_PAGES)?;
+            let page = self.get_or_load(page_idx, lower, read_ahead_pages, mark_accessed)?;
             let mut p = page.lock();
             buf[copied..copied + n].copy_from_slice(&p.bytes()[page_off..page_off + n]);
             drop(p);
@@ -711,7 +826,7 @@ impl PageCache {
                 }
                 page
             } else {
-                self.get_or_load(page_idx, lower, 1)?
+                self.get_or_load(page_idx, lower, 1, true)?
             };
             let mut p = page.lock();
             p.bytes()[page_off..page_off + n].copy_from_slice(&buf[copied..copied + n]);
@@ -719,6 +834,11 @@ impl PageCache {
                 self.dirty_pages.fetch_add(1, Ordering::Relaxed);
                 let global_dirty = PAGE_CACHE_DIRTY_PAGE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
                 crate::perf::observe_dirty_pages(global_dirty);
+                if lower.is_some() {
+                    if let Some(task) = crate::task::current_task() {
+                        task.note_output_blocks(PAGE_SIZE / crate::config::BLOCK_SIZE);
+                    }
+                }
             }
             p.dirty = true;
             p.write_version = p.write_version.wrapping_add(1);
@@ -755,6 +875,77 @@ impl PageCache {
             self.touch_page(page_idx, &page);
         }
         Self::reclaim_global();
+    }
+
+    /// Best-effort synchronous counterpart of force_page_cache_readahead().
+    /// Errors are deliberately ignored by the fadvise caller, as Linux does
+    /// not turn WILLNEED read failures into the syscall return value.
+    pub fn prefetch_range(
+        &self,
+        offset: usize,
+        len: usize,
+        lower: Option<(&Arc<dyn InodeOp>, &str)>,
+        read_ahead_pages: usize,
+    ) {
+        let file_size = *self.file_size.lock();
+        let end = if len == 0 {
+            file_size
+        } else {
+            offset.saturating_add(len).min(file_size)
+        };
+        let start_page = offset / PAGE_SIZE;
+        let end_page = end.div_ceil(PAGE_SIZE);
+        for page_idx in start_page..end_page {
+            if self
+                .get_or_load(page_idx, lower, read_ahead_pages, true)
+                .is_err()
+            {
+                break;
+            }
+        }
+    }
+
+    /// Drop clean, unmapped cache pages that are fully covered by the advised
+    /// byte range. The final partial EOF page is safe to discard when the
+    /// range reaches EOF, matching Linux generic_fadvise().
+    pub fn evict_clean_range(&self, offset: usize, len: usize) {
+        let file_size = *self.file_size.lock();
+        let range_end = if len == 0 {
+            usize::MAX
+        } else {
+            offset.saturating_add(len)
+        };
+        let start_page = offset.div_ceil(PAGE_SIZE);
+        let end_page = if range_end >= file_size {
+            file_size.div_ceil(PAGE_SIZE)
+        } else {
+            range_end / PAGE_SIZE
+        };
+        if end_page <= start_page {
+            return;
+        }
+        let mut pages = self.pages.lock();
+        let victims = pages
+            .range(start_page..end_page)
+            .map(|(&page_idx, _)| page_idx)
+            .collect::<Vec<_>>();
+        let mut removed = 0usize;
+        for page_idx in victims {
+            let removable = pages.get(&page_idx).is_some_and(|page| {
+                let page_guard = page.lock();
+                !page_guard.dirty
+                    && Arc::strong_count(page) == 1
+                    && Arc::strong_count(&page_guard.frame) == 1
+            });
+            if removable {
+                pages.remove(&page_idx);
+                removed += 1;
+            }
+        }
+        drop(pages);
+        if removed != 0 {
+            PAGE_CACHE_PAGE_COUNT.fetch_sub(removed, Ordering::Relaxed);
+        }
     }
 
     fn finish_writeback_batch(

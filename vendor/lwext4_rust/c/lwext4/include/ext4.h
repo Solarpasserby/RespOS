@@ -338,6 +338,17 @@ int ext4_fclose(ext4_file *file);
  * @return  Standard error code.*/
 int ext4_ftruncate(ext4_file *file, uint64_t size);
 
+/**@brief   Deallocate full blocks and zero partial blocks in a file range.
+ *
+ * The logical file size and current file position are unchanged.
+ *
+ * @param   file   File handle.
+ * @param   offset First byte of the range.
+ * @param   size   Number of bytes in the range.
+ *
+ * @return  Standard error code.*/
+int ext4_fpunch_hole(ext4_file *file, uint64_t offset, uint64_t size);
+
 /**@brief   Read data from file.
  *
  * @param   file File handle.
@@ -401,13 +412,15 @@ int ext4_inode_open(ext4_file *file, const char *mount_point,
 
 /** Read raw inode metadata without resolving a pathname. */
 int ext4_raw_inode_fill_ino(const char *mount_point, uint32_t inode,
-			    struct ext4_inode *raw_inode);
+			    struct ext4_inode *raw_inode,
+			    uint64_t *blocks_count);
 
 /** Atomically set selected metadata on an inode number. */
 int ext4_setattr_ino(const char *mount_point, uint32_t inode,
 		     uint32_t mask, uint32_t mode, uint32_t uid,
-		     uint32_t gid, uint32_t atime, uint32_t mtime,
-		     uint32_t ctime);
+		     uint32_t gid, int64_t atime_sec, uint32_t atime_nsec,
+		     int64_t mtime_sec, uint32_t mtime_nsec,
+		     int64_t ctime_sec, uint32_t ctime_nsec);
 
 /** Remove a file name while retaining an unlinked inode for open users. */
 int ext4_fremove_deferred(const char *path);

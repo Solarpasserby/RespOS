@@ -1741,7 +1741,15 @@ int ext4_extent_remove_space(struct ext4_inode_ref *inode_ref, ext4_lblk_t from,
 		if (unwritten)
 			ext4_ext_mark_unwritten(ex);
 
-		ext4_ext_dirty(inode_ref, path + depth);
+		ret = ext4_ext_dirty(inode_ref, path + depth);
+		if (ret != EOK)
+			goto out;
+
+		/* The original middle-split path updated the two surviving
+		 * extents but never released the physical blocks removed between
+		 * them.  Hole punch relies on both the block bitmap and i_blocks
+		 * changing, not merely on making reads look sparse. */
+		ext4_ext_remove_blocks(inode_ref, ex, from, to);
 
 		newex.first_block = to_le32(to + 1);
 		newex.block_count = to_le16(ee_block + len - 1 - to);

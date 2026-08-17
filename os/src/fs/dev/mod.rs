@@ -54,12 +54,66 @@ use null::NullInode;
 use random::RandomInode;
 use rtc::RtcInode;
 use shm::shm_dir;
+use spin::Mutex;
 use tty::TtyInode;
 use zero::ZeroInode;
 
 use crate::fs::dentry_cache;
 use crate::fs::mount::{self, Mount, VfsMount, get_mount_by_dentry};
 use crate::syscall::{Errno, SysResult};
+
+fn formatted_geometry_from_header(
+    header: &[u8],
+    fstype: &str,
+    maximum: usize,
+) -> Option<(usize, usize)> {
+    match fstype {
+        "ext2" | "ext3" | "ext4" => {
+            const SUPER_OFFSET: usize = 1024;
+            const BLOCKS_LO_OFFSET: usize = SUPER_OFFSET + 4;
+            const LOG_BLOCK_SIZE_OFFSET: usize = SUPER_OFFSET + 24;
+            const MAGIC_OFFSET: usize = SUPER_OFFSET + 56;
+            let magic = u16::from_le_bytes(
+                header
+                    .get(MAGIC_OFFSET..MAGIC_OFFSET + 2)?
+                    .try_into()
+                    .ok()?,
+            );
+            if magic != 0xef53 {
+                return None;
+            }
+            let blocks = u32::from_le_bytes(
+                header
+                    .get(BLOCKS_LO_OFFSET..BLOCKS_LO_OFFSET + 4)?
+                    .try_into()
+                    .ok()?,
+            ) as usize;
+            let log_block_size = u32::from_le_bytes(
+                header
+                    .get(LOG_BLOCK_SIZE_OFFSET..LOG_BLOCK_SIZE_OFFSET + 4)?
+                    .try_into()
+                    .ok()?,
+            );
+            if blocks == 0 || log_block_size > 6 {
+                return None;
+            }
+            let block_size = 1024usize.checked_shl(log_block_size)?;
+            blocks
+                .checked_mul(block_size)
+                .filter(|capacity| *capacity <= maximum)
+                .map(|capacity| (capacity, block_size))
+        }
+        _ => None,
+    }
+}
+
+pub(super) fn formatted_capacity_from_header(
+    header: &[u8],
+    fstype: &str,
+    maximum: usize,
+) -> Option<usize> {
+    formatted_geometry_from_header(header, fstype, maximum).map(|geometry| geometry.0)
+}
 
 // ── /dev ─────────────────────────────────────────────────────────────
 
@@ -92,6 +146,7 @@ impl InodeOp for DevDirInode {
             "cpu_dma_latency" => Ok(Arc::new(CpuDmaLatencyInode)),
             "shm" => Ok(shm_dir()),
             "misc" => Ok(Arc::new(MiscDirInode)),
+            "rtc" | "rtc0" => Ok(Arc::new(RtcInode)),
             "loop-control" => Ok(Arc::new(LoopControlInode)),
             "loop0" => Ok(Arc::new(LoopInode::new(0))),
             "vda" => Ok(Arc::new(VirtBlkInode::new(VDA_INO, VDA_RDEV))),
@@ -126,6 +181,8 @@ impl InodeOp for DevDirInode {
             entry(LOOP0_INO, InodeType::BlockDevice, 12, b"loop0\0"),
             entry(VDA_INO, InodeType::BlockDevice, 13, b"vda\0"),
             entry(VDA2_INO, InodeType::BlockDevice, 14, b"vda2\0"),
+            entry(RTC_INO, InodeType::CharDevice, 15, b"rtc\0"),
+            entry(RTC_INO, InodeType::CharDevice, 16, b"rtc0\0"),
         ])
     }
 
@@ -157,13 +214,65 @@ impl InodeOp for DevDirInode {
 pub(crate) struct VirtBlkInode {
     ino: u64,
     rdev: u64,
+    slot: usize,
+    capacity: usize,
 }
 
 impl VirtBlkInode {
-    const SIZE: usize = 1024 * 1024 * 1024;
+    const VDA_SIZE: usize = 1024 * 1024 * 1024;
+    // /dev/vda2 is the disposable LTP device. It must satisfy the harness's
+    // 300-MiB device admission check even when a test formats a smaller FS.
+    const VDA2_SIZE: usize = 300 * 1024 * 1024;
+    const VDA2_DEFAULT_FILESYSTEM_SIZE: usize = 10 * 1024 * 1024;
+    const FORMAT_HEADER_SIZE: usize = 4096;
 
     fn new(ino: u64, rdev: u64) -> Self {
-        Self { ino, rdev }
+        let slot = usize::from(ino == VDA2_INO);
+        let capacity = if slot == 1 {
+            Self::VDA2_SIZE
+        } else {
+            Self::VDA_SIZE
+        };
+        Self {
+            ino,
+            rdev,
+            slot,
+            capacity,
+        }
+    }
+
+    /// The LTP scratch block devices are intentionally lightweight rather
+    /// than backed by another virtio disk. Preserve the formatted filesystem
+    /// header so mount(2)'s backing-directory emulation can still enforce the
+    /// size selected by mkfs (for example mmap16's 10240 1-KiB blocks).
+    pub(crate) fn mount_capacity(&self, fstype: &str) -> usize {
+        let recorded = VIRT_BLK_FORMAT_GEOMETRIES.lock()[self.slot];
+        let headers = VIRT_BLK_FORMAT_HEADERS.lock();
+        recorded
+            .map(|geometry| geometry.0)
+            .or_else(|| formatted_capacity_from_header(&headers[self.slot], fstype, self.capacity))
+            .unwrap_or_else(|| {
+                if self.slot == 1 {
+                    Self::VDA2_DEFAULT_FILESYSTEM_SIZE
+                } else {
+                    self.capacity
+                }
+            })
+    }
+
+    pub(crate) fn mount_block_size(&self, fstype: &str) -> usize {
+        let recorded = VIRT_BLK_FORMAT_GEOMETRIES.lock()[self.slot];
+        recorded
+            .map(|geometry| geometry.1)
+            .or_else(|| {
+                formatted_geometry_from_header(
+                    &VIRT_BLK_FORMAT_HEADERS.lock()[self.slot],
+                    fstype,
+                    self.capacity,
+                )
+                .map(|geometry| geometry.1)
+            })
+            .unwrap_or(if self.slot == 1 { 1024 } else { 4096 })
     }
 
     pub fn ioctl(&self, request: usize, arg: usize) -> SysResult<usize> {
@@ -171,12 +280,12 @@ impl VirtBlkInode {
         const BLKGETSIZE64: usize = 0x8008_1272;
         match request {
             request if request & 0xffff == BLKGETSIZE64 & 0xffff => {
-                let size = Self::SIZE as u64;
+                let size = self.capacity as u64;
                 crate::mm::copy_to_user(arg as *mut u64, &size as *const u64, 1)?;
                 Ok(0)
             }
             request if request & 0xffff == BLKGETSIZE => {
-                let sectors = Self::SIZE / 512;
+                let sectors = self.capacity / 512;
                 crate::mm::copy_to_user(arg as *mut usize, &sectors as *const usize, 1)?;
                 Ok(0)
             }
@@ -203,13 +312,24 @@ impl InodeOp for VirtBlkInode {
     }
 
     fn read_at(&self, _path: &str, off: usize, buf: &mut [u8]) -> SysResult<usize> {
-        let len = buf.len().min(Self::SIZE.saturating_sub(off));
+        let len = buf.len().min(self.capacity.saturating_sub(off));
         buf[..len].fill(0);
+        let header_end = off.saturating_add(len).min(Self::FORMAT_HEADER_SIZE);
+        if off < header_end {
+            let headers = VIRT_BLK_FORMAT_HEADERS.lock();
+            buf[..header_end - off].copy_from_slice(&headers[self.slot][off..header_end]);
+        }
         Ok(len)
     }
 
     fn write_at(&self, _path: &str, off: usize, buf: &[u8]) -> SysResult<usize> {
-        Ok(buf.len().min(Self::SIZE.saturating_sub(off)))
+        let len = buf.len().min(self.capacity.saturating_sub(off));
+        let header_end = off.saturating_add(len).min(Self::FORMAT_HEADER_SIZE);
+        if off < header_end {
+            VIRT_BLK_FORMAT_HEADERS.lock()[self.slot][off..header_end]
+                .copy_from_slice(&buf[..header_end - off]);
+        }
+        Ok(len)
     }
 
     fn truncate(&self, _path: &str, _size: usize) -> SysResult<usize> {
@@ -239,6 +359,86 @@ impl InodeOp for VirtBlkInode {
 
     fn unlink(&self, _valid_dentry: &Arc<Dentry>) -> SysResult {
         Err(Errno::EACCES)
+    }
+}
+
+static VIRT_BLK_FORMAT_HEADERS: Mutex<[[u8; VirtBlkInode::FORMAT_HEADER_SIZE]; 2]> =
+    Mutex::new([[0; VirtBlkInode::FORMAT_HEADER_SIZE]; 2]);
+static VIRT_BLK_FORMAT_GEOMETRIES: Mutex<[Option<(usize, usize)>; 2]> = Mutex::new([None, None]);
+
+/// Record the geometry selected by the bundled no-op mkfs replacement. The
+/// lightweight virtual block device has no real formatter, but mount users
+/// must still observe the filesystem size and block size requested by mkfs.
+pub(crate) fn record_noop_mkfs(path: &str, args: &[alloc::string::String]) {
+    let tokens = args
+        .iter()
+        .flat_map(|arg| arg.split_ascii_whitespace())
+        .collect::<Vec<_>>();
+    let is_ext = core::iter::once(path)
+        .chain(tokens.iter().copied())
+        .any(|token| {
+            matches!(
+                token
+                    .trim_matches(|ch: char| ch == '\'' || ch == '"')
+                    .rsplit('/')
+                    .next(),
+                Some("mkfs.ext2" | "mkfs.ext3" | "mkfs.ext4")
+            )
+        });
+    if !is_ext {
+        return;
+    }
+    let Some((device_index, slot)) =
+        tokens.iter().enumerate().find_map(|(index, token)| {
+            match token.trim_matches(|ch: char| ch == '\'' || ch == '"') {
+                "/dev/vda" => Some((index, 0)),
+                "/dev/vda2" => Some((index, 1)),
+                _ => None,
+            }
+        })
+    else {
+        return;
+    };
+    let block_size = tokens
+        .windows(2)
+        .find_map(|pair| {
+            (pair[0] == "-b")
+                .then(|| {
+                    pair[1]
+                        .trim_matches(|ch: char| ch == '\'' || ch == '"')
+                        .parse::<usize>()
+                        .ok()
+                })
+                .flatten()
+        })
+        .or_else(|| {
+            tokens.iter().find_map(|token| {
+                token
+                    .strip_prefix("-b")?
+                    .trim_matches(|ch: char| ch == '\'' || ch == '"')
+                    .parse::<usize>()
+                    .ok()
+            })
+        })
+        .filter(|size| matches!(*size, 1024 | 2048 | 4096))
+        .unwrap_or(4096);
+    let blocks = tokens[device_index + 1..].iter().find_map(|token| {
+        token
+            .trim_matches(|ch: char| ch == '\'' || ch == '"')
+            .parse::<usize>()
+            .ok()
+    });
+    let maximum = if slot == 1 {
+        VirtBlkInode::VDA2_SIZE
+    } else {
+        VirtBlkInode::VDA_SIZE
+    };
+    let capacity = blocks
+        .and_then(|blocks| blocks.checked_mul(block_size))
+        .filter(|capacity| *capacity <= maximum)
+        .unwrap_or(maximum);
+    if capacity != 0 {
+        VIRT_BLK_FORMAT_GEOMETRIES.lock()[slot] = Some((capacity, block_size));
     }
 }
 

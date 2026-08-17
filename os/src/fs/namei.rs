@@ -11,7 +11,6 @@ use crate::fs::ext4::Ext4Inode;
 use crate::fs::register_dirty_owner;
 use crate::syscall::{Errno, SysResult};
 use crate::task::current_task;
-use crate::timer::{TimeSpec, get_time_ms};
 use alloc::{
     format,
     string::{String, ToString},
@@ -588,6 +587,7 @@ pub fn open_last_lookups(nd: &mut Nameidata, flags: usize, mode: usize) -> SysRe
     let file = Arc::new(File::new(Path::new(nd.mnt.clone(), dentry), inode, flags));
     if flags.contains(OpenFlags::O_TRUNC)
         && flags.intersects(OpenFlags::O_WRONLY | OpenFlags::O_RDWR)
+        && file.inode().node_type() == InodeType::Regular
     {
         file.truncate(0)?;
     }
@@ -632,6 +632,7 @@ pub fn path_open(dirfd: isize, path: &str, flags: usize, mode: usize) -> SysResu
         let file = Arc::new(File::new(path, inode, open_flags));
         if open_flags.contains(OpenFlags::O_TRUNC)
             && open_flags.intersects(OpenFlags::O_WRONLY | OpenFlags::O_RDWR)
+            && file.inode().node_type() == InodeType::Regular
         {
             file.truncate(0)?;
         }
@@ -1059,11 +1060,7 @@ pub fn filename_link_tmpfile(file: &File, newdirfd: isize, newpath: &str) -> Sys
                         offset += written;
                     }
                     if !data.is_empty() {
-                        let ms = get_time_ms();
-                        let now = TimeSpec {
-                            sec: (ms / 1000) as isize,
-                            nsec: ((ms % 1000) * 1_000_000) as isize,
-                        };
+                        let now = crate::syscall::realtime_timespec();
                         inode.note_data_write(child_path.as_str(), now)?;
                         register_dirty_owner(
                             page_cache,

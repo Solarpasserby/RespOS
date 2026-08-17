@@ -46,7 +46,8 @@ pub fn console_putchar(c: usize) {
 /// Stage-1 早期控制台：只写 NS16550 THR，不依赖锁、格式化或 MMU 状态。
 ///
 /// 仅在进入完整 driver framework / MMU 之前使用；此时 entry 建立的 DMW0 identity
-/// 使物理地址可直接访问。UART_BASE 对 QEMU virt 与 2K1000LA 相同（0x1fe0_01e0）。
+/// 使物理地址可直接访问。UART_BASE 由板级配置决定：QEMU virt 0x1fe0_01e0 /
+/// 2K1000LA 0x1fe2_0000（byte stride，THR@0 / LSR@5）。
 #[cfg(feature = "board_ls2k1000")]
 pub fn early_putchar(c: u8) {
     unsafe {
@@ -115,6 +116,17 @@ pub fn shutdown(failure: bool) -> ! {
             let s5_poweroff = ACPI_GED_SLP_EN | (ACPI_GED_SLP_TYP_S5 << ACPI_GED_SLP_TYP_SHIFT);
             core::ptr::write_volatile(mmio_addr(ACPI_GED_REG_SLEEP_CTL) as *mut u8, s5_poweroff);
         }
+    }
+    register::idle()
+}
+
+/// Reset the LoongArch virtual platform through the ACPI GED reset register.
+pub fn restart() -> ! {
+    unsafe {
+        core::ptr::write_volatile(
+            mmio_addr(ACPI_GED_REG_RESET) as *mut u8,
+            ACPI_GED_RESET_VALUE,
+        );
     }
     register::idle()
 }

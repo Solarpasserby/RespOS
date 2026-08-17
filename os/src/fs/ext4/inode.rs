@@ -8,19 +8,23 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::any::Any;
 use core::marker::PhantomData;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use hashbrown::HashMap;
 use lazy_static::lazy_static;
-use lwext4_rust::{Ext4File, InodeTypes as Ext4InodeTypes, bindings};
+use lwext4_rust::{bindings, Ext4File, InodeTypes as Ext4InodeTypes};
 use spin::Mutex;
 
 use crate::fs::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
 use crate::fs::{KStat, PageCache};
 use crate::syscall::{Errno, SysResult};
-use crate::timer::{TimeSpec, get_time_ms};
+use crate::timer::TimeSpec;
 
 lazy_static! {
     static ref EXT4_INODE_CACHE: Mutex<HashMap<(usize, u64), Weak<dyn InodeOp>>> =
+        Mutex::new(HashMap::new());
+    /// Strong references keep in-memory lazy timestamps reachable until a
+    /// filesystem durability boundary has committed them to the lower inode.
+    static ref LAZYTIME_INODES: Mutex<HashMap<(usize, u64), Arc<dyn InodeOp>>> =
         Mutex::new(HashMap::new());
     static ref DEFERRED_INODE_DISCARDS: Mutex<Vec<(usize, &'static [u8], u32)>> =
         Mutex::new(Vec::new());
@@ -31,6 +35,12 @@ lazy_static! {
 }
 
 static DEFERRED_INODE_DISCARD_PENDING: AtomicBool = AtomicBool::new(false);
+const DEFAULT_DIRTYTIME_EXPIRE_SECONDS: usize = 12 * 60 * 60;
+const LAZYTIME_BACKGROUND_BATCH: usize = 8;
+const LAZYTIME_RETRY_US: usize = 5 * 1_000_000;
+static DIRTYTIME_EXPIRE_SECONDS: AtomicUsize = AtomicUsize::new(DEFAULT_DIRTYTIME_EXPIRE_SECONDS);
+static NEXT_LAZYTIME_SCAN_US: AtomicUsize = AtomicUsize::new(usize::MAX);
+static LAZYTIME_SCAN_RUNNING: AtomicBool = AtomicBool::new(false);
 
 pub(super) struct ProfiledExt4Lock {
     inner: Mutex<()>,
@@ -209,6 +219,7 @@ struct MetadataState {
     times: Option<InodeTimes>,
     generation: usize,
     pending_data_times: Option<PendingDataTimes>,
+    pending_atime: Option<PendingAtime>,
 }
 
 #[derive(Clone, Copy)]
@@ -216,6 +227,13 @@ struct PendingDataTimes {
     generation: usize,
     mtime: TimeSpec,
     ctime: TimeSpec,
+}
+
+#[derive(Clone, Copy)]
+struct PendingAtime {
+    generation: usize,
+    atime: TimeSpec,
+    dirtied_at_us: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -231,10 +249,12 @@ struct RawInodeMetadata {
     uid: u32,
     gid: u32,
     rdev: u32,
-    atime: u32,
-    mtime: u32,
-    ctime: u32,
+    atime: TimeSpec,
+    mtime: TimeSpec,
+    ctime: TimeSpec,
+    timestamp_extra_mask: u8,
     size: u64,
+    blocks: u64,
     nlink: u32,
     namespace_generation: usize,
 }
@@ -310,6 +330,7 @@ impl Ext4Inode {
                 times: None,
                 generation: 1,
                 pending_data_times: None,
+                pending_atime: None,
             }),
             unlinked: AtomicBool::new(false),
             page_cache: PageCache::new(0),
@@ -429,7 +450,7 @@ impl Ext4Inode {
             child_ty,
         );
         if let Some(inode) = inode.as_any().downcast_ref::<Ext4Inode>() {
-            inode.init_inode_times();
+            inode.init_inode_times(&path)?;
         }
         crate::perf::ext4_create_call(1);
         crate::perf::ext4_create_ticks(crate::perf::elapsed_since(started));
@@ -583,37 +604,50 @@ impl Ext4Inode {
     }
 
     fn now_timespec() -> TimeSpec {
-        let ms = get_time_ms();
+        crate::syscall::realtime_timespec()
+    }
+
+    fn decode_lower_time(sec: u32, extra: u32, has_extra: bool) -> TimeSpec {
+        let signed_low = sec as i32 as i64;
+        let epoch = if has_extra { i64::from(extra & 3) } else { 0 };
         TimeSpec {
-            sec: (ms / 1000) as isize,
-            nsec: ((ms % 1000) * 1_000_000) as isize,
+            sec: (signed_low + (epoch << 32)) as isize,
+            nsec: if has_extra { (extra >> 2) as isize } else { 0 },
         }
     }
 
-    fn normalize_lower_time(sec: u32) -> TimeSpec {
-        let now = Self::now_timespec();
-        let ts = TimeSpec {
-            sec: sec as isize,
-            nsec: 0,
-        };
-        // TODO[ABI-COMPAT]: 当前 CLOCK_REALTIME 仍是开机时间，镜像里的 ext4
-        // 时间戳却是构建机 Unix 时间。没有内核侧覆盖记录时，先把“未来”
-        // 时间归零，避免 libc 用 time() 与 stat() 比较时失真。
-        if ts.sec > now.sec {
-            TimeSpec::default()
+    const ATIME_EXTRA: u8 = 1 << 0;
+    const MTIME_EXTRA: u8 = 1 << 1;
+    const CTIME_EXTRA: u8 = 1 << 2;
+
+    fn truncate_lower_time(time: TimeSpec, has_extra: bool) -> TimeSpec {
+        const MIN_SEC: isize = -2_147_483_648;
+        const LEGACY_MAX_SEC: isize = 2_147_483_647;
+        const EXTRA_MAX_SEC: isize = 15_032_385_535;
+        let max_sec = if has_extra {
+            EXTRA_MAX_SEC
         } else {
-            ts
+            LEGACY_MAX_SEC
+        };
+        let sec = time.sec.clamp(MIN_SEC, max_sec);
+        TimeSpec {
+            sec,
+            nsec: if !has_extra || sec == MIN_SEC || sec == max_sec {
+                0
+            } else {
+                time.nsec
+            },
         }
     }
 
-    fn cached_times(&self, atime: u32, mtime: u32, ctime: u32) -> InodeTimes {
+    fn cached_times(&self, atime: TimeSpec, mtime: TimeSpec, ctime: TimeSpec) -> InodeTimes {
         if let Some(times) = self.metadata.lock().times {
             return times;
         }
         InodeTimes {
-            atime: Self::normalize_lower_time(atime),
-            mtime: Self::normalize_lower_time(mtime),
-            ctime: Self::normalize_lower_time(ctime),
+            atime,
+            mtime,
+            ctime,
         }
     }
 
@@ -637,19 +671,15 @@ impl Ext4Inode {
         mtime: Option<TimeSpec>,
         ctime: Option<TimeSpec>,
     ) -> SysResult {
-        let lower_time = |time: Option<TimeSpec>| {
-            time.filter(|time| time.sec >= 0 && time.sec <= u32::MAX as isize)
-                .map(|time| time.sec as u32)
-        };
-        let lower_atime = lower_time(atime);
-        let lower_mtime = lower_time(mtime);
-        let lower_ctime = lower_time(ctime);
         let mask = u32::from(mode.is_some())
             | (u32::from(owner.is_some()) << 1)
-            | (u32::from(lower_atime.is_some()) << 2)
-            | (u32::from(lower_mtime.is_some()) << 3)
-            | (u32::from(lower_ctime.is_some()) << 4);
+            | (u32::from(atime.is_some()) << 2)
+            | (u32::from(mtime.is_some()) << 3)
+            | (u32::from(ctime.is_some()) << 4);
         let (uid, gid) = owner.unwrap_or_default();
+        let atime = atime.unwrap_or_default();
+        let mtime = mtime.unwrap_or_default();
+        let ctime = ctime.unwrap_or_default();
         let mount = self.mount_point_c;
         let guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Attributes);
         let ret = {
@@ -662,9 +692,12 @@ impl Ext4Inode {
                     mode.unwrap_or(0) & 0o7777,
                     uid,
                     gid,
-                    lower_atime.unwrap_or(0),
-                    lower_mtime.unwrap_or(0),
-                    lower_ctime.unwrap_or(0),
+                    atime.sec as i64,
+                    atime.nsec as u32,
+                    mtime.sec as i64,
+                    mtime.nsec as u32,
+                    ctime.sec as i64,
+                    ctime.nsec as u32,
                 )
             }
         };
@@ -684,7 +717,12 @@ impl Ext4Inode {
     ) -> SysResult {
         // Preserve an earlier delayed write's mtime before a later explicit
         // setattr supersedes some or all timestamp fields.
-        self.flush_pending_data_times(path)?;
+        self.flush_pending_times(path)?;
+        let extra_mask = self.raw_metadata(path)?.timestamp_extra_mask;
+        let atime =
+            atime.map(|time| Self::truncate_lower_time(time, extra_mask & Self::ATIME_EXTRA != 0));
+        let mtime =
+            mtime.map(|time| Self::truncate_lower_time(time, extra_mask & Self::MTIME_EXTRA != 0));
         let mut times = self.current_times(path)?;
 
         if let Some(atime) = atime {
@@ -694,7 +732,10 @@ impl Ext4Inode {
             times.mtime = mtime;
         }
         if update_ctime {
-            times.ctime = Self::now_timespec();
+            times.ctime = Self::truncate_lower_time(
+                Self::now_timespec(),
+                extra_mask & Self::CTIME_EXTRA != 0,
+            );
         }
 
         crate::perf::ext4_set_times_call(1);
@@ -722,42 +763,114 @@ impl Ext4Inode {
         self.set_times_impl(path, Some(atime), None, false)
     }
 
-    fn init_inode_times(&self) {
-        let now = Self::now_timespec();
-        self.metadata.lock().times = Some(InodeTimes {
-            atime: now,
-            mtime: now,
-            ctime: now,
+    /// Publish an automatic access timestamp without issuing lower metadata
+    /// I/O. The lazytime registry keeps the inode alive until a durability
+    /// boundary commits the pending value.
+    pub(crate) fn defer_atime(&self, path: &str, atime: TimeSpec) -> SysResult {
+        let extra_mask = self.raw_metadata(path)?.timestamp_extra_mask;
+        let atime = Self::truncate_lower_time(atime, extra_mask & Self::ATIME_EXTRA != 0);
+        let mut times = self.current_times(path)?;
+        times.atime = atime;
+        let mut metadata = self.metadata.lock();
+        let (generation, dirtied_at_us) = metadata.pending_atime.map_or_else(
+            || (1, crate::timer::get_timeout_us()),
+            |pending| (pending.generation.wrapping_add(1), pending.dirtied_at_us),
+        );
+        metadata.times = Some(times);
+        metadata.pending_atime = Some(PendingAtime {
+            generation,
+            atime,
+            dirtied_at_us,
         });
+        Ok(())
+    }
+
+    fn init_inode_times(&self, path: &str) -> SysResult {
+        let extra_mask = self.raw_metadata(path)?.timestamp_extra_mask;
+        let realtime = Self::now_timespec();
+        let atime = Self::truncate_lower_time(realtime, extra_mask & Self::ATIME_EXTRA != 0);
+        let mtime = Self::truncate_lower_time(realtime, extra_mask & Self::MTIME_EXTRA != 0);
+        let ctime = Self::truncate_lower_time(realtime, extra_mask & Self::CTIME_EXTRA != 0);
+        self.commit_lower_setattr(path, None, None, Some(atime), Some(mtime), Some(ctime))?;
+        self.metadata.lock().times = Some(InodeTimes {
+            atime,
+            mtime,
+            ctime,
+        });
+        Ok(())
     }
 
     fn set_cached_times(&self, times: InodeTimes) {
         self.metadata.lock().times = Some(times);
     }
 
-    fn flush_pending_data_times(&self, path: &str) -> SysResult {
-        let pending = self.metadata.lock().pending_data_times;
-        let Some(pending) = pending else {
-            return Ok(());
+    fn flush_pending_times(&self, path: &str) -> SysResult {
+        let (pending_atime, pending_data) = {
+            let metadata = self.metadata.lock();
+            (metadata.pending_atime, metadata.pending_data_times)
         };
+        if pending_atime.is_none() && pending_data.is_none() {
+            return Ok(());
+        }
         crate::perf::ext4_set_times_call(1);
-        crate::perf::ext4_set_times_mtime_update(1);
+        if pending_atime.is_some() {
+            crate::perf::ext4_set_times_atime_update(1);
+        }
+        if pending_data.is_some() {
+            crate::perf::ext4_set_times_mtime_update(1);
+        }
         self.commit_lower_setattr(
             path,
             None,
             None,
-            None,
-            Some(pending.mtime),
-            Some(pending.ctime),
+            pending_atime.map(|pending| pending.atime),
+            pending_data.map(|pending| pending.mtime),
+            pending_data.map(|pending| pending.ctime),
         )?;
         let mut metadata = self.metadata.lock();
-        if metadata
-            .pending_data_times
-            .is_some_and(|current| current.generation == pending.generation)
-        {
-            metadata.pending_data_times = None;
+        if let Some(pending) = pending_atime {
+            if metadata
+                .pending_atime
+                .is_some_and(|current| current.generation == pending.generation)
+            {
+                metadata.pending_atime = None;
+            }
+        }
+        if let Some(pending) = pending_data {
+            if metadata
+                .pending_data_times
+                .is_some_and(|current| current.generation == pending.generation)
+            {
+                metadata.pending_data_times = None;
+            }
         }
         Ok(())
+    }
+
+    fn flush_pending_atime(&self, path: &str) -> SysResult {
+        let pending = self.metadata.lock().pending_atime;
+        let Some(pending) = pending else {
+            return Ok(());
+        };
+        crate::perf::ext4_set_times_call(1);
+        crate::perf::ext4_set_times_atime_update(1);
+        self.commit_lower_setattr(path, None, None, Some(pending.atime), None, None)?;
+        let mut metadata = self.metadata.lock();
+        if metadata
+            .pending_atime
+            .is_some_and(|current| current.generation == pending.generation)
+        {
+            metadata.pending_atime = None;
+        }
+        Ok(())
+    }
+
+    fn has_pending_atime(&self) -> bool {
+        self.metadata.lock().pending_atime.is_some()
+    }
+
+    fn pending_atime(&self) -> Option<PendingAtime> {
+        self.metadata.lock().pending_atime
     }
 
     pub(crate) fn invalidate_raw_metadata(&self) {
@@ -797,6 +910,7 @@ impl Ext4Inode {
         let raw_inode = {
             let guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Stat);
             let mut raw_inode: bindings::ext4_inode = unsafe { core::mem::zeroed() };
+            let mut blocks = 0u64;
             let mount = self.mount_point_c;
             let ret = {
                 let _lower = guard.profile_lower();
@@ -805,19 +919,21 @@ impl Ext4Inode {
                         mount.as_ptr().cast(),
                         self.ino as u32,
                         &mut raw_inode,
+                        &mut blocks,
                     )
                 }
             };
             if ret != 0 {
                 return Err(Self::map_lwext4_err(ret));
             }
-            raw_inode
+            (raw_inode, blocks)
         };
         // Reload after lower I/O so a mutation of this directory cannot make
         // a fresh snapshot carry the generation observed before the I/O.
         let mut state = self.metadata.lock();
         let namespace_generation = state.generation;
 
+        let (raw_inode, blocks) = raw_inode;
         let osd2 = unsafe { core::ptr::addr_of!(raw_inode.osd2).read_unaligned() };
         let linux2 = unsafe { osd2.linux2 };
         let inode_blocks = unsafe { core::ptr::addr_of!(raw_inode.blocks).read_unaligned() };
@@ -831,6 +947,13 @@ impl Ext4Inode {
         } else {
             0
         };
+        let extra_isize = u16::from_le(raw_inode.extra_isize) as usize;
+        let atime_sec = u32::from_le(raw_inode.access_time);
+        let mtime_sec = u32::from_le(raw_inode.modification_time);
+        let ctime_sec = u32::from_le(raw_inode.change_inode_time);
+        let atime_extra = u32::from_le(raw_inode.atime_extra);
+        let mtime_extra = u32::from_le(raw_inode.mtime_extra);
+        let ctime_extra = u32::from_le(raw_inode.ctime_extra);
         let metadata = RawInodeMetadata {
             mode: u16::from_le(raw_inode.mode) as u32,
             uid: u16::from_le(raw_inode.uid) as u32
@@ -838,11 +961,15 @@ impl Ext4Inode {
             gid: u16::from_le(raw_inode.gid) as u32
                 | ((u16::from_le(linux2.gid_high) as u32) << 16),
             rdev,
-            atime: u32::from_le(raw_inode.access_time),
-            mtime: u32::from_le(raw_inode.modification_time),
-            ctime: u32::from_le(raw_inode.change_inode_time),
+            atime: Self::decode_lower_time(atime_sec, atime_extra, extra_isize >= 16),
+            mtime: Self::decode_lower_time(mtime_sec, mtime_extra, extra_isize >= 12),
+            ctime: Self::decode_lower_time(ctime_sec, ctime_extra, extra_isize >= 8),
+            timestamp_extra_mask: u8::from(extra_isize >= 16) * Self::ATIME_EXTRA
+                | u8::from(extra_isize >= 12) * Self::MTIME_EXTRA
+                | u8::from(extra_isize >= 8) * Self::CTIME_EXTRA,
             size: (u32::from_le(raw_inode.size_lo) as u64)
                 | ((u32::from_le(raw_inode.size_hi) as u64) << 32),
+            blocks,
             nlink: u16::from_le(raw_inode.links_count) as u32,
             namespace_generation,
         };
@@ -895,7 +1022,7 @@ impl InodeOp for Ext4Inode {
             mode: raw.mode,
             mode_valid: true,
             blksize: crate::config::BLOCK_SIZE as u32,
-            blocks: KStat::blocks_for_size(size as u64),
+            blocks: raw.blocks,
             atime: times.atime,
             mtime: times.mtime,
             ctime: times.ctime,
@@ -1038,10 +1165,34 @@ impl InodeOp for Ext4Inode {
         Ok(0)
     }
 
+    fn punch_hole(&self, path: &str, offset: usize, len: usize) -> SysResult<usize> {
+        self.check_type(InodeType::Regular)?;
+        {
+            let guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Write);
+            let file = &mut Ext4File::new(self.mount_point, self.ty.clone());
+            let _lower = guard.profile_lower();
+            file.inode_open(self.ino as u32, bindings::O_RDWR)
+                .map_err(Self::map_lwext4_err)?;
+            let operation = file
+                .file_punch_hole(offset as u64, len as u64)
+                .map_err(Self::map_lwext4_err);
+            let close = file.file_close().map_err(Self::map_lwext4_err);
+            operation?;
+            close?;
+        }
+        self.invalidate_raw_metadata();
+        let now = Self::now_timespec();
+        self.set_times(path, None, Some(now))?;
+        Ok(0)
+    }
+
     fn note_data_write(&self, path: &str, time: TimeSpec) -> SysResult {
+        let extra_mask = self.raw_metadata(path)?.timestamp_extra_mask;
+        let mtime = Self::truncate_lower_time(time, extra_mask & Self::MTIME_EXTRA != 0);
+        let ctime = Self::truncate_lower_time(time, extra_mask & Self::CTIME_EXTRA != 0);
         let mut times = self.current_times(path)?;
-        times.mtime = time;
-        times.ctime = time;
+        times.mtime = mtime;
+        times.ctime = ctime;
         let mut metadata = self.metadata.lock();
         let generation = metadata
             .pending_data_times
@@ -1049,14 +1200,14 @@ impl InodeOp for Ext4Inode {
         metadata.times = Some(times);
         metadata.pending_data_times = Some(PendingDataTimes {
             generation,
-            mtime: time,
-            ctime: time,
+            mtime,
+            ctime,
         });
         Ok(())
     }
 
     fn flush_data_metadata(&self, path: &str) -> SysResult {
-        self.flush_pending_data_times(path)
+        self.flush_pending_times(path)
     }
 
     fn has_pending_data_metadata(&self) -> bool {
@@ -1068,10 +1219,12 @@ impl InodeOp for Ext4Inode {
     }
 
     fn set_mode(&self, path: &str, mode: u32) -> SysResult {
-        self.flush_pending_data_times(path)?;
+        self.flush_pending_times(path)?;
         crate::perf::ext4_set_mode_call(1);
         let mut times = self.current_times(path)?;
-        times.ctime = Self::now_timespec();
+        let extra_mask = self.raw_metadata(path)?.timestamp_extra_mask;
+        times.ctime =
+            Self::truncate_lower_time(Self::now_timespec(), extra_mask & Self::CTIME_EXTRA != 0);
         self.commit_lower_setattr(path, Some(mode), None, None, None, Some(times.ctime))?;
         self.invalidate_raw_metadata();
         self.set_cached_times(times);
@@ -1079,10 +1232,12 @@ impl InodeOp for Ext4Inode {
     }
 
     fn set_owner(&self, path: &str, uid: u32, gid: u32) -> SysResult {
-        self.flush_pending_data_times(path)?;
+        self.flush_pending_times(path)?;
         crate::perf::ext4_set_owner_call(1);
         let mut times = self.current_times(path)?;
-        times.ctime = Self::now_timespec();
+        let extra_mask = self.raw_metadata(path)?.timestamp_extra_mask;
+        times.ctime =
+            Self::truncate_lower_time(Self::now_timespec(), extra_mask & Self::CTIME_EXTRA != 0);
         self.commit_lower_setattr(path, None, Some((uid, gid)), None, None, Some(times.ctime))?;
         self.invalidate_raw_metadata();
         self.set_cached_times(times);
@@ -1090,13 +1245,15 @@ impl InodeOp for Ext4Inode {
     }
 
     fn set_owner_and_mode(&self, path: &str, uid: u32, gid: u32, mode: Option<u32>) -> SysResult {
-        self.flush_pending_data_times(path)?;
+        self.flush_pending_times(path)?;
         crate::perf::ext4_set_owner_call(1);
         if mode.is_some() {
             crate::perf::ext4_set_mode_call(1);
         }
         let mut times = self.current_times(path)?;
-        times.ctime = Self::now_timespec();
+        let extra_mask = self.raw_metadata(path)?.timestamp_extra_mask;
+        times.ctime =
+            Self::truncate_lower_time(Self::now_timespec(), extra_mask & Self::CTIME_EXTRA != 0);
         self.commit_lower_setattr(path, mode, Some((uid, gid)), None, None, Some(times.ctime))?;
         self.invalidate_raw_metadata();
         self.set_cached_times(times);
@@ -1397,7 +1554,7 @@ impl InodeOp for Ext4Inode {
         let inode = self.lookup(parent_path, name)?;
         inode.clear_xattrs();
         if let Some(inode) = inode.as_any().downcast_ref::<Ext4Inode>() {
-            inode.init_inode_times();
+            inode.init_inode_times(&path)?;
         }
         Ok(inode)
     }
@@ -1493,6 +1650,186 @@ fn evict_dead_inodes(cache: &mut HashMap<(usize, u64), Weak<dyn InodeOp>>) {
 /// 手动清理 inode 缓存中已死亡的条目
 pub fn clean_inode_cache() {
     evict_dead_inodes(&mut EXT4_INODE_CACHE.lock());
+}
+
+pub(crate) fn register_lazytime_inode(inode: Arc<dyn InodeOp>) {
+    let Some(ext4) = inode.as_any().downcast_ref::<Ext4Inode>() else {
+        return;
+    };
+    let key = (ext4.fs_id, ext4.ino);
+    let pending = ext4.pending_atime();
+    LAZYTIME_INODES.lock().insert(key, inode);
+    let interval_us = dirtytime_expire_seconds().saturating_mul(1_000_000);
+    if interval_us != 0 {
+        if let Some(pending) = pending {
+            schedule_lazytime_scan(pending.dirtied_at_us.saturating_add(interval_us));
+        }
+    }
+}
+
+fn schedule_lazytime_scan(deadline_us: usize) {
+    let mut current = NEXT_LAZYTIME_SCAN_US.load(Ordering::Acquire);
+    while deadline_us < current {
+        match NEXT_LAZYTIME_SCAN_US.compare_exchange_weak(
+            current,
+            deadline_us,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => break,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+pub(crate) fn dirtytime_expire_seconds() -> usize {
+    DIRTYTIME_EXPIRE_SECONDS.load(Ordering::Acquire)
+}
+
+pub(crate) fn set_dirtytime_expire_seconds(value: usize) -> SysResult<()> {
+    DIRTYTIME_EXPIRE_SECONDS.store(value, Ordering::Release);
+    if value == 0 {
+        NEXT_LAZYTIME_SCAN_US.store(usize::MAX, Ordering::Release);
+        while LAZYTIME_SCAN_RUNNING.load(Ordering::Acquire) {
+            core::hint::spin_loop();
+        }
+    } else {
+        // Match Linux's sysctl handler: changing the interval wakes the
+        // dirtytime worker so existing inodes are re-evaluated immediately.
+        NEXT_LAZYTIME_SCAN_US.store(crate::timer::get_timeout_us(), Ordering::Release);
+    }
+    Ok(())
+}
+
+/// Commit a bounded batch of expired lazy timestamps from the timer-service
+/// hart's idle context. The timestamp age is monotonic and starts with the
+/// first deferred update, matching Linux's `dirtied_time_when` behavior.
+pub(crate) fn flush_expired_lazytime_inodes_if_needed() {
+    let now = crate::timer::get_timeout_us();
+    if now < NEXT_LAZYTIME_SCAN_US.load(Ordering::Acquire) {
+        return;
+    }
+    if LAZYTIME_SCAN_RUNNING
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    NEXT_LAZYTIME_SCAN_US.store(usize::MAX, Ordering::Release);
+
+    let interval_us = dirtytime_expire_seconds().saturating_mul(1_000_000);
+    if interval_us == 0 {
+        LAZYTIME_SCAN_RUNNING.store(false, Ordering::Release);
+        return;
+    }
+    let pending: Vec<_> = LAZYTIME_INODES
+        .lock()
+        .iter()
+        .map(|(&(fs_id, ino), inode)| ((fs_id, ino), inode.clone()))
+        .collect();
+    let mut flushed = 0usize;
+    for ((fs_id, ino), inode) in pending {
+        if dirtytime_expire_seconds() == 0 {
+            break;
+        }
+        let Some(ext4) = inode.as_any().downcast_ref::<Ext4Inode>() else {
+            continue;
+        };
+        let Some(candidate) = ext4.pending_atime() else {
+            continue;
+        };
+        let deadline = candidate.dirtied_at_us.saturating_add(interval_us);
+        let mut flush_failed = false;
+        if now >= deadline && flushed < LAZYTIME_BACKGROUND_BATCH {
+            flushed += 1;
+            if ext4.flush_pending_atime("").is_err() {
+                flush_failed = true;
+                schedule_lazytime_scan(now.saturating_add(LAZYTIME_RETRY_US));
+            }
+        }
+
+        if let Some(current) = ext4.pending_atime() {
+            let current_deadline = current.dirtied_at_us.saturating_add(interval_us);
+            if flush_failed {
+                // The failed generation remains pending. Avoid retrying on
+                // every scheduler tick while retaining the strong owner.
+            } else if now >= current_deadline && flushed >= LAZYTIME_BACKGROUND_BATCH {
+                schedule_lazytime_scan(now);
+            } else {
+                schedule_lazytime_scan(current_deadline.max(now));
+            }
+        } else {
+            let mut registry = LAZYTIME_INODES.lock();
+            if registry
+                .get(&(fs_id, ino))
+                .is_some_and(|current| Arc::ptr_eq(current, &inode))
+                && !ext4.has_pending_atime()
+            {
+                registry.remove(&(fs_id, ino));
+            }
+        }
+    }
+    LAZYTIME_SCAN_RUNNING.store(false, Ordering::Release);
+}
+
+/// An inode that has lost its final dentry/file owner must not remain pinned
+/// solely by the lazytime registry. Commit its pending atime before releasing
+/// that strong owner, matching Linux's eviction durability boundary.
+pub(crate) fn flush_lazytime_inode_on_evict(inode: Arc<dyn InodeOp>) {
+    let Some(ext4) = inode.as_any().downcast_ref::<Ext4Inode>() else {
+        return;
+    };
+    let key = (ext4.fs_id, ext4.ino);
+    let registered = LAZYTIME_INODES
+        .lock()
+        .get(&key)
+        .is_some_and(|current| Arc::ptr_eq(current, &inode));
+    if !registered || Arc::strong_count(&inode) > 2 {
+        return;
+    }
+    if ext4.flush_pending_atime("").is_err() {
+        schedule_lazytime_scan(crate::timer::get_timeout_us().saturating_add(LAZYTIME_RETRY_US));
+        return;
+    }
+    let mut registry = LAZYTIME_INODES.lock();
+    if registry
+        .get(&key)
+        .is_some_and(|current| Arc::ptr_eq(current, &inode))
+        && !ext4.has_pending_atime()
+    {
+        registry.remove(&key);
+    }
+}
+
+pub(super) fn flush_lazytime_inodes(fs_id: usize) -> SysResult {
+    let pending: Vec<_> = LAZYTIME_INODES
+        .lock()
+        .iter()
+        .filter_map(|(&(inode_fs_id, ino), inode)| {
+            (inode_fs_id == fs_id).then_some((ino, inode.clone()))
+        })
+        .collect();
+    let mut first_error = None;
+    for (ino, inode) in pending {
+        let Some(ext4) = inode.as_any().downcast_ref::<Ext4Inode>() else {
+            continue;
+        };
+        if let Err(error) = ext4.flush_pending_atime("") {
+            first_error.get_or_insert(error);
+            continue;
+        }
+        if !ext4.has_pending_atime() {
+            let mut registry = LAZYTIME_INODES.lock();
+            if registry
+                .get(&(fs_id, ino))
+                .is_some_and(|current| Arc::ptr_eq(current, &inode))
+                && !ext4.has_pending_atime()
+            {
+                registry.remove(&(fs_id, ino));
+            }
+        }
+    }
+    first_error.map_or(Ok(()), Err)
 }
 
 impl From<InodeType> for Ext4InodeTypes {

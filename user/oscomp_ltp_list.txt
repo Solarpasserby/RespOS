@@ -467,7 +467,7 @@ utime07
 utimensat01
 
 # oscomp LTP test list - Phase 12: signal — signal handling (20 tests)
-# 测例 rt_sigqueueinfo01 sigwait01 报错奇怪收益低跳过完整通过
+# rt_sigqueueinfo01 仍因 checkpoint 唤醒超时跳过；sigwait01 已于 2026-08-15 双架构恢复通过。
 kill03
 kill05
 kill06
@@ -640,8 +640,9 @@ setrlimit05
 # - mmap2：每组写入并映射 128 MiB 文件，约耗时 2 分钟，旧式输出没有评测可统计的 TPASS。
 # - mmap3：40 线程执行 1000 轮映射压力，单组约 1～3 分钟，仅产生 1 个 TPASS，
 #   部分 glibc 运行还会超时或 TBROK。
-# - mmap16：依赖文件系统延迟分配和存储耗尽后的 SIGBUS 语义，每组约 20 秒，
-#   当前稳定为 0 passed / 10 failed。
+# - mmap16：依赖 1 KiB ext4、mremap 和 checkpoint 协作。Phase 5 page-mkwrite 自定义满盘门禁已通过；
+#   聚焦 trace 也证明首个 checkpoint/futex 唤醒正确。当前父进程的 buffered write 填盘循环无法观察到
+#   后台/阈值 writeback 的 ENOSPC，因此不会唤醒 child 的第二个 checkpoint，约 30 秒后 TBROK，暂不纳入。
 brk01
 brk02
 clone01
@@ -693,7 +694,7 @@ mmap12
 mmap13
 mmap14
 mmap15
-#mmap16
+mmap16
 mmap17
 mmap18
 mmap19

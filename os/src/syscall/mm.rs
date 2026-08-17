@@ -183,6 +183,7 @@ pub fn sys_mmap(
                 replace,
                 noreplace,
                 locked,
+                flags.contains(MMAPFLAGS::MAP_GROWSDOWN),
                 backing,
             )?;
             memory_set.flush_tlb();
@@ -197,7 +198,15 @@ pub fn sys_mmap(
         }
         let file = file.expect("non-anonymous mmap must have a file");
         file.mmap_allowed(has_shared, prot.contains(MMapProt::PROT_WRITE))?;
-        let backing = mmap_file_backing(file, offset, len, map_len, has_shared)?;
+        let backing = if file.mmap_zero_filled() {
+            if has_shared {
+                MmapBacking::SharedAnonymous
+            } else {
+                MmapBacking::LazyAnonymous
+            }
+        } else {
+            mmap_file_backing(file, offset, len, map_len, has_shared)?
+        };
 
         task.op_memory_set_write(|memory_set| {
             let start = memory_set.mmap_area(
@@ -207,6 +216,7 @@ pub fn sys_mmap(
                 replace,
                 noreplace,
                 locked,
+                flags.contains(MMAPFLAGS::MAP_GROWSDOWN),
                 backing,
             )?;
             memory_set.flush_tlb();

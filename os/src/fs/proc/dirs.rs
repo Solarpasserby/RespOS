@@ -13,13 +13,14 @@ use super::smaps::SmapsInode;
 use super::stat::{ProcStatInode, TaskStatInode};
 use super::uptime::UptimeInode;
 use super::version::VersionInode;
+use crate::fs::ext4::{dirtytime_expire_seconds, set_dirtytime_expire_seconds};
 use crate::fs::pipe::{pipe_max_size_string, set_pipe_max_size};
 use crate::net::proc_net_tcp;
 use crate::syscall::ipc::{
     set_shmall_value, set_shmmax_value, set_shmmni_value, shmall_value, shmmax_value, shmmni_value,
 };
 use crate::syscall::{Errno, SysResult};
-use crate::task::{TASK_MANAGER, TaskStatus, current_task};
+use crate::task::{current_task, TaskStatus, PROCESS_MANAGER, TASK_MANAGER};
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
@@ -69,6 +70,8 @@ const PROC_NET_INO: u64 = 36;
 const PROC_NET_TCP_INO: u64 = 37;
 const PROC_RESPOS_PERF_INO: u64 = 38;
 const PROC_UPTIME_INO: u64 = 39;
+const PROC_SYS_VM_INO: u64 = 40;
+const PROC_SYS_VM_DIRTYTIME_EXPIRE_SECONDS_INO: u64 = 41;
 const PROC_PID_DIR_INO_BASE: u64 = 0x10000;
 const PROC_PID_STAT_INO_BASE: u64 = 0x20000;
 const PROC_DEV: u64 = 0x100;
@@ -140,7 +143,11 @@ impl InodeOp for ProcDirInode {
                 CONFIG_GZ_CONTENT,
             )))
         } else if let Ok(pid) = name.parse::<usize>() {
-            if TASK_MANAGER.get(pid).is_some() {
+            if PROCESS_MANAGER
+                .get(pid)
+                .and_then(|process| process.signal_target())
+                .is_some()
+            {
                 Ok(Arc::new(ProcPidDirInode { pid }))
             } else {
                 Err(Errno::ENOENT)
@@ -173,10 +180,9 @@ impl InodeOp for ProcDirInode {
             entry(PROC_UPTIME_INO, InodeType::Regular, 14, b"uptime\0"),
         ];
         let pids = core::cell::RefCell::new(Vec::new());
-        TASK_MANAGER.for_each(|task| {
-            // 只保留进程 leader（tgid == tid），避免线程重复出现
-            if task.tid() == task.tgid() {
-                pids.borrow_mut().push(task.tid());
+        PROCESS_MANAGER.for_each(|process| {
+            if process.signal_target().is_some() {
+                pids.borrow_mut().push(process.tgid());
             }
         });
         let mut off: i64 = 15;
@@ -244,6 +250,7 @@ impl InodeOp for ProcSysInode {
             "kernel" => Ok(Arc::new(ProcSysKernelInode)),
             "fs" => Ok(Arc::new(ProcSysFsInode)),
             "net" => Ok(Arc::new(ProcSysNetInode)),
+            "vm" => Ok(Arc::new(ProcSysVmInode)),
             _ => Err(Errno::ENOENT),
         }
     }
@@ -255,6 +262,75 @@ impl InodeOp for ProcSysInode {
             entry(PROC_SYS_KERNEL_INO, InodeType::Directory, 3, b"kernel\0"),
             entry(PROC_SYS_FS_INO, InodeType::Directory, 4, b"fs\0"),
             entry(PROC_SYS_NET_INO, InodeType::Directory, 5, b"net\0"),
+            entry(PROC_SYS_VM_INO, InodeType::Directory, 6, b"vm\0"),
+        ])
+    }
+
+    fn read_at(&self, _path: &str, _off: usize, _buf: &mut [u8]) -> SysResult<usize> {
+        Err(Errno::EISDIR)
+    }
+    fn write_at(&self, _path: &str, _off: usize, _buf: &[u8]) -> SysResult<usize> {
+        Err(Errno::EACCES)
+    }
+    fn truncate(&self, _path: &str, _size: usize) -> SysResult<usize> {
+        Err(Errno::EACCES)
+    }
+    fn create(
+        &self,
+        _parent_path: &str,
+        _name: &str,
+        _ty: InodeType,
+    ) -> SysResult<Arc<dyn InodeOp>> {
+        Err(Errno::EACCES)
+    }
+    fn link(&self, _old_path: &str, _bare_dentry: Arc<Dentry>) -> SysResult {
+        Err(Errno::EACCES)
+    }
+    fn unlink(&self, _valid_dentry: &Arc<Dentry>) -> SysResult {
+        Err(Errno::EACCES)
+    }
+}
+
+pub(super) struct ProcSysVmInode;
+
+impl InodeOp for ProcSysVmInode {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn node_type(&self) -> InodeType {
+        InodeType::Directory
+    }
+
+    fn stat(&self, _path: &str) -> SysResult<KStat> {
+        Ok(KStat::minimal(0, InodeType::Directory)
+            .with_dev(PROC_DEV)
+            .with_ino(PROC_SYS_VM_INO)
+            .with_mode(0o555)
+            .with_nlink(2))
+    }
+
+    fn lookup(&self, _parent_path: &str, name: &str) -> SysResult<Arc<dyn InodeOp>> {
+        match name {
+            "dirtytime_expire_seconds" => Ok(Arc::new(ProcSysctlUsizeInode::new(
+                PROC_SYS_VM_DIRTYTIME_EXPIRE_SECONDS_INO,
+                dirtytime_expire_seconds,
+                set_dirtytime_expire_seconds,
+            ))),
+            _ => Err(Errno::ENOENT),
+        }
+    }
+
+    fn readdir(&self, _path: &str) -> SysResult<Vec<LinuxDirent64>> {
+        Ok(vec![
+            dir_entry(PROC_SYS_VM_INO, 1, b".\0"),
+            dir_entry(PROC_SYS_INO, 2, b"..\0"),
+            entry(
+                PROC_SYS_VM_DIRTYTIME_EXPIRE_SECONDS_INO,
+                InodeType::Regular,
+                3,
+                b"dirtytime_expire_seconds\0",
+            ),
         ])
     }
 
@@ -1928,16 +2004,14 @@ impl InodeOp for ProcPidStatInode {
 }
 
 fn generate_pid_stat(pid: usize) -> SysResult<String> {
-    let Some(task) = TASK_MANAGER.get(pid) else {
+    let Some(task) = PROCESS_MANAGER
+        .get(pid)
+        .and_then(|process| process.signal_target())
+    else {
         return Err(Errno::ENOENT);
     };
 
-    let ppid = task.op_parent(|p| {
-        p.as_ref()
-            .and_then(|w| w.upgrade())
-            .map(|t| t.tid())
-            .unwrap_or(0)
-    });
+    let ppid = task.process().parent().map(|p| p.tgid()).unwrap_or(0);
     let state = match task.status() {
         TaskStatus::Ready | TaskStatus::Running => 'R',
         TaskStatus::Blocked => 'S',
@@ -1955,12 +2029,12 @@ fn generate_pid_stat(pid: usize) -> SysResult<String> {
             .collect::<String>()
     };
 
-    let ticks = task.elapsed_ticks();
+    let (user_ticks, system_ticks) = task.process_accounting_ticks();
     let mut result = String::new();
     let _ = write!(
         result,
         "{} ({}) {} {} 0 0 0 0 0 0 0 0 0 {} {}",
-        pid, comm, state, ppid, ticks, ticks
+        pid, comm, state, ppid, user_ticks, system_ticks
     );
     for _ in 0..39 {
         result.push_str(" 0");

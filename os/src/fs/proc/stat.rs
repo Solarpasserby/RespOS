@@ -4,7 +4,7 @@ use super::super::KStat;
 use super::super::vfs::{Dentry, InodeOp, InodeType, LinuxDirent64};
 use super::dirs::{proc_dev, proc_self_stat_ino, proc_stat_ino};
 use crate::syscall::{Errno, SysResult};
-use crate::task::{TASK_MANAGER, TaskStatus, current_task};
+use crate::task::{PROCESS_MANAGER, TASK_MANAGER, TaskStatus, current_task};
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -148,18 +148,16 @@ fn generate_task_stat(pid: Option<usize>) -> SysResult<String> {
         None => return Err(Errno::ESRCH),
     };
     let task = if let Some(pid) = pid {
-        TASK_MANAGER.get(pid).ok_or(Errno::ENOENT)?
+        PROCESS_MANAGER
+            .get(pid)
+            .and_then(|process| process.signal_target())
+            .ok_or(Errno::ENOENT)?
     } else {
         task
     };
 
-    let pid = task.tid();
-    let ppid = task.op_parent(|p| {
-        p.as_ref()
-            .and_then(|w| w.upgrade())
-            .map(|t| t.tid())
-            .unwrap_or(0)
-    });
+    let pid = task.tgid();
+    let ppid = task.process().parent().map(|p| p.tgid()).unwrap_or(0);
     let state = match task.status() {
         TaskStatus::Ready | TaskStatus::Running => 'R',
         TaskStatus::Blocked => 'S',
@@ -177,15 +175,15 @@ fn generate_task_stat(pid: Option<usize>) -> SysResult<String> {
             .collect::<String>()
     };
 
-    let ticks = task.elapsed_ticks();
+    let (user_ticks, system_ticks) = task.process_accounting_ticks();
     Ok(alloc::format!(
         "{} ({}) {} {} 0 0 0 0 0 0 0 0 0 {} {}{}\n",
         pid,
         comm,
         state,
         ppid,
-        ticks,
-        ticks,
+        user_ticks,
+        system_ticks,
         " 0".repeat(39)
     ))
 }

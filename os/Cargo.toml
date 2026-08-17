@@ -15,6 +15,7 @@ debug_traces = []
 fault_trace = []
 la_global_kernel = []
 board_ls2k1000 = []
+kernel_http = []
 
 [[bin]]
 name = "os"

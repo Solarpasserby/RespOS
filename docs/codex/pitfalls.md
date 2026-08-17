@@ -1,5 +1,42 @@
 # RespOS 已确认易错点
 
+## x86 的 packed epoll_event 不能外推到 RV64/LA64
+
+- 状态：已确认并修复
+- 适用范围：`epoll_ctl`/`epoll_wait` 原始用户 ABI、Rust probe、libuv/其他 C runtime
+- 最后验证：2026-08-16
+- 证据：RV64/LA64 Linux UAPI headers；`os/src/syscall/special_fd.rs`；双架构 CMake 自举与
+  `socket_phase5/tcp_half_close/udp_shutdown/signal_phase5` 日志
+- 内容：旧内核和 Rust probe 都按 12-byte、data offset 4 互相通信，因此专项会自洽通过，却与目标
+  架构 libc 使用的自然对齐 16-byte、offset 8 不兼容。真实 CMake/libuv 随后把 padding/data 误读为 fd，
+  触发 watcher 数组断言。修正内核时必须同步修正 probe，否则旧 probe 反而会制造假回归。
+- 后续影响：手写 syscall struct 时先核对目标 UAPI 的 `sizeof`/`offsetof`，并用真实 libc workload 与
+  非零 64-bit sentinel 验证 round-trip；测试与实现共享同一个错误常量不是独立 oracle。
+
+## pathname 的 4096-byte 上限不能复用于 exec argv/env
+
+- 状态：已确认并修复
+- 适用范围：`execve`、shell `-c`、CMake/Ninja/Make 生成命令、ARG_MAX
+- 最后验证：2026-08-16
+- 证据：guest 内 CMake 约 11.6 KiB `/bin/sh -c` 参数；`os/src/mm/mod.rs`；双架构 self-build 日志
+- 内容：路径通常受 page-sized name buffer 约束，但 Linux 单个 argv/env string 的边界是 32 pages，
+  过长应为 `E2BIG`。旧 `extract_cstrings_from_user()` 复用 pathname helper，导致合法长参数先以
+  `ENAMETOOLONG` 失败，表面上只是 make/CMake 子命令异常退出。
+- 后续影响：pathname、exec 单字符串、argv/env 个数和总字节必须作为四类独立预算维护；扩大单项上限
+  不能绕过整体 ARG_MAX，也不能把 path 的错误码一起改掉。
+
+## 对 detached pthread 调用 join 不能作为可移植内核 oracle
+
+- 状态：已确认；测试夹具已修正
+- 适用范围：pthread detach/resource-reclaim probe、musl/glibc 差异归因
+- 最后验证：2026-08-16
+- 证据：`respos-software/libc-combination.c`、宿主 Linux 与 RV64 Alpine 首轮对照
+- 内容：对 detached thread 再调用 `pthread_join()` 属于不可依赖的误用，libc 不保证统一返回
+  `EINVAL`；RV64 Alpine 首版夹具在此前四线程组通过后因此段错误，但移除该断言、保持线程明确存活并
+  用 condition 验证其完成后，双架构完整矩阵及各 8 轮压力均通过。
+- 后续影响：线程回收测试应验证 detached worker 的可观察完成、同步对象不再被访问以及后续大量线程
+  create/join 能继续成功；不得把 join detached 的返回值或崩溃直接归因为 clone/futex 内核回归。
+
 ## chroot 先检查 privilege 会把 pathname 与目录权限错误遮蔽为 EPERM
 
 - 状态：已确认并修复
@@ -160,6 +197,75 @@
   串入后续 case；这会表现为大量不相关失败、ready/blocked task 单调增长甚至晚期假死。
 - 后续影响：不能在 wait 内核循环里简单忽略信号，因为 handler 必须先执行；应在 signal frame 中保存
   重执行上下文。分析大量 LTP TBROK 时同时看 `SA_RESTART`、task health 和跨 case 输出串台。
+
+## recvmmsg timeout 不能按理想 deadline 自行唤醒
+
+- 状态：已确认并按 Linux ABI 实现
+- 适用范围：`recvmmsg` 非空 timeout、SA_RESTART、partial count、MSG_WAITFORONE
+- 最后验证：2026-08-15；Linux oracle 与 RV64/LA64 socket probe 各 8 轮
+- 证据：Linux 完全无消息的 200 ms timeout 运行 35 秒仍未返回；改为 300 ms 后发送 message 时返回 `1`
+  且 remainder 为零。最终日志为 `/tmp/respos-{rv,la}-socket-recvmmsg-timeout-stress8.log`。
+- 内容：Linux 只在成功接收每条 message 后检查并写回 timeout。普通 handler 的零进展 `EINTR` 保持
+  timespec 原值；SA_RESTART 从该原值重新等待；partial count 保留上一条成功时写回的 remainder。
+  这是已记录的历史行为，不等价于 poll/nanosleep 的独立 timer。
+- 后续影响：不要因为接口有 timespec 参数就注册 task timeout waiter；那会让无消息调用按时返回，反而
+  破坏目标 ABI。探针必须用有界 sender/signal 确保 Linux oracle 退出，不能直接等待 timeout 并让 CI
+  永久挂住。
+
+## signal 入队后的晚到 interrupted 写会伪造下一次 syscall 的 EINTR
+
+- 状态：已确认并修复
+- 适用范围：SMP signal enqueue、interruptible wait、连续两个阻塞 syscall
+- 最后验证：2026-08-15；RV64/LA64 signal probe 各连续 8 轮
+- 证据：扩展 epoll timeout 向量后，RV64 第 6 轮出现 `epoll_pwait` 正确返回 `EINTR`、handler 只执行
+  一次，但紧随其后的 `wait4` 也返回 `EINTR`；`os/src/task/task.rs::mark_signal_interrupted()` 修复后
+  signal/socket/wait4/task 双架构回归通过。
+- 内容：发送核先入 pending queue，等待核可在发送核写 wake hint 前观察并消费 signal。若发送核随后仍
+  无条件写 `interrupted=true`，该 bool 已不对应任何 pending signal，会污染下一次阻塞 syscall。只在
+  syscall 返回点清一次 hint 不能闭合该先后关系，因为晚写可能发生在 clear 之后。
+- 后续影响：发布 hint 后重新验证权威 pending 条件；若目标已非 interruptible 或 signal 已不可递送，
+  立即撤销。不要靠用户态重试 cleanup wait 隐藏，因为同一缺陷会影响任意相邻阻塞调用。
+
+## stop 先通知 parent、后写 Stopped 会丢并发 SIGCONT
+
+- 状态：已确认并修复
+- 适用范围：SIGSTOP/SIGTSTP 等默认 Stop、SIGCONT、WUNTRACED、SMP
+- 最后验证：2026-08-15；双架构 signal 8 轮与 job-control 专项
+- 证据：修复前无调试输出的完整 signal probe 多次停在 `sigchld_autoreap PASS` 之后；GDB 显示两 hart
+  都在 `run_tasks` idle，而添加阶段输出会改变时序并通过。修复后日志为
+  `/tmp/respos-{rv,la}-signal-clock-nanosleep-stress8.log`。
+- 内容：旧 Stop action 先写 wait event/唤醒父进程，随后 `stop_current_and_run_next()` 才写 `Stopped`。
+  父进程若立即 SIGCONT，会因仍看到 `Running` 而不 enqueue child；child 随后停住，父进程等待回收，
+  系统最终无 ready task。即使提前写 `Stopped`，handoff 再写一次也会覆盖并发 SIGCONT 的 `Ready`。
+- 后续影响：正确顺序是 `Stopped -> wait/SIGCHLD publication -> state-preserving handoff`。遇到仅加打印就
+  消失的 job-control hang，应优先审计状态发布顺序，不能把它记录为偶发调度抖动。
+
+## wait 只用 exited-child 集合兜底会丢 stop/continue 唤醒
+
+- 状态：已确认并修复
+- 适用范围：wait4/waitid、WUNTRACED/WCONTINUED、SA_NOCLDSTOP、SMP
+- 最后验证：2026-08-15；RV64/LA64 signal probe 各连续 8 轮
+- 证据：加入 pipe read restart 后改变调度时序，probe 两次稳定停在 `SA_NOCLDSTOP` 尾段；临时输出改变
+  时序后通过。ProcessState child-event generation 修复后，无时序输出双架构 8 轮通过，日志为
+  `/tmp/respos-{rv,la}-signal-read-restart-stress8.log`。
+- 内容：child 可在父进程完成 children scan、但尚未设置 waiting flag 时发布 stop。通知看不到 waiter；
+  父进程随后发布 Blocked，若只检查 `exited_child_ids` 就永远睡眠，因为 stop/continue 不是 exit。
+- 后续影响：所有“先检查条件、再登记 waiter”的接口都要有同一锁或 generation/sequence handshake；
+  调试打印、额外 yield 或仅检查退出队列都不是 lost-wakeup 修复。
+
+## pid-specific wait 不能因无关旧 zombie 持续撤销睡眠
+
+- 状态：已确认并修复
+- 适用范围：wait4/waitid、多个子进程、LA64 SMP synchronous TLB shootdown
+- 最后验证：2026-08-15；RV64/LA64 futex race 各 20 轮
+- 证据：`os/src/syscall/process.rs::wait_block_current()`；
+  `/tmp/respos-{rv,la}-futex-timed-norestart-waitfix.log`
+- 内容：等待 child A 时，`exited_child_ids` 中可能已有尚未回收的 child B。若 Blocked 后仅因该集合非空
+  就撤销睡眠，父进程会在权威 children scan 与登记之间永久忙循环。LA64 内核态 IE=0 时还会阻止该 hart
+  响应 child A 退出回收所需的 TLB shootdown，形成 wait↔exit 闭环。GDB 证据显示一核停在
+  `remote_tlb_shootdown`，另一核在 `sys_wait4` 重复扫描/分配。
+- 后续影响：scan→register 竞态复查只比较扫描前保存的 child-event generation，并保留 signal/ready 条件；
+  旧 exit 集合不是“本轮扫描后发生事件”的证据。具体 child 是否匹配仍由下一轮 pid/pgrp/options 扫描决定。
 
 ## per-hart allocator cache 不能假设原 hart 释放，也不能反转 cache/buddy 锁序
 
@@ -448,18 +554,105 @@
   证据。尤其双 NOW/times NULL 属于 current-time：非 owner 可凭 inode 写权限成功、无写权限返回
   `EACCES`；显式时间和 `NOW+OMIT` 属于 arbitrary，普通非 owner 应返回 `EPERM`，不能只复用 write bit。
 
+## RTC 接入后，所有 wall-clock metadata 必须同步退出 monotonic 假设
+
+- 状态：已确认并修复当前 filesystem/IPC 调用点；RTC ioctl 后续已拆分为独立硬件域
+- 适用范围：`CLOCK_REALTIME` 初始化、`UTIME_NOW`、自动 inode 时间、SysV IPC timestamp、`RTC_RD_TIME`
+- 最后验证：2026-08-16
+- 证据：首次 LA64 `utimens_special_probe` 在 NOW window 断言失败；修复后双架构即时、跨重启和 LTP 通过
+- 内容：仅让 `clock_gettime(CLOCK_REALTIME)` 读取 RTC 会把原来同为“开机时间”的两套时钟拆开：
+  filesystem 若继续用 `get_time_ms()`，`UTIME_NOW` 会落在 1970，而用户对照已经是日历 epoch。wall-clock
+  metadata 必须统一走 realtime helper；timeout、uptime 和 CPU accounting 则必须保留 monotonic。
+  `RTC_RD_TIME/RTC_SET_TIME` 是硬件时钟接口，不属于 system realtime metadata，不能复用 realtime offset。
+  另外，设备映射列表不等于设备枚举列表：RV64 的普通 RTC MMIO 若加入 `VIRTIO_MMIO`，会改变 block
+  transport index 并使根盘初始化失败。
+- 后续影响：增加新的绝对 timestamp 时必须明确 clock domain；测试既要断言 calendar epoch，也要断言
+  调整 realtime 不影响 monotonic。平台 RTC 默认 enable 状态不能凭固件经验假设，LA64 TOY 需显式启用。
+
+## ioctl command 必须在 syscall ABI 边界截断为 32-bit unsigned int
+
+- 状态：已确认并修复 RV64 musl `hwclock`，双架构双 libc 实测
+- 适用范围：所有 ioctl、尤其 direction bit 置位的 `_IOR/_IOW` command
+- 最后验证：2026-08-16
+- 证据：RV64 musl 实际传入 `0xffffffff80247009`；修复后
+  `/tmp/respos-{rv,la}-rtc-set-phase5-current.log` 中两套 BusyBox `hwclock -r` 与专项均通过
+- 内容：Linux `ioctl(int, unsigned int, ...)` 在 syscall 入口只观察低 32 bit；RespOS 若直接拿 64-bit
+  `usize` 比较，libc 从有符号立即数路径装载 `_IOR` 常量时会因高位符号扩展而误报 `ENOTTY`。应统一在
+  `sys_ioctl` 入口 `as u32`，不能给每个设备重复增加 sign-extended 常量。
+- 后续影响：新增 ioctl dispatcher 复用规范化后的 command；探针需包含至少一个 direction bit 置位命令
+  和真实 libc 工具，纯 Rust 零扩展常量不足以覆盖该 ABI。
+
+## QEMU RTC reset persistence 不等于跨进程电池后备
+
+- 状态：已确认并双架构 reset 验证
+- 适用范围：goldfish `tick_offset`、LS7A `offset_toy`、reboot、RTC 测试结论
+- 最后验证：2026-08-16
+- 证据：QEMU `hw/rtc/{goldfish_rtc,ls7a_rtc}.c` reset/realize 状态机；
+  `/tmp/respos-{rv,la}-rtc-reset-persist-phase5.log`
+- 内容：两个设备在 system reset 时清 alarm/control，但保留已写的 time offset；新 QEMU 进程 realize 时
+  又从 `-rtc base` 初始化 offset。专项必须在同一 QEMU 内经历真正第二次内核启动，不能用 set 后立即读回
+  代替；也不能把该结果描述成跨 QEMU 进程掉电保持。
+- 后续影响：若平台提供 RTC state/NVRAM 后端，再建立跨进程门禁；当前本地证据只申报 device-reset
+  persistence。
+
+## ext4 extra timestamp 必须把 signed low seconds 与 epoch 位一起处理
+
+- 状态：已实现并在扩展/128-byte 旧 inode 上双架构跨冷启动验证
+- 适用范围：ext4 atime/mtime/ctime raw inode 编解码、组合 setattr、旧 inode layout
+- 最后验证：2026-08-15
+- 证据：Linux oracle、`ext4_timestamp_phase5_probe`，日志
+  `/tmp/respos-{rv,la}-ext4-persist-{prepare,verify}.log`
+- 内容：`i_*time` 低 word 不是简单 u32 epoch seconds；解码必须先 sign-extend 为 i32，再加
+  `(extra & 3) << 32`，纳秒为 `extra >> 2`。写入也必须由目标 signed 秒反推出 epoch，且在修改 mode/
+  owner/任一时间字段前验证全部 requested timestamp。只保存 u32 秒或只在 Rust cache 保存 nsec 会在
+  reboot/reopen 后丢语义。
+- 后续影响：不能用当前可见 cache 作为持久化证据；至少一次测试必须对同一磁盘重新启动并从 raw inode
+  读取。Linux VFS 对超范围值做 clamp，并在命中 min/max 时把 nsec 清零；不能误实现成 `ERANGE` 或
+  保留端点 nsec。无 extra field 时上界改为 `INT32_MAX` 且所有 nsec 清零；Rust cache 必须在 lower commit
+  后发布这个实际可表示值，不能等 reopen/reboot 才显现退化。当前两种 layout 均已跨重启验证。
+
 ## 自动 atime 更新不能复用会刷新 ctime 的显式 utimens 路径
 
-- 状态：已确认并修复 BuildStorm 写放大
-- 适用范围：relatime、read/readdir、ctime、ext4 metadata writeback
-- 最后验证：2026-08-10
-- 证据：RV64 8 GiB/8 核固定 120 秒 attributes 计数 A/B；临时 ext4 文件 stat/cat/touch 专项
+- 状态：已确认并修复 BuildStorm 写放大；regular-file/directory、24-hour 与 lazytime 已双架构专项验证
+- 适用范围：relatime/lazytime、read/readdir、ctime、ext4 metadata writeback
+- 最后验证：2026-08-16
+- 证据：RV64 8 GiB/8 核固定 120 秒 attributes 计数 A/B；Linux oracle 与
+  `/tmp/respos-{rv,la}-atime-lazytime-phase5-final.log`
 - 内容：旧实现每次自动 atime 都同时把 ctime 更新为 now，使下一次 relatime 判断继续满足
   `atime <= ctime`。58,692 次 set-times 中有 58,682 次来自自动 atime，形成约 29 万次块写请求。
   自动访问更新改为不碰 ctime 后，atime 落盘降至 1,185 次，块写请求降至 9,663；显式 `touch -a`
   仍同时更新 ctime。
 - 后续影响：自动访问时间和显式 `utimensat/futimens` 必须走语义不同的入口。不能为复用代码让普通
   read 改 ctime，也不能反向让显式时间修改漏掉 ctime；relatime 回归需检查第二次读取不重复落盘。
+  directory `readdir` 同样适用，并且 `MS_NODIRATIME` 只能抑制目录，不能扩散到普通文件。
+
+## 普通 inode 的 atime 不能归 open-file description 私有缓存所有
+
+- 状态：已由 lazytime 首轮 RV64 门禁定位并修复，双架构 release/perf 专项通过
+- 适用范围：同 inode 多 fd、pathname utimens、relatime 判断、lazytime stat 可见性
+- 最后验证：2026-08-16
+- 证据：修复前 pathname `utimensat` 已把 atime 设为 100，但旧 fd 仍以先前 override 判断并抑制 read；
+  修复后 `/tmp/respos-{rv,la}-atime-lazytime-{,perf-}phase5-final.log` 通过
+- 内容：ext4 inode 已有按 `(fs_id, ino)` 共享的 metadata cache。再把自动 atime 写入 `FileInner`
+  会产生第二份、只对一个 open-file description 可见的所有权；其他 fd/pathname 更新 inode 后无法使它
+  失效。普通 ext4 的自动/显式时间必须只发布到 inode cache；只有尚无 lower inode 的 tmpfile 可以使用
+  open-file override。
+- 后续影响：遇到跨 fd 可见性失败时先检查状态所有权，不要靠 reopen 掩盖。lazytime 延迟的是持久化，
+  不是 inode 内存可见性；`fsync`、filesystem sync 和 remount-off 必须在 lower barrier 前提交 pending。
+
+## lazytime registry 保活会隐藏真实 eviction，aging 也不能使用 realtime
+
+- 状态：已由 background/eviction 专项确认并修复，双架构 release/perf 与 crash-image 通过
+- 适用范围：lazytime dirtytime aging、inode/dentry reclaim、`clock_settime`、ext4 lower metadata I/O
+- 最后验证：2026-08-16
+- 证据：`/tmp/respos-{rv,la}-atime-dirtytime-eviction-phase5{,-perf}.log`、
+  `/tmp/respos-{rv,la}-lazytime-crash-{prepare,verify}.log`
+- 内容：pending registry 为防 inode 在 durability boundary 前消失而持有强引用；若通用 eviction 只看
+  `Arc::strong_count`，这个保活引用会让最后 dentry 逐出永远看似“仍有 owner”。逐出路径必须识别
+  registry + 当前调用这两个内部引用，先释放 dentry/cache 锁，再调用可能进入 lwext4 的 flush。dirtytime
+  年龄记录首次 dirty 的 monotonic 时刻；若使用 realtime，`clock_settime` 会制造提前到期或无限延迟。
+- 后续影响：新增 inode cache/reclaim 路径必须接入同一 eviction hook，且不得持有 dentry、registry 或
+  scheduler 锁进入 lower I/O。失败不能丢 pending/owner；重复 atime 更新不能刷新首次 dirty 时刻。
 
 ## 多个 lwext4 时间 setter 会为同一 inode 重复完整路径遍历
 
@@ -559,6 +752,19 @@
 - 后续影响：验证必须同时覆盖目标信号唤醒、有限 timeout、非目标信号 EINTR 和信号到达/发布 Blocked
   的 lost-wakeup 窗口；只测“超时最终返回”不足以证明 signal selection 正确。
 
+## 用 `BTreeMap<signo, SigInfo>` 表示 pending 会同时破坏标准与实时信号语义
+
+- 状态：已确认并修复当前队列范围
+- 适用范围：`SigPending`、`rt_sigqueueinfo`、`rt_sigtimedwait`、`RLIMIT_SIGPENDING`
+- 最后验证：2026-08-15；Linux/RV64/LA64 oracle/probe 与双架构 LTP `tgkill02`
+- 证据：旧 `add_signal()` 对同号执行 `insert`，会覆盖首条 info；修复后日志
+  `/tmp/respos-{rv,la}-signal-rtqueue-{quota,tgkill02}.log`
+- 内容：标准信号 pending 时应合并并保留首个实例信息，实时信号则必须同号 FIFO 多实例排队。仅有
+  bitmap 加单值 map 会让标准信号错误返回最后 value，也让实时信号静默丢实例。反过来，无界 Vec 队列
+  又会令 `tgkill02` 的 limit=0 错误成功；必须在 enqueue 前 reserve 配额，最后实例 pop 后才清 bitmap。
+- 后续影响：队列测试必须同时断言 info value 顺序、耗尽后的 pending 位、配额 `EAGAIN` 和消费后恢复；
+  只测试 handler“至少执行一次”无法发现覆盖和额度泄漏。
+
 ## 交互式 probe 返回后的 stdin 轮询会污染调度计数
 
 - 状态：已确认
@@ -650,6 +856,60 @@
 - 后续影响：实现必须由文件系统真实分配 extent，并用独立 probe 检查块数增长和 size/data/offset；
   底层没有独立预分配状态时应继续诚实返回 `EOPNOTSUPP`，不能在 syscall 层模拟成功。
 
+## extent 中段 split 后必须释放物理块，且 `st_blocks` 不能由 size 推算
+
+- 状态：已确认并修复 ext4 punch-hole
+- 适用范围：lwext4 extent remove、`PUNCH_HOLE`、stat、delayed inode metadata
+- 最后验证：2026-08-16；Linux/RV64/LA64 mmap punch 专项
+- 证据：`vendor/lwext4_rust/c/lwext4/src/ext4_extent.c`、`os/src/fs/ext4/inode.rs`、
+  `/tmp/respos-{rv,la}-mmap-punch-phase5-errors.log`
+- 内容：旧的 extent 中段删除分支能拆出左右 extent，却漏掉 physical block release；读取表面已呈现 hole，
+  但块仍泄漏。若 VFS 又用逻辑 size 计算 `st_blocks`，专项甚至无法发现释放是否真实发生。另一个覆盖
+  陷阱是 punch 后再提交旧 delayed timestamp：stale inode 快照会恢复旧 `i_blocks`。
+- 后续影响：打洞门禁必须同时检查 lower 重读为零、size/offset 不变和 `st_blocks` 下降；破坏 extent 前
+  先 flush 旧 metadata，inode ref 必须在 write-back cache 模式退出前提交。不要把普通 `fallocate04`
+  的预分配 skip 误报成 punch-hole 结果。
+
+## `ext4_fwrite` 不能用 inode-ref 提交结果覆盖原始写错误
+
+- 状态：已确认并修复 ENOSPC 错误保真与 cache-mode 配对
+- 适用范围：lwext4 partial write、ENOSPC/EIO、PageCache writeback、shared mmap page-mkwrite
+- 最后验证：2026-08-16；双架构 16 MiB auxiliary ext4 满盘专项
+- 证据：`vendor/lwext4_rust/c/lwext4/src/ext4.c`、
+  `/tmp/respos-{rv,la}-mmap-enospc-phase5-final.log`
+- 内容：写循环已记录 `ENOSPC` 且可能完成部分块后，旧 Finish 路径把 `r` 覆盖成
+  `ext4_fs_put_inode_ref()` 的成功，Rust 只能从短计数合成 `EIO`；通过 `goto out_fsize` 的错误出口还会
+  跳过 block-cache write-back disable。结果既丢失错误类别，又可能让后续 I/O 留在错误的 cache nesting。
+- 后续影响：operation result、cleanup result 和 transaction commit 必须分开保存；inode-ref 成功时提交
+  已完成的 partial write，但返回原始 operation error。所有启用 cache write-back 的路径都必须在统一
+  Finish 中配对关闭，新增 C API 也应专项检查错误出口。
+
+## synthetic mount 丢失 mkfs geometry 会把填盘测试伪装成 writeback 故障
+
+- 状态：已确认并修复
+- 适用范围：lightweight block mount、no-op mkfs、filesystem capacity/block size、LTP `mmap16`
+- 最后验证：2026-08-16；RV64/LA64 musl/glibc `mmap16` 各 10/10
+- 证据：`/tmp/respos-rv-mmap16-synthetic-fs-capacity.log`、
+  `/tmp/respos-{rv,la}-mmap16-pagecache-isize-extended-v2.log`
+- 内容：`mmap16` 的首个 checkpoint 正常，parent 也进入填盘循环；逐次 writeback 全部成功且隐藏 backing
+  文件增长到数百 MiB，说明不是后台 `ENOSPC` 被吞掉。根因是 `/dev/vda2` 只提供设备 admission size，
+  mount backing 却没有继承 no-op mkfs 请求的 10 MiB capacity/1 KiB block size。因而 parent 永远填不满
+  实际根文件系统，child 才在第二个 checkpoint 超时。
+- 后续影响：synthetic device size 与 formatted filesystem geometry 必须分开；no-op formatter 也要把
+  capacity/block size 传给 mount emulation。遇到填盘不结束时先记录 backing 的实际增长与 lower write
+  结果，不能仅从“buffered write 一直成功”推断 writeback-error 生命周期有缺陷。
+
+## LoongArch 写保护必须同时清 PTE W 与 D
+
+- 状态：已确认并修复
+- 适用范围：page-mkwrite、COW、任何要求下一次 store 重新 fault 的 PTE 降权
+- 最后验证：2026-08-16；双架构 `mmap16` 与 Phase 5 mmap probe
+- 证据：清 W 后 RV64 `mmap16` 10/10、LA64 0/10；清 W/D 后 LA64 musl/glibc 均 10/10
+- 内容：公共 `PTEFlags::WRITE` 映射到 LoongArch PTE W，但硬件 PageModifyFault 还由 D 位决定。保留旧
+  DIRTY 只清 WRITE 时，LA 可继续 store 而不进入 page_mkwrite；RV64 因权限模型不同不会暴露该错误。
+- 后续影响：建立 read-only/COW/page-mkwrite 边界时沿用 `WRITE | DIRTY` 成对清除；页表修改后仍须完成
+  本地及远端 TLB shootdown，不能用架构单测结果外推另一架构。
+
 ## 可写共享文件映射不能永久冻结 mmap 时的 EOF
 
 - 状态：已确认并修复专项 mmap 扩容回归
@@ -708,6 +968,10 @@
   producer 在修改条件后取出 waiter，并在释放数据锁后唤醒。
 - 后续影响：验证不能只看“没有 yield”，还要验证 data integrity、buffer-full backpressure、peer EOF/
   EPIPE、nonblock EAGAIN、accept/connect、signal EINTR 和 producer-before-switch 竞态。
+
+2026-08-15 增量：pathname connect 在 accept queue 满时也必须走同一 pending-lock waiter 协议；阻塞
+socket 直接返回 `EAGAIN` 是可见 ABI 错误。accept 取走 endpoint 后唤醒一个 connector，listener close
+同时唤醒 accept/connect 两类 waiter；restart 分类还必须检查 `SO_SNDTIMEO`，不能只看 syscall number。
 
 ## RV64 `sret` 前不能提前恢复 SIE 或 user trap vector
 
@@ -1277,3 +1541,186 @@
 - 后续影响：定位此类布局敏感冷 fault 应优先使用不改 guest image 的 GDB 地址断点。测试报告必须
   单列预热项失败，不能宣称整组 6/6；修复应进入 MM/ext4/PageCache 线，并验证 loader 最后文件页
   offset `0x21000` 的 lower read/open/seek/read/close 返回链，而不是在 CPU clock 代码中加时序掩盖。
+
+## 普通 mmap 的动态 EOF 不能套用到 ELF PT_LOAD
+
+- 状态：已确认并修复
+- 适用范围：file-backed fault、ELF loader、partial last page、BSS、private COW
+- 最后验证：2026-08-15
+- 证据：首轮 M3 实现后 RV64 musl/glibc `mmap05` 均在 loader 阶段 raw status 139；分离 live mmap 与
+  fixed ELF backing、裁剪 fixed partial page 后 RV64/LA64 两套 libc 全部通过
+- 内容：普通 mmap 必须在 fault 时读取当前 EOF以支持映射后增长；ELF `PT_LOAD` 只能读取 `p_filesz`
+  prefix。若用当前完整文件长度替换 ELF backing.len，会把文件后续字节映入 BSS；若 fixed partial page
+  直接共享完整 PageCache frame，也会越过 segment 有效尾部暴露数据，表现为动态 loader 随机地址 fault。
+- 后续影响：修改 mmap EOF/COW 后不能只跑自定义 mmap probe；至少运行一个双架构动态 libc signal/
+  PROT_NONE 用例（当前为 `mmap05`），并保留 fixed partial-page 零填充检查。
+
+## user/system 记账不能把 process total 复制到两个字段
+
+- 状态：已确认并修复
+- 适用范围：`times`、`getrusage`、`wait4` rusage、`/proc/*/stat`、多线程 process CPU clock
+- 最后验证：2026-08-15
+- 证据：修复前 `sys_times/sys_getrusage/wait4` 均构造 `(ticks, ticks)`；Linux 对照与双架构
+  `task_a_wait4_probe` 修复后通过，CPU total clock 各 20 轮不回退
+- 内容：scheduler 运行区间只能回答 process total；把它同时写入 utime/stime 会把总量翻倍，并让 parent
+  children usage 永久累计错误。只包 syscall 函数也不完整：page fault/signal/timer trap 属于 system，
+  阻塞 syscall 的 task 切走后不应继续计时，恢复后却仍应保持 system mode。正确边界是 scheduler 管
+  running，user trap 管 mode，Zombie 分别冻结两类 tick。
+- 后续影响：专项必须同时包含主要为 user 的计算和真实 syscall 压力，并核对 reaped child 累计；仅检查
+  CPU time 单调或两个字段非零无法发现 total 双写。
+
+## 100 Hz rusage 专项不能用亚 tick 工作量断言非零
+
+- 状态：已在 `RUSAGE_THREAD` 首轮 RV64 门禁确认并修正 probe
+- 适用范围：`getrusage` 时间字段、短线程、双架构 CPU accounting 专项
+- 最后验证：2026-08-16
+- 证据：首轮 main thread 已执行计算但 `main_usage_delta == 0`；改为每个线程独立运行到跨过一个导出 tick
+  后，Linux 与 RV64/LA64 20/20 通过，日志 `/tmp/respos-{rv,la}-rusage-thread-phase5.log`
+- 内容：内部 accounting clock 精度高于 ABI 导出的 `CLK_TCK=100`；短于 10 ms 的累计在换算时向下取整为
+  0 是合法结果。只固定迭代次数会随架构/QEMU 速度变成非确定测试。
+- 后续影响：测试非零 rusage delta 时应循环到观测到一个 tick并设置有界上限；比较 process 与多个 thread
+  时保留一个 tick/线程的量化容差。不要通过降低内核记账精度或伪造最小 1 tick 来迁就 probe。
+
+## RUSAGE_CHILDREN 的 maxrss 不能求和，资源也不能在 copyout 前提交
+
+- 状态：已确认并在 wait4/raw waitid 路径修正
+- 适用范围：getrusage、wait4、waitid、Zombie/reap 生命周期
+- 最后验证：2026-08-16
+- 内容：Linux 对 reaped children 的 fault/context-switch 等累计求和，但 maxrss 表示任一 child 的最大
+  high-water。若在 wait 扫描或 user copyout 前提交，坏 status/rusage 指针重试会重复累计；若 waitid
+  reap 只删除 Zombie 而不提交，随后 `RUSAGE_CHILDREN` 又会永久少账。正确顺序是快照 Zombie、完成全部
+  copyout、原子移除 child，然后一次性累计 ticks/resources。
+- 后续影响：测试必须同时覆盖 bad pointer retry、wait4 与 waitid 第五参数 rusage，并用至少两个 child
+  区分 max 与 sum；`WNOWAIT` 只能观察，不能累计。
+
+## rusage block I/O 不能按 read/write syscall 次数或 writeback 次数记账
+
+- 状态：已确认并由 Linux oracle、RV64/LA64 cold-file 专项验证
+- 适用范围：`ru_inblock/ru_oublock`、VirtIO block、PageCache、mmap file fault、`fadvise64`
+- 最后验证：2026-08-16
+- 内容：Linux input block 在真实 read I/O 提交时计数，cache hit 不计；buffered output block 在 page 首次
+  dirty 时计数，同一 dirty page 的重复写和稍后的 writeback 不能再计。若在 VFS read/write syscall 入口
+  记账，cache hit 会被误报；若只在设备 write completion 记账，归属会漂移到 flusher，并与 Linux 时点
+  不同。RespOS 因此把 input 归属放在成功 VirtIO read submission，把 output 归属放在 disk-backed page
+  clean-to-dirty transition；boot/background I/O 没有 current task 时不记入任一用户进程。
+- 后续影响：冷 major-fault 测试必须先确保 dirty data 已同步，再只驱逐 clean 且 unmapped 的 cache page；
+  仅 munmap/reopen 不保证冷缓存。该 fixture 只证明 DONTNEED 的 clean full-page eviction 和后续 lower
+  fill；完整 advice/open-description/writeback-before-invalidate 契约必须另跑下节的 fadvise 专项。
+
+## per-CPU idle-stack handoff 不等于 Linux task context switch
+
+- 状态：已修正并由双架构 20 轮 actual-switch 专项验证
+- 适用范围：scheduler/processor handoff、`ru_nvcsw/ru_nivcsw`、yield/block/timer/exit
+- 最后验证：2026-08-16
+- 内容：RespOS 为避免另一 hart 在 outgoing context 尚未保存时提前恢复它，每次 yield/preempt/block 都先
+  切到 per-CPU idle stack，再发布 task。若在请求 handoff 时立即加计数，单一 runnable task 每个 timer
+  tick 都会虚增 `nivcsw`，单任务 `sched_yield` 也会虚增 `nvcsw`；Linux 只在 scheduler 最终发现
+  `prev != next` 时增加。现在 handoff 携带原因，idle loop 选择 next 后才提交；next 是同一 task 时不计。
+- 后续影响：probe 不能再用无竞争 `sched_yield` 制造 voluntary switch；应使用 nanosleep/blocked wait 等
+  确实切向 idle 的路径。验证 involuntary 时把 parent 与 gate-controlled competitor 固定在同一 CPU，避免
+  “只是经过 timer handler”或跨 CPU 同时运行造成假证据。
+
+## `posix_fadvise` 不能把部分页失效或瞬时 residency 当成稳定 ABI
+
+- 状态：已确认并由 Linux oracle、双架构专项验证
+- 适用范围：WILLNEED、DONTNEED、PageCache、mincore、mmap pin、tmpfile
+- 最后验证：2026-08-16
+- 内容：Linux WILLNEED 只发起 best-effort readahead，返回时 `mincore` 是否已驻留受异步完成与回收影响；
+  oracle 首版据此断言立即 resident，产生了非 ABI 失败。DONTNEED 对首尾部分覆盖页通常不失效，只有范围
+  到 EOF 时末尾部分页可被丢弃；dirty、mapped 或被 frame 引用的页也可能保留。tmpfile 没有 lower storage，
+  把其 clean PageCache 当普通磁盘缓存驱逐会直接丢数据。
+- 后续影响：Linux 对照只断言 syscall/error/data 与稳定的完整页边界；RespOS 专项可用自身同步实现的 I/O
+  计数固定策略效果，但不能将完成时序外推为 POSIX 契约。修改 eviction 时必须同时跑 mmap/SIGBUS、冷
+  major fault/block-I/O 与 dirty writeback 回归。
+
+## 零长 inode 不等于 mmap 一定 SIGBUS，grow-down fault 也不能只看 VMA flag
+
+- 状态：已确认并修正
+- 适用范围：`/dev/zero`、普通零长文件、`MAP_GROWSDOWN`、page-fault/user-copy
+- 最后验证：2026-08-16；RV64/LA64 musl/glibc `mmap10` 1/1、`mmap18` 4/4
+- 证据：`/tmp/respos-{rv,la}-mmap10-dev-zero.log`、
+  `/tmp/respos-{rv,la}-mmap18-growsdown-sp.log`
+- 内容：把所有 file-backed mapping 都套用 live EOF 会让 size=0 的 `/dev/zero` 在首次写时
+  SIGBUS；正确分界是由设备显式声明零填充 mmap，不能放宽普通文件 EOF。另一方面，
+  只要下方有 `MAP_GROWSDOWN` VMA 就扩展，会把任意坏指针和内核 user-copy 误当成栈增长；
+  必须同时校验紧邻页、用户 SP 和 guard gap。
+- 后续影响：新增 special file mmap 时应以 inode/file capability 表达语义，不以 size 或
+  pathname 猜测。修改 trap frame、VMA split/merge 或 copyin/copyout fault 路径时，必须复跑 `mmap18`
+  的成功与 blocker 两类用例。
+
+## 物理 console 的控制字符不能只在 read 路径处理
+
+- 适用范围：console line discipline、VINTR/VQUIT/VSUSP、job control、阻塞 syscall
+- 现象：前台程序读 tty 时 Ctrl-C 正常，但 `sleep 10` 等不读 tty 的程序直到自然结束后才显示并处理
+  `^C`；看起来像 signal 或 foreground pgrp 错误。
+- 根因：固件串口是轮询输入，若只有 stdin/`/dev/tty` 的 `read/read_ready` 调用 line discipline，就没有
+  读者替不读 tty 的前台作业消费控制字符。
+- 处理：由唯一 global timer service hart 在 timer safe point 抽取 console；已阻塞的 tty read 检查
+  当前线程实际可投递的 pending signal 后返回 `EINTR`。不要用 terminal 全局 generation 中断所有 reader，
+  也不要在每个 hart 或任意持锁 kernel trap 中直接轮询并投递，否则会重复消费字符或重入
+  task/signal registry。
+- 最后验证：2026-08-16，RV64/LA64 Alpine ash 下 `sleep 10` 的 Ctrl-C/Ctrl-Z 均立即生效。
+
+## 固件 console 的 destructive drain 必须整体串行
+
+- 适用范围：SMP、timer safe-point input pump、前台 tty reader、SBI/UART polling console
+- 现象：长命令偶发稳定变成字母次序错误的另一字符串，例如 `software` 变成 `softwrae`；queue 内容本身
+  没有丢失，容易误诊为 shell 行编辑或 QEMU PTY 注入问题。
+- 根因：timer service hart 与 foreground reader 可同时执行 `console_getchar()`；该读取会消费硬件字节。
+  即使随后写入同一个受锁 queue，两个 hart 仍可先后取走相邻字符、再以相反顺序取得 queue lock。
+- 处理：用独立锁覆盖从开始轮询到本轮 drain 结束的完整 pump。不能只锁单次 queue mutation，也不要让
+  多 hart 分别拥有输入缓存。2026-08-16 双架构扩展软件矩阵与 job-control 回归通过。
+
+## `PT_INTERP` 的高文件偏移不是 ELF metadata 大小
+
+- 适用范围：大型 PIE/动态 ELF、filesystem exec、lazy PT_LOAD、kernel heap
+- 现象：有效 ELF 直接执行返回 `ENOEXEC`，shell 随后把二进制当脚本解释并报莫名语法错误；显式执行
+  musl loader 加该 ELF 参数却能正常运行。Alpine RV64 Cargo 的 `PT_INTERP` 位于约 19.5 MiB 偏移。
+- 根因：旧 loader 为限制 kernel heap，把 metadata 及解释器字符串都要求位于首 1 MiB；这是实现限制，
+  不是 ELF ABI 约束。
+- 处理：只读固定 header/program-header 表，再从真实文件偏移单独读取有界解释器字符串，并重定位内存中
+  program header 副本的 `p_offset`。`PT_LOAD` offset 不能随之改写，因为 lazy fault 仍以它读取原文件。
+  2026-08-16 RV64/LA64 Cargo offline workspace 两轮 release 构建与产物运行通过。
+
+## FIFO 的 `O_TRUNC`、open 配对和 EOF 属于三个不同层次
+
+- 适用范围：shell redirection、named FIFO、多 reader/writer、namei 与 pipe runtime
+- 现象：`cmd > fifo` 返回 `EINVAL`，或两个 writer 中第一个退出后 reader 提前 EOF/第二个 writer EPIPE；
+  单 writer 的 nonblocking LTP 仍可能全部通过。
+- 根因：namei 把 `O_TRUNC` 无条件下发给特殊 inode；每个 `NamedFifoEnd` 又复用 anonymous Pipe 的
+  drop 行为，把单端点关闭误当成整个方向关闭。blocking open 若只看当前 endpoint count，还会在已配对
+  writer 快速退出后重新睡眠，丢失已经完成的 rendezvous。
+- 处理：open-time truncate 仅作用 regular inode；pending opener 计入 reader/writer rendezvous，配对完成
+  即使对端随后退出本次 open 仍成功；由 named FIFO 聚合计数在最后一个端点关闭时发布 EOF/EPIPE。
+
+## `PIPE_BUF` 原子性必须覆盖一次 writev 的所有 iovec
+
+- 适用范围：pipe/FIFO、并发 producer、stdio/coreutils、writev
+- 现象：并行 sha256sum 的两行被拼成一行，同时文件开头出现空行；每次单独 write 加锁看似已经串行。
+- 根因：空间不足时小 write 被部分提交；修复单 write 后，sys_writev 又逐 iovec 调用 write，使 libc 分开的
+  正文和换行仍可被其他 producer 插入。POSIX 原子边界看一次 syscall 的总长度，而不是单个 iovec。
+- 处理：不超过 `PIPE_BUF` 的 write 空间不足时零进度阻塞/EAGAIN；同样大小的 writev 先合并为一个 record
+  后提交。nonblocking pipe 不能先用“至少空一整页”的通用 readiness 拒绝小 record，必须让 pipe 按实际
+  请求长度裁决。2026-08-16 LA64 连续三轮、RV64 一轮并行 48 文件 sha256 pipeline 通过。
+
+## 文件锁清理不能只挂在显式 close syscall 上
+
+- 适用范围：flock、POSIX record lock、fd-table clear、dup/fork/process exit
+- 现象：持锁 shell/子进程已经退出，新进程的 `LOCK_NB` 或 `F_SETLK` 仍永久失败；简单 unlock 测试正常。
+- 根因：进程退出直接清空 fd table，不逐项经过 `sys_close()`；同时 flock 属于 open-file-description，按
+  当前进程 fd table 判断“最后一个 fd”会在跨 fork 时过早释放。record lock 则属于 PID，必须在 group
+  exit 清理，即使没有可枚举的最后 close。
+- 处理：flock entry 保存 open-file-description weak owner 并在竞争时剔除死亡项；record lock 在进程组
+  退出提交点按 TGID 全表删除。不要把两种锁合并成同一种 owner 模型。
+
+## virtio-net 已 up 不代表用户态具备路由与 DNS
+
+- 适用范围：QEMU user networking、smoltcp 多 interface、Alpine Git/curl/wget
+- 现象：宿主通过 hostfwd 能访问内核 HTTP，用户态连接 `10.0.2.2` 却立即拒绝；或同网段访问和 DNS
+  成功，但公网 TCP 一直超时；域名也可能直接报 `bad address`。
+- 根因：入站 listener 不经过 TCP connect 的 interface context；若 connect 仍固定使用 loopback，真实
+  NIC 只能入站。只配置 `10.0.2.15/24` 没有 `0/0 via 10.0.2.2` 时，同网段和 `10.0.2.3` DNS 可成功，
+  公网仍无路由。当前两张 Alpine 软件镜像的 `/etc/resolv.conf` 为空，最后一种失败属于镜像配置。
+- 处理：分别验证 guest→宿主同网段、UDP DNS、公网 HTTP 和 Git HTTPS；检查默认路由确实安装在
+  Ethernet interface，而不是 loopback。launcher 只在 software/final guest 没有既有 nameserver 时安装
+  `10.0.2.3` fallback；运行使用 `-snapshot`，不要修改归档镜像或把空 resolv.conf 误报成 UDP 内核故障。

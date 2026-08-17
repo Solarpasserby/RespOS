@@ -37,6 +37,9 @@ const SYSCALL_GETDENTS64: usize = 61;
 const SYSCALL_LSEEK: usize = 62;
 const SYSCALL_READ: usize = 63;
 const SYSCALL_WRITE: usize = 64;
+const SYSCALL_READV: usize = 65;
+const SYSCALL_WRITEV: usize = 66;
+const SYSCALL_PSELECT6: usize = 72;
 const SYSCALL_PPOLL: usize = 73;
 const SYSCALL_SPLICE: usize = 76;
 const SYSCALL_PREAD64: usize = 67;
@@ -64,6 +67,7 @@ const SYSCALL_TIMER_DELETE: usize = 111;
 const SYSCALL_CLOCK_SETTIME: usize = 112;
 const SYSCALL_CLOCK_GETTIME: usize = 113;
 const SYSCALL_CLOCK_GETRES: usize = 114;
+const SYSCALL_CLOCK_NANOSLEEP: usize = 115;
 const SYSCALL_SCHED_SETAFFINITY: usize = 122;
 const SYSCALL_SCHED_GETAFFINITY: usize = 123;
 const SYSCALL_SCHED_YIELD: usize = 124;
@@ -83,6 +87,7 @@ const SYSCALL_KILL: usize = 129;
 const SYSCALL_SIGACTION: usize = 134;
 const SYSCALL_SIGPROCMASK: usize = 135;
 const SYSCALL_SIGPENDING: usize = 136;
+const SYSCALL_SIGTIMEDWAIT: usize = 137;
 const SYSCALL_SIGQUEUEINFO: usize = 138;
 const SYSCALL_SIGRETURN: usize = 139;
 const SYSCALL_REBOOT: usize = 142;
@@ -113,13 +118,19 @@ const SYSCALL_RECVFROM: usize = 207;
 const SYSCALL_SETSOCKOPT: usize = 208;
 const SYSCALL_GETSOCKOPT: usize = 209;
 const SYSCALL_SHUTDOWN: usize = 210;
+const SYSCALL_SENDMSG: usize = 211;
+const SYSCALL_RECVMSG: usize = 212;
 const SYSCALL_BRK: usize = 214;
 const SYSCALL_MUNMAP: usize = 215;
 const SYSCALL_CLONE: usize = 220;
 const SYSCALL_EXECVE: usize = 221;
 const SYSCALL_MMAP: usize = 222;
+const SYSCALL_RECVMMSG: usize = 243;
+const SYSCALL_SENDMMSG: usize = 269;
 const SYSCALL_MSYNC: usize = 227;
 const SYSCALL_MPROTECT: usize = 226;
+const SYSCALL_FADVISE64: usize = 223;
+const SYSCALL_WAITID: usize = 95;
 const SYSCALL_MEMFD_CREATE: usize = 279;
 const SYSCALL_RENAMEAT2: usize = 276;
 const SYSCALL_STATX: usize = 291;
@@ -262,6 +273,27 @@ pub struct IoVec {
     pub len: usize,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct MsgHdr {
+    pub msg_name: usize,
+    pub msg_namelen: u32,
+    pub _pad1: u32,
+    pub msg_iov: usize,
+    pub msg_iovlen: usize,
+    pub msg_control: usize,
+    pub msg_controllen: usize,
+    pub msg_flags: i32,
+    pub _pad2: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct MMsgHdr {
+    pub msg_hdr: MsgHdr,
+    pub msg_len: u32,
+}
+
 fn syscall(id: usize, args: [usize; 6]) -> isize {
     let mut ret: isize;
     unsafe {
@@ -303,6 +335,14 @@ pub fn sys_write(fd: usize, buf: &[u8]) -> isize {
         SYSCALL_WRITE,
         [fd, buf.as_ptr() as usize, buf.len(), 0, 0, 0],
     )
+}
+
+pub fn sys_readv(fd: usize, iov: *const IoVec, iovcnt: usize) -> isize {
+    syscall(SYSCALL_READV, [fd, iov as usize, iovcnt, 0, 0, 0])
+}
+
+pub fn sys_writev(fd: usize, iov: *const IoVec, iovcnt: usize) -> isize {
+    syscall(SYSCALL_WRITEV, [fd, iov as usize, iovcnt, 0, 0, 0])
 }
 
 pub fn sys_splice(
@@ -721,6 +761,13 @@ pub fn sys_fsync(fd: usize) -> isize {
     syscall(SYSCALL_FSYNC, [fd, 0, 0, 0, 0, 0])
 }
 
+pub fn sys_fadvise64(fd: usize, offset: isize, len: isize, advice: usize) -> isize {
+    syscall(
+        SYSCALL_FADVISE64,
+        [fd, offset as usize, len as usize, advice, 0, 0],
+    )
+}
+
 pub fn sys_sync() -> isize {
     syscall(SYSCALL_SYNC, [0; 6])
 }
@@ -866,6 +913,19 @@ pub fn sys_wait4_full(
     )
 }
 
+pub fn sys_waitid_raw(
+    idtype: usize,
+    id: usize,
+    infop: *mut u8,
+    options: usize,
+    rusage: *mut RUsage,
+) -> isize {
+    syscall(
+        SYSCALL_WAITID,
+        [idtype, id, infop as usize, options, rusage as usize, 0],
+    )
+}
+
 pub fn sys_getrusage(who: isize, usage: *mut RUsage) -> isize {
     syscall(
         SYSCALL_GETRUSAGE,
@@ -919,6 +979,18 @@ pub fn sys_clock_gettime(clock_id: usize, value: *mut TimeSpec) -> isize {
 
 pub fn sys_clock_getres(clock_id: usize, value: *mut TimeSpec) -> isize {
     syscall(SYSCALL_CLOCK_GETRES, [clock_id, value as usize, 0, 0, 0, 0])
+}
+
+pub fn sys_clock_nanosleep(
+    clock_id: usize,
+    flags: usize,
+    request: *const TimeSpec,
+    remaining: *mut TimeSpec,
+) -> isize {
+    syscall(
+        SYSCALL_CLOCK_NANOSLEEP,
+        [clock_id, flags, request as usize, remaining as usize, 0, 0],
+    )
 }
 
 pub fn sys_prlimit64(
@@ -1041,6 +1113,25 @@ pub fn sys_sigpending_raw(set: *mut u64, sigsetsize: usize) -> isize {
     syscall(SYSCALL_SIGPENDING, [set as usize, sigsetsize, 0, 0, 0, 0])
 }
 
+pub fn sys_sigtimedwait_raw(
+    set: *const u64,
+    info: *mut u8,
+    timeout: *const TimeSpec,
+    sigsetsize: usize,
+) -> isize {
+    syscall(
+        SYSCALL_SIGTIMEDWAIT,
+        [
+            set as usize,
+            info as usize,
+            timeout as usize,
+            sigsetsize,
+            0,
+            0,
+        ],
+    )
+}
+
 pub fn sys_sigqueueinfo_raw(tgid: usize, signum: i32, info: *const u8) -> isize {
     syscall(
         SYSCALL_SIGQUEUEINFO,
@@ -1052,8 +1143,13 @@ pub fn sys_sigreturn() -> isize {
     syscall(SYSCALL_SIGRETURN, [0, 0, 0, 0, 0, 0])
 }
 
-pub fn sys_reboot() -> isize {
-    syscall(SYSCALL_REBOOT, [0, 0, 0, 0, 0, 0])
+pub fn sys_reboot(command: usize) -> isize {
+    const LINUX_REBOOT_MAGIC1: usize = 0xfee1_dead;
+    const LINUX_REBOOT_MAGIC2: usize = 0x2812_1969;
+    syscall(
+        SYSCALL_REBOOT,
+        [LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2, command, 0, 0, 0],
+    )
 }
 
 pub fn sys_linkat(
@@ -1229,6 +1325,27 @@ pub fn sys_ppoll(
     )
 }
 
+pub fn sys_pselect6(
+    nfds: usize,
+    readfds: usize,
+    writefds: usize,
+    exceptfds: usize,
+    timeout: *const TimeSpec,
+    sigmask: usize,
+) -> isize {
+    syscall(
+        SYSCALL_PSELECT6,
+        [
+            nfds,
+            readfds,
+            writefds,
+            exceptfds,
+            timeout as usize,
+            sigmask,
+        ],
+    )
+}
+
 pub fn sys_sendto(
     fd: usize,
     buf: *const u8,
@@ -1255,6 +1372,31 @@ pub fn sys_recvfrom(
         SYSCALL_RECVFROM,
         [fd, buf as usize, len, flags, addr, addrlen],
     )
+}
+
+pub fn sys_sendmsg(fd: usize, msg: *const MsgHdr, flags: usize) -> isize {
+    syscall(SYSCALL_SENDMSG, [fd, msg as usize, flags, 0, 0, 0])
+}
+
+pub fn sys_recvmsg(fd: usize, msg: *mut MsgHdr, flags: usize) -> isize {
+    syscall(SYSCALL_RECVMSG, [fd, msg as usize, flags, 0, 0, 0])
+}
+
+pub fn sys_recvmmsg(
+    fd: usize,
+    msgvec: *mut MMsgHdr,
+    vlen: usize,
+    flags: usize,
+    timeout: *mut TimeSpec,
+) -> isize {
+    syscall(
+        SYSCALL_RECVMMSG,
+        [fd, msgvec as usize, vlen, flags, timeout as usize, 0],
+    )
+}
+
+pub fn sys_sendmmsg(fd: usize, msgvec: *mut MMsgHdr, vlen: usize, flags: usize) -> isize {
+    syscall(SYSCALL_SENDMMSG, [fd, msgvec as usize, vlen, flags, 0, 0])
 }
 
 pub fn sys_setsockopt(

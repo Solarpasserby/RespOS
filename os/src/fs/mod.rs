@@ -16,6 +16,7 @@ mod poll;
 pub mod proc;
 mod special;
 mod stdio;
+pub mod tty;
 pub mod vfs;
 
 pub use fdset::*;

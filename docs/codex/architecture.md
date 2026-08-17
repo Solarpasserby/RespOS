@@ -4,6 +4,53 @@
 `docs/mm模块基础说明.md`、`docs/task模块核心功能说明.md`、
 `docs/ltp-fs-abi-design.md` 与 A/B/C 重构文档。
 
+## Regular-file advice 与 PageCache
+
+- 状态：六种 Linux/POSIX advice 当前范围已实现并双架构验证
+- 适用范围：`fadvise64`、buffered read/pread、file-backed mmap fault、PageCache reclaim/writeback
+- 最后验证：2026-08-16
+- 证据：`os/src/fs/{file,page_cache}.rs`、`user/src/bin/fadvise_phase5_probe.rs`、
+  `scripts/fadvise_phase5_probe_linux.c`；双架构专项、LTP、mmap 与 rusage 日志见
+  [current-status.md](./current-status.md)。
+- 内容：advice 状态属于 `FileInner`，因此 dup/fork 共享而另一次 open 独立。NORMAL/RANDOM/SEQUENTIAL
+  选择 16/1/32 页读取窗口；NOREUSE 控制已有页的 LRU promotion。buffered I/O 与 mmap fault 必须从同一
+  PageCache 取 frame，并传递同一 advice 状态。WILLNEED 可包含边界部分页并尽力同步预取。DONTNEED 先
+  启动范围写回，再只失效 advice 完整覆盖且 clean/unmapped/unpinned 的页；到达 EOF 时末尾部分页可失效。
+  writeback/prefetch 错误不改变 fadvise 返回值，失败 dirty page 留给既有 error cursor。
+- 后续影响：不能把 advice 放在 fd table entry，否则 dup 不共享；不能无条件驱逐部分覆盖页、dirty 页、
+  mmap pin 或无 lower backing 的 tmpfile。引入异步 flusher 时必须保持“先 writeback、后 invalidation”顺序。
+
+## File size grow 与 sub-page filesystem block 的 page-mkwrite 边界
+
+- 状态：当前 ext4/synthetic block mount 范围已实现并双架构验证
+- 适用范围：writable `MAP_SHARED`、`ftruncate` grow、filesystem block size 小于 VM page、ENOSPC/SIGBUS
+- 最后验证：2026-08-16
+- 证据：`os/src/fs/{dev,mount,file,page_cache}.rs`、`os/src/mm/memory_set.rs`；双架构双 libc
+  `mmap16` 与 Phase 5 mmap probe 日志见 [current-status.md](./current-status.md)
+- 内容：mount geometry 必须区分 block-device capacity、formatted filesystem capacity 和 filesystem
+  block size。若 grow 越过 old EOF 所在 filesystem block、仍停留在同一 VM page 且确实暴露新范围，
+  按稳定 `(dev, ino)` 扫描 live shared mappings，将对应 resident PTE 写保护；LoongArch 清 W/D，RV64
+  清 W。下一次 store 经 page-mkwrite 为尚未覆盖的 page prefix 建立 backing，成功后才恢复 WRITE；
+  ENOSPC 由 trap 转为 SIGBUS。shrink 同时裁剪 PageCache 的 reservation prefix，避免 truncate/regrow
+  复用失效预留。
+- 后续影响：不能只依据 VM page size 判断 grow 是否需要 refault，也不能把 device admission size 当成
+  filesystem 可分配空间。真实 formatter 可从 ext superblock恢复 geometry；bundled no-op mkfs 必须显式
+  记录参数。修改 PTE 后必须完成跨 hart TLB shootdown。
+
+## 特殊零填充映射与 `MAP_GROWSDOWN`
+
+- 状态：当前 `/dev/zero` 与单页 stack-growth 范围已实现并双架构验证
+- 适用范围：`mmap10`、`mmap18`、user-mode page fault 与 kernel user-copy
+- 最后验证：2026-08-16
+- 证据：`os/src/fs/{dev/zero,file,vfs/inode}.rs`、`os/src/syscall/mm.rs`、
+  `os/src/mm/memory_set.rs`与双架构 trap 入口；日志见 [current-status.md](./current-status.md)。
+- 内容：只有 inode/file 显式声明 `mmap_zero_filled` 才绕过 file EOF，普通零长文件仍必须
+  SIGBUS。`MAP_GROWSDOWN` 只能在用户 trap 传入的 SP 位于紧邻下方 fault page 时扩展，
+  并与前一 VMA 保持 256 页 guard gap；不带 SP 的内核代访路径不会扩展。
+- 后续影响：不能以 inode size=0 通用推导设备 mmap 语义，也不能见到 grow-down
+  VMA 就对任意下方 fault 扩展。若后续支持跨多页栈跳跃，仍须保留 SP 与 guard-gap
+  验证，不得让 `copyin/copyout` 变成隐式栈增长触发器。
+
 ## 启动与执行链
 
 ```text
@@ -35,16 +82,32 @@
   `EXT4_OP_LOCK`。关机路径先尝试 shutdown 辅助 superblock，再 shutdown 根 superblock；即使
   一个设备 flush 失败，也必须继续尝试另一个设备。
 - 启动入口：内嵌 `initproc` 启动内嵌 `contest_launcher`。launcher 从 `/respos/profile`
-  读取 `mode=auto|preliminary|final|diagnostic`。线上 `auto` 以及 profile 缺失、空白或无效时，先检查
+  读取 `mode=auto|preliminary|final|diagnostic|software|bootstrap`。线上 `auto` 以及 profile 缺失、空白或无效时，先检查
   根盘上的 CAgent/BuildStorm 决赛脚本，再检查 musl/glibc basic 初赛脚本；决赛标志优先，未知镜像
   打印告警并安全回退到 preliminary。preliminary exec 原内嵌 `testrunner`；final
   在 `/glibc` 中使用 `/bin/bash` 严格串行运行当前官方决赛镜像固定的
   `cagent_testcode.sh`、`buildstorm_testcode.sh`，全部结束后关机。diagnostic 只供显式本地 profile
-  使用，进入内嵌 `user_shell`，默认提交镜像不会选择它。dispatcher 失败时
+  使用，进入内嵌 `user_shell`；software 进入 Alpine 交互 shell；bootstrap 运行本地辅助盘上的
+  Git-over-SSH clone/self-build 脚本并关机。这三种本地模式都不会进入默认提交镜像。dispatcher 失败时
   `initproc` 仍依次回退到内嵌 `testrunner` 和 `user_shell`。测例策略不进入内核。
 - 后续影响：新增 inode-number lwext4 API 时必须传递所属 mountpoint；新增固有 VFS
   mountpoint 时必须同时插入并 pin 全局 dentry cache，否则 namei 会新建不同的
   dentry 并绕过 mount tree。
+
+### exec 字符串预算与 epoll event 布局按 Linux 目标 ABI 分离
+
+- 状态：RV64/LA64 已实现并经真实 CMake/libuv 与专项验证
+- 适用范围：`execve` argv/env、pathname 用户字符串、`epoll_ctl`、`epoll_pwait`
+- 最后验证：2026-08-16
+- 证据：`os/src/mm/mod.rs`、两架构 `config/syscall.rs`、`os/src/syscall/special_fd.rs`；双架构
+  guest 自举与 epoll/signal 日志见 [current-status.md](./current-status.md)
+- 内容：pathname C string 继续受 4096-byte 上限约束，越界为 `ENAMETOOLONG`；exec argv/env 的单个
+  string 独立允许至 32 pages（含结尾 NUL），越界为 `E2BIG`，并继续受参数个数和聚合预算约束。
+  RV64 与 LA64 Linux UAPI 的 `struct epoll_event` 均为自然对齐 16 bytes：`events` 在 offset 0，64-bit
+  `data` 在 offset 8。内核逐项按 16-byte stride 复制，必须保留 padding，不得套用 x86 的 packed
+  12-byte/offset-4 布局。
+- 后续影响：新增目标架构时必须由该架构 libc/UAPI 验证 epoll 布局；路径与 exec 参数不得重新共用一个
+  C-string 上限。涉及 exec 总量时还需保留 `ARG_MAX` 的整体门禁，不能只扩大单字符串上限。
 
 ### 初始化顺序不可随意交换
 
@@ -200,6 +263,30 @@
   PTE 带 USER；VMA/PTE 权限相容；私有 COW 页不同时可写；shared mapping 不进入私有 COW。
 - 后续影响：debug 启动自检失败应视为结构性错误，不能通过关闭断言完成验收。
 
+### file mmap 的 live EOF、private provenance 与 truncate/punch invalidation
+
+- 状态：M3 EOF/truncate、ext4 punch-hole 与 shared-write ENOSPC 已通过双架构专项
+- 适用范围：普通 file mmap、MAP_SHARED/MAP_PRIVATE、ftruncate、fallocate punch、PageCache、COW、SMP TLB
+- 最后验证：2026-08-16
+- 证据：`os/src/mm/memory_set.rs`、`os/src/fs/file.rs`、`mmap_phase5_probe`；
+  `/tmp/respos-{rv,la}-mmap-punch-phase5-errors.log`
+- 内容：普通 mmap backing 以 live EOF 判定 fault；整页起点越当前 EOF 返回 SIGBUS，扩容后可再次
+  fault-in。clean private file page 共享 PageCache frame并以只读+COW PTE 表示，首写才成为匿名 private
+  page。truncate 先更新 backing/清零尾页，再在不持 File lock 时两阶段扫描唯一 MemorySet，移除新 EOF
+  外所有 resident file PTE/frame，并复用地址空间既有 TLB flush/shootdown。
+- punch-hole 边界：lower ext4 只对已分配的边界块清零并释放范围内完整块；PageCache 对部分页原地清零、
+  对完整页失效。跨地址空间扫描按 inode identity 撤销 shared/clean-private 的完整 punched PTE，使其
+  refault hole；已完成 COW 的 writable private 页是匿名 provenance，不再随 backing hole 改写。
+- shared write fault：writable shared file resident PTE 初始 write-protected；store fault 先由 File backing
+  物化/确认当前页的持久块，成功后才开放 WRITE，`ENOSPC` 由 trap 转为 SIGBUS。当前 ext4 在没有
+  unwritten-extent API 时写入 frame 的当前字节来物化 hole，并以 File state lock 与 truncate 串行；释放
+  空间后的新 fault 可以重新成功，不把 mapping 永久标坏。
+- ELF 边界：`PT_LOAD` 是固定 file-backed prefix，不使用普通 mmap 的动态 EOF；段尾 BSS 是匿名零页，
+  固定 prefix 的 partial last page 必须只复制有效字节，不能直接共享含后续文件数据的完整 PageCache 页。
+- 后续影响：新增 file-backed VMA 类型必须明确是 dynamic EOF 还是 fixed prefix。跨 MemorySet 扫描不得
+  在 File lock 下做，也不得在 MemorySet lock 下调用可能等待该 MemorySet 的 truncate/punch 路径。
+  后续若引入硬件 dirty-bit 或异步分配，仍须保留“backing 成功后才开放 shared WRITE”的提交边界。
+
 ### LA64 `PROT_NONE` 叶子区分软件 present 与硬件 valid
 
 - 状态：已实现并通过双架构聚焦回归
@@ -273,8 +360,46 @@
   `wait/kill/setpgid/getsid/sched_*` 等 ABI 中表示“当前进程、当前进程组或特殊选择”。fork 创建的新
   process 继承父 PGID/SID，只有 `setsid()` 成功才以自身 PID 同时建立新 session 和 process group。
 - 后续影响：新增 pid lookup 不得把 selector 0 当作 `TASK_MANAGER` 中的真实用户 task；PID 1 的
-  reparent/init 角色与普通正 PID 身份必须同时保留。non-leader exec 后稳定 process identity 仍须在
-  Phase 5 单独重构，不能用本不变量宣称 task 生命周期已经闭合。
+  reparent/init 角色与普通正 PID 身份必须同时保留。
+
+### 进程身份独立于任一线程 TCB
+
+- 状态：M2.1 核心路径已实现并通过双架构 2/8 hart 专项
+- 适用范围：thread group、PID/session、parent/children/wait、leader exit、exec de-thread、process signal
+- 最后验证：2026-08-15
+- 证据：`os/src/task/{process,task}.rs`、`os/src/syscall/{process,signal,time}.rs`；
+  `/tmp/respos-{rv,la}-process-identity-{race,smp8}.log`
+- 内容：每个进程由 `Arc<ProcessState>` 稳定表示，成员 TCB 和父进程 children 表强持有；全局
+  `ProcessTable[tgid]` 只保存 Weak 索引。`TaskManager[tid]` 只表示线程。leader 先退出不会销毁 TGID、
+  parent/children 或 wait 身份；最后 member 才发布 Zombie。non-leader exec 在 sibling quiescence 后
+  接管 TGID 的 TID 索引，kernel stack 不依赖数值 TID。
+- 提交规则：exec 和 group exit 通过 process lifecycle CAS 取得单一 owner；wait copyout 成功后才 Reaped；
+  用户映像的所有可失败准备发生在 exec teardown 前；等待 remote CPU acknowledgement 时不持有
+  members/children 锁。
+- 后续影响：按 PID 的新路径必须查 `ProcessTable`，按 TID 的接口才查 `TaskManager`。不得恢复 exited
+  leader tombstone。共享 handler/resource owner 与兼容身份双写仍需继续迁移，不能从
+  当前 M2.1 结果外推完整 signal/job-control 支持。
+
+### controlling tty 与 line discipline 状态属于 terminal，进程只保存关联关系
+
+- 状态：M2.2 terminal、物理 console line discipline 与孤儿组转换已实现并通过双架构专项/全屏 Vim
+- 适用范围：stdio、`/dev/tty`、session/pgrp、termios、job-control signal、wait stopped/continued
+- 最后验证：2026-08-16
+- 证据：`os/src/fs/tty.rs`、`user/src/bin/job_control_phase5_probe.rs`、
+  `scripts/job_control_phase5_probe_linux.c`；`/tmp/respos-{rv,la}-job-control-orphan-stress8.log`
+- 内容：单一 console terminal 保存 controlling session、foreground PGID 与共享 termios；每个
+  `ProcessState` 只保存本进程是否仍关联该 controlling tty。fork 继承关联，`setsid()` 脱离，只有
+  terminal 对象提交前台组切换或 session release。stdio 和 `/dev/tty` 的读写在进入物理 console 前
+  统一执行后台组检查，不能让每个 fd 或 `sys_ioctl` 各自维护状态。孤儿组判定扫描稳定 ProcessState；
+  `setpgid/setsid/exit+reparent` 在关系提交前后检测非孤儿→孤儿转换，且只有存在 stopped member 才按
+  `SIGHUP`、`SIGCONT` 顺序通知整个存活进程组。stdio stdin 和 `/dev/tty` 还必须共享 canonical edit/
+  ready record/raw queue；物理 console 由 timer safe point 主动抽取控制字符，使不读 tty 的前台作业也能
+  及时收到 VINTR/VQUIT/VSUSP；阻塞 read 只检查当前线程实际可投递的 pending signal，不能用 terminal
+  全局 generation 错误中断同进程内未被选中的 reader thread。timer service 与前台 reader 均可能进入
+  pump，但固件 getchar 是 destructive 操作，因此必须用独立 pump lock 串行整个 drain；仅锁目标 queue
+  会允许两个 hart 交错取字节并重排输入。
+- 后续影响：增加 PTY 时每个 terminal 实例必须独立持有相同状态机；hangup I/O、flow control、
+  SIGWINCH、forced steal 副作用及并发关系变更的统一锁域仍需扩展，不能塞回单个 ioctl 分支。
 
 ### 调度状态只有一个所有者提交
 
@@ -288,9 +413,9 @@
 
 ### CPU clock 以真实调度运行区间记账
 
-- 状态：已实现并通过双架构单核/LTP 与 2-hart probe
-- 适用范围：RV64/LA64 scheduler、thread group、CPU clock、POSIX CPU timer
-- 最后验证：2026-08-14
+- 状态：已实现并通过双架构单核/LTP 与 2-hart probe；user/system 拆分已闭合当前范围
+- 适用范围：RV64/LA64 scheduler、thread group、CPU clock、POSIX CPU timer、times/getrusage/wait
+- 最后验证：2026-08-15
 - 证据：`os/src/task/{processor,task}.rs`、`os/src/syscall/time.rs`、
   `user/src/bin/task_a_clock_probe.rs`；`/tmp/respos-{rv,la}-cpu-clock-{cluster,probe-smp2}.log`
 - 内容：idle scheduler 在切入 task 前开启 thread/process 运行区间，task 交回 idle 后关闭区间；idle
@@ -300,9 +425,42 @@
 - 生命周期：fork/new process 从零创建两类 clock，线程 clone 只共享 process clock，exec 保留累计
   时间。POSIX CPU timer 只强持有 detached clock state；thread clock 在创建线程退出后冻结，process
   clock 则由线程组累计状态继续前进，不借 timer 保留 TCB、MemorySet 或 fd table。
+- user/system accounting 复用 process clock 的 per-hart slot，并在 slot 中记录当前 mode。task 保存跨
+  context switch 的 mode：新任务从 user 开始；user trap 入口切到 system，trap 返回前切回 user；若
+  syscall 阻塞，scheduler end/begin 在 system mode 上关闭/恢复区间。exit 将两类 tick 分别冻结到
+  ProcessState，wait 输出成功后才分别累计到 parent children usage。process/thread CPU clock 的 total
+  仍是两类 interval 之和，不另建可能漂移的第三份时钟。thread clock 同样保存 user/system 两项，但只需
+  一个 running interval；`RUSAGE_THREAD` 快照调用线程，`RUSAGE_SELF` 继续快照共享 process clock。
 - 后续影响：CPU clock 的 begin/end 必须继续包围真实 `__switch`，不能移到 ready/block 状态变更处；
   SMP 实现不得退化为单一 `running_since`。若增加 CPU hotplug 或 hart 数量，必须同步审计 slot 上限与
-  已运行区间。当前 `times/getrusage` 未区分 user/system，不能把两字段均为 total 解释为完整会计语义。
+  已运行区间。新增 user trap 返回路径必须配对 mode transition；不能只在 syscall 分支记 system，否则
+  page fault、signal 和 timer trap 会被错误计入 user。rusage 非时间字段使用下述独立资源快照，不能从
+  CPU clock 推导或用全局 perf counter 冒充。
+
+### getrusage 非时间字段随 stable process identity 聚合
+
+- 状态：fault/RSS/context-switch/block-I/O 当前范围已实现并通过 Linux/RV64/LA64 专项
+- 适用范围：`RUSAGE_THREAD/SELF/CHILDREN`、`wait4`、raw `waitid`、user page fault、scheduler handoff、
+  VirtIO block read 与 disk-backed PageCache clean-to-dirty
+- 最后验证：2026-08-16
+- 内容：每个 TCB 保存 thread fault/context-switch counters，所有增量同时写入 stable `ProcessState` 的
+  process counters，故已退出线程无需继续保留 TCB 也不会从 SELF 消失。Zombie 发布前冻结进程资源；
+  wait copyout 成功后，parent children counters 对 fault/switch 求和、对 maxrss 取最大值。THREAD 的
+  maxrss 与 Linux 一样使用进程 mm 高水位，而不是虚构 thread-private RSS。
+- 缺页边界：`MemorySet::handle_page_fault` 返回 `Minor/Major/Retry`；只有 architecture user-trap 消费分类并
+  计数，`ensure_user_page_access` 只完成内核代用户访问所需映射。RSS 统计 user VMA 的 resident frames，
+  fault/getrusage/exit 更新 process high-water；unmap 只降低 current resident，不降低 high-water。
+- I/O 边界：实际成功提交的当前任务 block read 按设备 512-byte block 记 `inblock`；disk-backed cache page
+  首次从 clean 变 dirty 时记 `oublock`，而不是在 write syscall 或最终 writeback 时重复记账。boot/background
+  I/O 没有可归属 task 时不污染用户进程。`POSIX_FADV_DONTNEED` 的当前实现仅驱逐 clean、未映射且无外部
+  owner 的 cache page，使下一次 file fault 能可靠走 lower fill；dirty/mapped page 继续保留。
+- switch 边界：RespOS 为安全发布 outgoing saved context 必须先切到 per-CPU idle stack，但该内部跳板不是
+  Linux task switch。Processor handoff 保存 voluntary/involuntary 原因；idle loop 发布 outgoing、选择 next
+  后，仅在 next 与 outgoing 不是同一 `Arc<TaskControlBlock>` 时提交 counter。next 为空表示切向 idle 或
+  outgoing 已被另一 hart claim，仍是真实 switch；exit handoff 使用 `None`，不在最终 snapshot 后补账。
+- 后续影响：新增 fault handler 成功分支必须明确分类；wait/reap 新入口必须沿用“copyout 完成后才累计”的
+  提交边界。新增块设备、page-cache dirty 入口必须沿用同一 task/process snapshot，不能改用全局设备/
+  perf counter；全部 Linux-zero legacy rusage 字段保持 0，除非目标 ABI 契约明确改变。
 
 ### 精确 task deadline 由 timer-service hart 单点编程
 
@@ -322,20 +480,129 @@
   deadline。IPI handler 只能读取原子状态并编程硬件，不能取得 waiter/scheduler 锁；撤销 waiter 不必
   同步删除 hint，最坏只能多一次早中断。
 
-### `wait4` 的 SA_RESTART 在 signal frame 中保存重执行上下文
+### SIGCHLD disposition 在 child 退出发布点决定 Zombie 或 Reaped
 
-- 状态：已实现并通过双架构专项
-- 适用范围：RV64/LA64 syscall trap、`wait4/waitpid`、signal frame、`sigreturn`
-- 最后验证：2026-08-13
+- 状态：`SA_NOCLDWAIT`/显式 `SIG_IGN` 首轮已实现并通过三方专项
+- 适用范围：SIGCHLD action、child exit、ProcessTable、wait4/waitid
+- 最后验证：2026-08-15
+- 证据：`os/src/signal/sig_handler.rs`、`os/src/task/{process,task}.rs`、
+  `os/src/syscall/process.rs`；`signal_phase5_probe` 与双架构 wait4 回归
+- 内容：默认忽略和显式 `SIG_IGN` 保持不同 action 表示；默认 SIGCHLD 保留 Zombie，显式 ignore
+  自动回收且不投递，`SA_NOCLDWAIT` 自动回收但仍向已安装 handler 投递。自动回收和成功 wait 都删除
+  parent children 强引用及 ProcessTable 索引。signal 唤醒的 wait 必须先重扫 child state，再决定
+  `ECHILD`、child status 或 `EINTR`。
+- 后续影响：不能重新把默认 ignored signal 初始化为 `SIG_IGN`。迁移共享 handler 到 ProcessState 时，
+  child 退出的 disposition snapshot 与 children removal 仍须保持同一语义提交顺序。
+
+### signal pending 的 bitmap 只负责选择，info 必须按信号类别排队
+
+- 状态：标准/实时队列核心与进程内配额已通过三方专项
+- 适用范围：thread/process pending、`rt_sigtimedwait`、`tkill/tgkill/rt_sigqueueinfo`、线程退出
+- 最后验证：2026-08-15
+- 证据：`os/src/signal/sig_struct.rs`、`os/src/task/{process,task}.rs`、`signal_phase5_probe`；
+  `/tmp/respos-{rv,la}-signal-rtqueue-{quota,tgkill02}.log`
+- 内容：pending bitmap 只表达“该信号号至少有一个实例”并维持最低编号优先级；每号 info queue 的
+  front 才是下一次递送对象。标准信号队列长度最多一且不覆盖首条 info，实时信号 FIFO 保存全部实例；
+  pop 最后一个实例时才清 bitmap。ProcessState 的原子额度覆盖同进程 thread/process 两级队列，消费和
+  thread teardown 都必须归还。
+- 后续影响：任何直接清空 `SigPending` 的新路径都必须同步释放实时额度；引入 real-UID credential owner
+  后，应把配额计数上移并覆盖同 UID 多进程，但不得破坏 ProcessState 下两级队列的原子 reserve/release。
+
+### 显式 restart-class syscall 在 signal frame 中保存重执行上下文
+
+- 状态：`wait4` 与已覆盖的零进展阻塞 I/O 已实现并通过双架构专项
+- 适用范围：RV64/LA64 syscall trap、`wait4/waitpid`、`read/write/readv/writev`、
+  `accept/accept4/connect(no SO_SNDTIMEO)/sendto/recvfrom/sendmsg/recvmsg/sendmmsg/recvmmsg`、signal frame、
+  `FUTEX_WAIT/FUTEX_WAIT_BITSET(null timeout)`、`sigreturn`
+- 最后验证：2026-08-15
 - 证据：`os/src/arch/{rv64,loongarch64}/trap/mod.rs`、`os/src/signal/mod.rs`、
   `user/src/bin/task_a_wait4_probe.rs`；`/tmp/respos-{rv,la}-wait4-restart-probe.log`
-- 内容：`wait4` 因可投递信号返回 `EINTR` 时，trap 层暂存 syscall 原始 arg0。只有实际取出的用户
+- 内容：显式表中的 syscall 因可投递信号返回 `EINTR` 时，trap 层暂存 syscall 原始 arg0。只有实际取出的用户
   handler 带 `SA_RESTART`，signal frame 才保存回退 4 字节的 syscall PC 和原始 arg0；handler 返回后
   `sigreturn` 恢复该上下文并重新执行 syscall。不带标志的 handler 继续观察到 `EINTR`，默认忽略信号
-  不会触发该路径。
-- 后续影响：不要在 `sys_wait4()` 内直接吞信号并继续阻塞，否则 handler 无法执行。扩展到 read、socket、
-  futex 等 syscall 前必须先确认 Linux 的 restart class、partial side effect 与 timeout 剩余时间语义；
+  不会触发该路径。当前显式表为
+  `wait4/read/write/readv/writev/accept/accept4/connect/sendto/recvfrom/sendmsg/recvmsg/sendmmsg/recvmmsg`，避免
+  未经验证的 syscall 被全局自动重启；向量 I/O、`MSG_WAITALL` 或 mmsg 已有进展时仍优先返回字节数/
+  message count。分类器同时读取 syscall 参数：futex 只有 null-timeout 路径属于当前证据范围；
+  `recvmmsg` 的 null/non-null timeout 都可重启，但仍由 socket timeout 状态进一步约束。所有 socket I/O
+  还查询 fd 对应 Socket：
+  accept/recv/read/readv 仅在无 `SO_RCVTIMEO` 时可重启，connect/send/write/writev 仅在无
+  `SO_SNDTIMEO` 时可重启；非 socket 的 read/write 仍走既有 restart class。trap 在执行 syscall 前快照
+  该分类，使共享 fd 的并发 `setsockopt` 不会把返回后的状态误套到已经按旧 deadline 开始的操作上。
+- 后续影响：不要在 `sys_wait4()` 内直接吞信号并继续阻塞，否则 handler 无法执行。扩展到其余
+  timeout-bearing syscall 前必须先确认 Linux 的 restart class、partial side effect 与剩余时间语义；
   不能把所有 `EINTR` 一律重启。
+
+### recvmmsg timeout 是 message 后检查/写回，不是独立 wake deadline
+
+- 状态：原生 64-bit timeout、restart、partial count 与 MSG_WAITFORONE 已完成三方专项
+- 适用范围：`recvmmsg`、signal restart classifier、AF_UNIX stream 当前 probe、timeout user pointer
+- 最后验证：2026-08-15
+- 证据：`os/src/syscall/{mod,net}.rs`、`scripts/socket_phase5_probe_linux.c`、
+  `user/src/bin/socket_phase5_probe.rs`；`/tmp/respos-{rv,la}-socket-recvmmsg-timeout-stress8.log`
+- 内容：syscall 入场读取并验证 relative timespec，计算只用于 message 后写回的 deadline，不注册 task
+  timer。每条成功 message 写 `max(deadline-now, 0)`；为零时返回当前 count。零进展 `EINTR` 不改 timeout，
+  使 `SA_RESTART` 从原用户值重新执行；已有 message 后错误返回 count，timeout 保留最近成功 message 的
+  写回。`MSG_WAITFORONE` 在首条成功后只给后续 receive 添加 `MSG_DONTWAIT`。
+- 后续影响：不要把它统一成 poll/nanosleep 的 timeout waiter，否则会偏离 Linux“无消息时超期不自行
+  唤醒”的历史 ABI。time64/compat 或 user-copy fault 扩展必须独立取 oracle，不能从原生指针布局外推。
+
+### signal interruption 标志只是 wake hint，发布后必须重新验证 pending 条件
+
+- 状态：已实现并通过双架构 signal/socket/wait4/task 专项
+- 适用范围：thread/process signal enqueue、interruptible blocking syscall、SMP signal delivery
+- 最后验证：2026-08-15
+- 证据：`os/src/task/task.rs::mark_signal_interrupted()`；
+  `/tmp/respos-{rv,la}-signal-wait-timeout-nonrestart-stress8.log`（RV64 最终等价日志名为
+  `/tmp/respos-rv-signal-scheduler-gdb.log`）
+- 内容：pending queue 是“是否仍有 signal 可递送”的权威状态，`interrupted` 只用于跨核唤醒。发送者在
+  入队后选择目标并发布 hint；等待者可能在这两个动作之间已观察 pending、退出 syscall 并消费 signal。
+  因此发送者写 hint 后必须再次检查目标仍 interruptible 且仍有未屏蔽、非 ignored signal，否则撤销
+  hint，避免下一次阻塞调用被已经消费的 signal 伪造 `EINTR`。
+- 后续影响：新增 signal wake 路径不得把 `interrupted=true` 当作不可撤销事件，也不能仅用该 bool 代替
+  pending queue。所有“先发布权威状态、后写 wake hint”的路径都要审计 consumer-wins 竞态。
+
+### 带 timeout 的 poll/sleep 等待保持非重启，remaining time 按接口单独处理
+
+- 状态：`nanosleep/ppoll/pselect6/epoll_pwait/clock_nanosleep` 已完成 Linux/RV64/LA64 三方专项
+- 适用范围：signal trap restart classifier、relative sleep、poll/select/epoll timeout
+- 最后验证：2026-08-15
+- 证据：`scripts/signal_phase5_probe_linux.c`、`user/src/bin/signal_phase5_probe.rs`；上述 signal 8 轮日志
+- 内容：上述调用在普通 handler 和 `SA_RESTART` handler 下均返回 `EINTR`，默认忽略 signal 不打断并
+  等到 timeout；它们不进入显式 restart-class 表。`nanosleep` 的 relative remainder 单独 copyout 并由
+  probe 校验，不能通过回退 PC 从原始完整 timeout 重新开始；relative `clock_nanosleep` 同样写 remainder，
+  `TIMER_ABSTIME` 形式不修改 remainder。epoll probe 使用已注册但未就绪的 pipe fd，
+  保证验证真实 waiter/block 路径而非空 interest 集合的调度让步行为。
+- 后续影响：`recvmmsg` 非空 timeout 等必须分别固定 Linux 的 remainder/absolute-deadline/partial-result
+  契约，不能从本组调用类推。
+
+### stop state 必须先于 parent wait event 发布，handoff 不得覆盖并发 continue
+
+- 状态：已实现并通过双架构 signal 8 轮与 job-control 专项
+- 适用范围：默认 Stop signal、SIGCONT、WUNTRACED、SMP task handoff
+- 最后验证：2026-08-15
+- 证据：`os/src/signal/mod.rs`、`os/src/task/scheduler.rs`；
+  `/tmp/respos-{rv,la}-signal-clock-nanosleep-stress8.log`、
+  `/tmp/respos-{rv,la}-job-control-after-stop-publish-fix.log`
+- 内容：Stop 递送先把 task 状态发布为 `Stopped`，随后写 wait event 并通知父进程，最后仅保存/handoff
+  当前 context。父进程一旦观察到 stop event，立即发送的 SIGCONT 必须看到 `Stopped` 并把 task 入 ready
+  queue；handoff 可能发生在该并发 wake 之后，因此不能再次无条件写 `Stopped` 覆盖 `Ready`。
+- 后续影响：任何“状态变化 + 对外事件 + context handoff”协议都必须按可观察顺序提交。不得用 probe
+  打印或额外 yield 让 stop 先完成，因为这会隐藏真实 shell `kill(SIGCONT)` 可触发的窗口。
+
+### wait 的 child-event generation 闭合扫描到登记之间的丢唤醒
+
+- 状态：已实现并通过双架构 8 轮 signal 压力
+- 适用范围：wait4/waitid、child stop/continue/exit、SA_NOCLDSTOP
+- 最后验证：2026-08-15
+- 证据：`os/src/task/{process,task}.rs`、`os/src/syscall/process.rs`；
+  `/tmp/respos-{rv,la}-signal-read-restart-stress8.log`
+- 内容：父进程 ProcessState 持有单调 child-event generation；child 在唤醒 waiter 前先发布新代际。
+  wait 在扫描 child 状态前保存代际，随后登记 waiter 并发布 Blocked；若此时代际已变化，立即撤销
+  Blocked 并重扫。代际只用于检测“有事件发生”，具体 pid/options/status 仍由下一轮权威 children 扫描决定。
+- 后续影响：不得用 `exited_child_ids` 代替代际，因为 stop/continue 不进入 exit 集合；也不能在代际变化
+  时直接伪造 wait result，否则会绕过 pid/pgrp 与 WUNTRACED/WCONTINUED 过滤。登记后的复查同样不得以
+  “存在任意旧 exited child”强制重扫；pid-specific wait 只由新的代际变化撤销睡眠。
 
 ### 进程组资源回收按 live owner 判定
 
@@ -505,19 +772,49 @@ FdTable slot (FdEntry: descriptor flags)
   FIFO、character、block、socket 都用 `ext4_mknod()` 建立真实特殊 inode，并从 raw inode device slot
   恢复 `KStat.rdev`；statx 按 Linux device 布局拆分 12-bit major 与 20-bit minor，不退化到 legacy
   8-bit minor。`sys_openat` 根据持久的 FIFO 类型将 pathname inode 转为 `NamedFifoEnd`；同一路径的
-  运行态 reader/writer 共享 VFS `PipeRingBuffer`，关闭最后一个端点后释放，不把管道内容写入 ext4。
+  运行态 reader/writer 共享 VFS `PipeRingBuffer`。blocking open 通过 reader/writer rendezvous 配对并可被
+  signal 中断，`O_NONBLOCK|O_WRONLY` 在无 reader 时返回 `ENXIO`；只有最后一个端点关闭才发布对应
+  EOF/EPIPE 并释放运行态 buffer，不把管道内容写入 ext4。open 的 `O_TRUNC` 只作用于 regular inode，
+  对 FIFO 等特殊节点忽略。
 - 后续影响：不能用普通文件占位再只改低 12 位 permission 假装特殊 inode；否则 reopen/readdir/stat
   会继续识别成 regular，并绕过类型相关 errno、xattr 限制与 FIFO 阻塞语义。特殊 inode 正确不等于
   已有对应设备驱动；超出 Linux kernel 32-bit device encoding 的 libc-only device number 不在本范围。
 
-### ext4 inode 属性以底层 transaction 成功为发布点
+### pipe 小记录与小 writev 以 `PIPE_BUF` 为原子提交边界
 
-- 状态：已实现 mode/owner/秒级 times 组合提交；`UTIME_NOW/UTIME_OMIT` 状态机及当前 flat credential
-  范围的非 owner 权限矩阵已双架构验证
+- 状态：已实现并由双架构并发真实工具矩阵验证
+- 适用范围：anonymous pipe、named FIFO、write/writev、并发 producer
+- 最后验证：2026-08-16
+- 证据：`os/src/fs/pipe.rs`、`os/src/syscall/fs.rs::sys_writev()`、
+  `respos-software/software-posix.sh`
+- 内容：总长度不超过 4096-byte `PIPE_BUF` 的 write 在 buffer 空间不足时不发布部分字节，而是整体阻塞或
+  对 nonblocking fd 返回 `EAGAIN`；小 writev 先把所有 iovec 拷入单个 kernel record，再调用同一 pipe
+  write 提交。nonblocking pipe 不使用通用的整页 `write_ready()` admission，而由 pipe write 按本次
+  record 长度判断空间；超过该边界的 write/writev 保留 partial-progress 行为。
+- 后续影响：任何 splice/vmsplice 或新 vectored-I/O 快路径若承诺 pipe write 等价语义，都必须明确是否
+  进入同一原子边界；不能按 iovec 逐段调用 write，否则 libc 将正文和换行拆开时仍会互相穿插。
+
+### flock 与 POSIX record lock 使用不同 owner 生命周期
+
+- 状态：已实现并由 guest GCC 生命周期 probe 双架构验证
+- 适用范围：flock、fcntl `F_SETLK`、dup/fork/close/exit
+- 最后验证：2026-08-16
+- 证据：`os/src/syscall/fs.rs`、`os/src/task/task.rs`、`respos-software/software-posix.sh`
+- 内容：flock entry 绑定 open-file-description 的 weak `FileOp` owner；dup/fork 共享该 owner，任一 fd close
+  不释放锁，最后一个强引用死亡后冲突扫描惰性回收 entry。POSIX record lock 以 TGID 为 owner，同一进程
+  任意相关 fd close 释放该 inode 上的锁，process-group exit 统一删除该 TGID 在所有 inode 上的 entry。
+- 后续影响：不得用 PID 实现 flock，也不得用 open-file-description 实现传统 `F_SETLK`。以后加入 OFD
+  record lock 时应建立第三种 owner 类型；高竞争 blocking lock 可增加事件唤醒，但不能改变上述生命周期。
+
+### ext4 inode 属性与扩展时间戳以底层 transaction 成功为发布点
+
+- 状态：已实现 mode/owner/times 组合提交及 ext4 纳秒/epoch 编解码；`UTIME_NOW/UTIME_OMIT` 状态机及
+  当前 flat credential 范围的非 owner 权限矩阵已双架构验证
 - 适用范围：chmod/chown/utimens、目录属性、hardlink alias、unlink 后打开 fd
 - 最后验证：2026-08-15
 - 证据：`os/src/fs/{ext4/inode.rs,file.rs}`、`vendor/lwext4_rust/c/lwext4/src/ext4.c`；
-  `fs_metadata_probe` Linux/RV64 对照与跨启动 qcow2 检查；`utimens_special_probe` RV64/LA64 权限门禁
+  `fs_metadata_probe` Linux/RV64 对照；`utimens_special_probe` RV64/LA64 权限门禁；
+  `ext4_timestamp_phase5_probe` 双架构跨冷启动检查
 - 内容：`ext4_setattr_ino` 在一个 inode ref/transaction 内更新选定字段；Rust mode/owner/times cache
   仅在 lower commit 成功后发布。fd 操作直接使用后端 inode number，不再依赖可见路径或隐藏 orphan
   名字；同 inode hardlink 共享属性缓存。`resolve_utimens_times()` 在任何字段发布前验证两个 `tv_nsec`，
@@ -525,10 +822,63 @@ FdTable slot (FdEntry: descriptor flags)
   改 atime/mtime/ctime，也保留 Linux 对不存在 pathname 成功的 no-op 扩展。其余请求按双 NOW/current
   time 与 arbitrary/mixed 分类：非 owner 前者要求 inode mode 写权限，否则 `EACCES`；后者返回
   `EPERM`。path、打开 fd 和 empty-path 最终均在 inode 修改前执行同一检查。
+- ext4 lower ABI 保留 signed 64-bit seconds 与 nsec，在同一事务内把低 32-bit 秒和
+  `nsec << 2 | epoch` 写入 classic/extra 字段；读取以 signed low word 加 2-bit epoch 恢复。当前精确
+  可表示范围为 `[-2147483648, 15032385535]`；按 Linux VFS 规则，超范围值截断到端点且端点 nsec
+  归零，无 extra field 时截断为 signed 32-bit 秒级。新 inode 的三项初始时间也先按 realtime 落盘再
+  发布缓存；缓存发布按每个 inode 的 `extra_isize` 分别选择 atime/mtime/ctime 精度，因此 128-byte
+  旧 inode 在立即 stat 与冷启动重读时均为 signed 32-bit 秒级，不会暂存无法落盘的扩展值。
 - 后续影响：新增 setattr 字段必须加入同一 prepare/commit/publish 协议；不得把 `ENOENT` 转成成功后只改
   Rust override。双 OMIT 是由契约明确允许的唯一 pathname-free no-op，不能推广到其他时间向量。
-  持久层仍只有 32-bit 秒精度，纳秒/epoch 扩展需另做 on-disk 设计与跨重启测试；`CAP_FOWNER`、ACL、
-  user namespace 与特殊 inode flags 不在当前 flat credential 模型内。
+  `CAP_FOWNER`、ACL、user namespace 和特殊 inode flags 不在当前已闭合范围内。
+
+### atime policy 与 lazytime durability 分层
+
+- 状态：regular/directory policy、24-hour relatime、lazytime 显式同步、background/eviction 与 crash-image
+  已双架构验证
+- 适用范围：read/readdir、relatime/strictatime/noatime/nodiratime、`MS_LAZYTIME`、fsync/sync/unmount
+- 最后验证：2026-08-16
+- 证据：`os/src/fs/{file.rs,mount.rs,dentry_cache.rs,ext4/{inode,super_block}.rs}`、
+  `os/src/task/processor.rs`、`user/src/bin/{atime_phase5_probe,lazytime_persist_probe}.rs`；
+  `/tmp/respos-{rv,la}-atime-dirtytime-eviction-phase5{,-perf}.log` 与
+  `/tmp/respos-{rv,la}-lazytime-crash-{prepare,verify}.log`
+- 内容：VFS 先按 readonly、mount/open noatime、directory nodiratime、strictatime，以及
+  `atime <= mtime || atime <= ctime || now-atime >= 24h` 决定是否生成自动访问事件。普通 ext4 文件的
+  可见时间只属于共享 inode metadata cache，不属于 open-file description；tmpfile 才使用 File override。
+  非 lazytime 事件立即调用只改 atime、不改 ctime 的 lower setattr；lazytime 事件更新 inode cache 和
+  pending generation，并把 inode 强引用登记到 filesystem registry。
+- durability：文件 `fsync/fdatasync` 通过该 inode 的 metadata flush 提交自身；mount-wide
+  `sync/syncfs/unmount/reboot` 先提交 dirty data，再按 filesystem 清空 lazy registry，最后执行 lower
+  cache barrier。remount 关闭 `MS_LAZYTIME` 前走同一 filesystem sync。generation 检查保证并发新事件
+  不会被旧 flush 错清。
+- background/eviction：pending 保存首次 dirty 的 monotonic 时间；默认 43,200 秒阈值可由
+  `/proc/sys/vm/dirtytime_expire_seconds` 调整，0 禁止后台到期。timer-service idle 每批最多 flush 8 个；
+  dentry eviction 只在最后真实 owner 消失时提交，并在进入 lower I/O 前释放 cache/dentry 锁。失败保持强
+  引用并重试，成功按 generation 清理 registry。
+- 后续影响：不能把普通 inode timestamp 缓存在单个 fd 上，否则 pathname setattr 或其他 fd 更新后会
+  产生陈旧 relatime 判断。dirtytime aging 必须使用 monotonic clock，不能受 system realtime 跳变影响；
+  真实断电、volatile device cache、I/O failure injection 和超大 registry soak 仍是独立边界。
+
+### Realtime 由平台 RTC 与 monotonic offset 组合
+
+- 状态：RV64/LA64 QEMU virt 已实现；clock 与 RTC set/reset 专项均已双架构验证
+- 适用范围：`CLOCK_REALTIME/gettimeofday`、filesystem/IPC 当前时间、`RTC_RD_TIME/RTC_SET_TIME`
+- 最后验证：2026-08-16
+- 证据：`os/src/arch/{rv64,loongarch64}/timer.rs`、`os/src/syscall/{time,fs}.rs`；
+  `/tmp/respos-{rv,la}-rtc-clock-phase5.log`、`/tmp/respos-{rv,la}-rtc-set-phase5-current.log`、
+  `/tmp/respos-{rv,la}-rtc-reset-persist-phase5.log`
+- 内容：goldfish RTC 直接提供 epoch ns；LS7A TOY 复位后默认关闭，必须先置 `EO|TOYEN` 再读取 packed
+  calendar/year 并换算 Unix epoch。内核保存 `rtc_epoch - monotonic` offset，因此 realtime 可由
+  `clock_settime` 调整而不改变 timeout/uptime/CPU clock 的 monotonic 基础。
+- `RTC_RD_TIME/RTC_SET_TIME` 访问平台 RTC 本身，不复用 `REALTIME_OFFSET_US`。RV64 goldfish 写回 high word
+  后写 low word；LA64 TOY 写回先落安全日期、再切 year、最后落目标 calendar。RTC 写回不改变 system
+  realtime，system `clock_settime` 也不隐式写 RTC；只有启动初始化显式从 RTC 建立 offset。
+- reboot restart 在同步 filesystem 后走 RV64 SBI cold reboot 或 LA64 ACPI GED reset；QEMU goldfish
+  `tick_offset` 与 LS7A `offset_toy` 均跨设备 reset 保留，因此下一次启动能重新读取。新 QEMU 进程则按
+  `-rtc base` 新建设备，不属于此持久化模型。
+- 后续影响：普通 MMIO 映射集合与 RV64 virtio transport 枚举集合必须分离；把 RTC 塞入
+  `VIRTIO_MMIO` 会使 block transport index 偏移并导致根盘不可用。当前已关闭 QEMU 同设备 reset 保持；
+  跨新 QEMU 进程的电池后备、RTC 写回宿主和真实硬件校准不由当前设备模型提供。
 
 ### PageCache 是普通文件驻留页的唯一所有者
 
@@ -569,17 +919,19 @@ FdTable slot (FdEntry: descriptor flags)
 
 - 状态：已实现，BuildStorm tg-xtask、手工链接与完整 xtask wrapper 已验证
 - 适用范围：filesystem exec、动态程序、大 ELF、kernel heap
-- 最后验证：2026-08-08；RV64 release、8 核、8 GiB
+- 最后验证：2026-08-16；RV64/LA64 release、2 核、4 GiB
 - 证据：`os/src/mm/memory_set.rs::try_from_elf_file()`、
   `os/src/task/task.rs::execve_file()`、`read_elf_metadata()`、`open_dynamic_linker()`
 - 内容：exec 只把 ELF/program header 与 PT_INTERP 名称读入 kernel heap；主 ELF 的 PT_LOAD VMA
   持有 `Arc<dyn FileOp>`、page-aligned file offset 和有效文件长度，private fault 时分配独立 frame
   并按页读取，BSS 尾部保持零。文件系统中的动态解释器也走相同的 lazy PT_LOAD 路径；文件式 loader
-  将元数据前缀限制为 1 MiB，并在安装 VMA 前校验 ELF64 program-header 尺寸和 PT_LOAD 文件边界；
-  嵌入式 app/解释器 fallback 仍使用完整 slice 的 eager loader。
+  只保留 ELF header/program-header 表；`PT_INTERP` 可位于文件任意合法偏移，loader 最多单独读取 4096
+  bytes 的解释器字符串并将 metadata 副本中的 `p_offset` 重定位到追加副本，因此无需保留高偏移前的
+  整段文件。安装 VMA 前仍校验 ELF64 program-header 尺寸和 PT_LOAD 文件边界；嵌入式 app/解释器
+  fallback 仍使用完整 slice 的 eager loader。
 - 后续影响：PT_LOAD offset 与 virtual address 的页内偏移必须同余；不能重新用 `read_all()` 或
-  单纯放大 kernel heap 规避大 ELF。工具链并发峰值仍需要 128 MiB kernel heap，但这与 ELF 整文件
-  分配是两个独立问题。
+  以 `PT_INTERP` 的文件偏移决定 metadata 前缀长度，也不能单纯放大 kernel heap 规避大 ELF。工具链
+  并发峰值仍需要 128 MiB kernel heap，但这与 ELF 整文件分配是两个独立问题。
 
 ### 用户栈是大范围 lazy VMA，不等于启动时一次性物理分配
 
@@ -742,21 +1094,26 @@ FdTable slot (FdEntry: descriptor flags)
 
 ## 网络模型
 
-### smoltcp 回环路径是当前主要实现
+### smoltcp SocketSet 由 loopback 与 virtio-net 两个接口共同驱动
 
-- 状态：已确认
-- 适用范围：TCP/UDP socket 与本地网络 benchmark
-- 最后验证：2026-08-03
+- 状态：双架构 QEMU 用户态外连已确认
+- 适用范围：TCP/UDP socket、loopback benchmark、QEMU virtio-net 静态 IPv4
+- 最后验证：2026-08-16
 - 证据：`os/src/net/mod.rs`、`os/src/net/listen.rs`、`os/src/net/socket.rs`、
-  `os/src/syscall/net.rs`；RV64 CAgent 三轮并发回归
-- 内容：socket syscall 经 FileOp socket 对象进入 TCP/UDP 实现，全局 `SocketSet`、loopback
-  interface/device 和 listen table 由锁保护，`poll_interfaces` 驱动协议栈。smoltcp 的单个
+  `os/src/syscall/net.rs`、`respos-software/software-network.sh`；双架构软件网络与 socket-connect 日志见
+  [current-status.md](./current-status.md)
+- 内容：socket syscall 经 FileOp socket 对象进入 TCP/UDP 实现，全局 `SocketSet` 同时由 IP-medium
+  loopback 和 Ethernet-medium virtio-net interface 驱动。TCP connect 按显式本地地址或目的地址选择
+  interface context；UDP 匿名绑定按目的地址选择源 IP，wildcard bind 保持 `0.0.0.0`。QEMU slirp
+  Ethernet 使用 `10.0.2.15/24` 和默认网关 `10.0.2.2`，DNS proxy 为 `10.0.2.3`。Interface lock 必须先于
+  SocketSet lock，和 `poll_interfaces` 一致。smoltcp 的单个
   listener 完成握手后会成为连接 socket，因此 listen table 按受限 `listen(backlog)` 预建
   listener 池；poll 将已连接 handle 转入 accept queue 并及时补位，避免同一轮并发 SYN 在
   userspace `accept` 前收到 reset。
 - 后续影响：网络失败应先区分 ABI、协议状态和测试服务端启动时序，不能只凭一次
   `Connection refused` 判断内核网络语义损坏。修改 poll/accept/close 时必须同时维护 listener
-  池、accept queue 和 socket handle 的唯一所有权，避免泄漏或重复 remove。
+  池、accept queue 和 socket handle 的唯一所有权，避免泄漏或重复 remove。当前地址配置只适用于
+  QEMU user networking；物理网络或不同 subnet 不能复用这些常量冒充 DHCP/配置接口。
 
 ### TCP 阻塞等待同时使用事件唤醒和短定时兜底
 

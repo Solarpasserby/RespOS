@@ -47,16 +47,23 @@ pub struct Pipe {
     poll_waiters: Arc<PollWaiters>,
     readable: bool,
     writable: bool,
+    close_buffer_on_drop: bool,
     flags: Mutex<OpenFlags>,
 }
 
 impl Pipe {
     /// return (pipe_read, pipe_write)
-    fn end_with_buffer(buffer: Arc<Mutex<PipeRingBuffer>>, readable: bool, writable: bool) -> Self {
+    fn end_with_buffer(
+        buffer: Arc<Mutex<PipeRingBuffer>>,
+        readable: bool,
+        writable: bool,
+        close_buffer_on_drop: bool,
+    ) -> Self {
         let poll_waiters = buffer.lock().poll_waiters.clone();
         Self {
             readable,
             writable,
+            close_buffer_on_drop,
             buffer,
             poll_waiters,
             flags: Mutex::new(if writable {
@@ -68,10 +75,10 @@ impl Pipe {
     }
 
     fn read_end_with_buffer(buffer: Arc<Mutex<PipeRingBuffer>>) -> Self {
-        Self::end_with_buffer(buffer, true, false)
+        Self::end_with_buffer(buffer, true, false, true)
     }
     fn write_end_with_buffer(buffer: Arc<Mutex<PipeRingBuffer>>) -> Self {
-        Self::end_with_buffer(buffer, false, true)
+        Self::end_with_buffer(buffer, false, true, true)
     }
 
     pub fn read_inner(&self, buf: &mut [u8]) -> usize {
@@ -158,6 +165,8 @@ struct NamedFifo {
     buffer: Arc<Mutex<PipeRingBuffer>>,
     readers: usize,
     writers: usize,
+    reader_open_waiters: VecDeque<usize>,
+    writer_open_waiters: VecDeque<usize>,
 }
 
 struct NamedFifoEnd {
@@ -232,16 +241,34 @@ impl FileOp for NamedFifoEnd {
 impl Drop for NamedFifoEnd {
     fn drop(&mut self) {
         let mut table = NAMED_FIFOS.lock();
+        let mut wake_waiters = VecDeque::new();
         if let Some(fifo) = table.get_mut(&self.path) {
             if self.inner.readable && fifo.readers > 0 {
                 fifo.readers -= 1;
+                if fifo.readers == 0 {
+                    let mut buffer = fifo.buffer.lock();
+                    buffer.read_closed = true;
+                    wake_waiters.append(&mut buffer.write_waiters);
+                }
             }
             if self.inner.writable && fifo.writers > 0 {
                 fifo.writers -= 1;
+                if fifo.writers == 0 {
+                    let mut buffer = fifo.buffer.lock();
+                    buffer.write_closed = true;
+                    wake_waiters.append(&mut buffer.read_waiters);
+                }
             }
             if fifo.readers == 0 && fifo.writers == 0 {
                 table.remove(&self.path);
             }
+        }
+        drop(table);
+        self.inner
+            .poll_waiters
+            .notify(POLL_READ | POLL_WRITE | POLL_HUP);
+        for tid in wake_waiters {
+            wakeup_task(tid);
         }
     }
 }
@@ -249,32 +276,122 @@ impl Drop for NamedFifoEnd {
 pub fn open_named_fifo(path: &str, flags: OpenFlags) -> SysResult<Arc<dyn FileOp>> {
     let readable = !flags.contains(OpenFlags::O_WRONLY) || flags.contains(OpenFlags::O_RDWR);
     let writable = flags.intersects(OpenFlags::O_WRONLY | OpenFlags::O_RDWR);
-    let mut table = NAMED_FIFOS.lock();
-    let fifo = table
-        .entry(String::from(path))
-        .or_insert_with(|| NamedFifo {
+    let nonblock = flags.contains(OpenFlags::O_NONBLOCK);
+    let task = current_task().expect("[kernel] current task is None.");
+    let tid = task.tid();
+    let path = String::from(path);
+    let buffer = {
+        let mut table = NAMED_FIFOS.lock();
+        let fifo = table.entry(path.clone()).or_insert_with(|| NamedFifo {
             buffer: Arc::new(Mutex::new(PipeRingBuffer::new())),
             readers: 0,
             writers: 0,
+            reader_open_waiters: VecDeque::new(),
+            writer_open_waiters: VecDeque::new(),
         });
+        if writable && !readable && nonblock && fifo.readers == 0 {
+            return Err(Errno::ENXIO);
+        }
+        if readable {
+            fifo.readers += 1;
+            fifo.buffer.lock().read_closed = false;
+        }
+        if writable {
+            fifo.writers += 1;
+            fifo.buffer.lock().write_closed = false;
+        }
+        fifo.buffer.clone()
+    };
 
-    if writable && !readable && flags.contains(OpenFlags::O_NONBLOCK) && fifo.readers == 0 {
-        return Err(Errno::ENXIO);
+    loop {
+        task.set_interruptible(true);
+        let mut wake_waiters = VecDeque::new();
+        let should_wait = {
+            let mut table = NAMED_FIFOS.lock();
+            let fifo = table.get_mut(&path).ok_or(Errno::EINTR)?;
+            if readable && fifo.writers > 0 {
+                wake_waiters.append(&mut fifo.writer_open_waiters);
+            }
+            if writable && fifo.readers > 0 {
+                wake_waiters.append(&mut fifo.reader_open_waiters);
+            }
+            let wait_for_writer = readable && !writable && !nonblock && fifo.writers == 0;
+            let wait_for_reader = writable && !readable && fifo.readers == 0;
+            if wait_for_writer {
+                if !fifo.reader_open_waiters.contains(&tid) {
+                    fifo.reader_open_waiters.push_back(tid);
+                }
+            } else if wait_for_reader {
+                if !fifo.writer_open_waiters.contains(&tid) {
+                    fifo.writer_open_waiters.push_back(tid);
+                }
+            }
+            wait_for_writer || wait_for_reader
+        };
+        for waiter in wake_waiters {
+            wakeup_task(waiter);
+        }
+        if !should_wait {
+            task.set_interruptible(false);
+            break;
+        }
+
+        let should_block = prepare_current_task_blocked();
+        // Close the check-to-sleep race: a matching opener may have arrived
+        // after the condition check but before this task became Blocked.
+        let counterpart_present = {
+            let table = NAMED_FIFOS.lock();
+            table.get(&path).is_some_and(|fifo| {
+                (readable && fifo.writers > 0) || (writable && fifo.readers > 0)
+            })
+        };
+        if counterpart_present || task.is_interrupted() || task.check_signal_interrupt() {
+            wakeup_task(tid);
+        }
+        if should_block {
+            if task.is_ready() {
+                remove_task(tid);
+                task.set_running();
+            } else {
+                switch_to_next_task();
+            }
+        }
+        task.set_interruptible(false);
+        if task.is_interrupted() || task.check_signal_interrupt() {
+            task.clear_interrupted();
+            let mut table = NAMED_FIFOS.lock();
+            if let Some(fifo) = table.get_mut(&path) {
+                fifo.reader_open_waiters.retain(|waiter| *waiter != tid);
+                fifo.writer_open_waiters.retain(|waiter| *waiter != tid);
+                if readable {
+                    fifo.readers = fifo.readers.saturating_sub(1);
+                }
+                if writable {
+                    fifo.writers = fifo.writers.saturating_sub(1);
+                }
+                if fifo.readers == 0 && fifo.writers == 0 {
+                    table.remove(&path);
+                }
+            }
+            return Err(Errno::EINTR);
+        }
+        // Reaching here means a matching opener completed the rendezvous.
+        // Its endpoint may already have closed again before this task runs;
+        // the open still succeeds and subsequent read observes buffered data
+        // followed by EOF, as on Linux.
+        break;
+    }
+    {
+        let mut table = NAMED_FIFOS.lock();
+        if let Some(fifo) = table.get_mut(&path) {
+            fifo.reader_open_waiters.retain(|waiter| *waiter != tid);
+            fifo.writer_open_waiters.retain(|waiter| *waiter != tid);
+        }
     }
 
-    if readable {
-        fifo.readers += 1;
-    }
-    if writable {
-        fifo.writers += 1;
-    }
-
-    let inner = Pipe::end_with_buffer(fifo.buffer.clone(), readable, writable);
+    let inner = Pipe::end_with_buffer(buffer, readable, writable, false);
     inner.set_status_flags(flags)?;
-    Ok(Arc::new(NamedFifoEnd {
-        path: String::from(path),
-        inner,
-    }))
+    Ok(Arc::new(NamedFifoEnd { path, inner }))
 }
 
 impl FileOp for Pipe {
@@ -381,12 +498,19 @@ impl FileOp for Pipe {
                 }
 
                 let mut write_size = 0;
-                for ch in buf {
-                    if buffer.available_bytes() >= buffer.capacity {
-                        break;
+                let free = buffer.capacity.saturating_sub(buffer.available_bytes());
+                // POSIX requires writes no larger than PIPE_BUF to be atomic.
+                // If the complete record does not fit, publish none of it and
+                // block (or return EAGAIN for O_NONBLOCK); larger writes may
+                // still make partial progress.
+                if buf.len() > PAGE_SIZE || free >= buf.len() {
+                    for ch in buf {
+                        if buffer.available_bytes() >= buffer.capacity {
+                            break;
+                        }
+                        buffer.write_byte(*ch);
+                        write_size += 1;
                     }
-                    buffer.write_byte(*ch);
-                    write_size += 1;
                 }
 
                 if write_size != 0 {
@@ -508,6 +632,9 @@ impl Drop for Pipe {
             self.writable,
             Arc::strong_count(&self.buffer)
         );
+        if !self.close_buffer_on_drop {
+            return;
+        }
         // 管道关闭时：
         // - 标记己端已关闭，让对端后续 read/write 感知到
         // - 收集被阻塞在对端缓冲区上的所有等待者并全部唤醒

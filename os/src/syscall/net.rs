@@ -7,6 +7,7 @@ use crate::{
     net::socket::{self, SOCK_CLOEXEC, SOCK_NONBLOCK, Socket, SocketDomain, SocketKind},
     signal::{SiField, Sig, SigInfo},
     task::current_task,
+    timer::get_timeout_us,
 };
 
 use super::{Errno, SysResult};
@@ -52,6 +53,7 @@ const MSG_DONTWAIT: usize = 0x40;
 const MSG_WAITALL: usize = 0x100;
 const MSG_ERRQUEUE: usize = 0x2000;
 const MSG_NOSIGNAL: usize = 0x4000;
+const MSG_WAITFORONE: usize = 0x1_0000;
 
 const IOV_MAX: usize = 1024;
 
@@ -189,6 +191,14 @@ fn with_socket<T>(fd: usize, f: impl FnOnce(&Socket) -> SysResult<T>) -> SysResu
         .downcast_ref::<Socket>()
         .ok_or(Errno::ENOTSOCK)?;
     f(socket)
+}
+
+pub(crate) fn socket_recv_is_restartable(fd: usize) -> Option<bool> {
+    with_socket(fd, |socket| Ok(socket.recv_timeout_us().is_none())).ok()
+}
+
+pub(crate) fn socket_send_is_restartable(fd: usize) -> Option<bool> {
+    with_socket(fd, |socket| Ok(socket.send_timeout_us().is_none())).ok()
 }
 
 fn read_sockaddr(addr: usize, len: usize) -> SysResult<SocketAddr> {
@@ -1059,7 +1069,7 @@ pub fn sys_recvmmsg(
     if vlen > IOV_MAX {
         return Err(Errno::EINVAL);
     }
-    if timeout != 0 {
+    let deadline_us = if timeout != 0 {
         let mut ts = crate::timer::TimeSpec::default();
         copy_from_user(
             &mut ts as *mut crate::timer::TimeSpec,
@@ -1069,18 +1079,56 @@ pub fn sys_recvmmsg(
         if !ts.is_valid_duration() {
             return Err(Errno::EINVAL);
         }
-    }
+        let duration_us = ts.checked_duration_us().ok_or(Errno::EINVAL)?;
+        Some(
+            get_timeout_us()
+                .checked_add(duration_us)
+                .ok_or(Errno::EINVAL)?,
+        )
+    } else {
+        None
+    };
     if vlen == 0 {
         return Ok(0);
     }
+    let wait_for_one = flags & MSG_WAITFORONE != 0;
+    let base_flags = flags & !MSG_WAITFORONE;
+    // Validate recvmmsg-only flags before any message or timeout writeback.
+    parse_recv_flags(base_flags)?;
     let mut recvd = 0usize;
     for idx in 0..vlen {
         let mut mmsg = read_mmsghdr(msgvec, idx)?;
-        match sys_recvmsg_into_hdr(fd, &mut mmsg.msg_hdr, flags) {
+        let recv_flags = if wait_for_one && recvd > 0 {
+            base_flags | MSG_DONTWAIT
+        } else {
+            base_flags
+        };
+        match sys_recvmsg_into_hdr(fd, &mut mmsg.msg_hdr, recv_flags) {
             Ok(len) => {
                 mmsg.msg_len = len as u32;
                 write_mmsghdr(msgvec, idx, &mmsg)?;
                 recvd += 1;
+                if let Some(deadline_us) = deadline_us {
+                    // Linux recvmmsg updates the relative timeout only after
+                    // a message is received.  It does not arm an independent
+                    // wakeup for this argument: a receive with no data can
+                    // remain blocked past the deadline until data or a signal
+                    // arrives.  Preserve that observable ABI, including a
+                    // zero remainder for a message arriving after deadline.
+                    let remaining_us = deadline_us.saturating_sub(get_timeout_us());
+                    let remaining = crate::timer::TimeSpec {
+                        sec: (remaining_us / 1_000_000) as isize,
+                        nsec: ((remaining_us % 1_000_000) * 1000) as isize,
+                    };
+                    copy_to_user(
+                        timeout as *mut crate::timer::TimeSpec,
+                        &remaining as *const crate::timer::TimeSpec,
+                        1,
+                    )?;
+                    if remaining_us == 0 {
+                        return Ok(recvd);
+                    }
+                }
             }
             Err(err) => {
                 return if recvd > 0 { Ok(recvd) } else { Err(err) };

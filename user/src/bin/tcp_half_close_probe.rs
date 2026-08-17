@@ -5,9 +5,9 @@
 extern crate user_lib;
 
 use user_lib::{
-    AF_INET, PollFd, SOCK_STREAM, SockAddrIn, TimeSpec, accept_unix, bind, close, connect, dup,
-    epoll_create1, epoll_ctl, epoll_pwait, getsockname, listen, ppoll_raw, read, sendto, shutdown,
-    socket, yield_,
+    AF_INET, EPOLL_DATA_OFFSET, EPOLL_EVENT_SIZE, PollFd, SOCK_STREAM, SockAddrIn, TimeSpec,
+    accept_unix, bind, close, connect, dup, epoll_create1, epoll_ctl, epoll_pwait, getsockname,
+    listen, ppoll_raw, read, sendto, shutdown, socket, yield_,
 };
 
 const SHUT_WR: usize = 1;
@@ -78,11 +78,11 @@ fn expect_rdhup_with_buffered_data(fd: usize) {
     let epfd = epoll_create1(0);
     assert!(epfd >= 0);
     let epfd = epfd as usize;
-    let mut interest = [0u8; 12];
+    let mut interest = [0u8; EPOLL_EVENT_SIZE];
     interest[..4].copy_from_slice(&((POLLIN | POLLRDHUP) as u32).to_ne_bytes());
-    interest[4..].copy_from_slice(&0x5244485550u64.to_ne_bytes());
+    interest[EPOLL_DATA_OFFSET..].copy_from_slice(&0x5244485550u64.to_ne_bytes());
     assert_eq!(epoll_ctl(epfd, EPOLL_CTL_ADD, fd, interest.as_ptr()), 0);
-    let mut ready = [0u8; 12];
+    let mut ready = [0u8; EPOLL_EVENT_SIZE];
     assert_eq!(
         epoll_pwait(epfd, ready.as_mut_ptr(), 1, 0, core::ptr::null(), 0),
         1
@@ -91,7 +91,7 @@ fn expect_rdhup_with_buffered_data(fd: usize) {
     assert_ne!(events & POLLIN as u32, 0);
     assert_ne!(events & POLLRDHUP as u32, 0);
     assert_eq!(
-        u64::from_ne_bytes(ready[4..].try_into().unwrap()),
+        u64::from_ne_bytes(ready[EPOLL_DATA_OFFSET..].try_into().unwrap()),
         0x5244485550
     );
     assert_eq!(close(epfd), 0);

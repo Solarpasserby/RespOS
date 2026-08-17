@@ -1,21 +1,22 @@
 // os/src/task/task.rs
-use super::INITPROC;
 #[cfg(target_arch = "loongarch64")]
 use super::aux::AT_HWCAP;
-use super::aux::{AT_EXECFN, AT_NULL, AT_PLATFORM, AT_RANDOM, AuxHeader};
+use super::aux::{AuxHeader, AT_EXECFN, AT_NULL, AT_PLATFORM, AT_RANDOM};
 use super::context::TaskContext;
 use super::kstack::KernelStack;
 use super::manager::TASK_MANAGER;
+use super::process::{ProcessLifecycle, ProcessState, PROCESS_MANAGER};
 use super::scheduler::remove_task;
-use super::tid::{TidHandle, tid_alloc};
+use super::tid::{tid_alloc, TidHandle};
+use super::INITPROC;
 use crate::config::CLK_TCK;
 use crate::fs::mount::init_root_fs;
 use crate::fs::{FdEntry, FdTable, FileOp, Path};
-use crate::mm::{MemorySet, copy_from_user, copy_to_user, writeback_file_pages};
+use crate::mm::{copy_from_user, copy_to_user, writeback_file_pages, MemorySet};
 use crate::mutex::{SpinLock, SpinNoIrqLock};
-use crate::signal::sig_handler::{ActionType, SigHandler};
+use crate::signal::sig_handler::{ActionType, SigActionFlag, SigHandler, SIG_IGN};
 use crate::signal::sig_info::SigInfo;
-use crate::signal::sig_stack::{SS_DISABLE, SignalStack};
+use crate::signal::sig_stack::{SignalStack, SS_DISABLE};
 use crate::signal::sig_struct::SigPending;
 use crate::signal::{SiField, Sig, SigSet};
 use crate::syscall::{Errno, SysResult};
@@ -40,50 +41,93 @@ const MAX_CPU_CLOCK_HARTS: usize = crate::arch::smp::MAX_HARTS;
 
 #[derive(Default)]
 struct ThreadCpuClock {
-    accumulated_ticks: usize,
+    accumulated_user_ticks: usize,
+    accumulated_system_ticks: usize,
     running_since: Option<usize>,
+    running_in_user: bool,
 }
 
 impl ThreadCpuClock {
-    fn begin_run(&mut self, now: usize) {
+    fn begin_run(&mut self, now: usize, in_user: bool) {
         debug_assert!(self.running_since.is_none());
         self.running_since = Some(now);
+        self.running_in_user = in_user;
     }
 
     fn end_run(&mut self, now: usize) {
         let Some(started) = self.running_since.take() else {
             return;
         };
-        self.accumulated_ticks = self
-            .accumulated_ticks
-            .saturating_add(now.wrapping_sub(started));
+        let elapsed = now.wrapping_sub(started);
+        if self.running_in_user {
+            self.accumulated_user_ticks = self.accumulated_user_ticks.saturating_add(elapsed);
+        } else {
+            self.accumulated_system_ticks = self.accumulated_system_ticks.saturating_add(elapsed);
+        }
+    }
+
+    fn transition(&mut self, now: usize, in_user: bool) {
+        let Some(started) = self.running_since else {
+            return;
+        };
+        if self.running_in_user == in_user {
+            return;
+        }
+        let elapsed = now.wrapping_sub(started);
+        if self.running_in_user {
+            self.accumulated_user_ticks = self.accumulated_user_ticks.saturating_add(elapsed);
+        } else {
+            self.accumulated_system_ticks = self.accumulated_system_ticks.saturating_add(elapsed);
+        }
+        self.running_since = Some(now);
+        self.running_in_user = in_user;
     }
 
     fn ticks_at(&self, now: usize) -> usize {
-        self.accumulated_ticks.saturating_add(
-            self.running_since
-                .map(|started| now.wrapping_sub(started))
-                .unwrap_or(0),
-        )
+        let (user, system) = self.accounting_ticks_at(now);
+        user.saturating_add(system)
+    }
+
+    fn accounting_ticks_at(&self, now: usize) -> (usize, usize) {
+        let elapsed = self
+            .running_since
+            .map(|started| now.wrapping_sub(started))
+            .unwrap_or(0);
+        if self.running_in_user {
+            (
+                self.accumulated_user_ticks.saturating_add(elapsed),
+                self.accumulated_system_ticks,
+            )
+        } else {
+            (
+                self.accumulated_user_ticks,
+                self.accumulated_system_ticks.saturating_add(elapsed),
+            )
+        }
     }
 }
 
 struct ProcessCpuClock {
-    accumulated_ticks: usize,
+    accumulated_user_ticks: usize,
+    accumulated_system_ticks: usize,
     running_since: [usize; MAX_CPU_CLOCK_HARTS],
+    running_in_user: [bool; MAX_CPU_CLOCK_HARTS],
 }
 
 impl ProcessCpuClock {
     fn new() -> Self {
         Self {
-            accumulated_ticks: 0,
+            accumulated_user_ticks: 0,
+            accumulated_system_ticks: 0,
             running_since: [CPU_CLOCK_STOPPED; MAX_CPU_CLOCK_HARTS],
+            running_in_user: [true; MAX_CPU_CLOCK_HARTS],
         }
     }
 
-    fn begin_run(&mut self, cpu: usize, now: usize) {
+    fn begin_run(&mut self, cpu: usize, now: usize, in_user: bool) {
         debug_assert_eq!(self.running_since[cpu], CPU_CLOCK_STOPPED);
         self.running_since[cpu] = now;
+        self.running_in_user[cpu] = in_user;
     }
 
     fn end_run(&mut self, cpu: usize, now: usize) {
@@ -91,18 +135,50 @@ impl ProcessCpuClock {
         if started == CPU_CLOCK_STOPPED {
             return;
         }
-        self.accumulated_ticks = self
-            .accumulated_ticks
-            .saturating_add(now.wrapping_sub(started));
+        let elapsed = now.wrapping_sub(started);
+        if self.running_in_user[cpu] {
+            self.accumulated_user_ticks = self.accumulated_user_ticks.saturating_add(elapsed);
+        } else {
+            self.accumulated_system_ticks = self.accumulated_system_ticks.saturating_add(elapsed);
+        }
+    }
+
+    fn transition(&mut self, cpu: usize, now: usize, in_user: bool) {
+        let started = self.running_since[cpu];
+        if started == CPU_CLOCK_STOPPED || self.running_in_user[cpu] == in_user {
+            return;
+        }
+        let elapsed = now.wrapping_sub(started);
+        if self.running_in_user[cpu] {
+            self.accumulated_user_ticks = self.accumulated_user_ticks.saturating_add(elapsed);
+        } else {
+            self.accumulated_system_ticks = self.accumulated_system_ticks.saturating_add(elapsed);
+        }
+        self.running_since[cpu] = now;
+        self.running_in_user[cpu] = in_user;
     }
 
     fn ticks_at(&self, now: usize) -> usize {
+        let (user, system) = self.accounting_ticks_at(now);
+        user.saturating_add(system)
+    }
+
+    fn accounting_ticks_at(&self, now: usize) -> (usize, usize) {
         self.running_since
             .iter()
-            .filter(|started| **started != CPU_CLOCK_STOPPED)
-            .fold(self.accumulated_ticks, |total, started| {
-                total.saturating_add(now.wrapping_sub(*started))
-            })
+            .enumerate()
+            .filter(|(_, started)| **started != CPU_CLOCK_STOPPED)
+            .fold(
+                (self.accumulated_user_ticks, self.accumulated_system_ticks),
+                |(user, system), (cpu, started)| {
+                    let elapsed = now.wrapping_sub(*started);
+                    if self.running_in_user[cpu] {
+                        (user.saturating_add(elapsed), system)
+                    } else {
+                        (user, system.saturating_add(elapsed))
+                    }
+                },
+            )
     }
 }
 
@@ -196,6 +272,7 @@ const RLIMIT_COUNT: usize = 16;
 const RLIMIT_FSIZE: usize = 1;
 const RLIMIT_STACK: usize = 3;
 const RLIMIT_MEMLOCK: usize = 8;
+pub const RLIMIT_SIGPENDING: usize = 11;
 const DEFAULT_CPU_AFFINITY_MASK: usize = usize::MAX;
 /// No CPU has saved or is executing this task's kernel context.
 ///
@@ -495,6 +572,7 @@ pub struct TaskControlBlock {
 
     // 基本数据
     tid: RwLock<TidHandle>,
+    process: Arc<ProcessState>,
     tgid: AtomicUsize,
     pgid: AtomicUsize,
     sid: AtomicUsize,
@@ -518,18 +596,11 @@ pub struct TaskControlBlock {
     terminate_requested: AtomicBool,
     task_status: SpinLock<TaskStatus>,
     cpu_owner: AtomicUsize,
-    parent: Arc<SpinLock<Option<Weak<TaskControlBlock>>>>,
     // CLONE_VFORK has a separate synchronization edge from the normal
     // parent/child relationship: the parent must resume when this child
     // successfully execs or exits.  Keep it one-shot so the ordinary SIGCHLD
     // wakeup on exit cannot enqueue the parent twice.
     vfork_parent: SpinLock<Option<Weak<TaskControlBlock>>>,
-    children: Arc<SpinLock<BTreeMap<usize, Arc<TaskControlBlock>>>>,
-    exited_children: Arc<SpinLock<BTreeSet<usize>>>,
-    exit_code: AtomicI32,
-    exit_signal: AtomicI32,
-    wait_event_code: AtomicI32,
-    wait_event_status: AtomicI32,
     // task_context: TaskContext, // 注意任务上下文的处理
 
     // 内存管理
@@ -567,11 +638,10 @@ pub struct TaskControlBlock {
     interrupted: AtomicBool,
     itimers: Arc<TaskTimers>,
     personality: AtomicUsize,
-    did_exec: AtomicBool,
     thread_cpu_clock: Arc<SpinNoIrqLock<ThreadCpuClock>>,
     process_cpu_clock: Arc<SpinNoIrqLock<ProcessCpuClock>>,
-    child_utime_ticks: AtomicUsize,
-    child_stime_ticks: AtomicUsize,
+    cpu_in_user: AtomicBool,
+    thread_resource_usage: super::process::ResourceUsageCounters,
 }
 
 impl core::fmt::Debug for TaskControlBlock {
@@ -592,6 +662,7 @@ impl TaskControlBlock {
 
             // 基本数据
             tid: RwLock::new(TidHandle(0)),
+            process: ProcessState::new(0, 0, 0, 0, 0, 0, false),
             tgid: AtomicUsize::new(0),
             pgid: AtomicUsize::new(0),
             sid: AtomicUsize::new(0),
@@ -612,14 +683,7 @@ impl TaskControlBlock {
             terminate_requested: AtomicBool::new(false),
             task_status: SpinLock::new(TaskStatus::Ready),
             cpu_owner: AtomicUsize::new(NO_CPU_OWNER),
-            parent: Arc::new(SpinLock::new(None)),
             vfork_parent: SpinLock::new(None),
-            children: Arc::new(SpinLock::new(BTreeMap::new())),
-            exited_children: Arc::new(SpinLock::new(BTreeSet::new())),
-            exit_code: AtomicI32::new(0),
-            exit_signal: AtomicI32::new(0),
-            wait_event_code: AtomicI32::new(0),
-            wait_event_status: AtomicI32::new(0),
             // task_context: TaskContext, // 注意任务上下文的处理
 
             // 内存管理
@@ -648,11 +712,10 @@ impl TaskControlBlock {
             interrupted: AtomicBool::new(false),
             itimers: Arc::new(TaskTimers::new()),
             personality: AtomicUsize::new(0),
-            did_exec: AtomicBool::new(false),
             thread_cpu_clock: Arc::new(SpinNoIrqLock::new(ThreadCpuClock::default())),
             process_cpu_clock: Arc::new(SpinNoIrqLock::new(ProcessCpuClock::new())),
-            child_utime_ticks: AtomicUsize::new(0),
-            child_stime_ticks: AtomicUsize::new(0),
+            cpu_in_user: AtomicBool::new(true),
+            thread_resource_usage: super::process::ResourceUsageCounters::new(),
         }
     }
 
@@ -663,6 +726,7 @@ impl TaskControlBlock {
     pub fn init(elf_data: &[u8]) -> Arc<Self> {
         let tid: TidHandle = tid_alloc();
         let tgid = tid.0;
+        let process = ProcessState::new(tgid, tgid, tgid, 0, 0, 0, true);
         // 创建地址空间会拷贝内核页表，先创建内核栈生成页表映射，以保证任务切换后能正确访问内核栈
         let mut kernel_stack =
             KernelStack::new(&tid).expect("failed to allocate init kernel stack");
@@ -670,7 +734,7 @@ impl TaskControlBlock {
             MemorySet::from_elf_data(elf_data);
 
         let mut kernel_stack_top = kernel_stack.get_top(); // 由于栈是新建的，栈顶就是栈顶边界
-        // 在栈上存储异常上下文，该数据不会从栈中弹出，固定位于栈最高位置
+                                                           // 在栈上存储异常上下文，该数据不会从栈中弹出，固定位于栈最高位置
         kernel_stack_top -= core::mem::size_of::<TrapContext>();
         let trap_cx_ptr = kernel_stack_top as *mut TrapContext;
         // 在栈上设置任务上下文，使任务可被正常切换
@@ -687,6 +751,7 @@ impl TaskControlBlock {
 
             // 基本数据
             tid: RwLock::new(tid),
+            process: process.clone(),
             tgid: AtomicUsize::new(tgid),
             pgid: AtomicUsize::new(tgid),
             sid: AtomicUsize::new(tgid),
@@ -707,14 +772,7 @@ impl TaskControlBlock {
             terminate_requested: AtomicBool::new(false),
             task_status: SpinLock::new(TaskStatus::Ready),
             cpu_owner: AtomicUsize::new(NO_CPU_OWNER),
-            parent: Arc::new(SpinLock::new(None)),
             vfork_parent: SpinLock::new(None),
-            children: Arc::new(SpinLock::new(BTreeMap::new())),
-            exited_children: Arc::new(SpinLock::new(BTreeSet::new())),
-            exit_code: AtomicI32::new(0),
-            exit_signal: AtomicI32::new(0),
-            wait_event_code: AtomicI32::new(0),
-            wait_event_status: AtomicI32::new(0),
 
             // 内存管理
             memory_set: SpinNoIrqLock::new(Arc::new(RwLock::new(memory_set))),
@@ -742,11 +800,10 @@ impl TaskControlBlock {
             interrupted: AtomicBool::new(false),
             itimers: Arc::new(TaskTimers::new()),
             personality: AtomicUsize::new(0),
-            did_exec: AtomicBool::new(false),
             thread_cpu_clock: Arc::new(SpinNoIrqLock::new(ThreadCpuClock::default())),
             process_cpu_clock: Arc::new(SpinNoIrqLock::new(ProcessCpuClock::new())),
-            child_utime_ticks: AtomicUsize::new(0),
-            child_stime_ticks: AtomicUsize::new(0),
+            cpu_in_user: AtomicBool::new(true),
+            thread_resource_usage: super::process::ResourceUsageCounters::new(),
         });
 
         // 在线程组中添加该线程
@@ -754,6 +811,8 @@ impl TaskControlBlock {
             .thread_group
             .lock()
             .add(task_ctrl_block.clone());
+        process.add_member(&task_ctrl_block);
+        PROCESS_MANAGER.add(&process);
 
         // 初始化内核栈上的异常上下文
         let trap_context = TrapContext::init_app_context(entry_point, user_sp, 0, 0, 0, 0, false);
@@ -799,13 +858,11 @@ impl TaskControlBlock {
             sid,
             thread_group,
             group_exiting,
-            parent,
-            children,
-            exited_children,
             cwd,
             root,
             exe_path,
             parent_for_child,
+            process,
         ) = if is_thread {
             // 创建线程，属于同一线程组
             (
@@ -814,17 +871,17 @@ impl TaskControlBlock {
                 self.sid(),
                 self.thread_group.clone(),
                 self.group_exiting.clone(),
-                self.parent.clone(),
-                self.children.clone(),
-                self.exited_children.clone(),
                 self.cwd.clone(),
                 self.root.clone(),
                 self.exe_path.clone(),
                 None,
+                self.process.clone(),
             )
         } else {
             let parent_for_child = if flags.contains(CloneFlags::CLONE_PARENT) {
-                self.op_parent(|parent| parent.as_ref().and_then(|parent| parent.upgrade()))
+                self.process
+                    .parent()
+                    .and_then(|parent| parent.signal_target())
                     .unwrap_or_else(|| INITPROC.clone())
             } else {
                 process_leader.clone()
@@ -836,13 +893,19 @@ impl TaskControlBlock {
                 self.sid(),
                 Arc::new(SpinLock::new(ThreadGroup::new())),
                 Arc::new(AtomicBool::new(false)),
-                Arc::new(SpinLock::new(Some(Arc::downgrade(&parent_for_child)))),
-                Arc::new(SpinLock::new(BTreeMap::new())),
-                Arc::new(SpinLock::new(BTreeSet::new())),
                 Arc::new(SpinLock::new(Path::from_existed_user(&self.cwd()))),
                 Arc::new(SpinLock::new(Path::from_existed_user(&self.root()))),
                 Arc::new(SpinLock::new(self.exe_path())),
                 Some(parent_for_child),
+                ProcessState::new(
+                    tid.0,
+                    self.pgid(),
+                    self.sid(),
+                    self.uid(),
+                    self.euid(),
+                    self.suid(),
+                    self.process.has_controlling_tty(),
+                ),
             )
         };
 
@@ -904,6 +967,7 @@ impl TaskControlBlock {
 
             // 基本数据
             tid: RwLock::new(tid),
+            process: process.clone(),
             tgid: AtomicUsize::new(tgid),
             pgid: AtomicUsize::new(pgid),
             sid: AtomicUsize::new(sid),
@@ -924,14 +988,7 @@ impl TaskControlBlock {
             terminate_requested: AtomicBool::new(false),
             task_status: SpinLock::new(TaskStatus::Ready),
             cpu_owner: AtomicUsize::new(NO_CPU_OWNER),
-            parent,
             vfork_parent: SpinLock::new(None),
-            children,
-            exited_children,
-            exit_code: AtomicI32::new(0),
-            exit_signal: AtomicI32::new(0),
-            wait_event_code: AtomicI32::new(0),
-            wait_event_status: AtomicI32::new(0),
 
             // 内存管理
             memory_set: SpinNoIrqLock::new(memory_set),
@@ -959,11 +1016,10 @@ impl TaskControlBlock {
             interrupted: AtomicBool::new(false),
             itimers,
             personality: AtomicUsize::new(self.personality()),
-            did_exec: AtomicBool::new(false),
             thread_cpu_clock: Arc::new(SpinNoIrqLock::new(ThreadCpuClock::default())),
             process_cpu_clock,
-            child_utime_ticks: AtomicUsize::new(0),
-            child_stime_ticks: AtomicUsize::new(0),
+            cpu_in_user: AtomicBool::new(true),
+            thread_resource_usage: super::process::ResourceUsageCounters::new(),
         });
 
         // 修改任务异常上下文
@@ -975,6 +1031,8 @@ impl TaskControlBlock {
         }
         // 在线程组中添加线程
         task_ctrl_block.op_thread_group_mut(|tg| tg.add(task_ctrl_block.clone()));
+        process.add_member(&task_ctrl_block);
+        PROCESS_MANAGER.add(&process);
 
         // 在任务管理器中添加线程号到线程的映射
         TASK_MANAGER.add(&task_ctrl_block);
@@ -993,11 +1051,6 @@ impl TaskControlBlock {
         envs: Vec<String>,
         linux_abi: bool,
     ) -> SysResult<usize> {
-        // 简化模型：只有进程 leader 可以 exec，避免非 leader exec 后父子关系和 tgid 语义混乱。
-        if !self.is_process_leader() {
-            return Err(Errno::EINVAL);
-        }
-
         if args.is_empty() {
             args.push(String::new());
         }
@@ -1014,10 +1067,6 @@ impl TaskControlBlock {
         envs: Vec<String>,
         linux_abi: bool,
     ) -> SysResult<usize> {
-        if !self.is_process_leader() {
-            return Err(Errno::EINVAL);
-        }
-
         if args.is_empty() {
             args.push(String::new());
         }
@@ -1046,11 +1095,25 @@ impl TaskControlBlock {
             &mut user_sp,
         )?;
 
+        // All fallible image preparation is complete.  From this point exec
+        // owns the process transition and may quiesce siblings without a path
+        // back to the old partially dismantled image.
+        if !self.process.begin_exec() {
+            return Err(Errno::EAGAIN);
+        }
+
         // Thread-private robust-list and clear_child_tid addresses belong to
         // the old image. Tear down sibling threads while that address space is
         // still installed; doing this after the MemorySet replacement lets
         // stale thread metadata write into the freshly loaded executable.
         self.close_other_threads_for_exec();
+        self.adopt_process_tgid_for_exec();
+
+        // The surviving thread also carries old-image thread metadata.  Run
+        // robust-futex recovery while the old mappings are still installed,
+        // then discard all user addresses that must not survive exec.
+        exit_robust_list(self);
+        self.reset_tid_address_for_exec();
 
         /* ===== 修改地址空间 ===== */
         let new_memory_set = Arc::new(RwLock::new(memory_set));
@@ -1085,7 +1148,7 @@ impl TaskControlBlock {
         // 记录可执行文件路径，供 /proc/self/exe 使用。到这里 exec 已经完成了
         // 新地址空间和用户栈的关键构造，父进程不应再能修改它的 pgid。
         self.set_exe_path(exe_path);
-        self.did_exec.store(true, Ordering::Relaxed);
+        self.process.mark_exec();
 
         /* ===== 修改文件描述符表 ===== */
         // Linux execve always undoes CLONE_FILES sharing before applying
@@ -1098,6 +1161,8 @@ impl TaskControlBlock {
         /* ===== 修改信号处理 ===== */
         self.op_sig_handler_mut(|handler| handler.reset_user_handlers_for_exec());
         *self.sig_stack.lock() = SignalStack::default();
+
+        self.process.finish_exec();
 
         // Linux vfork resumes the parent once the child has installed its new
         // image.  Do this only after all exec-visible state is ready.
@@ -1115,22 +1180,31 @@ impl TaskControlBlock {
     }
     /// 线程组号
     pub fn tgid(&self) -> usize {
-        self.tgid.load(Ordering::Relaxed)
+        let tgid = self.process.tgid();
+        debug_assert_eq!(self.tgid.load(Ordering::Relaxed), tgid);
+        tgid
+    }
+    pub fn process(&self) -> Arc<ProcessState> {
+        self.process.clone()
     }
     pub fn pgid(&self) -> usize {
-        self.pgid.load(Ordering::Relaxed)
+        let pgid = self.process.pgid();
+        debug_assert_eq!(self.pgid.load(Ordering::Relaxed), pgid);
+        pgid
     }
     pub fn sid(&self) -> usize {
-        self.sid.load(Ordering::Relaxed)
+        let sid = self.process.sid();
+        debug_assert_eq!(self.sid.load(Ordering::Relaxed), sid);
+        sid
     }
     pub fn uid(&self) -> usize {
-        self.uid.load(Ordering::Relaxed)
+        self.process.uid()
     }
     pub fn euid(&self) -> usize {
-        self.euid.load(Ordering::Relaxed)
+        self.process.euid()
     }
     pub fn suid(&self) -> usize {
-        self.suid.load(Ordering::Relaxed)
+        self.process.suid()
     }
     pub fn gid(&self) -> usize {
         self.gid.load(Ordering::Relaxed)
@@ -1268,15 +1342,10 @@ impl TaskControlBlock {
         self.exe_path.lock().clone()
     }
     pub fn exit_code(&self) -> i32 {
-        self.exit_code.load(Ordering::Relaxed)
+        (self.process.wait_status() >> 8) & 0xff
     }
     pub fn wait_status(&self) -> i32 {
-        let signal = self.exit_signal.load(Ordering::Relaxed);
-        if signal != 0 {
-            signal & 0xff
-        } else {
-            (self.exit_code() & 0xff) << 8
-        }
+        self.process.wait_status()
     }
     /// 获取用户任务页表的页表基址寄存器值
     pub fn get_user_token(&self) -> usize {
@@ -1340,21 +1409,37 @@ impl TaskControlBlock {
         self.interrupted.store(false, Ordering::Relaxed);
     }
 
+    /// Publish the wake hint for a deliverable signal, then revalidate it.
+    ///
+    /// A waiter may observe and consume the queued signal between the sender's
+    /// first `check_signal_interrupt()` and this store.  Without the second
+    /// check, that late store leaks into the next blocking syscall as a
+    /// spurious EINTR even though no deliverable signal remains.
+    fn mark_signal_interrupted(&self) -> bool {
+        self.interrupted.store(true, Ordering::Relaxed);
+        if self.check_signal_interrupt() {
+            true
+        } else {
+            self.interrupted.store(false, Ordering::Relaxed);
+            false
+        }
+    }
+
     /// ★ 核心判断：当前线程是否应该被 pending 信号中断
     /// 条件：
     ///   1. 线程处于可中断状态 (interruptible == true)
     ///   2. 存在 pending 信号没有被掩码屏蔽
     ///   3. 该信号的处理程序不是 SIG_IGN（sa_handler != 1）
     pub fn check_signal_interrupt(&self) -> bool {
-        use crate::signal::sig_handler::SIG_IGN;
         if !self.is_interruptible() {
             return false;
         }
         // find_signal 已经帮我们跳过了被 mask 屏蔽的信号
-        if let Some(sig) = self.op_sig_pending(|pending| pending.find_signal()) {
+        if let Some(sig) = self.find_pending_signal() {
             let action = self.op_sig_handler(|handler| handler.get(sig));
             // sa_handler == SIG_IGN(1) → 信号被显式忽略，不需要打断
             action.sa_handler != SIG_IGN
+                && (action.sa_handler != 0 || ActionType::default(sig) != ActionType::Ignore)
         } else {
             false
         }
@@ -1366,20 +1451,24 @@ impl TaskControlBlock {
         self.tid() == self.tgid()
     }
     pub fn did_exec(&self) -> bool {
-        self.did_exec.load(Ordering::Relaxed)
+        self.process.did_exec()
     }
     /* ======= 设置内部数据 ====== */
     pub fn set_tgid(&self, tgid: usize) {
+        debug_assert_eq!(self.process.tgid(), tgid);
         self.tgid.swap(tgid, Ordering::Relaxed);
     }
     pub fn set_pgid(&self, pgid: usize) {
+        self.process.set_pgid(pgid);
         self.pgid.store(pgid, Ordering::Relaxed);
     }
     pub fn set_sid(&self, sid: usize) {
+        self.process.set_sid(sid);
         self.sid.store(sid, Ordering::Relaxed);
     }
     pub fn set_uid_triplet(&self, uid: usize, euid: usize, suid: usize) {
         let old_euid = self.euid();
+        self.process.set_uid_triplet(uid, euid, suid);
         self.uid.store(uid, Ordering::Relaxed);
         self.euid.store(euid, Ordering::Relaxed);
         self.suid.store(suid, Ordering::Relaxed);
@@ -1437,66 +1526,38 @@ impl TaskControlBlock {
         *self.exe_path.lock() = path;
     }
     pub fn set_exit_code(&self, exit_code: i32) {
-        self.exit_signal.store(0, Ordering::Relaxed);
-        self.exit_code.swap(exit_code, Ordering::Relaxed);
+        self.process.set_wait_status((exit_code & 0xff) << 8);
     }
     pub fn set_exit_signal(&self, signal: i32) {
         let signal = signal & 0x7f;
         let core_dumped = ActionType::default(Sig::from(signal)) == ActionType::Core;
-        self.exit_code.store(0, Ordering::Relaxed);
-        self.exit_signal.store(
-            signal | if core_dumped { 0x80 } else { 0 },
-            Ordering::Relaxed,
-        );
+        self.process
+            .set_wait_status(signal | if core_dumped { 0x80 } else { 0 });
     }
     pub fn set_wait_event(&self, code: i32, status: i32) {
-        self.wait_event_status.store(status, Ordering::Relaxed);
-        self.wait_event_code.store(code, Ordering::Release);
+        self.process.set_wait_event(code, status);
     }
     pub fn take_wait_event(&self) -> Option<(i32, i32)> {
-        let code = self.wait_event_code.swap(0, Ordering::AcqRel);
-        (code != 0).then(|| (code, self.wait_event_status.load(Ordering::Acquire)))
+        self.process.take_wait_event()
     }
     pub fn peek_wait_event(&self) -> Option<(i32, i32)> {
-        let code = self.wait_event_code.load(Ordering::Acquire);
-        (code != 0).then(|| (code, self.wait_event_status.load(Ordering::Acquire)))
+        self.process.peek_wait_event()
     }
     pub fn notify_parent_sigchld(&self, code: i32) {
-        self.op_parent(|parent| {
-            if let Some(parent) = parent.as_ref().and_then(|parent| parent.upgrade()) {
-                let siginfo =
-                    SigInfo::new(Sig::SIGCHLD.raw(), code, SiField::Kill { tid: self.tid() });
-                parent.receive_siginfo(siginfo, false);
-                crate::task::scheduler::wakeup_task(parent.tid());
+        if let Some(parent_process) = self.process.parent() {
+            if let Some(parent) = parent_process.signal_target() {
+                let action = parent.op_sig_handler(|handler| handler.get(Sig::SIGCHLD));
+                if !action.flags.contains(SigActionFlag::SA_NOCLDSTOP) {
+                    let siginfo =
+                        SigInfo::new(Sig::SIGCHLD.raw(), code, SiField::Kill { tid: self.tgid() });
+                    parent.receive_siginfo(siginfo, false);
+                }
+                wake_process_child_waiters(&parent_process);
             }
-        });
+        }
     }
     pub fn notify_parent_exit(&self, code: i32) {
-        self.op_parent(|parent| {
-            if let Some(parent) = parent.as_ref().and_then(|parent| parent.upgrade()) {
-                parent.exited_children.lock().insert(self.tid());
-                let siginfo =
-                    SigInfo::new(Sig::SIGCHLD.raw(), code, SiField::Kill { tid: self.tid() });
-                parent.receive_siginfo(siginfo, false);
-                crate::task::scheduler::wakeup_task(parent.tid());
-                let waiters = parent.op_thread_group(|group| {
-                    group
-                        .iter()
-                        .filter(|task| task.is_waiting_for_child())
-                        .map(|task| task.tid())
-                        .collect::<Vec<_>>()
-                });
-                debug_trace!(
-                    "[quiescetrace] child={} exit parent={} waiters={:?}",
-                    self.tid(),
-                    parent.tid(),
-                    waiters
-                );
-                for tid in waiters {
-                    crate::task::scheduler::wakeup_task(tid);
-                }
-            }
-        });
+        notify_process_parent_exit(&self.process, code);
     }
     pub fn set_waiting_for_child(&self, waiting: bool) {
         self.waiting_for_child.store(waiting, Ordering::Release);
@@ -1505,16 +1566,13 @@ impl TaskControlBlock {
         self.waiting_for_child.load(Ordering::Acquire)
     }
     pub fn exited_child_ids(&self) -> Vec<usize> {
-        self.exited_children.lock().iter().copied().collect()
+        self.process.exited_child_ids()
     }
     pub fn remove_exited_child(&self, tid: usize) {
-        self.exited_children.lock().remove(&tid);
+        self.process.remove_exited_child(tid);
     }
     pub fn clear_exited_children(&self) {
-        self.exited_children.lock().clear();
-    }
-    pub fn set_parent(&self, parent: &Arc<TaskControlBlock>) {
-        *self.parent.lock() = Some(Arc::downgrade(parent));
+        self.process.clear_exited_children();
     }
     pub fn set_vfork_parent(&self, parent: &Arc<TaskControlBlock>) {
         *self.vfork_parent.lock() = Some(Arc::downgrade(parent));
@@ -1529,9 +1587,8 @@ impl TaskControlBlock {
     }
     // 添加子任务
     pub fn add_child(&self, task: Arc<TaskControlBlock>) {
-        // TODO: 返回结果是个 `Result`，之后可能要修改实现统一返回 `SysResult`
-        let tid = task.tid();
-        self.children.lock().insert(tid, task);
+        let child_process = task.process();
+        self.process.add_child(child_process);
     }
     // 任务状态设置
     pub fn set_ready(&self) {
@@ -1575,6 +1632,10 @@ impl TaskControlBlock {
             .map(|head| (head, inner.tid_address.robust_list_len))
     }
 
+    fn reset_tid_address_for_exec(&self) {
+        self.inner.lock().tid_address = TidAddress::new();
+    }
+
     // exec 时关闭线程组中除自身外的其它线程，只清理线程私有状态。
     pub fn close_other_threads_for_exec(&self) {
         let self_tid = self.tid();
@@ -1613,9 +1674,30 @@ impl TaskControlBlock {
             cleanup_exiting_thread(&task);
             task.set_exited();
             task.op_thread_group_mut(|tg| tg.remove(&task.tid()));
-            task.set_exit_code(0);
             TASK_MANAGER.remove(task.tid());
         }
+    }
+
+    /// Linux de-thread: after every sibling is quiescent, the exec caller
+    /// takes over the stable process TGID as its visible TID.  The kernel stack
+    /// allocation is independent of the numeric TID, so only identity indexes
+    /// are re-keyed here.
+    fn adopt_process_tgid_for_exec(self: &Arc<Self>) {
+        let old_tid = self.tid();
+        let tgid = self.tgid();
+        if old_tid == tgid {
+            return;
+        }
+
+        TASK_MANAGER.remove(old_tid);
+        self.process.remove_member(old_tid);
+        self.op_thread_group_mut(|group| group.remove(&old_tid));
+
+        *self.tid.write() = TidHandle(tgid);
+
+        self.op_thread_group_mut(|group| group.add(self.clone()));
+        self.process.add_member(self);
+        TASK_MANAGER.add(self);
     }
 
     /* ======= 操作内部数据 ====== */
@@ -1631,14 +1713,11 @@ impl TaskControlBlock {
         let memory_set = self.memory_set_arc();
         f(&mut memory_set_write(&memory_set))
     }
-    pub fn op_parent<T>(&self, f: impl FnOnce(&Option<Weak<TaskControlBlock>>) -> T) -> T {
-        f(&self.parent.lock())
-    }
-    pub fn op_children_mut<T>(
+    pub fn op_process_children_mut<T>(
         &self,
-        f: impl FnOnce(&mut BTreeMap<usize, Arc<TaskControlBlock>>) -> T,
+        f: impl FnOnce(&mut BTreeMap<usize, Arc<ProcessState>>) -> T,
     ) -> T {
-        f(&mut self.children.lock())
+        self.process.op_children_mut(f)
     }
     // 只读查信号队列
     pub fn op_sig_pending<T>(&self, f: impl FnOnce(&SigPending) -> T) -> T {
@@ -1648,6 +1727,113 @@ impl TaskControlBlock {
     // 可写改信号队列（加信号、改掩码）
     pub fn op_sig_pending_mut<T>(&self, f: impl FnOnce(&mut SigPending) -> T) -> T {
         f(&mut self.sig_pending.lock())
+    }
+
+    /// Lowest signal deliverable to this thread from either the thread queue
+    /// or the process queue. The latter is evaluated using this thread's mask.
+    pub fn find_pending_signal(&self) -> Option<Sig> {
+        let (mask, thread_signal) =
+            self.op_sig_pending(|pending| (pending.mask, pending.find_signal()));
+        let process_signal = self
+            .process
+            .op_sig_pending(|pending| pending.find_signal_with_mask(mask));
+        match (thread_signal, process_signal) {
+            (Some(thread), Some(process)) if process.raw() < thread.raw() => Some(process),
+            (Some(thread), _) => Some(thread),
+            (None, process) => process,
+        }
+    }
+
+    pub fn fetch_pending_signal(&self) -> Option<(Sig, SigInfo)> {
+        let fetched = self.process.op_sig_pending_mut(|process_pending| {
+            self.op_sig_pending_mut(|thread_pending| {
+                let thread_signal = thread_pending.find_signal();
+                let process_signal = process_pending.find_signal_with_mask(thread_pending.mask);
+                let take_process = match (thread_signal, process_signal) {
+                    (None, Some(_)) => true,
+                    (Some(thread), Some(process)) => process.raw() < thread.raw(),
+                    _ => false,
+                };
+                if take_process {
+                    let sig = process_signal.unwrap();
+                    let mut set = SigSet::empty();
+                    set.add_signal(sig);
+                    process_pending.fetch_signal_from_set(set)
+                } else {
+                    thread_pending.fetch_signal()
+                }
+            })
+        });
+        if fetched
+            .as_ref()
+            .is_some_and(|(sig, _)| sig.raw() > Sig::SIGLEGACYMAX.raw())
+        {
+            self.process.release_rt_signals(1);
+        }
+        fetched
+    }
+
+    pub fn pending_blocked_set(&self) -> SigSet {
+        let (thread_pending, mask) = self.op_sig_pending(|pending| (pending.pending, pending.mask));
+        let process_pending = self.process.op_sig_pending(|pending| pending.pending);
+        (thread_pending | process_pending) & mask
+    }
+
+    pub fn has_pending_in_set(&self, set: SigSet) -> bool {
+        let thread = self.op_sig_pending(|pending| !(pending.pending & set).is_empty());
+        thread
+            || self
+                .process
+                .op_sig_pending(|pending| !(pending.pending & set).is_empty())
+    }
+
+    /// Peek a sigtimedwait candidate without consuming it, so a failed user
+    /// copy leaves both queues unchanged. The boolean identifies process scope.
+    pub fn peek_pending_in_set(&self, set: SigSet) -> Option<(Sig, SigInfo, bool)> {
+        let thread = self.op_sig_pending(|pending| {
+            pending
+                .find_signal_in_set(set)
+                .and_then(|sig| pending.get_info(sig).copied().map(|info| (sig, info)))
+        });
+        let process = self.process.op_sig_pending(|pending| {
+            pending
+                .find_signal_in_set(set)
+                .and_then(|sig| pending.get_info(sig).copied().map(|info| (sig, info)))
+        });
+        match (thread, process) {
+            (Some((thread_sig, _thread_info)), Some((process_sig, process_info)))
+                if process_sig.raw() < thread_sig.raw() =>
+            {
+                Some((process_sig, process_info, true))
+            }
+            (Some((sig, info)), _) => Some((sig, info, false)),
+            (None, Some((sig, info))) => Some((sig, info, true)),
+            (None, None) => None,
+        }
+    }
+
+    pub fn consume_pending_signal(&self, sig: Sig, expected: SigInfo, process_scope: bool) -> bool {
+        let mut set = SigSet::empty();
+        set.add_signal(sig);
+        let consumed = if process_scope {
+            self.process.op_sig_pending_mut(|pending| {
+                if pending.get_info(sig).copied() != Some(expected) {
+                    return false;
+                }
+                pending.fetch_signal_from_set(set).is_some()
+            })
+        } else {
+            self.op_sig_pending_mut(|pending| {
+                if pending.get_info(sig).copied() != Some(expected) {
+                    return false;
+                }
+                pending.fetch_signal_from_set(set).is_some()
+            })
+        };
+        if consumed && sig.raw() > Sig::SIGLEGACYMAX.raw() {
+            self.process.release_rt_signals(1);
+        }
+        consumed
     }
 
     // 只读查 handler 表
@@ -1746,22 +1932,39 @@ impl TaskControlBlock {
     }
 
     pub fn receive_siginfo(&self, siginfo: SigInfo, thread_level: bool) {
+        let _ = self.try_receive_siginfo(siginfo, thread_level, usize::MAX);
+    }
+
+    /// Queue a signal, enforcing a caller-selected real-time pending limit.
+    /// Returns false only when a real-time instance cannot reserve quota.
+    pub fn try_receive_siginfo(
+        &self,
+        siginfo: SigInfo,
+        thread_level: bool,
+        rt_limit: usize,
+    ) -> bool {
         let sig = crate::signal::Sig::from(siginfo.signo);
+        let realtime = sig.raw() > Sig::SIGLEGACYMAX.raw();
+        if realtime && !self.process.reserve_rt_signal(rt_limit) {
+            return false;
+        }
 
         match thread_level {
             // ===== 线程级信号 =====
             true => {
-                self.op_sig_pending_mut(|pending| pending.add_signal(siginfo));
+                let queued = self.op_sig_pending_mut(|pending| pending.add_signal(siginfo));
+                debug_assert!(queued || !realtime);
 
                 if self.is_sigtimedwait_waiter_for(sig) && self.is_blocked() {
                     crate::task::scheduler::wakeup_task(self.tid());
                 }
                 // ★ 改动：不只是 KILL/STOP 才唤醒，而是调用 check_signal_interrupt
                 else if self.check_signal_interrupt() && !self.is_disabled_musl_sigcancel(sig) {
-                    self.interrupted.store(true, Ordering::Relaxed);
-                    crate::task::futex::interrupt_futex_wait(self.tid());
-                    if self.is_blocked() {
-                        crate::task::scheduler::wakeup_task(self.tid());
+                    if self.mark_signal_interrupted() {
+                        crate::task::futex::interrupt_futex_wait(self.tid());
+                        if self.is_blocked() {
+                            crate::task::scheduler::wakeup_task(self.tid());
+                        }
                     }
                 }
                 // 保留原来的 KILL/STOP 立即唤醒逻辑作为兜底
@@ -1774,6 +1977,11 @@ impl TaskControlBlock {
 
             // ===== 进程级信号 =====
             false => {
+                // Keep process-directed signals in process-owned storage until
+                // a concrete member actually consumes them. A selected member
+                // may exit or exec before delivery without losing the signal.
+                let queued = self.process.add_pending_signal(siginfo);
+                debug_assert!(queued || !realtime);
                 // A process-directed signal waited by sigtimedwait must go to
                 // the waiter even though userspace normally blocks that signal.
                 let target = self.op_thread_group(|tg| {
@@ -1802,18 +2010,17 @@ impl TaskControlBlock {
                 });
 
                 if let Some(task) = target {
-                    task.op_sig_pending_mut(|pending| pending.add_signal(siginfo));
-
                     if task.is_sigtimedwait_waiter_for(sig) && task.is_blocked() {
                         crate::task::scheduler::wakeup_task(task.tid());
                     }
                     // ★ 改动：同样使用 check_signal_interrupt
                     else if task.check_signal_interrupt() && !task.is_disabled_musl_sigcancel(sig)
                     {
-                        task.interrupted.store(true, Ordering::Relaxed);
-                        crate::task::futex::interrupt_futex_wait(task.tid());
-                        if task.is_blocked() {
-                            crate::task::scheduler::wakeup_task(task.tid());
+                        if task.mark_signal_interrupted() {
+                            crate::task::futex::interrupt_futex_wait(task.tid());
+                            if task.is_blocked() {
+                                crate::task::scheduler::wakeup_task(task.tid());
+                            }
                         }
                     } else if sig.is_kill_or_stop() && task.is_blocked() {
                         task.interrupted.store(true, Ordering::Relaxed);
@@ -1823,6 +2030,7 @@ impl TaskControlBlock {
                 }
             }
         }
+        true
     }
     pub fn set_sig_context_addr(&self, addr: usize) {
         self.inner.lock().sig_context_addr = addr;
@@ -1942,8 +2150,9 @@ impl TaskControlBlock {
     }
 
     pub(crate) fn begin_cpu_run(&self, cpu: usize, now: usize) {
-        self.thread_cpu_clock.lock().begin_run(now);
-        self.process_cpu_clock.lock().begin_run(cpu, now);
+        let in_user = self.cpu_in_user.load(Ordering::Acquire);
+        self.thread_cpu_clock.lock().begin_run(now, in_user);
+        self.process_cpu_clock.lock().begin_run(cpu, now, in_user);
     }
 
     pub(crate) fn end_cpu_run(&self, cpu: usize, now: usize) {
@@ -1971,23 +2180,99 @@ impl TaskControlBlock {
         self.process_cpu_clock().now_us()
     }
 
-    pub fn elapsed_ticks(&self) -> usize {
-        self.process_cpu_time_us()
-            .saturating_mul(CLK_TCK)
-            .div_ceil(1_000_000)
-            .max(1)
+    pub fn enter_kernel_accounting(&self) {
+        self.cpu_in_user.store(false, Ordering::Release);
+        let now = get_time();
+        self.thread_cpu_clock.lock().transition(now, false);
+        self.process_cpu_clock
+            .lock()
+            .transition(crate::arch::smp::current_hart_id(), now, false);
     }
 
-    pub fn child_ticks(&self) -> (usize, usize) {
+    pub fn leave_kernel_accounting(&self) {
+        let now = get_time();
+        self.thread_cpu_clock.lock().transition(now, true);
+        self.process_cpu_clock
+            .lock()
+            .transition(crate::arch::smp::current_hart_id(), now, true);
+        self.cpu_in_user.store(true, Ordering::Release);
+    }
+
+    pub fn thread_accounting_ticks(&self) -> (usize, usize) {
+        let (user, system) = self.thread_cpu_clock.lock().accounting_ticks_at(get_time());
         (
-            self.child_utime_ticks.load(Ordering::Relaxed),
-            self.child_stime_ticks.load(Ordering::Relaxed),
+            cpu_ticks_to_us(user).saturating_mul(CLK_TCK) / 1_000_000,
+            cpu_ticks_to_us(system).saturating_mul(CLK_TCK) / 1_000_000,
         )
     }
 
+    pub fn process_accounting_ticks(&self) -> (usize, usize) {
+        let (user, system) = self
+            .process_cpu_clock
+            .lock()
+            .accounting_ticks_at(get_time());
+        (
+            cpu_ticks_to_us(user).saturating_mul(CLK_TCK) / 1_000_000,
+            cpu_ticks_to_us(system).saturating_mul(CLK_TCK) / 1_000_000,
+        )
+    }
+
+    pub fn child_ticks(&self) -> (usize, usize) {
+        self.process.child_ticks()
+    }
+
     pub fn add_child_ticks(&self, utime: usize, stime: usize) {
-        self.child_utime_ticks.fetch_add(utime, Ordering::Relaxed);
-        self.child_stime_ticks.fetch_add(stime, Ordering::Relaxed);
+        self.process.add_child_ticks(utime, stime);
+    }
+
+    pub fn thread_resource_usage(&self) -> super::ResourceUsageSnapshot {
+        self.thread_resource_usage.snapshot()
+    }
+
+    pub fn process_resource_usage(&self) -> super::ResourceUsageSnapshot {
+        self.process.resource_usage()
+    }
+
+    pub fn child_resource_usage(&self) -> super::ResourceUsageSnapshot {
+        self.process.child_resource_usage()
+    }
+
+    pub fn add_child_resource_usage(&self, usage: super::ResourceUsageSnapshot) {
+        self.process.add_child_resource_usage(usage);
+    }
+
+    pub fn note_maxrss_pages(&self, pages: usize) {
+        self.process.note_maxrss_pages(pages);
+    }
+
+    pub fn note_minor_fault(&self) {
+        self.thread_resource_usage.note_minor_fault();
+        self.process.note_minor_fault();
+    }
+
+    pub fn note_major_fault(&self) {
+        self.thread_resource_usage.note_major_fault();
+        self.process.note_major_fault();
+    }
+
+    pub fn note_input_blocks(&self, blocks: usize) {
+        self.thread_resource_usage.note_input_blocks(blocks);
+        self.process.note_input_blocks(blocks);
+    }
+
+    pub fn note_output_blocks(&self, blocks: usize) {
+        self.thread_resource_usage.note_output_blocks(blocks);
+        self.process.note_output_blocks(blocks);
+    }
+
+    pub fn note_voluntary_context_switch(&self) {
+        self.thread_resource_usage.note_voluntary_context_switch();
+        self.process.note_voluntary_context_switch();
+    }
+
+    pub fn note_involuntary_context_switch(&self) {
+        self.thread_resource_usage.note_involuntary_context_switch();
+        self.process.note_involuntary_context_switch();
     }
     pub fn op_thread_group<T>(&self, f: impl FnOnce(&ThreadGroup) -> T) -> T {
         f(&self.thread_group.lock())
@@ -2161,13 +2446,6 @@ impl TaskControlBlock {
     }
 }
 
-/// 线程退出
-///
-/// 修改线程退出码，随后移除线程并释放线程占有的资源
-fn exit_thread(task: Arc<TaskControlBlock>, exit_code: i32) {
-    exit_thread_inner(task, ExitCause::Code(exit_code), true);
-}
-
 #[derive(Clone, Copy)]
 enum ExitCause {
     Code(i32),
@@ -2190,8 +2468,8 @@ impl ExitCause {
     }
 }
 
-fn exit_thread_detached(task: Arc<TaskControlBlock>, cause: ExitCause) {
-    exit_thread_inner(task, cause, false);
+fn exit_thread_detached(task: Arc<TaskControlBlock>) {
+    exit_thread_inner(task, false);
 }
 
 fn cleanup_exiting_thread(task: &Arc<TaskControlBlock>) {
@@ -2204,18 +2482,20 @@ fn cleanup_exiting_thread(task: &Arc<TaskControlBlock>) {
     }
     crate::task::futex::remove_futex_waiter(task.tid());
     remove_task(task.tid());
+    let discarded_rt = task.op_sig_pending_mut(|pending| {
+        let count = pending.realtime_count();
+        pending.clear_pending();
+        count
+    });
+    task.process.release_rt_signals(discarded_rt);
+    task.process.remove_member(task.tid());
 }
 
-fn exit_thread_inner(
-    task: Arc<TaskControlBlock>,
-    cause: ExitCause,
-    remove_from_thread_group: bool,
-) {
+fn exit_thread_inner(task: Arc<TaskControlBlock>, remove_from_thread_group: bool) {
     cleanup_exiting_thread(&task);
     if remove_from_thread_group {
         task.op_thread_group_mut(|tg| tg.remove(&task.tid()));
     }
-    cause.apply_to(&task);
     task.set_exited();
     TASK_MANAGER.remove(task.tid());
 }
@@ -2314,7 +2594,7 @@ fn handle_robust_entry(
 }
 
 fn reparent_children_to_init(task: &Arc<TaskControlBlock>) {
-    let children = task.op_children_mut(core::mem::take);
+    let children = task.op_process_children_mut(core::mem::take);
     task.clear_exited_children();
     for (_, child) in children {
         let exited = child.is_exited();
@@ -2323,11 +2603,68 @@ fn reparent_children_to_init(task: &Arc<TaskControlBlock>) {
         } else {
             SigInfo::CLD_EXITED
         };
-        child.set_parent(&INITPROC);
-        INITPROC.add_child(child.clone());
+        INITPROC.process.add_child(child.clone());
         if exited {
-            child.notify_parent_exit(sigchld_code);
+            notify_process_parent_exit(&child, sigchld_code);
         }
+    }
+}
+
+fn notify_process_parent_exit(process: &Arc<ProcessState>, code: i32) {
+    if let Some(parent_process) = process.parent() {
+        if let Some(parent) = parent_process.signal_target() {
+            let action = parent.op_sig_handler(|handler| handler.get(Sig::SIGCHLD));
+            let explicitly_ignored = action.sa_handler == SIG_IGN;
+            let auto_reap =
+                explicitly_ignored || action.flags.contains(SigActionFlag::SA_NOCLDWAIT);
+
+            if auto_reap {
+                let removed = parent_process
+                    .op_children_mut(|children| children.remove(&process.tgid()).is_some());
+                parent_process.remove_exited_child(process.tgid());
+                if removed {
+                    process.mark_reaped();
+                    PROCESS_MANAGER.remove(process.tgid());
+                }
+            } else {
+                parent_process.mark_child_exited(process.tgid());
+            }
+
+            // Linux still sends SIGCHLD with SA_NOCLDWAIT when a handler is
+            // installed. Explicit SIG_IGN both auto-reaps and suppresses it.
+            if !explicitly_ignored {
+                let siginfo = SigInfo::new(
+                    Sig::SIGCHLD.raw(),
+                    code,
+                    SiField::Kill {
+                        tid: process.tgid(),
+                    },
+                );
+                parent.receive_siginfo(siginfo, false);
+            }
+            wake_process_child_waiters(&parent_process);
+        }
+    }
+}
+
+fn wake_process_child_waiters(parent_process: &Arc<ProcessState>) {
+    // Publish before reading waiter flags. A wait call that scanned just
+    // before this event but has not registered yet will observe the changed
+    // generation after registration and rescan instead of sleeping forever.
+    parent_process.publish_child_event();
+    let waiters = parent_process
+        .members()
+        .into_iter()
+        .filter(|task| task.is_waiting_for_child())
+        .map(|task| task.tid())
+        .collect::<Vec<_>>();
+    debug_trace!(
+        "[quiescetrace] parent={} waiters={:?}",
+        parent_process.tgid(),
+        waiters
+    );
+    for tid in waiters {
+        crate::task::scheduler::wakeup_task(tid);
     }
 }
 
@@ -2342,11 +2679,21 @@ fn reparent_children_to_init(task: &Arc<TaskControlBlock>) {
 pub fn task_exit(task: Arc<TaskControlBlock>, exit_code: i32) {
     // warn! {"[kernel] Thread exit. tid: {}, tgid: {}, thread_count: {}.", task.tid(), task.tgid(), task.op_thread_group(|tg| tg.iter().count())}
 
-    if task.is_process_leader() {
-        task_group_exit(task, exit_code);
-        return;
+    let exits_as_thread = task.op_thread_group_mut(|group| {
+        if task.group_exiting.load(Ordering::Acquire)
+            || task.process.lifecycle() != ProcessLifecycle::Running
+            || group.size() == 1
+        {
+            false
+        } else {
+            group.remove(&task.tid());
+            true
+        }
+    });
+    if exits_as_thread {
+        exit_thread_inner(task, false);
     } else {
-        exit_thread(task, exit_code);
+        exit_process_group(task, ExitCause::Code(exit_code));
     }
 }
 
@@ -2372,22 +2719,45 @@ fn exit_process_group(task: Arc<TaskControlBlock>, cause: ExitCause) {
         task.tid(),
         task.tgid()
     );
-    if task
-        .group_exiting
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
+    let orphan_candidates = {
+        let sid = task.sid();
+        let mut groups = alloc::vec![task.pgid()];
+        task.op_process_children_mut(|children| {
+            for child in children.values() {
+                if child.sid() == sid && !groups.contains(&child.pgid()) {
+                    groups.push(child.pgid());
+                }
+            }
+        });
+        groups
+            .into_iter()
+            .map(|pgid| {
+                (
+                    sid,
+                    pgid,
+                    crate::fs::tty::process_group_is_orphaned(sid, pgid),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    if !task.process.begin_exit() {
         // Another thread owns group teardown.  Returning while this caller is
         // still Running would let exit_group's scheduler path hand it off as
         // runnable again, eventually resuming after a nominally noreturning
         // exit.  Yield until the teardown owner commits this TCB to Exited;
         // an exited handoff is never republished by the idle loop.
-        while !task.is_exited() {
+        while !task.is_exited()
+            && !matches!(
+                task.process.lifecycle(),
+                ProcessLifecycle::Zombie | ProcessLifecycle::Reaped
+            )
+        {
             crate::perf::quiescence_yield(1);
             crate::task::yield_current_task();
         }
         return;
     }
+    task.group_exiting.store(true, Ordering::Release);
 
     let tgid = task.tgid();
     let threads = task.op_thread_group(|tg| tg.iter().collect::<Vec<_>>());
@@ -2451,13 +2821,16 @@ fn exit_process_group(task: Arc<TaskControlBlock>, cause: ExitCause) {
         Arc::as_ptr(&other_fd_table) == fd_table_ptr
     });
     let fd_table_owned_by_group = !fd_table_shared_outside_group;
+
+    crate::fs::tty::release_console_on_session_exit(&task.process);
+
     let mut leader_cleaned = false;
     for thread in threads {
         if thread.tid() == leader.tid() {
             cleanup_exiting_thread(&thread);
             leader_cleaned = true;
         } else {
-            exit_thread_detached(thread, cause);
+            exit_thread_detached(thread);
         }
     }
     if !leader_cleaned {
@@ -2468,12 +2841,17 @@ fn exit_process_group(task: Arc<TaskControlBlock>, cause: ExitCause) {
 
     // 修改孩子进程的父亲——托孤。children 是进程级资源，只处理一次。
     reparent_children_to_init(&task);
+    for (sid, pgid, was_orphaned) in orphan_candidates {
+        crate::fs::tty::notify_orphaned_process_group_transition(sid, pgid, was_orphaned);
+    }
 
     let released_shm_attach_ids = if memory_set_owned_by_group {
         task.op_memory_set_read(|mem| mem.shm_attach_ids())
     } else {
         Vec::new()
     };
+    let final_resident_pages = task.op_memory_set_read(|mem| mem.resident_page_count());
+    task.note_maxrss_pages(final_resident_pages);
     if memory_set_owned_by_group {
         let writebacks = task.op_memory_set_read(|mem| mem.prepare_file_writeback(None));
         match writebacks {
@@ -2495,9 +2873,13 @@ fn exit_process_group(task: Arc<TaskControlBlock>, cause: ExitCause) {
     if fd_table_owned_by_group {
         task.fd_table.lock().clear();
     }
+    crate::syscall::release_posix_locks_for_process(tgid);
     crate::syscall::remove_posix_timers_for_owner(tgid);
 
     cause.apply_to(&leader);
+    let (user_ticks, system_ticks) = leader.process_accounting_ticks();
+    task.process
+        .publish_zombie(leader.wait_status(), user_ticks, system_ticks);
     leader.set_exited();
     leader.release_vfork_parent();
     leader.notify_parent_exit(cause.sigchld_code());

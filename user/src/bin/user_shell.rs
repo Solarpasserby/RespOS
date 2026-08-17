@@ -240,14 +240,10 @@ pub fn main() -> i32 {
             }
             BS | DL => {
                 if !line.is_empty() {
-                    print!("{}", BS as char);
-                    print!(" ");
-                    print!("{}", BS as char);
                     line.pop();
                 }
             }
             _ => {
-                print!("{}", c as char);
                 line.push(c as char);
             }
         }

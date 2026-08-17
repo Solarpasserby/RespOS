@@ -1075,7 +1075,7 @@ finish:
  * @param iblock    Logical block to be released
  * @return Error code
  */
-static int ext4_fs_release_inode_block(struct ext4_inode_ref *inode_ref,
+int ext4_fs_release_inode_block(struct ext4_inode_ref *inode_ref,
 				ext4_lblk_t iblock)
 {
 	ext4_fsblk_t fblock;

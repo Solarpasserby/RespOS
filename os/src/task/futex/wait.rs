@@ -15,7 +15,7 @@ use alloc::vec::Vec;
 use lazy_static::lazy_static;
 
 #[cfg(feature = "debug_traces")]
-const FUTEX_TRACE: bool = false;
+const FUTEX_TRACE: bool = option_env!("TASK_A_FUTEX_TRACE").is_some();
 #[cfg(feature = "debug_traces")]
 const FUTEX_EXIT_TRACE: bool = option_env!("TASK_A_FUTEX_EXIT_TRACE").is_some();
 const FUTEX_CMP_REQUEUE_TEST_YIELD: bool =

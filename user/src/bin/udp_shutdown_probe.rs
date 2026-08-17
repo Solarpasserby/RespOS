@@ -5,9 +5,9 @@
 extern crate user_lib;
 
 use user_lib::{
-    AF_INET, PollFd, SOCK_DGRAM, SockAddrIn, TimeSpec, bind, close, connect, epoll_create1,
-    epoll_ctl, epoll_pwait, exit, fork, getsockname, ppoll_raw, recvfrom, sendto, shutdown, socket,
-    time_get, waitpid, yield_,
+    AF_INET, EPOLL_DATA_OFFSET, EPOLL_EVENT_SIZE, PollFd, SOCK_DGRAM, SockAddrIn, TimeSpec, bind,
+    close, connect, epoll_create1, epoll_ctl, epoll_pwait, exit, fork, getsockname, ppoll_raw,
+    recvfrom, sendto, shutdown, socket, time_get, waitpid, yield_,
 };
 
 const SHUT_RD: usize = 0;
@@ -79,11 +79,11 @@ fn expect_readiness(fd: usize, expected: i16) {
     let epfd = epoll_create1(0);
     assert!(epfd >= 0);
     let epfd = epfd as usize;
-    let mut interest = [0u8; 12];
+    let mut interest = [0u8; EPOLL_EVENT_SIZE];
     interest[..4].copy_from_slice(&((POLLIN | POLLOUT | POLLRDHUP) as u32).to_ne_bytes());
-    interest[4..].copy_from_slice(&0x55445053485554u64.to_ne_bytes());
+    interest[EPOLL_DATA_OFFSET..].copy_from_slice(&0x55445053485554u64.to_ne_bytes());
     assert_eq!(epoll_ctl(epfd, EPOLL_CTL_ADD, fd, interest.as_ptr()), 0);
-    let mut ready = [0u8; 12];
+    let mut ready = [0u8; EPOLL_EVENT_SIZE];
     assert_eq!(
         epoll_pwait(epfd, ready.as_mut_ptr(), 1, 0, core::ptr::null(), 0),
         1
@@ -93,7 +93,7 @@ fn expect_readiness(fd: usize, expected: i16) {
         expected as u32
     );
     assert_eq!(
-        u64::from_ne_bytes(ready[4..].try_into().unwrap()),
+        u64::from_ne_bytes(ready[EPOLL_DATA_OFFSET..].try_into().unwrap()),
         0x55445053485554
     );
     assert_eq!(close(epfd), 0);
@@ -132,9 +132,9 @@ fn expect_blocking_poll_shutdown() {
     let epfd = epoll_create1(0);
     assert!(epfd >= 0);
     let epfd = epfd as usize;
-    let mut interest = [0u8; 12];
+    let mut interest = [0u8; EPOLL_EVENT_SIZE];
     interest[..4].copy_from_slice(&((POLLIN | POLLRDHUP) as u32).to_ne_bytes());
-    interest[4..].copy_from_slice(&0x554450424c4f43u64.to_ne_bytes());
+    interest[EPOLL_DATA_OFFSET..].copy_from_slice(&0x554450424c4f43u64.to_ne_bytes());
     assert_eq!(epoll_ctl(epfd, EPOLL_CTL_ADD, pair.0, interest.as_ptr()), 0);
     let child = fork();
     assert!(child >= 0);
@@ -142,7 +142,7 @@ fn expect_blocking_poll_shutdown() {
         delay_ms(100);
         exit(if shutdown(pair.0, SHUT_RD) == 0 { 0 } else { 1 });
     }
-    let mut ready = [0u8; 12];
+    let mut ready = [0u8; EPOLL_EVENT_SIZE];
     assert_eq!(
         epoll_pwait(epfd, ready.as_mut_ptr(), 1, 2000, core::ptr::null(), 0),
         1
@@ -152,7 +152,7 @@ fn expect_blocking_poll_shutdown() {
         (POLLIN | POLLRDHUP) as u32
     );
     assert_eq!(
-        u64::from_ne_bytes(ready[4..].try_into().unwrap()),
+        u64::from_ne_bytes(ready[EPOLL_DATA_OFFSET..].try_into().unwrap()),
         0x554450424c4f43
     );
     let mut status = 0;

@@ -1812,6 +1812,9 @@ unsafe extern "C" {
     pub fn ext4_ftruncate(file: *mut ext4_file, size: u64) -> ::core::ffi::c_int;
 }
 unsafe extern "C" {
+    pub fn ext4_fpunch_hole(file: *mut ext4_file, offset: u64, size: u64) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
     #[doc = "@brief   Read data from file.\n\n @param   file File handle.\n @param   buf  Output buffer.\n @param   size Bytes to read.\n @param   rcnt Bytes read (NULL allowed).\n\n @return  Standard error code."]
     pub fn ext4_fread(
         file: *mut ext4_file,
@@ -1858,6 +1861,7 @@ unsafe extern "C" {
         mount_point: *const ::core::ffi::c_char,
         inode: u32,
         raw_inode: *mut ext4_inode,
+        blocks_count: *mut u64,
     ) -> ::core::ffi::c_int;
     pub fn ext4_fremove_deferred(path: *const ::core::ffi::c_char) -> ::core::ffi::c_int;
     pub fn ext4_dir_rm_deferred(path: *const ::core::ffi::c_char) -> ::core::ffi::c_int;
@@ -1938,9 +1942,12 @@ unsafe extern "C" {
         mode: u32,
         uid: u32,
         gid: u32,
-        atime: u32,
-        mtime: u32,
-        ctime: u32,
+        atime_sec: i64,
+        atime_nsec: u32,
+        mtime_sec: i64,
+        mtime_nsec: u32,
+        ctime_sec: i64,
+        ctime_nsec: u32,
     ) -> ::core::ffi::c_int;
 }
 unsafe extern "C" {
