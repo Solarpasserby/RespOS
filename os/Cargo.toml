@@ -31,6 +31,7 @@ spin = "0.9.8"
 smoltcp = { path = "../vendor/smoltcp", default-features = false, features = ["alloc", "log", "medium-ethernet", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-udp"] }
 hashbrown = "0.16.1"
 lwext4_rust = { path = "../vendor/lwext4_rust", default-features = false }
+simple-ahci = "0.1.1-preview.1"
 
 [target.'cfg(target_arch = "riscv64")'.dependencies]
 riscv = { path = "../vendor/riscv", features = ["inline-asm"] }

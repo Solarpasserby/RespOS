@@ -158,7 +158,7 @@ pub fn wait_for_interrupt() {
 }
 
 #[inline]
-fn kernel_virt_to_phys<T>(ptr: *const T) -> usize {
+pub fn kernel_virt_to_phys<T>(ptr: *const T) -> usize {
     let addr = ptr as usize;
     if addr >= crate::config::KERNEL_BASE {
         addr - crate::config::KERNEL_BASE
