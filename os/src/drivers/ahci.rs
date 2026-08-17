@@ -52,13 +52,28 @@ impl AhciBlockDevice {
     /// 从 2K1000LA 的 AHCI 基址初始化（MMIO 经 uncached 窗口访问）。
     pub fn new() -> DevResult<Self> {
         let base = UNCACHE_BASE | AHCI_BASE;
-        println!("[kernel] AHCI: probing base {:#x}...", base);
+        // 诊断用 early_print（无锁、uncached、Stage 1 已验证），避免 println! 的
+        // console 自旋锁/格式化在 AHCI 初始化早期引入额外变量。
+        #[cfg(feature = "board_ls2k1000")]
+        crate::arch::sbi::early_print("[kernel] AHCI: probing...\n");
+
         let driver = unsafe { AhciDriver::try_new(base) }.ok_or(DevError::BadState)?;
+
+        #[cfg(feature = "board_ls2k1000")]
+        {
+            crate::arch::sbi::early_print("[kernel] AHCI: try_new returned, capacity=0x");
+            crate::arch::sbi::early_print_hex(driver.capacity() as usize);
+            crate::arch::sbi::early_print(", block_size=0x");
+            crate::arch::sbi::early_print_hex(driver.block_size());
+            crate::arch::sbi::early_print("\n");
+        }
+        #[cfg(not(feature = "board_ls2k1000"))]
         println!(
             "[kernel] AHCI disk: {} blocks x {} bytes",
             driver.capacity(),
             driver.block_size()
         );
+
         Ok(Self {
             inner: Mutex::new(driver),
         })
