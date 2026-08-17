@@ -25,10 +25,22 @@ const ACPI_GED_RESET_VALUE: u8 = 0x42;
 
 #[inline]
 fn mmio_addr(addr: usize) -> usize {
-    if super::paging_enabled() && !super::low_direct_map_enabled() {
-        addr + crate::config::KERNEL_BASE
-    } else {
-        addr
+    #[cfg(feature = "board_ls2k1000")]
+    {
+        // 2K1000LA 真机 MMIO 必须走 uncached DMW0 窗口（VSEG=0x8000），缓存直映
+        // 对真机外设无效（见 keypoints 坑 2）。该窗口在 disable_low_direct_map 后
+        // 仍然有效，所以这里无条件走 uncached 窗口；早期（未分页）理论上不存在，
+        // 真机经 U-Boot go 时 PG 恒为 1。
+        const UNCACHE_BASE: usize = 0x8000_0000_0000_0000;
+        UNCACHE_BASE | (addr & ((1usize << 48) - 1))
+    }
+    #[cfg(not(feature = "board_ls2k1000"))]
+    {
+        if super::paging_enabled() && !super::low_direct_map_enabled() {
+            addr + crate::config::KERNEL_BASE
+        } else {
+            addr
+        }
     }
 }
 

@@ -142,6 +142,7 @@ pub const GED_REG_BASE: usize = 0x100e_0000;
 pub const GED_REG_SIZE: usize = 0x1000;
 
 // MMIO 设备地址区间 (QEMU loongarch64 virt 平台)
+#[cfg(not(feature = "board_ls2k1000"))]
 pub const MMIO: &[(usize, usize)] = &[
     (0x1000_1000, 0x00_1000),       // Virtio Block
     (0x100d_0000, 0x00_1000),       // LS7A RTC
@@ -150,4 +151,17 @@ pub const MMIO: &[(usize, usize)] = &[
     (0x0010_0000, 0x00_2000),       // VIRT_TEST/RTC
     (PCI_ECAM_BASE, PCI_ECAM_SIZE), // PCIe ECAM
     (PCI_MMIO_BASE, PCI_MMIO_SIZE), // PCI BAR memory window
+];
+
+// 2K1000LA 真机设备地址区间（来自真机 Linux 启动日志 / 设备树）。
+// 注意：真机 MMIO 一律经 uncached DMW0 窗口（VSEG=0x8000）访问（见 sbi.rs::mmio_addr），
+// 这里的 direct-map 映射仅保证内核高半区地址空间覆盖这些区间、页表 walk 不因缺映射
+// 而异常；实际设备访问不依赖这份缓存映射。
+#[cfg(feature = "board_ls2k1000")]
+pub const MMIO: &[(usize, usize)] = &[
+    (0x1fe2_0000, 0x1000), // UART console（ttyS0，ns16550a，byte stride）
+    (0x1fe0_1400, 0x1000), // LIOINTC 中断控制器
+    (0x4004_0000, 0x1000), // GMAC eth0
+    (0x4005_0000, 0x1000), // GMAC eth1
+    (0x400e_0000, 0x1000), // AHCI/SATA
 ];

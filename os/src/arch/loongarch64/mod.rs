@@ -29,6 +29,12 @@ global_asm!(include_str!("tlb_refill.S"));
 
 static LOW_DIRECT_MAP_ACTIVE: AtomicBool = AtomicBool::new(true);
 
+/// 2K1000LA 真机经 U-Boot `go` 进入时 CRMD.PG 已为 1（分页模式，靠 DMW 窗口），
+/// `paging_enabled()` 恒真，无法用于判断内核页表是否已安装。boot paging 用此标志
+/// 保证幂等（首次进入必建表，mm::init 第二次调用直接返回）。
+#[cfg(feature = "board_ls2k1000")]
+static BOOT_PAGING_DONE: AtomicBool = AtomicBool::new(false);
+
 const LOONGARCH_CPUCFG1: usize = 1;
 const CPUCFG1_UAL: usize = 1 << 20;
 const HWCAP_LOONGARCH_UAL: usize = 1 << 2;
@@ -155,20 +161,33 @@ fn kernel_virt_to_phys<T>(ptr: *const T) -> usize {
     if addr >= crate::config::KERNEL_BASE {
         addr - crate::config::KERNEL_BASE
     } else {
-        addr
+        // 低于 KERNEL_BASE 的运行时地址可能是：
+        // - QEMU 直接地址模式下的物理地址（< 48-bit，掩码后不变）；
+        // - 2K1000LA U-Boot 的 0x9000 cached / 0x8000 uncached 窗口 VA（VSEG 在高
+        //   16 位，低 48 位即物理地址）。统一掩到 48-bit 得到真实物理地址。
+        addr & ((1usize << 48) - 1)
     }
 }
 
 #[inline]
 pub unsafe fn jump_to_high_half(entry: usize) -> ! {
+    // entry 是函数地址（PC 相对寻址，运行时落在当前窗口）：
+    // - QEMU 直接地址模式下是物理地址，+ KERNEL_BASE 得到高半区；
+    // - 2K1000LA 是 0x9000 窗口 VA，需先掩掉高 16 位窗口前缀得到物理地址再加 KERNEL_BASE。
     let target = if entry >= crate::config::KERNEL_BASE {
         entry
     } else {
-        entry + crate::config::KERNEL_BASE
+        (entry & ((1usize << 48) - 1)) + crate::config::KERNEL_BASE
     };
     unsafe {
         core::arch::asm!(
             "bgeu    $sp, {kernel_base}, 1f",
+            // 把 $sp 归一化到物理地址再重定位到高半区：
+            // - QEMU：$sp 已是物理地址（< 48-bit），slli/srli 为 no-op；
+            // - 2K1000LA：$sp 在 0x9000/0x8000 DMW 窗口（VSEG 高 16 位），
+            //   slli/srli 清掉高 16 位得到物理地址，再加 KERNEL_BASE。
+            "slli.d  $sp, $sp, 16",
+            "srli.d  $sp, $sp, 16",
             "add.d   $sp, $sp, {kernel_base}",
             "1:",
             "jr      {target}",
@@ -207,20 +226,32 @@ unsafe fn configure_mmu() {
 
 /// 建立一个最小的高地址恒等偏移映射，使高地址内核堆在正式内核页表构造前可用。
 pub fn enable_boot_paging() {
+    #[cfg(feature = "board_ls2k1000")]
+    if BOOT_PAGING_DONE.swap(true, Ordering::AcqRel) {
+        // 2K1000LA 真机经 U-Boot `go` 进入时 CRMD.PG 已为 1，paging_enabled() 恒真，
+        // 不能作为“内核页表是否已安装”的判断，改由 BOOT_PAGING_DONE 保证幂等。
+        return;
+    }
+    #[cfg(not(feature = "board_ls2k1000"))]
     if paging_enabled() {
         return;
     }
     unsafe {
-        let pgd =
-            kernel_virt_to_phys(core::ptr::addr_of!(BOOT_PGD.0) as *const _) as *mut [usize; 512];
-        let pmd =
-            kernel_virt_to_phys(core::ptr::addr_of!(BOOT_PMD.0) as *const _) as *mut [usize; 512];
-        let ptes = kernel_virt_to_phys(core::ptr::addr_of!(BOOT_PTES) as *const _)
-            as *mut [BootPage; BOOT_PTE_TABLES];
-        let high_pmd = kernel_virt_to_phys(core::ptr::addr_of!(BOOT_HIGH_PMD.0) as *const _)
-            as *mut [usize; 512];
-        let high_ptes = kernel_virt_to_phys(core::ptr::addr_of!(BOOT_HIGH_PTES) as *const _)
-            as *mut [BootPage; BOOT_HIGH_PTE_TABLES];
+        // 写指针用 addr_of! 直接得到的「当前可达地址」：
+        // - QEMU 直接地址模式（DA=1）下，PC 相对寻址落在物理地址，可直接解引用；
+        // - 2K1000LA 经 U-Boot go 进入时，PC 相对寻址自动落在 0x9000 cached 窗口 VA。
+        // 若改用 kernel_virt_to_phys 得到的 48-bit 物理地址，真机上 VSEG=0x0000 无
+        // DMW/页表覆盖，写页表会页错误。
+        // PTE 里存的 PPN / CSR 根页表地址必须用 kernel_virt_to_phys 得到的物理地址。
+        let pgd = core::ptr::addr_of!(BOOT_PGD.0) as *mut [usize; 512];
+        let pmd = core::ptr::addr_of!(BOOT_PMD.0) as *mut [usize; 512];
+        let ptes = core::ptr::addr_of!(BOOT_PTES) as *mut [BootPage; BOOT_PTE_TABLES];
+        let ptes_phys = kernel_virt_to_phys(core::ptr::addr_of!(BOOT_PTES) as *const _);
+        let high_pmd = core::ptr::addr_of!(BOOT_HIGH_PMD.0) as *mut [usize; 512];
+        let high_ptes =
+            core::ptr::addr_of!(BOOT_HIGH_PTES) as *mut [BootPage; BOOT_HIGH_PTE_TABLES];
+        let high_ptes_phys =
+            kernel_virt_to_phys(core::ptr::addr_of!(BOOT_HIGH_PTES) as *const _);
 
         let base_vpn = crate::config::KERNEL_BASE >> crate::config::PAGE_SIZE_BITS;
         let pgd_idx = (base_vpn >> 18) & 0x1ff;
@@ -233,14 +264,15 @@ pub fn enable_boot_paging() {
             )),
         );
         for table in 0..BOOT_PTE_TABLES {
-            let table_pa = ptes as usize + table * core::mem::size_of::<BootPage>();
+            let table_ptr = ptes as usize + table * core::mem::size_of::<BootPage>();
+            let table_phys = ptes_phys + table * core::mem::size_of::<BootPage>();
             core::ptr::write_volatile(
                 (pmd as *mut usize).add(pmd_idx + table),
-                table_pte(table_pa),
+                table_pte(table_phys),
             );
             for idx in 0..512 {
                 let pa = (table * 512 + idx) * crate::config::PAGE_SIZE;
-                core::ptr::write_volatile((table_pa as *mut usize).add(idx), leaf_pte(pa));
+                core::ptr::write_volatile((table_ptr as *mut usize).add(idx), leaf_pte(pa));
             }
         }
         let high_va = crate::config::KERNEL_BASE + crate::config::HIGH_MEMORY_START;
@@ -254,22 +286,31 @@ pub fn enable_boot_paging() {
             )),
         );
         for table in 0..BOOT_HIGH_PTE_TABLES {
-            let table_pa = high_ptes as usize + table * core::mem::size_of::<BootPage>();
+            let table_ptr = high_ptes as usize + table * core::mem::size_of::<BootPage>();
+            let table_phys = high_ptes_phys + table * core::mem::size_of::<BootPage>();
             core::ptr::write_volatile(
                 (high_pmd as *mut usize).add(high_pmd_idx + table),
-                table_pte(table_pa),
+                table_pte(table_phys),
             );
             for idx in 0..512 {
                 let pa = crate::config::HIGH_MEMORY_START
                     + (table * 512 + idx) * crate::config::PAGE_SIZE;
-                core::ptr::write_volatile((table_pa as *mut usize).add(idx), leaf_pte(pa));
+                core::ptr::write_volatile((table_ptr as *mut usize).add(idx), leaf_pte(pa));
             }
         }
         configure_mmu();
         let root = kernel_virt_to_phys(core::ptr::addr_of!(BOOT_PGD) as *const _);
         write_mmu_token(root);
 
+        // 2K1000LA 经 U-Boot 进入时 PG 已为 1，U-Boot 的 TLB 里可能残留旧翻译；
+        // 安装内核根页表后先冲刷 TLB，再保证分页与 MAT 配置正确。
+        #[cfg(feature = "board_ls2k1000")]
+        register::mmu::flush_tlb();
         register::crmd::enable_paging();
+        // QEMU：开启分页后立即关 DMW1，低地址直映由 DMW0 兜底，代码继续跑在物理
+        // 地址直到 jump_to_high_half。2K1000LA 相反：当前执行流在 0x9000 cached 窗口，
+        // 必须保留 DMW1 直到跳入高半区（随后由 disable_low_direct_map 关闭）。
+        #[cfg(not(feature = "board_ls2k1000"))]
         register::mmu::write_dmw1(0);
     }
 }
@@ -286,6 +327,9 @@ pub fn enable_secondary_boot_paging() {
         let root = kernel_virt_to_phys(core::ptr::addr_of!(BOOT_PGD) as *const _);
         write_mmu_token(root);
         register::crmd::enable_paging();
+        // 与 enable_boot_paging 相同的 DMW 策略；2K1000LA 次核同样运行在 0x9000
+        // 窗口，跳入高半区前不能关 DMW1（SMP 在 Stage 7，此路径尚未真机验证）。
+        #[cfg(not(feature = "board_ls2k1000"))]
         register::mmu::write_dmw1(0);
     }
 }
@@ -297,6 +341,12 @@ pub fn enable_mmu() {
 
 pub fn disable_low_direct_map() {
     unsafe {
+        // QEMU：低地址直映走 DMW0，关闭它让后续访问全部走页表。
+        // 2K1000LA：低地址直映走 DMW1（0x9000 cached 窗口）；DMW0（0x8000 uncached）
+        // 是真机 MMIO 访问窗口，必须保留，否则 UART/外设写不达（见 keypoints 坑 2）。
+        #[cfg(feature = "board_ls2k1000")]
+        register::mmu::write_dmw1(0);
+        #[cfg(not(feature = "board_ls2k1000"))]
         register::mmu::write_dmw0(0);
         register::mmu::flush_tlb();
     }

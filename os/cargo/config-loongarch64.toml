@@ -5,7 +5,10 @@ target = "loongarch64-unknown-none"
 rustflags = [
     "-Clink-arg=-Tsrc/linker_loongarch.ld",
     "-Cforce-frame-pointers=yes",
-    "-Ctarget-feature=-lsx,-lasx",
+    # 2K1000LA 的 LA264 核不支持非对齐访存（CPUCFG1.UAL=0），而 LLVM LoongArch 后端
+    # 默认会为非对齐字段/store-merging 生成 st.w/ld.w 等对齐指令，真机上触发 ADEM 异常。
+    # 关闭 ual 让 LLVM 对非对齐字段改走逐字节访问（QEMU 下行为不变，仅略慢）。
+    "-Ctarget-feature=-lsx,-lasx,-ual",
 ]
 
 [profile.dev]
