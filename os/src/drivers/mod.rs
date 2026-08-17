@@ -1,5 +1,8 @@
 // os/src/driver.rs
 
+// board_jh7110 下块设备换成 jh7110_sd，virtio-blk 相关 import/构造变死代码。
+#![cfg_attr(feature = "board_jh7110", allow(unused_imports, dead_code))]
+
 mod device;
 mod disk;
 #[cfg(all(target_arch = "riscv64", feature = "board_jh7110"))]
@@ -22,7 +25,9 @@ use {
     virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader},
 };
 
-#[cfg(target_arch = "riscv64")]
+#[cfg(all(target_arch = "riscv64", feature = "board_jh7110"))]
+pub type BlockDeviceImpl = jh7110_sd::SdCard;
+#[cfg(all(target_arch = "riscv64", not(feature = "board_jh7110")))]
 pub type BlockDeviceImpl = VirtIoBlkDev<VirtIoHalImpl, MmioTransport<'static>>;
 #[cfg(target_arch = "loongarch64")]
 pub type BlockDeviceImpl = VirtIoBlkDev<VirtIoHalImpl, PciTransport>;
@@ -33,7 +38,12 @@ pub type NetDeviceImpl = VirtIoNetDev<VirtIoHalImpl, MmioTransport<'static>>;
 pub type NetDeviceImpl = VirtIoNetDev<VirtIoHalImpl, PciTransport>;
 
 impl BlockDeviceImpl {
-    #[cfg(target_arch = "riscv64")]
+    #[cfg(all(target_arch = "riscv64", feature = "board_jh7110"))]
+    pub fn new_device(_index: usize) -> DevResult<Self> {
+        jh7110_sd::SdCard::new()
+    }
+
+    #[cfg(all(target_arch = "riscv64", not(feature = "board_jh7110")))]
     pub fn new_device(index: usize) -> DevResult<Self> {
         let &(virtio0, virtio0_size) = VIRTIO_MMIO.get(index).ok_or(DevError::InvalidParam)?;
         let header = NonNull::new((virtio0 + KERNEL_BASE) as *mut VirtIOHeader).unwrap();
