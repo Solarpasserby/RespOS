@@ -5,7 +5,9 @@ target = "loongarch64-unknown-none"
 rustflags = [
     "-Clink-arg=-Tsrc/linker_loongarch.ld",
     "-Cforce-frame-pointers=yes",
-    "-Ctarget-feature=-lsx,-lasx",
+    # 2K1000LA 的 LA264 核不支持非对齐访存（与内核 os 侧同样的原因），关闭 ual
+    # 让 LLVM 对非对齐字段改走逐字节访问，避免用户程序在真机触发 ADEM。
+    "-Ctarget-feature=-lsx,-lasx,-ual",
 ]
 
 [profile.dev]
