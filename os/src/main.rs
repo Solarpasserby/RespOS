@@ -63,8 +63,19 @@ pub fn rust_main(hart_id: usize, opaque: usize) -> ! {
             "[vf2] mm::init ok, free_frames = {}",
             mm::free_frame_count()
         );
+        // Stage 3：timer 中断 + trap。每 1 秒打印一次，验证 SBI set_timer → mtimecmp
+        // → supervisor timer interrupt → trap 重装 → WFI 唤醒 全链路。若 timer 不工作，
+        // 首次 WFI 会永久挂住、无任何 tick 输出。
+        trap::enable_timer_interrupt();
+        timer::set_next_ti_trigger();
+        let mut last_ms = timer::get_time_ms();
         loop {
             arch::wait_for_interrupt();
+            let now_ms = timer::get_time_ms();
+            if now_ms.saturating_sub(last_ms) >= 1000 {
+                println!("[vf2] timer tick at {} ms", now_ms);
+                last_ms = now_ms;
+            }
         }
     }
     #[cfg(not(feature = "board_jh7110"))]
