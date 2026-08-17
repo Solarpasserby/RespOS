@@ -57,7 +57,7 @@ impl AhciBlockDevice {
         #[cfg(feature = "board_ls2k1000")]
         crate::arch::sbi::early_print("[kernel] AHCI: probing...\n");
 
-        let driver = unsafe { AhciDriver::try_new(base) }.ok_or(DevError::BadState)?;
+        let mut driver = unsafe { AhciDriver::try_new(base) }.ok_or(DevError::BadState)?;
 
         #[cfg(feature = "board_ls2k1000")]
         {
@@ -66,6 +66,17 @@ impl AhciBlockDevice {
             crate::arch::sbi::early_print(", block_size=0x");
             crate::arch::sbi::early_print_hex(driver.block_size());
             crate::arch::sbi::early_print("\n");
+
+            // 诊断：读 block2（ext4 superblock @offset1024）验证 DMA 读数据。
+            let mut sb = [0u8; 512];
+            if driver.read(2, &mut sb) {
+                let magic = u16::from_le_bytes([sb[56], sb[57]]);
+                crate::arch::sbi::early_print("[kernel] AHCI: block2 magic=0x");
+                crate::arch::sbi::early_print_hex(magic as usize);
+                crate::arch::sbi::early_print(" (ext4=0xef53)\n");
+            } else {
+                crate::arch::sbi::early_print("[kernel] AHCI: read block2 failed\n");
+            }
         }
         #[cfg(not(feature = "board_ls2k1000"))]
         println!(
