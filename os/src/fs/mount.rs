@@ -708,7 +708,12 @@ fn dirent_name(d_name: &[u8]) -> Option<&str> {
 
 /// 初始化根文件系统，返回根 Path 供 init 进程使用。
 pub fn init_root_fs() -> Arc<Path> {
-    let root_fs = crate::fs::ext4::super_block();
+    let Some(root_fs) = crate::fs::ext4::try_super_block() else {
+        // 无块设备（真机 Stage 4 未接 AHCI / 无盘）：返回零初始化根路径，跳过
+        // procfs/devfs/aux-fs。用户程序仍可运行，磁盘相关 syscall 会 ENODEV。
+        println!("[kernel] no root block device, using zero-init root fs");
+        return Path::zero_init();
+    };
     let root_inode = root_fs.root_inode();
     let root_dentry = Arc::new(Dentry::new("/".into(), None, root_inode.clone()));
     ensure_tmp_dir(&root_inode, &root_dentry);

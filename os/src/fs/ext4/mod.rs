@@ -13,13 +13,16 @@ pub use inode::*;
 pub use super_block::*;
 
 lazy_static! {
-    static ref SUPER_BLOCK: Arc<Ext4SuperBlock> = {
-        let device = BlockDeviceImpl::new_device(0)
-            .expect("[kernel] required root virtio block device is unavailable");
-        Arc::new(
-            Ext4SuperBlock::new(Disk::new(Arc::new(device)), 0, "ext4_root", "/", b"/\0")
-                .expect("[kernel] failed to initialize root EXT4 filesystem"),
-        )
+    static ref SUPER_BLOCK: Option<Arc<Ext4SuperBlock>> = {
+        match BlockDeviceImpl::new_device(0) {
+            Ok(device) => Some(Arc::new(
+                Ext4SuperBlock::new(Disk::new(Arc::new(device)), 0, "ext4_root", "/", b"/\0")
+                    .expect("[kernel] failed to initialize root EXT4 filesystem"),
+            )),
+            // 无块设备（真机 Stage 4 未接 AHCI / QEMU 未挂盘）：根 ext4 不可用，
+            // 由 init_root_fs 降级为零初始化根路径，让无盘也能进用户态。
+            Err(_) => None,
+        }
     };
     static ref AUXILIARY_SUPER_BLOCK: Mutex<Option<Arc<Ext4SuperBlock>>> = Mutex::new(None);
 }
@@ -41,11 +44,17 @@ pub fn auxiliary_super_block() -> crate::syscall::SysResult<Arc<Ext4SuperBlock>>
 }
 
 pub fn root_inode() -> Arc<dyn InodeOp> {
-    SUPER_BLOCK.root_inode()
+    super_block().root_inode()
 }
 
+/// 尝试获取根 ext4 超级块；无块设备时返回 `None`。
+pub fn try_super_block() -> Option<Arc<dyn SuperBlockOp>> {
+    SUPER_BLOCK.clone().map(|sb| sb as Arc<dyn SuperBlockOp>)
+}
+
+/// 获取根 ext4 超级块；无块设备时 panic（供磁盘必需路径使用）。
 pub fn super_block() -> Arc<dyn SuperBlockOp> {
-    SUPER_BLOCK.clone()
+    try_super_block().expect("[kernel] required root virtio block device is unavailable")
 }
 
 pub fn shutdown() -> crate::syscall::SysResult {
@@ -56,7 +65,9 @@ pub fn shutdown() -> crate::syscall::SysResult {
         .lock()
         .as_ref()
         .map_or(Ok(()), |super_block| super_block.shutdown());
-    let root_result = SUPER_BLOCK.shutdown();
+    let root_result = SUPER_BLOCK
+        .as_ref()
+        .map_or(Ok(()), |super_block| super_block.shutdown());
     auxiliary_result?;
     root_result
 }
