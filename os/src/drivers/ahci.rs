@@ -58,6 +58,8 @@ impl AhciBlockDevice {
         crate::arch::sbi::early_print("[kernel] AHCI: probing...\n");
 
         let mut driver = unsafe { AhciDriver::try_new(base) }.ok_or(DevError::BadState)?;
+        #[cfg(not(feature = "board_ls2k1000"))]
+        let _ = &mut driver; // QEMU LA 下 driver 只读，避免 unused_mut
 
         #[cfg(feature = "board_ls2k1000")]
         {

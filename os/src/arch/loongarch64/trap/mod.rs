@@ -269,6 +269,63 @@ pub fn trap_handler(cx: &mut TrapContext) {
     }
 }
 
+/// 内核态非对齐访存（ADEM）模拟。LA264 UAL=0，lwext4 C 库等按 +ual 编译的代码会在
+/// 真机触发 ADEM；这里逐字节模拟 ld/st，成功后把 ERA 推进到下一条指令。
+/// 返回 false 表示不是可模拟的指令（交给上层 panic）。
+fn emulate_unaligned_access(cx: &mut TrapContext) -> bool {
+    // LoongArch 2RI12 访存指令：opcode=inst[31:22], si12=inst[21:10], rj=inst[9:5], rd=inst[4:0]。
+    let inst = unsafe { core::ptr::read_volatile(cx.era as *const u32) } as usize;
+    let opcode = (inst >> 22) & 0x3ff;
+    let si12 = ((inst >> 10) & 0xfff) as i16 as isize;
+    let rj = (inst >> 5) & 0x1f;
+    let rd = inst & 0x1f;
+
+    let addr = (cx.x[rj] as isize).wrapping_add(si12) as usize;
+
+    let read_bytes = |addr: usize, n: usize| -> usize {
+        let mut v = 0usize;
+        for i in 0..n {
+            v |= (unsafe { core::ptr::read_volatile((addr + i) as *const u8) } as usize) << (i * 8);
+        }
+        v
+    };
+    let write_bytes = |addr: usize, val: usize, n: usize| {
+        for i in 0..n {
+            unsafe {
+                core::ptr::write_volatile((addr + i) as *mut u8, ((val >> (i * 8)) & 0xff) as u8)
+            };
+        }
+    };
+
+    let loaded = match opcode {
+        0xa0 => Some((read_bytes(addr, 1) as u8 as i8) as isize as usize), // ld.b
+        0xa1 => Some((read_bytes(addr, 2) as u16 as i16) as isize as usize), // ld.h
+        0xa2 => Some((read_bytes(addr, 4) as u32 as i32) as isize as usize), // ld.w
+        0xa3 => Some(read_bytes(addr, 8)),                                   // ld.d
+        0xa8 => Some(read_bytes(addr, 1)),                                   // ld.bu
+        0xa9 => Some(read_bytes(addr, 2)),                                   // ld.hu
+        0xaa => Some(read_bytes(addr, 4)),                                   // ld.wu
+        _ => None,
+    };
+    if let Some(val) = loaded {
+        if rd != 0 {
+            cx.x[rd] = val;
+        }
+        cx.era += 4;
+        return true;
+    }
+
+    match opcode {
+        0xa4 => write_bytes(addr, cx.x[rd], 1), // st.b
+        0xa5 => write_bytes(addr, cx.x[rd], 2), // st.h
+        0xa6 => write_bytes(addr, cx.x[rd], 4), // st.w
+        0xa7 => write_bytes(addr, cx.x[rd], 8), // st.d
+        _ => return false,
+    }
+    cx.era += 4;
+    true
+}
+
 #[unsafe(no_mangle)]
 pub fn trap_from_kernel(cx: &mut TrapContext) {
     match estat::cause(estat::read()) {
@@ -278,6 +335,17 @@ pub fn trap_from_kernel(cx: &mut TrapContext) {
         }
         estat::Trap::Exception(estat::Exception::IllegalInstruction) => {
             panic!("[kernel] IllegalInstruction at 0x{:x}", cx.era);
+        }
+        estat::Trap::Exception(estat::Exception::AddressNotAligned) => {
+            // LA264 UAL=0，lwext4 C 库等代码的非对齐访存走这里逐字节模拟。
+            if !emulate_unaligned_access(cx) {
+                panic!(
+                    "[kernel] AddressNotAligned not emulated: era = {:#x}, badv = {:#x}, inst = {:#x}",
+                    cx.era,
+                    badv::read(),
+                    unsafe { core::ptr::read_volatile(cx.era as *const u32) }
+                );
+            }
         }
         estat::Trap::Exception(exception) if is_page_fault(exception) => {
             panic!(
