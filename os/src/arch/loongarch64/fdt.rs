@@ -185,6 +185,9 @@ pub unsafe fn memory_end_from_fdt(fdt_addr: usize) -> Option<usize> {
                         for cell in 0..address_cells {
                             address = (address << 32) | read_be32(cursor + off + cell * 4)? as u64;
                         }
+                        // 2K1000LA 的 FDT /memory 用 0x9000 窗口 VA（0x90000000_...），
+                        // 掩到 48-bit 得到物理地址（对齐 StarryOS 的 to_phys）。
+                        address &= (1u64 << 48) - 1;
                         let mut size = 0u64;
                         for cell in 0..size_cells {
                             size = (size << 32)

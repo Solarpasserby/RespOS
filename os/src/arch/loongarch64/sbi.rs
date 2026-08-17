@@ -73,7 +73,7 @@ pub fn early_print(s: &str) {
 #[cfg(feature = "board_ls2k1000")]
 pub fn early_print_hex(v: usize) {
     early_print("0x");
-    for shift in (0..64).rev().step_by(4) {
+    for shift in (0..64).step_by(4).rev() {
         let d = ((v >> shift) & 0xf) as u8;
         let c = if d < 10 { b'0' + d } else { b'a' + d - 10 };
         early_putchar(c);
