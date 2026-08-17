@@ -56,6 +56,16 @@ pub const MAX_PHYSICAL_MEMORY_END: usize = 0xc000_0000;
 //   SATA/AHCI:    0x400e_0000（irq 19）
 //   GMAC:         eth0 0x4004_0000 / eth1 0x4005_0000
 
+/// UART console 基址。
+///
+/// QEMU virt 用 `0x1fe0_01e0`；2K1000LA 真机 console 是 `0x1fe2_0000`
+/// （ttyS0，compatible=`ns16550a`，DTB 无 `reg-shift` → byte stride，
+/// 寄存器偏移同 QEMU：THR@0 / LSR@5）。
+#[cfg(not(feature = "board_ls2k1000"))]
+pub const UART_BASE: usize = 0x1fe0_01e0;
+#[cfg(feature = "board_ls2k1000")]
+pub const UART_BASE: usize = 0x1fe2_0000;
+
 /// QEMU loongarch64/virt fw_cfg MMIO window.
 #[cfg(not(feature = "board_ls2k1000"))]
 const FW_CFG_DATA: usize = 0x1e02_0000;

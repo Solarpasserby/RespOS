@@ -4,10 +4,12 @@
 // RISC-V 通过 SBI ecall 调用固件服务，LoongArch 因为直接运行在裸机（-bios），
 // 所以这里直接访问 UART，并通过本地 register 模块操作 CSR。
 
-use super::{config::GED_REG_BASE, register};
+use super::{
+    config::{GED_REG_BASE, UART_BASE},
+    register,
+};
 
-const UART_BASE: usize = 0x1fe0_01e0;
-// NS16550 寄存器偏移
+// NS16550 寄存器偏移（byte stride，THR@0 / LSR@5）
 const UART_THR: usize = UART_BASE + 0; // Transmit Holding Register
 const UART_RBR: usize = UART_BASE + 0; // Receiver Buffer Register
 const UART_LSR: usize = UART_BASE + 5; // Line Status Register
