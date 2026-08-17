@@ -30,12 +30,12 @@ override SUBMIT_AUX_FS_SIZE := 16M
 
 # Local root images.  Preliminary images are restored under unambiguous names
 # from the retained official archives; final images are the public large disks.
-RV_PRE_ARCHIVE ?= img/sdcard-rv.img.xz
-LA_PRE_ARCHIVE ?= img/sdcard-la.img.xz
-RV_PRE_FS_IMG ?= img/sdcard-rv-pre.img
-LA_PRE_FS_IMG ?= img/sdcard-la-pre.img
-RV_FINAL_FS_IMG ?= img/sdcard-rv-pub.img
-LA_FINAL_FS_IMG ?= img/sdcard-la-pub.img
+RV_PRE_ARCHIVE ?= img/rv-2026-初赛.img.xz
+LA_PRE_ARCHIVE ?= img/la-2026-初赛.img.xz
+RV_PRE_FS_IMG ?= img/rv-2026-初赛.img
+LA_PRE_FS_IMG ?= img/la-2026-初赛.img
+RV_FINAL_FS_IMG ?= img/rv-2025-决赛.img
+LA_FINAL_FS_IMG ?= img/la-2025-决赛.img
 RV_SOFTWARE_FS_IMG ?= img/alpine-linux-riscv64-ext4fs.img
 LA_SOFTWARE_BASE_IMG ?= img/alpine-linux-loongarch64-ext4fs.img
 LA_SOFTWARE_FS_IMG ?= /tmp/respos-la-software-root.img
