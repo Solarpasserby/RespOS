@@ -231,6 +231,24 @@ pub fn trap_handler(cx: &mut TrapContext) {
             );
             exit_and_run_next(-4);
         }
+        // LA264 UAL=0，用户态非对齐访存会触发 ADEM。预编译的 core/alloc rlib 仍可能
+        // 生成非对齐 ld.d/st.d（见 workflow 坑：core::char::escape_debug_ext）。这里按
+        // SIGBUS 结束该任务而不是 panic 整个内核，后续可再加指令级模拟兜底。
+        estat::Trap::Exception(
+            estat::Exception::AddressError | estat::Exception::AddressNotAligned,
+        ) => {
+            let badv = badv::read();
+            let tid = current_task().map(|task| task.tid()).unwrap_or(usize::MAX);
+            println!(
+                "[kernel] AddressNotAligned in application, tid = {}, era = {:#x}, badv = {:#x}, kernel killed it.",
+                tid, cx.era, badv
+            );
+            if let Some(task) = current_task() {
+                let siginfo = SigInfo::new(Sig::SIGBUS.raw(), SigInfo::KERNEL, SiField::None);
+                task.receive_siginfo(siginfo, true);
+            }
+            exit_by_signal_and_run_next(Sig::SIGBUS.raw());
+        }
         estat::Trap::Interrupt(interrupt) => {
             panic!(
                 "[kernel] Unsupported interrupt: {:?}, era = {:#x}",
