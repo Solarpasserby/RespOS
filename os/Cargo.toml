@@ -15,6 +15,7 @@ debug_traces = []
 fault_trace = []
 la_global_kernel = []
 kernel_http = []
+board_jh7110 = []
 
 [[bin]]
 name = "os"

@@ -21,19 +21,18 @@
 
 ---
 
-## 1. 一个重要纠正：RespOS 当前**没有** virtio-net
+## 1. virtio-net 现状（随分支更新）
 
-用户假设「当前网络使用 virtio-net」**不成立**。证据：
+> 注意：最初分析基于 `main@9bc6ecd`，当时**没有** virtio-net。当前 `port/jh7110` 已切到
+> `main@6f3fd4d`（合入 `feat/http`），**此时 virtio-net 驱动已经存在**：
+> - `drivers/virtio/net_dev.rs`（`VirtIoNetDev`）、`drivers/mod.rs::find_virtio_net_mmio()`、
+>   `net/ethernet.rs`（`EthernetDevice` 实现 smoltcp `Device`）、`net/mod.rs::init()` 拉起
+>   `ETH_DEV`/`ETH_IFACE`（QEMU slirp 静态 IP `10.0.2.15/24`）。
+> - 另有 `net/http.rs`（`kernel_http` feature）与 goldfish RTC（`timer.rs` `GOLDFISH_RTC_BASE=0x101000`、
+>   `syscall::init_realtime_from_rtc()`）。
 
-- `os/src/net/mod.rs` 的 `init()` / `poll_interfaces()` 只创建并驱动一个 `LoopbackDev`
-  （`net/loopback.rs`），`Medium::Ip`，`127.0.0.1`；没有任何物理 NIC 设备。
-- `grep VirtIONet|virtio_net|EthernetDevice` 在整个 `os/src` 零命中；`virtio-drivers` crate
-  只被 `drivers/virtio/block_dev.rs` 用于 `VirtIOBlk`。
-- 比赛里的 iperf 全走 loopback。
-
-**因此 Stage 6 不是「把 virtio-net 换成 GMAC」，而是「给 smoltcp 写第一个真实 `phy::Device`（GMAC）」**。
-好消息是 smoltcp/socket/tcp/udp 层与 `LoopbackDev` 完全可复用，只需新增一个 GMAC `Device` + 第二个
-`Interface`（非 loopback）。
+**因此 Stage 6 是「把 virtio-net 换成 JH7110 GMAC」**：`EthernetDevice` 目前硬编码适配
+`VirtIoNetDev`，需改为适配 GMAC `phy::Device`；smoltcp/socket/tcp/udp 层与 `LoopbackDev` 完全可复用。
 
 ---
 
@@ -77,12 +76,14 @@
 `init_frame_allocator`（`mm/frame_allocator.rs:156-161`）就以 `[reserved_end, memory_end)` 作为可分配区间。
 QEMU 里 OpenSBI/DTB 位于 RAM 顶部，但栈式分配器自底向上分配、workload 远不能把 16 GiB 吃光，所以从不触顶。
 
-JH7110 上**不一样**：
-- DTB 被 U-Boot 放在 `fdt_addr_r`（约 `0x46000000`），位于 DDR 中下部，**处于 frame allocator 区间内**；
-- OpenSBI/U-Boot 占用 DDR 顶部（约 8 GiB 末端），也在区间内。
+JH7110 上**不一样**（真机 `bdinfo` 已实测，4 GiB 版）：
+- DTB 被 U-Boot 放在 `fdt_addr_r=0x46000000`（DDR 中下部，**处于 frame allocator 区间内**）；
+- OpenSBI 在 DDR **底部** `0x40000000`（`Firmware Base: 0x40000000`，`reserved[0] [0x40000000-0x4007ffff]`；
+  内核装在 `0x40200000` 紧跟其后，所以底部 OpenSBI 区天然被排除在 frame allocator 之外）；
+- U-Boot 重定位到 DDR **顶部**（`relocaddr=0xfff44000`，紧贴 4 GiB 末址 `0x13fffffff`），**在区间内**。
 
-一旦分配器推进到这些地址，会覆盖 DTB/OpenSBI/U-Boot。**Stage 2 必须处理**：至少保留
-`/reserved-memory` 或把 `memory_end` 上界压到 OpenSBI 之下、并把 DTB 复制/保留到安全地址。
+一旦分配器推进到这些地址，会覆盖 DTB/顶部 U-Boot。**Stage 2 必须处理**：保留 `/reserved-memory`、
+把 DTB 复制/保留到安全地址，并把 `memory_end` 上界压到 U-Boot 重定位区（`0xfff44000`）之下。
 Stage 1（只输出 Hello，几乎不分配）可暂不处理。
 
 ### 2.4 A/B/C 复用分类（对应需求第五部分）
@@ -159,6 +160,25 @@ OpenSBI 在 **hart 1** 上启动（`OpenSBI boots on Hart 1`，官方 OpenSBI �
 
 `fdt_high=0xffffffffffffffff` 是关键：U-Boot 不会把 DTB 搬到高地址，`booti` 后内核 `a1=0x46000000`。
 
+**StarryOS 源码印证**（crate `ax-plat-riscv64-visionfive2` 0.1.10，与上述 DTS 完全一致）：
+- `boot.rs` `_start`：注释明确 `PC = 0x40200000, a0 = hartid, a1 = dtb`；进入后 `addi a0, a0, -1`
+  把 hart id（1..4）归一为 0-based cpu id——RespOS 目前直接用 `a0` 当 hart id，Stage 7 需照此处理。
+- `console.rs`：**不走 SBI**，直接 `uart_16550::MmioSerialPort::new_with_stride(addr, 4)`（stride=4 =
+  `reg-shift=2`），且不调 `init()`，证明 firmware 已初始化 UART0、直写即可。
+- `irq.rs`：PLIC S-mode context = `2 × hart_id`（hart0=S7 无 S 态）；timer 用 `riscv::register::time` +
+  `sbi_rt::set_timer`，与 RespOS 完全同构。
+- `mem.rs`：free RAM 从 `KERNEL_BASE_PADDR=0x40200000` 起算（`0x40000000..0x40200000` 被 SBI 占用），
+  且 `reserved_phys_ram_ranges()` 暂返回空、有 `TODO: parse dtb`——即它也未解析 `/reserved-memory`，
+  印证 §2.3 的 DDR 顶部保留问题在 StarryOS 同样未闭环。
+
+**真机实测确认（2026-08，用户 VisionFive 2 v1.3B / 4 GiB，U-Boot 2021.10 SDK 5.15）**：
+- `DRAM: 4 GiB`（`0x40000000..0x13fffffff`）；`PCB revision: 0xb2`、`chip_vision=B`、`BOM revision: A`。
+- OpenSBI v1.2：`Firmware Base 0x40000000`（底部 512 KB `reserved[0]`）、`aclint-mtimer @ 4000000Hz`、
+  `Boot HART ID: 1`、`Domain0 Next Address: 0x40200000`、`Platform Console Device: uart8250`。
+- U-Boot 重定位到顶部 `relocaddr=0xfff44000`；`booti`/`tftpboot`/`dhcp`/`ping` 均可用；
+  `fdtfile=starfive/starfive_visionfive2.dtb`；`bootargs=...earlycon=sbi` 说明 **SBI console 在本固件可用**。
+- 结论：§4/§7 的 `0x40200000` 装载、`0x46000000` DTB、`booti` 选型、4 MHz、直写 UART0 全部成立。
+
 ---
 
 ## 4. 最小真机启动方案（Stage 0/1）
@@ -185,8 +205,9 @@ OpenSBI 在 **hart 1** 上启动（`OpenSBI boots on Hart 1`，官方 OpenSBI �
 2. **`os/src/arch/rv64/entry/entry.asm`** — `boot_pagetable` 重写为 JH7110 布局（§7.3 给出精确结构）。
 3. **`os/src/arch/rv64/config/board.rs`**
    - `HARDWARE_CLOCK_FREQ = 4_000_000`（USER/ACCOUNTING 跟随）。
-   - `MEMORY_START = 0x4000_0000`、`MEMORY_END`（FDT 兜底）= `0x8000_0000`、
-     `MAX_PHYSICAL_MEMORY_END = 0x2_4000_0000`（8 GiB）。
+   - `MEMORY_START = 0x4020_0000`（内核装载地址；与当前 QEMU 语义一致，且 StarryOS 的
+     `KERNEL_BASE_PADDR=0x40200000` 同样从装载地址起算，因为 `0x40000000..0x40200000` 被 SBI 占用）、
+     `MEMORY_END`（FDT 兜底）= `0x8000_0000`、`MAX_PHYSICAL_MEMORY_END = 0x2_4000_0000`（8 GiB）。
    - `init_physical_memory_end` 的 `clamp` 下界相应改。
    - `VIRTIO_MMIO` 表暂时清空（Stage 1 不用），后续替换为 JH7110 MMIO 表（UART/CLINT/PLIC/SDIO/GMAC）。
 4. **`os/src/mm/memory_set.rs:2224`** — `first_gigabyte_end = 0x8000_0000.min(memory_end)`。
@@ -273,32 +294,40 @@ Stage 1 若暂时不用 FDT（内存硬编码），可省略 DTB、`booti 0x4020
 ## 7. 第一批可执行修改任务（Stage 1）
 
 ### 7.1 增加 VisionFive 2 board 配置
-- `os/Cargo.toml` 增 `board_jh7110` feature（与 `la_global_kernel` 并列，默认关）。
+- `os/Cargo.toml` 增 `board_jh7110` feature（与 `la_global_kernel` 并列，**不在 default**）。
 - `board.rs` 用 `#[cfg(feature="board_jh7110")]` 提供 JH7110 常量组（§4.2 第 3 条）。
-- 保守起见先不引入第二个 linker script，先用 `linker_riscv.ld` 里的符号在构建期由 Makefile 传入
-  `LOAD_ADDRESS`，或直接复制为 `linker_jh7110.ld` 只改两行。
+- **隔离落地（已实现）**：JH7110 专属内容放独立文件，QEMU 零改动——
+  `os/src/linker_jh7110.ld`、`os/src/arch/rv64/entry/entry_jh7110.asm`、
+  `os/cargo/config-jh7110.toml`；`entry/mod.rs` 按 feature 选择汇编，
+  `Makefile` 新增 `prepare-jh7110-cargo-config` + `build-vf2`（`--features board_jh7110`）。
+  默认 `make build-rv` 仍走 `entry.asm` + `linker_riscv.ld` + QEMU 常量，行为不变。
 
 ### 7.2 linker script
 `LOAD_ADDRESS` 0x80200000 → **0x40200000**；`BASE_ADDRESS` → **0xffffffc040200000**。
 `KERNEL_OFFSET` 保持 `0xffffffc000000000`。
 
 ### 7.3 `_start` / early page table
-`entry.asm` 的 `boot_pagetable` 布局改为（已在本地用脚本核验 VPN 索引）：
+`entry.asm` 的 `boot_pagetable` 改为 StarryOS 已验证的最小 4 项布局（额外**补上 MMIO 区**，使早期可直写
+UART0 定位失败，这点比我原方案的「只映射 DDR」更优）：
 
 ```text
-.zero 8*1            # 跳过 VPN2=0
-.rept 8              # identity：0x40000000..0x240000000（8 个 1 GiB leaf，VPN2=1..8）
-  .quad (boot_ppn << 10) | 0xcf
-  .set boot_ppn, boot_ppn + 0x40000   # boot_ppn 初始 = 0x40000
-.endr
-.zero 8*248          # 跳过 VPN2=9..256
-.rept 8              # high-half：0xffffffc040000000..（VPN2=257..264）
-  .quad (boot_ppn << 10) | 0xcf
-  .set boot_ppn, boot_ppn + 0x40000   # boot_ppn 重新初始 = 0x40000
-.endr
-.zero 8*247          # 跳过 VPN2=265..511
+boot_pagetable:
+    .align 12
+    # identity 0x0000_0000..0x4000_0000（含 MMIO：UART0/CLINT/PLIC）
+    .quad (0x0 << 10) | 0xcf
+    # identity 0x4000_0000..0x8000_0000（首 1 GiB DDR：kernel/DTB/heap）
+    .quad (0x40000 << 10) | 0xcf
+    .zero 8 * 254                      # VPN2=2..255 未映射
+    # high-half 0xffffffc0_0000_0000..0xffffffc0_4000_0000（MMIO 高半，供 KERNEL_BASE+pa 访问）
+    .quad (0x0 << 10) | 0xcf
+    # high-half 0xffffffc0_4000_0000..0xffffffc0_8000_0000（首 1 GiB DDR 高半，含 0x40200000 内核）
+    .quad (0x40000 << 10) | 0xcf
+    .zero 8 * 254                      # VPN2=258..511 未映射
 ```
-（1 + 8 + 248 + 8 + 247 = 512 项。high-half 映射起点 VPN2=257 对应 `KERNEL_BASE+0x40000000`。）
+（1+1+254+1+1+254 = 512 项。StarryOS `boot.rs::init_boot_page_table` 正是这 4 项、flags 用 `0xef` 带
+Global 位；RespOS 沿用现有 `0xcf`（无 Global）以保持与 QEMU 页表一致。首 1 GiB DDR 足够覆盖
+kernel(0x40200000)/DTB(0x46000000)/heap(0x40b00000..)，其余 7 GiB 由 `mm::init` 的正式 direct map
+按 FDT 实际末址补齐——比映射满 8 GiB 更省、更贴合 StarryOS 实机验证。）
 
 ### 7.4 FDT 地址保存与传递
 - 现有 `rust_main(hart_id, opaque)` 已经把 `a1`（=DTB PA）作为 `opaque` 传入，并立即
@@ -310,6 +339,11 @@ Stage 1 若暂时不用 FDT（内存硬编码），可省略 DTB、`booti 0x4020
 可以，但**不要依赖 legacy `console_putchar`**。改 `sbi.rs::console_putchar` 为 SBI DBCN（`console_write`，
 EID `0x4442434E`）。若真机无输出，再直写 UART0：基址 `0x10000000`，`reg-shift=2`，用 `KERNEL_BASE + pa`
 作虚拟地址，DW8250 LSR/THR 轮询写（无需开时钟，firmware 已配好）。
+
+**StarryOS 印证**：它的 `console.rs` **不走 SBI**，而是直接 `uart_16550::MmioSerialPort::new_with_stride(addr, 4)`
+（stride=4 即 `reg-shift=2`），且 `init_early()` 不调 `uart.init()`——证明 firmware 已把 UART0 初始化好、
+直写即可用。这比 SBI console 更可靠，建议 Stage 1 直接采用直写 UART0（约 40 行 16550 驱动），SBI DBCN 作为
+备选。
 
 ### 7.6 Makefile 生成真机 kernel
 ```make

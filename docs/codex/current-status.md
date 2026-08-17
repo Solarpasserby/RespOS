@@ -1,5 +1,27 @@
 # RespOS 当前状态
 
+## 2026-08-17 VisionFive 2 (JH7110) Stage 1 真机启动成功（`port/jh7110` 分支）
+
+- **结果**：RespOS 首次在 VisionFive 2 真机跑通最小启动链，串口输出
+  `[vf2] Hello RespOS on VisionFive 2 (hart_id=1, dtb=0xff748628)`。验证了 JH7110 的
+  `0x40200000` 装载、4 项 early page table（MMIO + 首 1 GiB DDR identity/高半区）、
+  `KERNEL_BASE=0xffffffc0...` 高半区模型、`a0=hart id`、以及 OpenSBI 1.2 的 legacy SBI console。
+- **环境**：板 v1.3B（`PCB revision 0xb2`/`chip_vision=B`）4 GiB DRAM；OpenSBI v1.2
+  （`aclint-mtimer @ 4000000Hz`、`Boot HART 1`、`Domain0 Next Address 0x40200000`）；
+  U-Boot 2021.10 SDK 5.15。加载用 TFTP：`tftpboot 0x40200000 kernel-vf2.bin; go 0x40200000`。
+- **隔离落地**：`board_jh7110` Cargo feature + 独立文件
+  `os/src/linker_jh7110.ld`、`os/src/arch/rv64/entry/entry_jh7110.asm`、`os/cargo/config-jh7110.toml`；
+  QEMU `make build-rv` 基线不变（`Entry/PhysicalAddress 0x80200000` 确认）。构建命令需
+  `CMAKE_POLICY_VERSION_MINIMUM=3.5 RUSTUP_TOOLCHAIN=nightly-2025-01-18`（lwext4 的 CMake 3.4 与
+  宿主 CMake 4.x 冲突，见 workflows.md）。
+- **已确认坑**：本板 U-Boot 的 `booti` 校验 RISC-V Image magic（`Bad Linux RISCV Image magic!`），
+  Stage 1 用 `go` 裸跳绕过；但 `go` 传参不可靠（本次 `a1=0xff748628` 非预期 DTB）。Stage 2 要解析
+  DTB，需给 `kernel-vf2.bin` 加 Image magic 头改用 `booti`，或显式 `fdt` 传 DTB。
+- **待验证/未做**：Stage 2（正式 MMU direct map + frame allocator + heap + FDT memory discovery）、
+  真机侧 SD 卡识别（`Card did not respond to voltage select: -110`，暂被 TFTP 绕过）、goldfish RTC 与
+  virtio-net 在 JH7110 的 gate 处理、SMP hart 拓扑（hart0=S7 无 MMU）。详见
+  [porting-visionfive2.md](../porting-visionfive2.md)。
+
 ## 2026-08-16 Git SSH 与 guest 内初步自举双架构闭合（当前工作树，基线 `993fa3e0`）
 
 - **交付链路**：新增只用于本地验证的 `mode=bootstrap`、`run-{rv,la}-bootstrap` 与临时辅助盘生成脚本。

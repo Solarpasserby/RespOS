@@ -1,13 +1,28 @@
-// RISC-V QEMU virt 机器时钟频率。
+// 板级时钟/内存常量。默认 QEMU virt；`board_jh7110` feature 切换到 VisionFive 2。
 //
 // 目前三类时间使用同一硬件尺度；保留拆分命名是为了和 LoongArch 的
 // bench-facing wall clock / timeout / accounting 设计保持一致。
+#[cfg(feature = "board_jh7110")]
+pub const HARDWARE_CLOCK_FREQ: usize = 4_000_000; // aclint-mtimer @ 4000000Hz
+#[cfg(not(feature = "board_jh7110"))]
 pub const HARDWARE_CLOCK_FREQ: usize = 10_000_000;
 pub const USER_CLOCK_FREQ: usize = HARDWARE_CLOCK_FREQ;
 pub const ACCOUNTING_CLOCK_FREQ: usize = HARDWARE_CLOCK_FREQ;
+
+#[cfg(feature = "board_jh7110")]
+pub const MEMORY_START: usize = 0x4020_0000;
+#[cfg(not(feature = "board_jh7110"))]
 pub const MEMORY_START: usize = 0x8020_0000;
+
+#[cfg(feature = "board_jh7110")]
+pub const MEMORY_END: usize = 0x8000_0000;
+#[cfg(not(feature = "board_jh7110"))]
 pub const MEMORY_END: usize = 0x9000_0000;
-/// End of the QEMU virt RAM window for the supported 16 GiB configuration.
+
+/// End of the supported RAM window（QEMU 16 GiB / VisionFive 2 4 GiB）。
+#[cfg(feature = "board_jh7110")]
+pub const MAX_PHYSICAL_MEMORY_END: usize = 0x1_4000_0000;
+#[cfg(not(feature = "board_jh7110"))]
 pub const MAX_PHYSICAL_MEMORY_END: usize = 0x4_8000_0000;
 
 use core::sync::atomic::{AtomicUsize, Ordering};

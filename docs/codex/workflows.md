@@ -174,6 +174,21 @@ RUSTUP_TOOLCHAIN=nightly-2025-01-18 make all
 仍不稳定的 `let` chains、`usize::is_multiple_of` 或其他需要 `#![feature(...)]` 的语言/标准库
 能力；以实际课程日志为准，不能只按本机较新的 nightly 判断可提交性。
 
+### 本地构建需要为 vendored lwext4 兼容 CMake 4.x
+
+`vendor/lwext4_rust/c/lwext4/CMakeLists.txt` 声明 `cmake_minimum_required(VERSION 3.4)`；CMake
+4.0 起移除了对 `< 3.5` 的兼容，会直接拒绝该最小版本。宿主机 CMake ≥ 4.0（实测 4.4.2）时，任何会
+触发 lwext4 C 编译的构建目标（`make build-rv` / `build-la` / `build-vf2` / `all`）都必须带上
+`CMAKE_POLICY_VERSION_MINIMUM=3.5`：
+
+```bash
+CMAKE_POLICY_VERSION_MINIMUM=3.5 RUSTUP_TOOLCHAIN=nightly-2025-01-18 make build-rv
+CMAKE_POLICY_VERSION_MINIMUM=3.5 RUSTUP_TOOLCHAIN=nightly-2025-01-18 make build-vf2
+```
+
+该变量只改变 CMake 的兼容策略下限，不改 vendored 源码或官方镜像。缺失时的报错形态是 CMake 在
+lwext4 配置阶段直接失败（并非 Rust/链接错误），排查顺序应先看这条而不是内核源码。
+
 ### 决赛设计文档
 
 - 状态：已实现
