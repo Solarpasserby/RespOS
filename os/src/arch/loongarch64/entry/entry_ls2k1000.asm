@@ -27,7 +27,7 @@ _start:
     # DMW0 = VSEG=0x8000（uncached IO 窗口），MAT=0(SUC)，PLV0。
     # 即 0x8000_0000_0000_0001。用 ori + lu52i.d 构造，避免 li.d 伪指令。
     ori      $t0, $zero, 0x1       # t0 = 1 (PLV0)
-    lu52i.d  $t0, $t0, 0x800       # t0[63:52] = 0x800 → 0x8000_0000_0000_0001
+    lu52i.d  $t0, $t0, -0x800       # t0[63:52] = 0x800 → 0x8000_0000_0000_0001
     csrwr    $t0, CSR_DMW0
 
     # CPU0 使用第一个 64 KiB early stack（按 CPUNUM 选栈）。
@@ -47,7 +47,7 @@ _start_secondary_phys:
     addi.d   $t0, $t0, 0x11
     csrwr    $t0, CSR_DMW1
     ori      $t0, $zero, 0x1
-    lu52i.d  $t0, $t0, 0x800
+    lu52i.d  $t0, $t0, -0x800
     csrwr    $t0, CSR_DMW0
 
     csrrd    $t1, 0x20
