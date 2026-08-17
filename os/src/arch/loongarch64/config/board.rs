@@ -20,22 +20,41 @@ pub const ACCOUNTING_CLOCK_FREQ: usize = HARDWARE_CLOCK_FREQ;
 // the PCI/MMIO hole.  `MEMORY_END` is only the compatibility fallback used when
 // QEMU memory discovery is unavailable.
 //
-// 2K1000LA 的 DDR 布局尚未接入：Stage 1 只做 entry + early UART，不触碰 frame
-// allocator / direct map / heap，因此下面仍是 QEMU 占位值。Stage 2 依据板载 U-Boot
-// `bdinfo` / `fdt print /memory` + 龙芯 2K1000LA 处理器用户手册确定 DDR 起止/是否分段后替换。
-// 已知：DDR 起始物理地址 = 0x0020_0000（StarryOS someboot 内核装载点即 DDR 起点）。
+// 2K1000LA（LSGD2K10 板）DDR 为两段（与 QEMU 同构，仅常量不同），来自真机
+// Linux 启动日志 `Early memory node ranges`：
+//   node 0: [mem 0x0000000000200000-0x000000000affffff]  （低段 174 MiB）
+//   node 0: [mem 0x0000000090000000-0x00000000bfffffff]  （高段 768 MiB）
+#[cfg(not(feature = "board_ls2k1000"))]
 pub const MEMORY_START: usize = 0;
-pub const LOW_MEMORY_END: usize = 0x1000_0000;
-pub const HIGH_MEMORY_START: usize = 0x8000_0000;
-pub const MEMORY_END: usize = 0x3_7000_0000;
-/// End of the high RAM window for the contest's supported 36 GiB maximum.
-pub const MAX_PHYSICAL_MEMORY_END: usize = 0x9_7000_0000;
+#[cfg(feature = "board_ls2k1000")]
+pub const MEMORY_START: usize = 0x0020_0000;
 
-// —— 2K1000LA 固定外设地址（Stage 2 起逐步接入，这里先留档）——
-//   UART0    (NS16550 兼容): 0x1fe0_01e0  —— 与 QEMU virt 相同（QEMU 即仿 Loongson）
-//   LIOINTC  主中断控制器:    0x1fe0_1400（reg）/ 0x1fe0_1040（ISR）
-//   GMAC0    以太网:          0x4004_0000
-//   SATA/AHCI: 由 DTB compatible "loongson,ls2k1000-ahci" 的 reg 给定
+#[cfg(not(feature = "board_ls2k1000"))]
+pub const LOW_MEMORY_END: usize = 0x1000_0000;
+#[cfg(feature = "board_ls2k1000")]
+pub const LOW_MEMORY_END: usize = 0x0b00_0000;
+
+#[cfg(not(feature = "board_ls2k1000"))]
+pub const HIGH_MEMORY_START: usize = 0x8000_0000;
+#[cfg(feature = "board_ls2k1000")]
+pub const HIGH_MEMORY_START: usize = 0x9000_0000;
+
+#[cfg(not(feature = "board_ls2k1000"))]
+pub const MEMORY_END: usize = 0x3_7000_0000;
+#[cfg(feature = "board_ls2k1000")]
+pub const MEMORY_END: usize = 0xc000_0000;
+
+/// End of the high RAM window for the supported maximum.
+#[cfg(not(feature = "board_ls2k1000"))]
+pub const MAX_PHYSICAL_MEMORY_END: usize = 0x9_7000_0000;
+#[cfg(feature = "board_ls2k1000")]
+pub const MAX_PHYSICAL_MEMORY_END: usize = 0xc000_0000;
+
+// —— 2K1000LA 固定外设地址（来自真机 Linux 启动日志 / 设备树，Stage 2 起逐步接入）——
+//   UART console: 0x1fe2_0000（ttyS0，16550A，irq 16）—— 不是 QEMU 的 0x1fe0_01e0
+//   LIOINTC:      0x1fe0_1400（interrupt-controller@1fe01400）
+//   SATA/AHCI:    0x400e_0000（irq 19）
+//   GMAC:         eth0 0x4004_0000 / eth1 0x4005_0000
 
 /// QEMU loongarch64/virt fw_cfg MMIO window.
 #[cfg(not(feature = "board_ls2k1000"))]
