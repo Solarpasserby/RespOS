@@ -184,6 +184,7 @@ pub const MMIO: &[(usize, usize)] = &[
     (0x1000_0000, 0x00_1000), // UART0
     (0x0200_0000, 0x00_1000), // CLINT (aclint-mtimer @ 4000000Hz)
     (0x0c00_0000, 0x400_0000), // PLIC (64 MiB)
+    (0x1601_0000, 0x4_0000), // SDIO0/SDIO1/GMAC0/GMAC1 (0x16010000..0x16050000)
 ];
 #[cfg(not(feature = "board_jh7110"))]
 pub const MMIO: &[(usize, usize)] = &[

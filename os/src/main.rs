@@ -63,6 +63,23 @@ pub fn rust_main(hart_id: usize, opaque: usize) -> ! {
             "[vf2] mm::init ok, free_frames = {}",
             mm::free_frame_count()
         );
+        // Stage 5：SD 卡驱动自检（初始化 + 读块 0，MBR 结尾应为 55 AA）。
+        match crate::drivers::jh7110_sd::SdCard::new() {
+            Ok(card) => {
+                println!("[vf2] SD card init ok");
+                let mut blk = [0u8; 512];
+                match crate::drivers::BlockDevice::read_block(&card, 0, &mut blk) {
+                    Ok(()) => {
+                        println!(
+                            "[vf2] read block 0 ok, tail={:02x}{:02x}",
+                            blk[510], blk[511]
+                        );
+                    }
+                    Err(e) => println!("[vf2] read block 0 failed: {:?}", e),
+                }
+            }
+            Err(e) => println!("[vf2] SD card init failed: {:?}", e),
+        }
         // Stage 3：timer 中断 + trap。每 1 秒打印一次，验证 SBI set_timer → mtimecmp
         // → supervisor timer interrupt → trap 重装 → WFI 唤醒 全链路。若 timer 不工作，
         // 首次 WFI 会永久挂住、无任何 tick 输出。

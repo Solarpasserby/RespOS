@@ -1,15 +1,25 @@
 # RespOS 当前状态
 
-## 2026-08-17 VisionFive 2 (JH7110) Stage 1+2+3 真机通过（`port/jh7110` 分支）
+## 2026-08-17 VisionFive 2 (JH7110) Stage 1+2+3+5(读块) 真机通过（`port/jh7110` 分支）
 
-- **结果**：RespOS 已在 VisionFive 2 真机跑通 Stage 1（Hello）、Stage 2（正式 MMU）、Stage 3（timer 中断
-  + trap）。Stage 2 输出 `physical_memory_end = 0x140000000`、`mm::init ok, free_frames ≈ 977399`；
-  Stage 3 输出 `timer tick at 315332 ms` 起每秒稳定 +1000 ms，证明 SBI set_timer → mtimecmp →
-  supervisor timer interrupt → trap 重装 → WFI 唤醒 + 4 MHz 时钟全链路正确。
-- **启动链路（已闭环）**：`tftpboot 0x40200000 kernel-vf2.bin` → `booti 0x40200000 - ${fdtcontroladdr}`
-  → RISC-V Image 头（magic `0x05435352` @0x38、`text_offset 0x200000`）→ `_start` → 完整 4 GiB DDR +
-  MMIO 的 early page table → `rust_main` → FDT 内存发现（control FDT `0xfffc56a0` 解析出 4 GiB）→
-  `trap::init` + `mm::init`（frame allocator + 256 MiB heap + direct map 首个 GiB 4 KiB 边界 `RAM_BASE`）。
+- **结果**：RespOS 已在 VisionFive 2 真机跑通 Stage 1（Hello）、Stage 2（正式 MMU）、Stage 3（timer
+  中断 + trap）、Stage 5 的** SD 卡读块**。Stage 2 输出 `physical_memory_end = 0x140000000`、
+  `mm::init ok, free_frames ≈ 977400`；Stage 3 `timer tick` 每秒 +1000 ms；Stage 5 输出
+  `SD card init ok`（rca 动态）+ `read block 0 ok, tail=55aa`（读到 MBR magic）。
+- **SD 卡驱动（`os/src/drivers/jh7110_sd.rs`，dw_mmc，目标 sdio1@0x16020000）**：控制器复位 + 时钟
+  （UPD_CLK 轮询 CMD.START）+ FIFOTH（MSIZE=2/深度/2 水位）+ 卡初始化（CMD0/8/55/41/2/3/9/7/16）+
+  单块读（CMD17 + STATUS 读 FIFO 字数一次读多字）。**踩坑**：① CMD bit10 RW 语义反了（1=写，读应为 0，
+  否则出现 TXDR 而非 RXDR）；② UPD_CLK 不置 RINTSTS.CD、要轮询 CMD.START；③ MMIO 表漏 SDIO 窗口
+  `0x16010000..0x16050000` 会 StorePageFault；④ `j` 被压缩成 c.jal 破坏 Image 头（改硬编码 4 字节）。
+- **待做（Stage 5 收尾）**：CSD 容量解析（`num_blocks`）、写块（CMD24/25 + flush）、4-bit/高速，
+  然后接 `Disk`/ext4/VFS（`BlockDeviceImpl` 换 `SdCard`），恢复 `rust_main_high` 完整用户态。
+- **启动链路（已闭环，两条加载路径均验证）**：TFTP（`tftpboot 0x40200000 kernel-vf2.bin; booti ...`）与
+  SD 卡（`fatload mmc 1:3 0x40200000 kernel-vf2.bin; fatload mmc 1:3 0x46000000 jh7110-...v1.3b.dtb; booti 0x40200000 - 0x46000000`）
+  均可。SD 卡用卡上 v1.3b DTB 时 `dtb=0x46000000`；TFTP 用 control FDT 时 `dtb=0xfffc56a0`。
+  Image 头（magic `0x05435352` @0x38、`text_offset 0x200000`）→ `_start` → 完整 4 GiB DDR + MMIO
+  的 early page table → `rust_main` → FDT 内存发现 → `trap::init` + `mm::init`。
+  **SD 卡插槽注意**：本板 microSD 枚举为 `mmc 1`（`sdio1@16020000: 1 (SD)`），非 `mmc 0`；且 64G
+  卡会 `-110` 电压协商失败，需用兼容卡（实测 16G 普通卡正常）。
 - **环境**：板 v1.3B（`PCB revision 0xb2`）4 GiB DRAM；OpenSBI v1.2（`aclint-mtimer @ 4000000Hz`、
   `Boot HART 1`）；U-Boot 2021.10 SDK 5.15。`booti` 正确传 `a0=hart_id=1`、`a1=dtb=0xfffc56a0`。
 - **隔离落地**：`board_jh7110` feature + 独立文件；QEMU `make build-rv` 基线不变。构建命令

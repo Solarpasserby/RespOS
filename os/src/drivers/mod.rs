@@ -2,6 +2,8 @@
 
 mod device;
 mod disk;
+#[cfg(all(target_arch = "riscv64", feature = "board_jh7110"))]
+pub mod jh7110_sd;
 mod virtio;
 
 pub use device::*;
