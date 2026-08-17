@@ -84,7 +84,7 @@ fn rust_main_high_ls2k1000() -> ! {
 
     mm::init();
     // mm::init 会初始化 heap + frame allocator + direct map 并 activate 内核页表。
-    sbi::early_print("[RespOS 2K1000LA] mm::init OK, free frames=0x");
+    sbi::early_print("[RespOS 2K1000LA] mm::init OK, free frames=");
     sbi::early_print_hex(mm::free_frame_count());
     sbi::early_print("\n");
 
