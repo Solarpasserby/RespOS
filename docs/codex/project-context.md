@@ -68,6 +68,7 @@
 | `auxfs/` | 辅助盘的运行 profile 与 software/bootstrap payload | 源码布局与 guest `/respos` 挂载点分离；统一由制盘脚本组装 |
 | `docs/codex/` | Codex 接手摘要、状态和验证工作流 | 只保留经核验的项目知识 |
 | `docs/cagent/` | CAgent 题目执行计划和协作材料 | 队友按当前阶段文档执行，不放镜像或产物 |
+| `docs/现场手册/` | 现场故障分流、ABI/命令速查和离线资料清单 | 面向快速执行；详细证据仍回链 `docs/codex/` |
 
 ## 当前开发基线与目标
 

@@ -10,6 +10,8 @@ CLAUDE.md
 img/
 testsuit/
 examples/
+# 现场离线资料包（工具链、镜像、Git bundle、缓存和原始日志）
+offline/
 
 # 本地学习笔记不参与 RespOS 项目知识同步
 docs/C组学习指南-文件系统与文件ABI.md
