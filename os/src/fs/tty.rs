@@ -1,3 +1,14 @@
+//! 控制终端、termios、输入队列和前台进程组语义。
+//!
+//! 当前 console TTY 把 SBI/UART 字节流转换为 canonical 或 noncanonical 用户输入，并实现
+//! 常用 ioctl。输入处理必须区分字节编码与字符显示；内核 console 已按 UTF-8 字节输出，TTY
+//! 不能再次按 Unicode scalar 重编码。
+//!
+//! session、controlling tty 与 foreground process group 是进程级关系。后台进程读写、控制
+//! 字符生成 signal、`TIOCSCTTY/TIOCSPGRP` 权限和 orphan group 行为都依赖 ProcessManager，
+//! 不能仅检查当前线程 PID。读取队列与 signal/进程状态分属不同锁域，阻塞读取要避免在持有
+//! TTY 锁时投递 signal 或切换任务。
+
 use crate::mm::{copy_from_user, copy_to_user};
 use crate::mutex::SpinNoIrqLock;
 use crate::sbi::console_getchar;
@@ -99,8 +110,7 @@ struct TerminalState {
 struct ConsoleInputState {
     edit: alloc::vec::Vec<u8>,
     ready: VecDeque<u8>,
-    /// Remaining byte count for each canonical record. A zero-length record
-    /// represents VEOF at the start of a line.
+    /// 每条规范模式记录尚未读取的字节数。零长度记录表示行首收到 VEOF。
     records: VecDeque<usize>,
 }
 
@@ -127,10 +137,9 @@ impl ConsoleInputState {
 }
 
 lazy_static! {
-    /// RespOS currently exposes one physical console terminal through stdio
-    /// and /dev/tty. Keep terminal ownership here rather than in ioctl or an
-    /// arbitrary file descriptor, so all opens observe the same job-control
-    /// state.
+    /// RespOS 当前通过标准输入输出和 `/dev/tty` 暴露同一个物理控制台终端。
+    /// 终端所有权放在这里，而不是 ioctl 或某个任意文件描述符中，
+    /// 从而保证所有打开实例观察到相同的作业控制状态。
     static ref CONSOLE_TERMINAL: SpinNoIrqLock<TerminalState> =
         SpinNoIrqLock::new(TerminalState {
             session_id: 1,
@@ -139,9 +148,8 @@ lazy_static! {
         });
     static ref CONSOLE_INPUT: SpinNoIrqLock<ConsoleInputState> =
         SpinNoIrqLock::new(ConsoleInputState::new());
-    /// Firmware console reads are destructive. The timer-service hart and a
-    /// foreground reader may both pump input, so serialize the complete drain
-    /// operation rather than only protecting the destination queues.
+    /// 固件控制台读取会消费数据。定时服务核与前台读取者都可能抽取输入，
+    /// 因此必须串行化整个排空操作，而不只是保护目标队列。
     static ref CONSOLE_PUMP: SpinNoIrqLock<()> = SpinNoIrqLock::new(());
 }
 
@@ -198,8 +206,11 @@ fn terminal_signal(byte: u8, termios: KernelTermios) -> Option<Sig> {
     }
 }
 
-/// Pull all currently available firmware-console bytes through the shared
-/// line discipline.
+/// 将固件控制台当前可用的全部字节送入共享线路规程处理。
+///
+/// 固件读取会消费字节，因此整个 drain 由 `CONSOLE_PUMP` 串行化，防止 timer-service 与前台
+/// reader 各取走一半。每个字节依次应用输入转换、canonical 编辑、回显和 ISIG 控制字符；
+/// 产生 VINTR/VQUIT/VSUSP 时向当前前台进程组发信号，即使此刻没有任务阻塞在 read。
 fn pump_console_input() {
     let _pump = CONSOLE_PUMP.lock();
     let termios = CONSOLE_TERMINAL.lock().termios;
@@ -280,9 +291,8 @@ fn pump_console_input() {
     }
 }
 
-/// Service physical-console input from the global timer safe point. Terminal
-/// control characters must generate signals even when no process is reading
-/// the tty (for example, Ctrl-C while the foreground job sleeps).
+/// 在全局定时器安全点处理物理控制台输入。即使没有进程读取 tty，终端控制字符
+/// 也必须产生信号，例如前台作业睡眠时输入 Ctrl-C。
 pub fn poll_console_input() {
     pump_console_input();
 }
@@ -330,6 +340,14 @@ pub fn console_available_bytes() -> usize {
     CONSOLE_INPUT.lock().ready.len()
 }
 
+/// 按当前 termios 从共享控制台读取，并实现 canonical/raw 与作业控制阻塞语义。
+///
+/// 读取前执行后台进程组检查；canonical 模式只返回完整行、VEOF 记录或信号，raw 模式按
+/// VMIN/VTIME 组合决定立即返回、最少字节和首字节后超时。无数据时先登记控制台 waiter，
+/// 再 pump/复查并发布 Blocked，以关闭输入到达与睡眠之间的窗口。
+///
+/// 已读取字节构成 partial progress，后续信号/超时不能覆盖它；零进展被可递送信号打断才
+/// 返回 EINTR。退出前必须撤销 waiter 和临时定时器。
 pub fn read_console(buf: &mut [u8], kind: ConsoleReadKind) -> SysResult<usize> {
     check_background_read()?;
     if buf.is_empty() {
@@ -490,10 +508,9 @@ pub fn process_group_is_orphaned(session_id: usize, pgid: usize) -> bool {
     orphaned
 }
 
-/// POSIX requires a newly orphaned process group which contains stopped
-/// processes to receive SIGHUP followed by SIGCONT. Callers snapshot
+/// POSIX 要求新成为孤儿且包含停止进程的进程组依次收到 SIGHUP 与 SIGCONT。调用者先快照
 /// `was_orphaned` before changing parent/session/group relations and invoke
-/// this after the relation is committed.
+/// 关系，并在关系提交后执行本操作。
 pub fn notify_orphaned_process_group_transition(
     session_id: usize,
     pgid: usize,
@@ -518,9 +535,8 @@ pub fn notify_orphaned_process_group_transition(
     }
 }
 
-/// Enforce the POSIX background-read rule before touching the physical
-/// console. Ignored/blocked SIGTTIN and orphaned process groups get EIO;
-/// otherwise the whole background group is stopped through SIGTTIN.
+/// 接触物理控制台前执行 POSIX 后台读取规则。SIGTTIN 被忽略/阻塞或进程组已孤儿化时
+/// 返回 EIO；否则通过 SIGTTIN 停止整个后台进程组。
 pub fn check_background_read() -> SysResult {
     let task = current_task().expect("[kernel] current task is None.");
     let process = task.process();
@@ -584,8 +600,12 @@ fn check_background_terminal_change() -> SysResult {
     Err(Errno::EINTR)
 }
 
-/// Dispatch console-terminal ioctls after the fd layer has established that
-/// the descriptor refers to a tty.
+/// fd 层确认描述符指向 tty 后，分派 termios、窗口大小、会话和前台进程组 ioctl。
+///
+/// 所有 get 操作先快照内核状态再 copyout；set 操作先完整 copyin/校验，再一次提交，避免
+/// EFAULT 改变半份终端状态。`TIOCSCTTY`、`TIOCNOTTY`、`TIOCSPGRP` 必须检查 session leader、
+/// controlling tty 和同会话进程组关系；后台修改终端设置还需按 SIGTTOU 作业控制规则处理。
+/// 未实现请求返回 ENOTTY，不能假成功欺骗 libc。
 pub fn console_ioctl(request: usize, arg: usize) -> SysResult<usize> {
     let task = current_task().expect("[kernel] current task is None.");
     let process = task.process();

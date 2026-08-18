@@ -1,4 +1,19 @@
 // os/src/task/task.rs
+
+//! 任务控制块及线程级生命周期的核心实现。
+//!
+//! `TaskControlBlock` 表示可被调度的线程；进程级身份、子进程和 zombie/reap 状态
+//! 由 `process.rs` 管理。二者不能简单按 PID/TID 合并，否则 clone thread、group
+//! exit、wait4 和 signal 的可观察语义会互相污染。
+//!
+//! 本文件负责或参与：任务创建与 fork/clone、exec 资源替换、内核栈和 trap
+//! context、fd/MM/signal 共享关系、阻塞唤醒、退出清理及资源使用统计。修改时应明确：
+//!
+//! - 哪些字段属于线程，哪些属于 thread group，哪些由 `Arc` 在 fork 后共享；
+//! - 状态转换由哪个锁线性化，谁是退出或唤醒的唯一胜者；
+//! - 不能在持有 task/MM/FS 大锁时执行可能阻塞的后端 I/O；
+//! - exec 成功前必须可回滚，成功提交后旧地址空间和 close-on-exec fd 才能释放；
+//! - exit、signal kill 和 wait reap 是不同阶段，资源不能过早回收或重复清理。
 #[cfg(target_arch = "loongarch64")]
 use super::aux::AT_HWCAP;
 use super::aux::{AuxHeader, AT_EXECFN, AT_NULL, AT_PLATFORM, AT_RANDOM};
@@ -188,8 +203,7 @@ enum CpuClockSource {
     Process(Arc<SpinNoIrqLock<ProcessCpuClock>>),
 }
 
-/// A detached clock reference retained by POSIX timers without retaining the
-/// complete task or its address space after a thread exits.
+/// POSIX timer 保留的分离 clock 引用；线程退出后无需继续持有完整 task 或其地址空间。
 #[derive(Clone)]
 pub struct CpuClockHandle {
     source: CpuClockSource,
@@ -274,11 +288,10 @@ const RLIMIT_STACK: usize = 3;
 const RLIMIT_MEMLOCK: usize = 8;
 pub const RLIMIT_SIGPENDING: usize = 11;
 const DEFAULT_CPU_AFFINITY_MASK: usize = usize::MAX;
-/// No CPU has saved or is executing this task's kernel context.
+/// 没有 CPU 正在执行或尚未保存该任务的内核上下文。
 ///
-/// A task retains its owner while it is moving from a running context to the
-/// per-CPU idle context.  A wakeup may put it back on the global ready queue
-/// during that interval, but another CPU must not restore that context yet.
+/// 任务从 running context 切换到 per-CPU idle context 的过程中继续保留 owner。此窗口中
+/// wakeup 可以把它放回全局 ready queue，但另一 CPU 尚不能恢复这份仍在保存中的 context。
 pub const NO_CPU_OWNER: usize = usize::MAX;
 const SCHED_OTHER: usize = 0;
 const SCHED_FIFO: usize = 1;
@@ -590,23 +603,19 @@ pub struct TaskControlBlock {
     caps: CapState,
     thread_group: Arc<SpinLock<ThreadGroup>>,
     group_exiting: Arc<AtomicBool>,
-    /// Set by exec/group teardown before a remote sibling is detached.  It
-    /// prevents a context whose previous CPU is still completing handoff from
-    /// becoming claimable again.
+    /// exec/group teardown 在分离远端 sibling 前设置。若旧 CPU 仍在完成 context handoff，
+    /// 该标记阻止此 context 再次变为可 claim。
     terminate_requested: AtomicBool,
     task_status: SpinLock<TaskStatus>,
     cpu_owner: AtomicUsize,
-    // CLONE_VFORK has a separate synchronization edge from the normal
-    // parent/child relationship: the parent must resume when this child
-    // successfully execs or exits.  Keep it one-shot so the ordinary SIGCHLD
-    // wakeup on exit cannot enqueue the parent twice.
+    // CLONE_VFORK 在普通 parent/child 关系之外还有独立同步边：child 成功 exec 或 exit 时
+    // parent 必须恢复。保持一次性，避免 exit 的普通 SIGCHLD 唤醒把 parent 重复入队。
     vfork_parent: SpinLock<Option<Weak<TaskControlBlock>>>,
     // task_context: TaskContext, // 注意任务上下文的处理
 
     // 内存管理
-    // Each task owns a replaceable handle to an address space. CLONE_VM copies
-    // the inner Arc, but exec replaces only the caller's handle instead of
-    // overwriting the MemorySet still used by its vfork/clone parent.
+    // 每个 task 拥有一个可替换的地址空间 handle。CLONE_VM 复制内部 Arc；exec 只替换调用者
+    // 自己的 handle，不能覆盖仍被其 vfork/clone parent 使用的 MemorySet。
     memory_set: SpinNoIrqLock<Arc<RwLock<MemorySet>>>,
 
     // 文件系统
@@ -627,9 +636,8 @@ pub struct TaskControlBlock {
     // ===== 新增：可中断状态标记 =====
     // 标记当前线程是否处于"可被信号中断"的阻塞中（futex_wait / sigtimedwait / wait4）
     interruptible: AtomicBool,
-    // Non-zero while rt_sigtimedwait sleeps for one of these (normally
-    // blocked) signals. Signal delivery uses it to select and wake the actual
-    // waiter without turning the wanted signal into EINTR.
+    // rt_sigtimedwait 等待这些（通常已被 mask）signal 时为非零。signal 投递用它选择并唤醒
+    // 真正 waiter，而不是把目标 signal 转换成 EINTR。
     sigtimedwait_mask: AtomicU64,
     // wait4/waitid 可由线程组中任意线程执行；子进程状态变化时需要
     // 唤醒真正的等待者，而不能只唤醒进程组长。
@@ -719,10 +727,14 @@ impl TaskControlBlock {
         }
     }
 
-    /// 新建任务
+    /// 从内嵌 ELF 创建系统中的第一个用户任务。
     ///
-    /// 事实上只有初始任务会借由这个方法产生
+    /// 该启动专用路径同时创建 pid/tgid 身份、ProcessState、内核栈、用户地址空间、根/cwd、
+    /// fd 表、信号与 CPU 记账对象，并在栈顶布置 TrapContext 和首次调度 TaskContext。
+    /// 内核栈必须先于用户页表复制建立，使用户 root 能看到完整的内核半区拓扑。
     ///
+    /// 本函数使用不可恢复分配并返回完整 Arc；只有所有字段和上下文初始化完成后，调用方
+    /// 才能把 init 加入任务/进程管理器和调度队列。普通 fork/clone 不得复用该路径。
     pub fn init(elf_data: &[u8]) -> Arc<Self> {
         let tid: TidHandle = tid_alloc();
         let tgid = tid.0;
@@ -832,7 +844,16 @@ impl TaskControlBlock {
         task_ctrl_block
     }
 
-    /// 克隆父线程，创建子线程
+    /// 根据 Linux `clone` 标志复制当前任务，创建线程或新进程。
+    ///
+    /// 该函数同时负责内核栈/陷入上下文、地址空间、文件表、信号处理器、线程组、
+    /// 进程身份、父子关系以及 CPU 记账对象的所有权组合。`CLONE_VM`、`CLONE_FILES`、
+    /// `CLONE_SIGHAND` 等标志决定共享 Arc 还是建立独立副本；没有 `CLONE_VM` 时通过
+    /// COW 创建子地址空间。新任务只有在所有可失败分配完成后才加入线程组、
+    /// `PROCESS_MANAGER` 和 `TASK_MANAGER`，避免外部观察到半初始化任务。
+    ///
+    /// 返回的新任务处于 Ready 但尚未执行；用户态 child-tid、TLS、父任务阻塞等 ABI
+    /// 提交由 `sys_clone` 在本函数成功后完成。
     pub fn clone_(self: &Arc<Self>, flags: CloneFlags) -> SysResult<Arc<Self>> {
         let tid = tid_alloc();
 
@@ -1075,6 +1096,15 @@ impl TaskControlBlock {
         self.install_exec_image(exe_path, loaded, args, envs, linux_abi)
     }
 
+    /// 将已经完整解析的 ELF 地址空间提交为当前进程的新执行映像。
+    ///
+    /// 提交前先在临时 `MemorySet` 中构造 argv、envp、auxv 和用户栈；这些步骤失败时旧映像
+    /// 仍保持完整。`begin_exec` 成功后进入不可回滚阶段：停止同线程组其他成员、处理旧映像的
+    /// robust futex/clear-child-tid、替换并激活页表、释放旧 SysV SHM 附加关系，然后重建
+    /// trap context。最后解除共享 fd 表、应用 close-on-exec，并复位不能跨 exec 保留的信号状态。
+    ///
+    /// 调用者必须保证 `loaded` 尚未被其他任务使用。成功返回 argc；从提交点开始不得再返回
+    /// 会让用户态继续使用半拆除旧映像的错误。
     fn install_exec_image(
         self: &Arc<Self>,
         exe_path: String,
@@ -1095,23 +1125,19 @@ impl TaskControlBlock {
             &mut user_sp,
         )?;
 
-        // All fallible image preparation is complete.  From this point exec
-        // owns the process transition and may quiesce siblings without a path
-        // back to the old partially dismantled image.
+        // 所有可能失败的 image 准备均已完成。从这里开始 exec 拥有进程转换，可以 quiesce
+        // sibling，且不再回到已部分拆除的旧 image。
         if !self.process.begin_exec() {
             return Err(Errno::EAGAIN);
         }
 
-        // Thread-private robust-list and clear_child_tid addresses belong to
-        // the old image. Tear down sibling threads while that address space is
-        // still installed; doing this after the MemorySet replacement lets
-        // stale thread metadata write into the freshly loaded executable.
+        // 线程私有 robust-list 与 clear_child_tid 地址属于旧 image。趁旧地址空间仍安装时拆除
+        // sibling thread；若在替换 MemorySet 后执行，陈旧线程 metadata 会写入新加载的程序。
         self.close_other_threads_for_exec();
         self.adopt_process_tgid_for_exec();
 
-        // The surviving thread also carries old-image thread metadata.  Run
-        // robust-futex recovery while the old mappings are still installed,
-        // then discard all user addresses that must not survive exec.
+        // 存活线程也携带旧 image 的线程 metadata。在旧 mapping 仍安装时完成 robust-futex
+        // recovery，再丢弃所有不能跨 exec 保留的用户地址。
         exit_robust_list(self);
         self.reset_tid_address_for_exec();
 
@@ -1151,10 +1177,9 @@ impl TaskControlBlock {
         self.process.mark_exec();
 
         /* ===== 修改文件描述符表 ===== */
-        // Linux execve always undoes CLONE_FILES sharing before applying
-        // close-on-exec.  Otherwise an exec'd child can keep mutating its
-        // parent's descriptor table and its pipe endpoints survive as long as
-        // the parent, preventing captured stdout/stderr from reaching EOF.
+        // Linux execve 在应用 close-on-exec 前总会解除 CLONE_FILES 共享。否则 exec 后的 child
+        // 仍能修改 parent 的 fd table，pipe endpoint 也会与 parent 一样长寿，使捕获的
+        // stdout/stderr 永远到不了 EOF。
         self.unshare_fd_table_for_exec();
         self.fd_table.lock().close_on_exec();
 
@@ -1164,8 +1189,7 @@ impl TaskControlBlock {
 
         self.process.finish_exec();
 
-        // Linux vfork resumes the parent once the child has installed its new
-        // image.  Do this only after all exec-visible state is ready.
+        // Linux vfork 在 child 安装新 image 后恢复 parent；必须等所有 exec 可见状态就绪后再做。
         self.release_vfork_parent();
 
         Ok(argc)
@@ -1240,14 +1264,12 @@ impl TaskControlBlock {
         self.sched.cpu_affinity_mask()
     }
 
-    /// Whether this ready task can be claimed by `cpu` without violating its
-    /// affinity or the context-save owner handoff.
+    /// 这个 ready task 是否能由 `cpu` claim，且不违反 affinity 或 context-save owner handoff。
     ///
-    /// The scheduler calls this while holding the global ready-queue lock, so
-    /// another CPU cannot claim the same queued task between this check and
-    /// `try_claim_running_on_cpu()`.  The owner may concurrently change from
-    /// this CPU to `NO_CPU_OWNER` after an outgoing context reaches idle; an
-    /// early `false` merely leaves the task queued for the next fetch.
+    /// scheduler 持有全局 ready-queue 锁时调用，因此从此次检查到
+    /// `try_claim_running_on_cpu()` 之间，另一 CPU 不能 claim 同一 queued task。outgoing
+    /// context 到达 idle 后，owner 可并发地从本 CPU 变为 `NO_CPU_OWNER`；过早返回 false
+    /// 只会让任务留在队列中，等待下一次 fetch。
     pub fn can_be_claimed_on_cpu(&self, cpu: usize) -> bool {
         cpu < usize::BITS as usize
             && self.cpu_affinity_mask() & (1usize << cpu) != 0
@@ -1276,9 +1298,8 @@ impl TaskControlBlock {
         self.task_status.lock().clone()
     }
 
-    /// Claim a ready context for one CPU.  The scheduler lock serializes queue
-    /// removal; this owner CAS additionally serializes the short interval in
-    /// which a task has been woken but its previous CPU has not saved it yet.
+    /// 为一个 CPU claim ready context。scheduler 锁串行化出队；owner CAS 额外串行化“任务
+    /// 已被唤醒，但旧 CPU 尚未保存完 context”的短窗口。
     pub fn try_claim_running_on_cpu(&self, cpu: usize) -> bool {
         let mut status = self.task_status.lock();
         if *status != TaskStatus::Ready || self.terminate_requested.load(Ordering::Acquire) {
@@ -1295,8 +1316,8 @@ impl TaskControlBlock {
         true
     }
 
-    /// Release the CPU that owns this task's saved context.  This must execute
-    /// only after `__switch` has left the task, from the local idle context.
+    /// 释放拥有该任务 saved context 的 CPU。只能在 `__switch` 已离开该任务后，从本地 idle
+    /// context 执行。
     pub fn release_cpu_owner(&self, cpu: usize) {
         assert_eq!(
             self.cpu_owner.load(Ordering::Acquire),
@@ -1316,9 +1337,8 @@ impl TaskControlBlock {
         );
     }
 
-    /// Whether some CPU can still execute this task's saved context.
-    /// `NO_CPU_OWNER` is published only after that CPU has switched back to
-    /// its per-CPU idle context.
+    /// 是否仍有 CPU 能执行该任务的 saved context。只有该 CPU 已切回 per-CPU idle context
+    /// 后才发布 `NO_CPU_OWNER`。
     pub fn has_cpu_owner(&self) -> bool {
         self.cpu_owner.load(Ordering::Acquire) != NO_CPU_OWNER
     }
@@ -1409,12 +1429,11 @@ impl TaskControlBlock {
         self.interrupted.store(false, Ordering::Relaxed);
     }
 
-    /// Publish the wake hint for a deliverable signal, then revalidate it.
+    /// 发布“存在可投递 signal”的唤醒提示，然后重新验证。
     ///
-    /// A waiter may observe and consume the queued signal between the sender's
-    /// first `check_signal_interrupt()` and this store.  Without the second
-    /// check, that late store leaks into the next blocking syscall as a
-    /// spurious EINTR even though no deliverable signal remains.
+    /// waiter 可能在 sender 第一次 `check_signal_interrupt()` 与此次 store 之间观察并消费
+    /// queued signal。若没有第二次检查，这个迟到 store 会泄漏到下一次 blocking syscall，
+    /// 在已无可投递 signal 时伪造 EINTR。
     fn mark_signal_interrupted(&self) -> bool {
         self.interrupted.store(true, Ordering::Relaxed);
         if self.check_signal_interrupt() {
@@ -1577,8 +1596,7 @@ impl TaskControlBlock {
     pub fn set_vfork_parent(&self, parent: &Arc<TaskControlBlock>) {
         *self.vfork_parent.lock() = Some(Arc::downgrade(parent));
     }
-    /// Wake the CLONE_VFORK parent exactly once, either after a successful
-    /// exec or while this child is exiting.
+    /// 在 exec 成功后或 child 退出时，恰好唤醒一次 CLONE_VFORK parent。
     pub fn release_vfork_parent(&self) {
         let parent = self.vfork_parent.lock().take();
         if let Some(parent) = parent.and_then(|parent| parent.upgrade()) {
@@ -1653,10 +1671,8 @@ impl TaskControlBlock {
             );
         }
 
-        // Removing a task from scheduler/task maps does not stop a sibling
-        // already executing on another CPU. Mark every sibling non-runnable
-        // first, then wait for the owning CPU's post-__switch acknowledgement
-        // before old-image frames can be recycled by exec.
+        // 从 scheduler/task map 删除任务不会停止已在另一 CPU 执行的 sibling。先把所有 sibling
+        // 标为不可运行，再等待 owner CPU 在 `__switch` 后确认，之后 exec 才能回收旧 image frame。
         for task in &tasks {
             task.request_termination();
             remove_task(task.tid());
@@ -1678,10 +1694,8 @@ impl TaskControlBlock {
         }
     }
 
-    /// Linux de-thread: after every sibling is quiescent, the exec caller
-    /// takes over the stable process TGID as its visible TID.  The kernel stack
-    /// allocation is independent of the numeric TID, so only identity indexes
-    /// are re-keyed here.
+    /// Linux de-thread：所有 sibling quiescent 后，exec caller 接管稳定的进程 TGID 作为可见
+    /// TID。内核栈分配与数字 TID 无关，因此这里只重新建立 identity index。
     fn adopt_process_tgid_for_exec(self: &Arc<Self>) {
         let old_tid = self.tid();
         let tgid = self.tgid();
@@ -1729,8 +1743,7 @@ impl TaskControlBlock {
         f(&mut self.sig_pending.lock())
     }
 
-    /// Lowest signal deliverable to this thread from either the thread queue
-    /// or the process queue. The latter is evaluated using this thread's mask.
+    /// 从线程队列或进程队列中选出可投递给本线程的最小 signal；进程队列使用本线程 mask 判断。
     pub fn find_pending_signal(&self) -> Option<Sig> {
         let (mask, thread_signal) =
             self.op_sig_pending(|pending| (pending.mask, pending.find_signal()));
@@ -1787,8 +1800,8 @@ impl TaskControlBlock {
                 .op_sig_pending(|pending| !(pending.pending & set).is_empty())
     }
 
-    /// Peek a sigtimedwait candidate without consuming it, so a failed user
-    /// copy leaves both queues unchanged. The boolean identifies process scope.
+    /// 查看 sigtimedwait 候选但不消费，使用户 copy 失败时两个队列都保持不变；布尔值标识
+    /// 候选是否来自进程作用域。
     pub fn peek_pending_in_set(&self, set: SigSet) -> Option<(Sig, SigInfo, bool)> {
         let thread = self.op_sig_pending(|pending| {
             pending
@@ -1868,6 +1881,10 @@ impl TaskControlBlock {
         self.inner.lock().sigsuspend_saved_mask = mask;
     }
 
+    /// 取出并清除 sigsuspend 保存的原始信号掩码。
+    ///
+    /// 该值只能被实际获选投递的一个信号帧消费；普通 wake、伪唤醒或未处理 pending 信号
+    /// 不得提前清除，否则 sigreturn 无法恢复进入 sigsuspend 前的线程状态。
     pub fn take_sigsuspend_saved_mask(&self) -> Option<SigSet> {
         self.inner.lock().sigsuspend_saved_mask.take()
     }
@@ -1935,8 +1952,15 @@ impl TaskControlBlock {
         let _ = self.try_receive_siginfo(siginfo, thread_level, usize::MAX);
     }
 
-    /// Queue a signal, enforcing a caller-selected real-time pending limit.
-    /// Returns false only when a real-time instance cannot reserve quota.
+    /// 将信号可靠地加入线程级或进程级 pending 队列，并唤醒合适的可中断等待者。
+    ///
+    /// 标准信号遵循合并语义；实时信号先原子预留调用者指定的 `RLIMIT_SIGPENDING` 额度，
+    /// 只有额度不足时返回 `false`。进程定向信号保存在稳定的 `ProcessState` 中，选择某个
+    /// 线程仅用于投递/唤醒提示，不能让信号生命周期依赖线程组首领 TCB。
+    ///
+    /// 唤醒前会优先匹配 `sigtimedwait`，再处理普通可中断系统调用和 futex 等待。
+    /// `mark_signal_interrupted` 负责关闭“信号已被另一 CPU 消费、迟到提示污染下一次系统调用”
+    /// 的竞争窗口；SIGKILL/SIGSTOP 路径保留强制唤醒兜底。
     pub fn try_receive_siginfo(
         &self,
         siginfo: SigInfo,
@@ -1977,13 +2001,12 @@ impl TaskControlBlock {
 
             // ===== 进程级信号 =====
             false => {
-                // Keep process-directed signals in process-owned storage until
-                // a concrete member actually consumes them. A selected member
-                // may exit or exec before delivery without losing the signal.
+                // process-directed signal 保留在进程所有的 storage 中，直到具体成员真正消费。
+                // 被选成员可能在投递前 exit/exec，但不能因此丢失 signal。
                 let queued = self.process.add_pending_signal(siginfo);
                 debug_assert!(queued || !realtime);
-                // A process-directed signal waited by sigtimedwait must go to
-                // the waiter even though userspace normally blocks that signal.
+                // sigtimedwait 等待的 process-directed signal 必须送给 waiter，即使用户态通常
+                // 已经 mask 了这个 signal。
                 let target = self.op_thread_group(|tg| {
                     if let Some(waiter) =
                         tg.iter().find(|task| task.is_sigtimedwait_waiter_for(sig))
@@ -2301,10 +2324,9 @@ impl TaskControlBlock {
         }
     }
 
-    /// Exec must detach from CLONE_FILES before applying CLOEXEC. Threads
-    /// removed by `close_other_threads_for_exec` can retain their old shared
-    /// table through abandoned kernel-stack Arcs; if no live task still owns
-    /// that table, clear it explicitly so stale TCBs cannot pin pipe ends.
+    /// exec 应在应用 CLOEXEC 前解除 CLONE_FILES。被 `close_other_threads_for_exec` 删除的线程
+    /// 可能通过遗留 kernel-stack Arc 保留旧共享表；若已无 live task 拥有它，应显式清空，
+    /// 避免 stale TCB pin 住 pipe end。
     pub fn unshare_fd_table_for_exec(&self) {
         let old_table = {
             let mut current = self.fd_table.lock();
@@ -2409,9 +2431,8 @@ impl TaskControlBlock {
         }
     }
 
-    /// Override the root token in a saved context that is not currently
-    /// executing. LA idle contexts use this before they are restored so the
-    /// scheduler cannot inherit a reclaimed user page table.
+    /// 覆盖当前未执行的 saved context 中的 root token。LA idle context 在恢复前使用它，
+    /// 防止 scheduler 继承已回收的用户页表。
     #[cfg(target_arch = "loongarch64")]
     pub fn set_saved_mmu_token(&self, token: usize) {
         let task_cx = self.kernel_stack.get_top() as *mut TaskContext;
@@ -2500,6 +2521,13 @@ fn exit_thread_inner(task: Arc<TaskControlBlock>, remove_from_thread_group: bool
     TASK_MANAGER.remove(task.tid());
 }
 
+/// 在线程退出或 exec 丢弃旧映像前，按 Linux robust-list 协议修复其遗留 futex。
+///
+/// 从用户 head 读取链表首项、futex 偏移和 pending 项，最多遍历固定数量以防损坏链表
+/// 拖死内核。对仍由退出 tid 持有的 futex 原子写入 OWNER_DIED、保留 WAITERS 位并唤醒
+/// 一个等待者；用户地址不可读、溢出或链表成环时停止清理而不让退出失败。
+///
+/// 必须在旧 MemorySet 仍安装时调用，且不能持有 task/MM/全局 futex 队列锁跨用户拷贝。
 fn exit_robust_list(task: &Arc<TaskControlBlock>) {
     const ROBUST_LIST_HEAD_SIZE: usize = core::mem::size_of::<usize>() * 3;
     const FUTEX_WAITERS: u32 = 0x8000_0000;
@@ -2630,8 +2658,8 @@ fn notify_process_parent_exit(process: &Arc<ProcessState>, code: i32) {
                 parent_process.mark_child_exited(process.tgid());
             }
 
-            // Linux still sends SIGCHLD with SA_NOCLDWAIT when a handler is
-            // installed. Explicit SIG_IGN both auto-reaps and suppresses it.
+            // 安装 handler 时，即使有 SA_NOCLDWAIT，Linux 仍发送 SIGCHLD；显式 SIG_IGN
+            // 才会同时自动 reap 并抑制该 signal。
             if !explicitly_ignored {
                 let siginfo = SigInfo::new(
                     Sig::SIGCHLD.raw(),
@@ -2648,9 +2676,8 @@ fn notify_process_parent_exit(process: &Arc<ProcessState>, code: i32) {
 }
 
 fn wake_process_child_waiters(parent_process: &Arc<ProcessState>) {
-    // Publish before reading waiter flags. A wait call that scanned just
-    // before this event but has not registered yet will observe the changed
-    // generation after registration and rescan instead of sleeping forever.
+    // 读取 waiter flag 前先发布。若 wait 调用恰在事件前完成扫描但尚未注册，它会在注册后
+    // 观察到 generation 变化并重新扫描，而不是永久睡眠。
     parent_process.publish_child_event();
     let waiters = parent_process
         .members()
@@ -2713,6 +2740,15 @@ pub fn task_group_exit(task: Arc<TaskControlBlock>, exit_code: i32) {
     exit_process_group(task, ExitCause::Code(exit_code));
 }
 
+/// 由唯一获胜线程完成整个进程组的不可逆退出事务。
+///
+/// `begin_exit` 决定 teardown owner；失败的并发调用者只能等待所有者把自身提交为 Exited，
+/// 不能从本应不返回的 exit 路径继续执行。所有者先请求远端 sibling 退出并等待其 CPU
+/// 上下文完成交接，之后才允许释放线程组共享的地址空间、文件表和信号资源。
+///
+/// `CLONE_VM`/`CLONE_FILES` 可能跨进程共享资源，因此是否拥有最终清理权以其他存活 tgid
+/// 的实际引用为准，而不能只看 Arc 计数。函数还负责孤儿进程组通知、子进程托孤、共享
+/// 文件映射回写、SysV SHM 分离、SIGCHLD/wait 状态发布以及 zombie 生命周期提交。
 fn exit_process_group(task: Arc<TaskControlBlock>, cause: ExitCause) {
     debug_trace!(
         "[quiescetrace] group-exit begin tid={} tgid={}",
@@ -2741,11 +2777,9 @@ fn exit_process_group(task: Arc<TaskControlBlock>, cause: ExitCause) {
             .collect::<Vec<_>>()
     };
     if !task.process.begin_exit() {
-        // Another thread owns group teardown.  Returning while this caller is
-        // still Running would let exit_group's scheduler path hand it off as
-        // runnable again, eventually resuming after a nominally noreturning
-        // exit.  Yield until the teardown owner commits this TCB to Exited;
-        // an exited handoff is never republished by the idle loop.
+        // 另一线程拥有 group teardown。若 caller 仍为 Running 就返回，exit_group 的 scheduler
+        // 路径会再次把它作为 runnable handoff，最终从本应不返回的 exit 之后继续执行。持续
+        // yield，直到 teardown owner 把此 TCB 提交为 Exited；idle loop 不会重新发布 exited handoff。
         while !task.is_exited()
             && !matches!(
                 task.process.lifecycle(),
@@ -2762,10 +2796,8 @@ fn exit_process_group(task: Arc<TaskControlBlock>, cause: ExitCause) {
     let tgid = task.tgid();
     let threads = task.op_thread_group(|tg| tg.iter().collect::<Vec<_>>());
 
-    // A group-exit owner may tear down a MemorySet shared with siblings that
-    // are still executing on other CPUs.  Request their retirement first and
-    // wait for each owning CPU to publish its post-switch acknowledgement;
-    // only then may the common address space and file-backed frames be freed.
+    // group-exit owner 可能拆除仍被其他 CPU 上 sibling 共享的 MemorySet。先请求它们 retire，
+    // 等每个 owner CPU 发布 switch 后确认，之后才能释放公共地址空间和 file-backed frame。
     for thread in threads.iter().filter(|thread| thread.tid() != task.tid()) {
         thread.request_termination();
         remove_task(thread.tid());
@@ -2790,12 +2822,10 @@ fn exit_process_group(task: Arc<TaskControlBlock>, cause: ExitCause) {
         .cloned()
         .unwrap_or_else(|| task.clone());
 
-    // A separate CLONE_VM process can share this address space, but raw Arc
-    // counts cannot identify it: detached/deferred TCBs from this same thread
-    // group also retain their MemorySet handle for a short time.  Treat only
-    // a live task in another tgid as an external owner.  Otherwise a process
-    // whose worker threads exited just before its leader would skip recycling
-    // and leave all resident pages pinned by the zombie leader.
+    // 独立 CLONE_VM 进程可以共享此地址空间，但裸 Arc count 无法识别：同一 thread group 的
+    // detached/deferred TCB 也会短暂保留 MemorySet handle。只有另一 tgid 中的 live task 才算
+    // external owner；否则 worker 恰在 leader 前退出的进程会跳过回收，让 zombie leader pin
+    // 住所有 resident page。
     let task_memory_set = task.memory_set_arc();
     let live_tasks = TASK_MANAGER.snapshot();
     let memory_set_shared_outside_group = live_tasks.iter().any(|other| {
@@ -2810,9 +2840,8 @@ fn exit_process_group(task: Arc<TaskControlBlock>, cause: ExitCause) {
         let fd_table = task.fd_table.lock();
         Arc::as_ptr(&fd_table)
     };
-    // Deferred TCBs can retain this FdTable after leaving `thread_group`, so
-    // Arc counts cannot distinguish them from a live CLONE_FILES process.
-    // Only a live task in another tgid makes clearing the shared table unsafe.
+    // Deferred TCB 离开 `thread_group` 后仍可能保留此 FdTable，因此 Arc count 无法区分它们
+    // 与 live CLONE_FILES 进程。只有另一 tgid 中的 live task 才使清空共享表变得不安全。
     let fd_table_shared_outside_group = live_tasks.iter().any(|other| {
         if other.tgid() == tgid {
             return false;
@@ -2960,6 +2989,11 @@ fn init_user_stack(
         Ok(*stack_ptr)
     }
 
+    /// 按目标 ABI 的 `(type, value)` 对顺序把 auxv 逆序压入向下增长的用户栈。
+    ///
+    /// 逆序遍历保证最终内存顺序与输入一致，调用者必须已在尾部包含 `AT_NULL`。
+    /// 每次写入通过目标 `MemorySet` 的安全代访接口解决惰性栈页；返回首个 auxv 项地址，
+    /// 供初始寄存器和 `/proc` 相关布局使用。
     fn push_auxv_to_stack(
         memory_set: &mut MemorySet,
         auxv: &[AuxHeader],

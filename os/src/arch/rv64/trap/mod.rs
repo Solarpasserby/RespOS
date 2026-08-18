@@ -1,9 +1,18 @@
 // os/src/trap.rs
 
-//! ### ~~中断~~异常模块
+//! RISC-V 用户/内核异常、中断与 syscall 入口。
 //!
-//! 注：应当注意到目前内核台下触发中断会被屏蔽
-//! 因此无需担心某些过程是否需要关闭中断
+//! trap 汇编负责在用户栈和内核栈之间切换并保存 `TrapContext`，Rust 分派器处理 ecall、
+//! page fault、timer、软件 IPI 和非法指令。返回用户态前再统一处理 signal、抢占和
+//! `SA_RESTART`，所以 syscall 实现本身不应直接改写 trap PC。
+//!
+//! 用户 ecall 进入后 `sepc` 只前进一次；sigreturn 使用 frame 中恢复的上下文。page fault
+//! 将 load/store/instruction 原因和用户 SP 传给 MM，以区分 COW、lazy、SIGBUS、SIGSEGV 与
+//! 合法的单页 grow-down。内核态 trap 默认处于受控中断状态，但这不意味着任意锁序都安全：
+//! timer/IPI 和 scheduler 路径仍须遵守 no-irq lock 与 context handoff 协议。
+//!
+//! `sret` 前必须保持 kernel trap vector，清除不可信的 SIE，并在通用/浮点状态恢复完毕后
+//! 才切换 user vector；否则恢复过程中的中断会把半完成上下文当作完整用户状态。
 
 mod context;
 
@@ -74,11 +83,15 @@ pub fn enable_timer_interrupt() {
     }
 }
 
-/// ~~中断~~异常处理函数
+/// RV64 用户态陷入的统一分派入口。
 ///
-/// 用户程序上下文保存于内核栈上，包含用户程序使用的寄存器数据以及系统调用传递的寄存器参数
+/// 汇编入口已经把完整用户寄存器保存到当前任务内核栈上的 `TrapContext`。本函数按 scause
+/// 分派系统调用、用户缺页、非法指令、断点、定时器和 IPI：系统调用先推进 sepc，并仅为
+/// 明确可重启的零进展 EINTR 保留原 arg0；缺页交给 `MemorySet`，I/O/ENOSPC 失败投递 SIGBUS，
+/// 其他非法地址投递 SIGSEGV；定时器只在安全点推进全局期限后实施抢占。
 ///
-/// 该函数根据 `CSR` 区分不同异常类型，对不同类型异常做不同处理
+/// 所有普通分支最终都经过统一信号投递和 CPU 记账收尾。新增异常类型不得直接绕过
+/// `handle_signals` 返回用户态，也不得在任意内核持锁点执行全局 timer/scheduler 工作。
 #[unsafe(no_mangle)]
 pub fn trap_handler(cx: &mut TrapContext) {
     crate::perf::user_trap(1);
@@ -174,12 +187,10 @@ pub fn trap_handler(cx: &mut TrapContext) {
                 instruction,
                 stval
             );
-            // IllegalInstruction is a synchronous user exception.  Deliver
-            // SIGILL to the faulting thread so an installed handler can
-            // inspect/recover from it; the normal signal path applies the
-            // process-wide default Core action when no handler is installed.
-            // Killing only this thread strands pthread joiners and differs
-            // from Linux fatal-signal semantics.
+            // 非法指令属于同步用户异常。向触发异常的线程投递 SIGILL，
+            // 使已安装的处理器有机会检查并恢复；若没有处理器，普通信号路径会执行
+            // 进程范围的默认 Core 动作。只杀死当前线程会使 pthread join 等待者悬空，
+            // 也不符合 Linux 的致命信号语义。
             let siginfo = SigInfo::new(Sig::SIGILL.raw(), SigInfo::KERNEL, SiField::None);
             task.receive_siginfo(siginfo, true);
         }
@@ -242,6 +253,11 @@ pub fn trap_handler(cx: &mut TrapContext) {
 }
 
 #[unsafe(no_mangle)]
+/// RV64 内核态 trap 分派器，只处理可以在无任务信号语义下安全完成的异常与中断。
+///
+/// 内核缺页、非法指令和意外 ecall 属于内核不变量破坏并立即 panic；定时器/IPI 只应答硬件、
+/// 重设期限，并仅在 idle 安全点执行会触碰全局任务/信号表的超时工作。该入口不能调用
+/// 用户态 `handle_signal`，也不能在任意被中断的持锁临界区实施任务抢占。
 pub fn kernel_trap_handler(cx: &mut TrapContext) {
     let scause = scause::read();
     match scause.cause() {
@@ -275,20 +291,16 @@ pub fn kernel_trap_handler(cx: &mut TrapContext) {
         }
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
             crate::perf::sample_concurrency();
-            // SBI timer interrupts remain pending until a later deadline is
-            // programmed. Long syscall paths can legitimately cross a tick;
-            // acknowledge it by arming the next tick and process expirations.
-            // Scheduling remains at explicit safe points in kernel code.
+            // SBI 定时器中断在编程一个更晚的期限前会一直保持 pending。
+            // 长系统调用路径可以合法跨越 tick；通过设置下一 tick 并处理到期项来应答中断。
+            // 内核代码中的调度仍只发生在显式安全点。
             set_next_ti_trigger();
-            // Global timeout work touches task/signal/timer registries and
-            // must not re-enter an arbitrary kernel critical section.  A
-            // kernel-mode tick processes it only when this hart is in the
-            // per-CPU idle context (`current_task == None`), where no task
-            // lock is held. Ticks taken directly from user mode are handled
-            // by trap_handler's safe path above.
+            // 全局超时工作会访问任务、信号和定时器注册表，不能重入任意内核临界区。
+            // 内核态 tick 仅在本硬件线程处于每 CPU idle 上下文
+            //（`current_task == None`，不持任务锁）时处理；直接从用户态进入的 tick
+            // 由上方 trap_handler 的安全路径处理。
             //
-            // The boot hart remains the sole global timer service CPU during
-            // early SMP; secondary harts only re-arm their local tick.
+            // SMP 早期阶段仍由启动核独占全局定时服务；次级核只重设本地 tick。
             if crate::arch::smp::is_timer_service_hart() && crate::task::current_task().is_none() {
                 crate::timer::await_task_timer_deadline();
                 check_all_task_timers();

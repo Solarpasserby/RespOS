@@ -1,6 +1,15 @@
 // os/src/syscall.rs
 
-//! ### 系统调用模块
+//! 系统调用编号、公共分派与跨 syscall 的辅助协议。
+//!
+//! 两个架构的 trap 入口都把编号和最多六个参数整理为 `syscall(id, args)`；因此 Linux
+//! ABI 语义应在此分派到公共模块，架构目录只负责寄存器和异常机制。match 分支只做
+//! 类型/指针方向解码，复杂状态机应属于 FS、MM、task、net、signal 等领域对象。
+//!
+//! 返回值统一使用 `SysResult<usize>`，trap 层再把 `Errno` 编码为负值。未知编号必须返回
+//! `ENOSYS`，不能为了推进测试而假成功。阻塞接口是否支持 `SA_RESTART` 由
+//! `is_restartable_syscall` 显式列举；带 timeout、已经部分完成或契约规定不可重启的接口
+//! 不能仅因为会返回 `EINTR` 就加入该列表。
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -271,11 +280,10 @@ pub fn check_all_task_timers() {
 
 static LAST_SAFE_POINT_TIMER_MS: AtomicUsize = AtomicUsize::new(usize::MAX);
 
-/// Consume deferred global timer work at an explicit no-lock kernel safe point.
+/// 在显式的无锁内核安全点消费延迟执行的全局定时器工作。
 ///
-/// The boot hart is the sole global timer service CPU. Long blocking syscalls
-/// that retry wholly in kernel mode must call this between iterations because
-/// their kernel-mode timer traps only acknowledge the hardware tick.
+/// 启动核是唯一的全局定时服务 CPU。完全在内核态重试的长阻塞系统调用必须在迭代间调用本函数，
+/// 因为它们的内核态定时器陷入只会应答硬件 tick。
 pub fn service_task_timers_at_safe_point() {
     if !crate::arch::smp::is_timer_service_hart() {
         return;
@@ -290,9 +298,8 @@ fn merge_offset_arg(low: usize, high: usize) -> isize {
     (((high as u64) << 32) | ((low as u64) & 0xffff_ffff)) as i64 as isize
 }
 
-/// Syscalls for which an interrupted, zero-progress operation is restarted
-/// when the delivered handler has SA_RESTART. Timeout-bearing and explicitly
-/// non-restartable waits must stay out of this list.
+/// 当已投递处理器具有 SA_RESTART 时，下列系统调用若被中断且没有取得进展，便会重新启动。
+/// 带超时的等待和明确不可重启的等待不得加入此列表。
 pub fn is_restartable_syscall(syscall_id: usize, args: &[usize; 6]) -> bool {
     if syscall_id == SYSCALL_RECVMMSG {
         return net::socket_recv_is_restartable(args[0]).unwrap_or(false);
@@ -325,6 +332,15 @@ pub fn is_restartable_syscall(syscall_id: usize, args: &[usize; 6]) -> bool {
     syscall_id == SYSCALL_WAIT4
 }
 
+/// Linux ABI 的统一系统调用分派器。
+///
+/// 架构 trap 只负责取得 syscall number 和六个原始寄存器参数；这里按编号完成类型转换并把
+/// 调用交给各领域入口。每个具体入口负责自己的用户指针、长度、权限和失败原子性，分派层
+/// 不应复制领域状态机。未知编号统一返回 ENOSYS，不能 panic 或假成功。
+///
+/// 每次调用前顺带回收已经安全脱离命名空间的延迟 ext4 inode，返回后统一记录 syscall
+/// 性能统计。是否可按 SA_RESTART 重执行由 trap 在调用前通过 `is_restartable_syscall`
+/// 判定，不能仅凭最终 errno 猜测，因为 socket 类型、timeout 和 partial progress 会改变语义。
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SysResult<usize> {
     crate::fs::ext4::reap_deferred_inodes();
     let result = match syscall_id {

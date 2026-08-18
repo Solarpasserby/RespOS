@@ -1,5 +1,18 @@
 // os/src/arch/loongarch64/trap/mod.rs
 
+//! LoongArch 用户/内核异常、中断与 syscall 入口。
+//!
+//! 汇编入口保存寄存器并构造 `TrapContext`，本模块根据 ESTAT 分派 syscall、页错误、timer、
+//! IPI、FP/LSX unavailable 和非法指令。返回用户态前还要完成 signal frame 投递、可能的
+//! syscall restart、扩展寄存器恢复以及调度抢占。
+//!
+//! ERA 对普通 syscall 只前进一次；sigreturn 成功后使用用户 frame 恢复的 PC，不能再次覆盖。
+//! 页错误必须把访问类型传给 `MemorySet`，ENOSPC/EIO 型 file fault 映射为 SIGBUS，其余非法
+//! 地址映射为 SIGSEGV。FP/LSX 首次使用异常不推进 ERA，而是启用当前任务状态后重试指令。
+//!
+//! trap 路径处于中断、MM 和 scheduler 的交界，锁内不得执行可能切换任务的操作。secondary
+//! hart 在 boot timer service 发布前也不能借 timer trap 提前进入公共 scheduler。
+
 mod context;
 
 use super::register::{badv, ecfg, eentry, estat};
@@ -50,6 +63,11 @@ fn is_page_fault(exception: estat::Exception) -> bool {
     )
 }
 
+/// 把 LoongArch 页异常原因转换为公共缺页类型，并完成 fault 记账与信号选择。
+///
+/// `MemorySet::handle_page_fault` 在写锁内处理 lazy/COW/page-mkwrite；成功时更新 minor/major
+/// 与 RSS 高水位，Retry 表示架构可直接重试。EIO/ENOSPC 表示映射对象后端故障并投递 SIGBUS，
+/// 权限或地址错误投递 SIGSEGV。这里只入队信号，实际 handler/default action 由统一返回路径执行。
 fn handle_user_page_fault(cx: &TrapContext, exception: estat::Exception) {
     let badv = badv::read();
     let cause = page_fault_cause(exception);
@@ -156,7 +174,14 @@ fn read_badi() -> usize {
     bits
 }
 
-/// 异常处理入口
+/// LoongArch64 用户态陷入的统一分派入口。
+///
+/// 除系统调用、缺页、定时器和 IPI 外，还负责 FP/LSX 首次使用、非法指令以及 ADEM
+/// 非对齐访存模拟。扩展状态只在任务已激活时由汇编 eager 保存；Unavailable 异常仅开启状态并
+/// 重试原指令。用户缺页和 syscall 与 RV64 共享领域实现，架构层只负责异常原因转换与信号选择。
+///
+/// QEMU 可能产生来源位已撤销的 ECODE=0 伪中断，该分支必须安全应答而不能 panic。
+/// 所有可返回用户态的路径最终统一处理 pending 信号并结束内核态 CPU 记账。
 #[unsafe(no_mangle)]
 pub fn trap_handler(cx: &mut TrapContext) {
     crate::perf::user_trap(1);
@@ -187,11 +212,9 @@ pub fn trap_handler(cx: &mut TrapContext) {
             crate::arch::smp::acknowledge_ipi();
             crate::timer::rearm_task_timer_request();
         }
-        // LoongArch ECODE=0 denotes an interrupt. QEMU may withdraw the last
-        // ESTAT.IS bit between taking the trap and this CSR read, leaving a
-        // zero ECODE with no source bit. Treat that state as a spurious timer
-        // edge instead of misclassifying it as an unsupported exception and
-        // panicking the whole kernel under sustained user-space activity.
+        // LoongArch 的 ECODE=0 表示中断。QEMU 可能在陷入发生后、读取 CSR 前撤销最后一个
+        // ESTAT.IS 位，于是留下 ECODE 为零却没有来源位的状态。应将它视为伪定时器边沿，
+        // 不要误判为不支持的异常并在持续用户态负载下触发整个内核 panic。
         estat::Trap::Exception(estat::Exception::Unknown(0)) => {
             clear_timer_interrupt();
             set_next_ti_trigger();
@@ -304,10 +327,15 @@ fn fault_in_emulated_access(
     })
 }
 
-/// 内核/用户态非对齐访存（ADEM）模拟。LA264 UAL=0，lwext4 C 库、预编译 core/alloc
-/// 等按 +ual 编译的代码会在真机触发 ADEM；这里逐字节模拟 ld/st，成功后把 ERA 推进
-/// 到下一条指令。覆盖 2RI12（ld/st）、3R（ldx/stx）、2RI14（ll/sc/ldptr/stptr）三组
-/// 整数访存指令。返回 false 表示不是可模拟的指令（交给上层）。
+/// 模拟 LA264 在 UAL=0 时触发 ADEM 的整数非对齐访存。
+///
+/// 解码 2RI12（ld/st）、3R（ldx/stx）和 2RI14（ll/sc/ldptr/stptr）三组指令，
+/// 对有符号立即数显式扩展，再逐字节完成小端读写和符号/零扩展。目标跨页时，调用者已先用
+/// `fault_in_emulated_access` 确保每页权限和惰性/COW 状态正确；本函数不能绕过 MemorySet
+/// 直接把未映射用户地址当作内核指针访问。
+///
+/// 成功后写回目标寄存器并把 ERA 推进一条指令；返回 false 表示编码不在安全模拟集合，
+/// 由上层按真实地址错误处理。LL/SC 只能提供当前内核范围内的兼容模拟，不宣称跨核保留硬件 reservation。
 fn emulate_unaligned_access(cx: &mut TrapContext) -> bool {
     let inst = unsafe { core::ptr::read_volatile(cx.era as *const u32) } as usize;
 
@@ -481,6 +509,11 @@ fn emulate_unaligned_access(cx: &mut TrapContext) -> bool {
 }
 
 #[unsafe(no_mangle)]
+/// LoongArch 内核态 trap 分派器。
+///
+/// 内核 ADEM 可在确认指令属于安全模拟集合后由 `emulate_unaligned_access` 恢复；真正页错误、
+/// 非法指令和未知异常属于内核不变量破坏。timer/IPI 只应答硬件，并仅在 idle 安全点处理全局
+/// 超时工作；不能在被中断的任意锁临界区调度用户任务或投递用户 signal。
 pub fn trap_from_kernel(cx: &mut TrapContext) {
     match estat::cause(estat::read()) {
         estat::Trap::Exception(estat::Exception::Breakpoint) => {

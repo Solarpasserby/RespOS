@@ -1,5 +1,16 @@
 // os/src/fs/pipe.rs
 
+//! 匿名管道和命名 FIFO 共用的字节流、容量与等待状态机。
+//!
+//! pipe 的读端和写端共享同一 ring buffer，同时分别统计 reader/writer open-file 引用。
+//! 最后一个 writer 关闭后，空 buffer 对 reader 表示 EOF；最后一个 reader 关闭后，write
+//! 需要产生 `EPIPE`/SIGPIPE。poll/epoll readiness 必须从相同状态计算并唤醒同一 waiter 集合。
+//!
+//! 长度不超过 `PIPE_BUF` 的单次 write/writev 是不可交错 record：nonblocking 模式空间不足
+//! 时整体返回 `EAGAIN`，blocking 模式则等待足够空间。更大的写允许部分完成，但每次状态
+//! 改变后都要重新检查 signal、端点关闭和容量。检查条件、注册 waiter、再次检查、睡眠构成
+//! 防丢唤醒协议；不能用无界 yield 轮询代替。
+
 use super::KStat;
 use super::vfs::InodeType;
 use super::{FileOp, OpenFlags, POLL_HUP, POLL_READ, POLL_WRITE, PollEvents, PollWaiters};
@@ -52,7 +63,7 @@ pub struct Pipe {
 }
 
 impl Pipe {
-    /// return (pipe_read, pipe_write)
+    /// 返回 `(读端, 写端)`。
     fn end_with_buffer(
         buffer: Arc<Mutex<PipeRingBuffer>>,
         readable: bool,
@@ -273,6 +284,15 @@ impl Drop for NamedFifoEnd {
     }
 }
 
+/// 打开命名 FIFO，并实现 POSIX 读写端会合语义。
+///
+/// 同一路径在 `NAMED_FIFOS` 中共享一个 ring buffer 和端点计数。只写非阻塞打开在没有读者时
+/// 返回 ENXIO；阻塞的只读/只写打开先登记 opener waiter，再发布 Blocked 并复查对端数量，
+/// 关闭匹配端恰好到达于检查和睡眠之间的竞争窗口。`O_RDWR` 同时建立两端，不等待会合。
+///
+/// 对端完成会合后即使在本任务恢复前再次关闭，本次 open 仍然成功；后续 read 通过缓冲数据
+/// 和 EOF 观察关闭。错误或信号中断路径必须撤销 waiter/端点计数，最后一个端点释放后才能
+/// 从全局表移除该路径实例。
 pub fn open_named_fifo(path: &str, flags: OpenFlags) -> SysResult<Arc<dyn FileOp>> {
     let readable = !flags.contains(OpenFlags::O_WRONLY) || flags.contains(OpenFlags::O_RDWR);
     let writable = flags.intersects(OpenFlags::O_WRONLY | OpenFlags::O_RDWR);
@@ -337,8 +357,8 @@ pub fn open_named_fifo(path: &str, flags: OpenFlags) -> SysResult<Arc<dyn FileOp
         }
 
         let should_block = prepare_current_task_blocked();
-        // Close the check-to-sleep race: a matching opener may have arrived
-        // after the condition check but before this task became Blocked.
+        // 关闭“检查后、睡眠前”的竞争窗口：匹配的打开者可能在条件检查之后、
+        // 本任务变为 Blocked 之前已经到达。
         let counterpart_present = {
             let table = NAMED_FIFOS.lock();
             table.get(&path).is_some_and(|fifo| {
@@ -375,10 +395,8 @@ pub fn open_named_fifo(path: &str, flags: OpenFlags) -> SysResult<Arc<dyn FileOp
             }
             return Err(Errno::EINTR);
         }
-        // Reaching here means a matching opener completed the rendezvous.
-        // Its endpoint may already have closed again before this task runs;
-        // the open still succeeds and subsequent read observes buffered data
-        // followed by EOF, as on Linux.
+        // 执行到这里说明匹配的打开者已完成会合。其端点可能在本任务恢复前又关闭，
+        // 但 open 仍应成功；之后的 read 先读缓冲数据，再观察到 EOF，与 Linux 一致。
         break;
     }
     {
@@ -401,6 +419,11 @@ impl FileOp for Pipe {
     fn splice_supported(&self) -> bool {
         true
     }
+    /// 从管道环形缓冲区读取；空且写端关闭时返回 EOF，空且仍有写端时可中断睡眠。
+    ///
+    /// 读取、EOF 判断和 waiter 入队都在 buffer 锁内完成。发布 Blocked 后若写者已经把任务
+    /// 改为 Ready，则本地撤销队列项并继续，无需真的切换；恢复后统一清除 waiter 和
+    /// interruptible 状态。成功读取会唤醒一个写者并通知 POLLOUT。
     fn read<'a>(&'a self, buf: &'a mut [u8]) -> SysResult<usize> {
         if buf.is_empty() {
             return Ok(0);
@@ -479,6 +502,12 @@ impl FileOp for Pipe {
             }
         }
     }
+    /// 向管道写入，并保持 `PIPE_BUF` 范围内记录的原子性。
+    ///
+    /// 不超过一页的写入只有在整段可容纳时才发布，否则阻塞或在 O_NONBLOCK 下返回 EAGAIN；
+    /// 更大写入允许填满剩余空间后返回 partial count。读端已关闭返回 EPIPE，由 syscall 层
+    /// 负责相应 SIGPIPE 语义。写入、空间检查与 waiter 入队同锁完成，成功后唤醒 reader
+    /// 并通知 POLLIN。
     fn write<'a>(&'a self, buf: &'a [u8]) -> SysResult<usize> {
         if buf.is_empty() {
             return Ok(0);
@@ -499,10 +528,9 @@ impl FileOp for Pipe {
 
                 let mut write_size = 0;
                 let free = buffer.capacity.saturating_sub(buffer.available_bytes());
-                // POSIX requires writes no larger than PIPE_BUF to be atomic.
-                // If the complete record does not fit, publish none of it and
-                // block (or return EAGAIN for O_NONBLOCK); larger writes may
-                // still make partial progress.
+                // POSIX 要求不超过 PIPE_BUF 的写入保持原子性。若完整记录放不下，
+                // 就一个字节也不能发布，并阻塞等待（O_NONBLOCK 时返回 EAGAIN）；
+                // 更大的写入则允许只取得部分进展。
                 if buf.len() > PAGE_SIZE || free >= buf.len() {
                     for ch in buf {
                         if buffer.available_bytes() >= buffer.capacity {

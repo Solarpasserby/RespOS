@@ -3,6 +3,16 @@
 //! 挂载系统 —— 管理全局挂载表和挂载点穿越。
 //!
 //! 核心数据结构参照 Linux 的 `struct vfsmount` / `struct mount` / mount tree。
+//! `Path` 由 `(vfsmount, dentry)` 组成；同一个 dentry 在不同 mount namespace 位置上的
+//! 可见含义可能不同，路径遍历不能只保存 inode。
+//!
+//! 根盘、辅助盘和伪文件系统共享挂载树。设备 index 0 的根文件系统通常是启动必需项，
+//! `/respos` 辅助盘失败则必须可降级；卸载和关机 sync 要对每个 superblock 独立尝试，
+//! 一个失败不能阻止其余文件系统 flush。
+//!
+//! mount/umount 修改全局拓扑时必须同步 dentry pin/cache。已有 cwd、root、open fd 或子挂载
+//! 会影响 busy 判定；从 mountpoint 向上处理 `..` 与进入子 mount 是 namei 和本模块共同维护
+//! 的边界，不能靠字符串前缀替代对象 identity。
 
 use super::Path;
 use super::dentry_cache::{
@@ -299,9 +309,15 @@ pub fn path_global_abs_path(path: &Path) -> alloc::string::String {
     }
 }
 
-/// 挂载文件系统。
+/// 在现有目录 dentry 上提交 mount、remount 或传播属性变更。
 ///
-/// 第一版只支持 ext4 挂载到目录。不处理 bind mount、remount 等复杂语义。
+/// 入口先解析目标但不跟随最后一级 mount，确保操作的是挂载点本身。remount 在修改 flags 前
+/// 处理 lazytime 刷新与只读限制；普通块文件系统挂载必须验证 fstype、目标目录、设备身份和
+/// 重复挂载，再构造独立 superblock/root。只有后端初始化全部成功后才把新 Mount 插入树和
+/// 全局索引，失败不能让 namei 看见半安装挂载点。
+///
+/// 当前支持范围不完整的 bind/move/复杂 propagation 组合必须显式拒绝；不能仅记录 flags
+/// 就伪装成 Linux 已实施相应命名空间语义。
 pub fn do_mount(_source: &str, target: &str, fstype: &str, flags: usize) -> SysResult<usize> {
     let target_path = filename_lookup_no_follow_final_mount(AT_FDCWD, target)?;
     let target_visible_path = target_path.global_abs_path();
@@ -578,8 +594,7 @@ pub fn do_umount2(target: &str, flags: usize) -> SysResult<usize> {
         return Err(Errno::EAGAIN);
     }
 
-    // Flush every filesystem in a detached subtree before any namespace or
-    // backing-root cleanup can make its dirty inodes unreachable.
+    // 在命名空间或后端根清理使脏 inode 不可达之前，先刷新已分离子树中的每个文件系统。
     let mut filesystems: Vec<Arc<dyn SuperBlockOp>> = Vec::new();
     collect_mount_filesystems(&mount, &mut filesystems);
     for filesystem in filesystems {
@@ -736,13 +751,19 @@ pub fn init_root_fs() -> Arc<Path> {
     Path::new(root_vfs_mount, root_dentry)
 }
 
+/// 探测可选的第二块 ext4 设备，并把它作为独立文件系统挂载到 `/respos`。
+///
+/// 探测和 mount 必须在修改根文件系统命名空间前成功；设备缺失、格式非法或挂载失败只禁用
+/// 辅助盘，绝不能影响官方根盘启动，也不能在根盘上遗留伪 `/respos`。成功后创建并 pin
+/// 独立 dentry/Mount，确保 namei 通过 mount tree 进入辅助 superblock，而不是按字符串前缀
+/// 混用根文件系统 inode identity。
 fn init_auxiliary_fs(
     root_inode: &Arc<dyn super::vfs::InodeOp>,
     root_dentry: &Arc<Dentry>,
     root_mount: &Arc<Mount>,
 ) {
-    // Probe and mount the optional block device before touching the official
-    // root filesystem.  A missing/invalid x1 must not create /respos on x0.
+    // 接触正式根文件系统前先探测并挂载可选块设备；x1 缺失或无效时，
+    // 绝不能在 x0 上误创建 `/respos`。
     let auxiliary = match crate::fs::ext4::auxiliary_super_block() {
         Ok(fs) => fs,
         Err(_error) => {

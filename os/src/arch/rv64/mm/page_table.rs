@@ -1,5 +1,15 @@
 // os/src/arch/rv64/mm/page_table.rs
 
+//! RISC-V Sv39 页表、PTE flag 与 TLB shootdown 的架构实现。
+//!
+//! 三级页表把 39-bit VA 分为三个 9-bit index 和 12-bit 页内偏移。用户页权限来自
+//! V/R/W/X/U，A/D 位既参与硬件访问也被 COW、mprotect 和 dirty tracking 使用；修改 PTE
+//! 后必须通过本地 `sfence.vma` 或 SBI RFENCE 使所有可能缓存该地址空间的 hart 可见。
+//!
+//! 用户根页表共享内核高半区的启动期拓扑。运行期新增内核映射不得跨入一个旧用户 root
+//! 从未复制的空根项；动态内核栈和 direct map 调整必须保持这一约束。页表 frame 的回收要
+//! 等待远端失效完成，不能让旧 TLB 指向已经重新分配的物理页。
+
 use crate::config::{KERNEL_BASE, PAGE_SIZE_BITS};
 use crate::mm::{
     FrameTracker, KERNEL_SPACE, MapPermission, PPN_WIDTH_SV39, PhysAddr, PhysPageNum, VirtAddr,
@@ -61,8 +71,7 @@ impl PageTable {
         (8usize << 60) | self.root_ppn.0
     }
 
-    /// Preserve the existing RV64 immediate-release behavior. The retirement
-    /// ownership change in this stage is specific to the LA ASID protocol.
+    /// 保留 RV64 现有立即释放行为；本阶段 retirement ownership 修改只针对 LA ASID 协议。
     pub fn retire_data_frame(&mut self, frame: Arc<FrameTracker>) {
         drop(frame);
     }
@@ -134,7 +143,7 @@ pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> &'static mut T {
 ///
 /// 均返回页表项的可变借用，用于修改或读取页表项
 impl PageTable {
-    /// Install an aligned Sv39 level-2 leaf for the kernel direct map.
+    /// 为 kernel direct map 安装一个对齐的 Sv39 level-2 leaf。
     pub fn map_gigabyte(&mut self, va: VirtAddr, pa: PhysAddr, flags: PTEFlags) -> SysResult {
         const GIGABYTE: usize = 1 << 30;
         let va_raw = usize::from(va);
@@ -154,15 +163,12 @@ impl PageTable {
         Ok(())
     }
 
-    /// Populate every kernel-half root entry that is still empty.
+    /// 填充所有仍为空的 kernel-half root entry。
     ///
-    /// User address spaces copy kernel root entries by value and then share
-    /// the lower-level tables they reference.  Dynamic kernel mappings (most
-    /// notably kernel stacks) may therefore add lower-level entries safely,
-    /// but they must never need to create a brand-new root entry after the
-    /// first user page table has been cloned.  Preparing the empty branches at
-    /// boot keeps the root topology immutable while retaining lazy leaf-page
-    /// allocation.
+    /// 用户地址空间按值复制 kernel root entry，随后共享它们引用的 lower-level table。因此
+    /// 动态 kernel mapping（尤其 kernel stack）可以安全增加 lower-level entry，但第一个用户
+    /// 页表 clone 后绝不能再要求新建 root entry。boot 时准备空 branch，使 root 拓扑保持
+    /// immutable，同时保留 lazy leaf-page 分配。
     pub fn prepare_kernel_root_branches(&mut self) -> SysResult {
         let first_kernel_index = (KERNEL_BASE >> (PAGE_SIZE_BITS + 18)) & 0x1ff;
         for index in first_kernel_index..512 {
@@ -265,8 +271,7 @@ impl PageTable {
         );
     }
 
-    /// Atomically replace an existing leaf mapping without allocating page-table
-    /// pages. Used by COW after the replacement frame has been fully prepared.
+    /// 不分配页表页，原子替换已有 leaf mapping；供 COW 在 replacement frame 完全准备好后使用。
     pub fn replace_pte(
         &mut self,
         vpn: VirtPageNum,

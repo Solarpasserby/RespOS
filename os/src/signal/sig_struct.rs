@@ -1,3 +1,10 @@
+//! signal 编号、mask、pending queue 与用户 signal frame 的公共数据结构。
+//!
+//! 标有 `#[repr(C)]` 的类型属于用户 ABI，字段顺序、对齐和 padding 不能按 Rust 内部便利性
+//! 调整。RV64 与 LA64 的 mcontext/扩展状态差异由各自结构和转换路径表达，不能套用 x86
+//! 布局。`SigPending` 同时维护普通 signal 的合并语义和 realtime signal 的排队顺序；mask
+//! 只影响选择/投递，不等于从 pending 中删除。
+
 use super::sig_info::{LinuxSigInfo, SigInfo};
 use super::sig_stack::{SigContext, UContext};
 use alloc::collections::btree_map::BTreeMap;
@@ -5,7 +12,8 @@ use alloc::collections::vec_deque::VecDeque;
 use bitflags::bitflags;
 pub const MAX_SIGNUM: usize = 64;
 
-// 新增：帧标记，sigreturn 用它区分普通帧 vs RT 帧
+/// 内核写入用户栈的帧种类标记，`sigreturn` 用它区分普通帧与 RT 帧。
+/// 该值只用于选择解析布局，不能替代对整个用户 frame 的地址和内容校验。
 #[derive(Clone, Copy, Default)]
 #[repr(align(16))]
 #[repr(C)]
@@ -48,10 +56,9 @@ pub struct SigRTFrame {
 pub struct SigPending {
     pub pending: SigSet, // 接收信号位图
     pub mask: SigSet,    // 信号掩码
-    /// Linux standard signals coalesce while pending, preserving the first
-    /// siginfo. Real-time signals (33..=64) retain every instance FIFO for a
-    /// given signal number. The pending bitmap remains set until that queue is
-    /// empty, while signal selection still prefers the lowest signal number.
+    /// Linux 标准信号在 pending 期间合并，并保留第一份 siginfo；实时信号（33..=64）
+    /// 则按同一信号编号维护每个实例的 FIFO。队列清空前 pending 位图始终置位，
+    /// 信号选择仍优先取编号最小者。
     pub info: BTreeMap<i32, VecDeque<SigInfo>>,
 }
 
@@ -85,9 +92,8 @@ impl SigPending {
 
     // 添加一个新信号
     // 用作任务收到信号
-    /// Queue a signal and report whether this created a new pending instance.
-    /// Standard-signal coalescing therefore returns false after the first
-    /// instance, whereas every real-time signal returns true.
+    /// 将信号入队，并报告是否新建了 pending 实例。标准信号合并使首个实例之后返回 false，
+    /// 而每个实时信号实例都会返回 true。
     pub fn add_signal(&mut self, siginfo: SigInfo) -> bool {
         let sig = Sig::from(siginfo.signo); // 把i32 → 转换成 Sig 类型的信号
         self.pending.add_signal(sig);
@@ -117,8 +123,7 @@ impl SigPending {
         self.find_signal_with_mask(self.mask)
     }
 
-    /// Find the lowest-numbered deliverable signal using a caller-supplied
-    /// thread mask. Process-pending queues have no mask of their own.
+    /// 使用调用者提供的线程掩码寻找编号最小的可投递信号；进程级 pending 队列没有独立掩码。
     pub fn find_signal_with_mask(&self, mask: SigSet) -> Option<Sig> {
         let mut temp_pending = self.pending.bits();
         loop {
@@ -186,6 +191,11 @@ impl SigPending {
         }
     }
 
+    /// 消费指定信号编号队列中的最早一份 siginfo，并同步维护 pending 位图。
+    ///
+    /// 标准信号队列最多一个实例，实时信号按 FIFO 保留全部实例；只有队列在 pop 后为空时
+    /// 才能清除位图位和 map 项。调用者必须已经从同一个 `SigPending` 锁域确认该信号存在，
+    /// 因此“位图存在但队列为空”属于必须立即暴露的内部不变量破坏。
     fn pop_signal_info(&mut self, sig: Sig) -> SigInfo {
         let (siginfo, empty) = {
             let queue = self

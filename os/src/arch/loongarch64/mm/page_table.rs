@@ -1,26 +1,34 @@
 // os/src/arch/loongarch64/mm/page_table.rs
 //
-// LoongArch LA64 页表实现 (3级页表, 4KB 页)
+// LoongArch LA64 页表实现（三级页表，4 KiB 页）
 //
-// 地址结构 (39-bit VA):
-//   | PGD(9) | PMD(9) | PTE(9) | Offset(12) |
+// 地址结构（39-bit VA）：
+//   | PGD(9) | PMD(9) | PTE(9) | 页内偏移(12) |
 //   | 38..30 | 29..21 | 20..12 | 11..0      |
 //
-// PTE 格式 (64-bit):
-//   | RPLV/NX/NR | Reserved | PPN[47:12] | Software | G/MAT/PLV/D/V |
+// PTE 格式（64-bit）：
+//   | RPLV/NX/NR | 保留 | PPN[47:12] | 软件位 | G/MAT/PLV/D/V |
 //
-// Flags:
-//   bit 0: V (Valid)
-//   bit 1: D (Dirty / Writable)
-//   bits[3:2]: PLV (Privilege: 0=kernel, 3=user)
-//   bits[5:4]: MAT (Memory type: 1=cached)
-//   bit 6: G (Global)
-//   bit 7: P (software present)
-//   bit 8: W (software writable)
-//   bit 10: PROTNONE (software-present leaf with no hardware access)
-//   bit 61: NR (No Read)
-//   bit 62: NX (No Execute)
+// 标志位：
+//   bit 0: V（硬件有效）
+//   bit 1: D（硬件脏/可写）
+//   bits[3:2]: PLV（特权级：0=内核，3=用户）
+//   bits[5:4]: MAT（内存类型：1=缓存）
+//   bit 6: G（全局映射）
+//   bit 7: P（软件 present）
+//   bit 8: W（软件记录的可写权限）
+//   bit 10: PROTNONE（软件存在、硬件禁止访问的叶子）
+//   bit 61: NR（禁止读）
+//   bit 62: NX（禁止执行）
 //   bit 63: RPLV
+//
+//! LoongArch 页表不仅编码 Linux VMA 权限，还参与软件 TLB refill、10-bit ASID、huge leaf、
+//! Global 配对约束和跨 hart INVTLB。PTE 的 `P/W/PROTNONE` 软件位不能简单等同于硬件
+//! `V/D/NR/NX`；mprotect、COW 和 page-mkwrite 需要借助它们区分“逻辑存在但暂不可访问”。
+//!
+//! 修改叶子后必须按地址空间 residency 完成远端失效，页表页和 data frame 在 completion
+//! 之前进入 retired 队列而不是立即释放。软件 refill 会缓存 invalid pair，因此即使从无效
+//! PTE 建立 fresh mapping，也不能未经证明删除定点 invalidation。
 
 use crate::config::{KERNEL_BASE, PAGE_SIZE_BITS};
 use crate::mm::{FrameTracker, frame_alloc as alloc_frame};
@@ -66,28 +74,23 @@ impl PendingTlbRange {
 pub struct PageTable {
     root_ppn: PhysPageNum,
     frames: Vec<FrameTracker>,
-    // Data frames whose PTEs were removed or replaced. Keep them with the
-    // owning address space until its synchronous shootdown completes; a
-    // process-independent retirement queue cannot safely choose a target
-    // hart set for a batch containing multiple ASIDs.
+    // PTE 已删除或替换的数据帧。与所属地址空间一起保留到同步 TLB 刷新完成；独立于
+    // 进程的延迟回收队列无法为包含多个 ASID 的批次安全选择目标硬件线程集合。
     retired_data_frames: Vec<Arc<FrameTracker>>,
-    // Page-table frames cannot be reused while an exiting task still runs on
-    // this root. The last active-hart transition releases this owned batch.
+    // 退出任务仍在此根页表上运行时不能复用页表帧；最后一次活动硬件线程转换
+    // 会释放这批归属明确的帧。
     retired_page_table_frames: Mutex<Vec<FrameTracker>>,
-    // Conservative half-open VPN envelope covering every successful leaf
-    // PTE mutation since the previous synchronous flush. The envelope may
-    // include untouched pages between sparse changes, but never omits one.
-    // &mut PTE writers use get_mut(); activate() only needs interior reset.
+    // 保守的半开 VPN 包络，覆盖上次同步刷新后每次成功的叶 PTE 修改。稀疏修改之间
+    // 可包含未触碰页，但绝不遗漏修改页。`&mut PTE` 写入者使用 get_mut()；activate() 只需
+    // 执行内部状态复位。
     pending_tlb_range: Mutex<PendingTlbRange>,
 }
 
 impl PageTable {
-    /// Mark the already-built, immutable kernel half as global before its
-    /// first activation. LoongArch 4 KiB TLB entries cover an even/odd pair;
-    /// the entry is global only when both TLBELO G bits are set. Leave an
-    /// unpaired leaf non-global rather than claiming a property the hardware
-    /// will not provide. Runtime mappings such as recycled kernel stacks are
-    /// installed after this pass and deliberately remain ASID-scoped.
+    /// 首次激活前把已构建且 immutable 的 kernel half 标为 global。LoongArch 4 KiB TLB entry
+    /// 覆盖偶/奇页对，只有两个 TLBELO 的 G 位都置位时才真正 global。未配对 leaf 保持
+    /// non-global，不能声称硬件不提供的属性。recycled kernel stack 等 runtime mapping 在此
+    /// pass 后安装，并刻意保持 ASID-scoped。
     #[cfg(feature = "la_global_kernel")]
     pub fn mark_existing_kernel_global(&mut self) -> (usize, usize) {
         let kernel_pgd = (KERNEL_BASE >> (PAGE_SIZE_BITS + 18)) & 0x1ff;
@@ -127,11 +130,10 @@ impl PageTable {
         (global_pairs, skipped_huge)
     }
 
-    /// Install one aligned 2 MiB kernel direct-map entry in the PMD.
+    /// 在 PMD 中安装一个对齐的 2 MiB kernel direct-map entry。
     ///
-    /// Global huge-leaf encoding is deliberately rejected. The previous
-    /// bit-12 assumption faulted immediately when the high-RAM direct map was
-    /// exercised; 4 KiB paired global leaves are evaluated independently.
+    /// 刻意拒绝 Global huge-leaf 编码。旧 bit-12 假设在访问 high-RAM direct map 时立即 fault；
+    /// 4 KiB 配对 global leaf 另行独立评估。
     pub fn map_huge_2m(&mut self, va: VirtAddr, pa: PhysAddr, flags: PTEFlags) -> SysResult {
         const HUGE_SIZE: usize = 2 * 1024 * 1024;
         let va_raw = usize::from(va);
@@ -162,10 +164,8 @@ impl PageTable {
         Ok(())
     }
 
-    /// Populate every still-empty kernel-half root entry before user roots
-    /// copy the kernel half.  Later dynamic mappings then only mutate shared
-    /// lower-level tables, so an old user root cannot miss a newly-created
-    /// kernel-stack root branch.
+    /// 用户 root 复制 kernel half 前填充所有仍为空的 kernel-half root entry。后续动态 mapping
+    /// 只修改共享 lower-level table，旧用户 root 就不会遗漏新建 kernel-stack root branch。
     pub fn prepare_kernel_root_branches(&mut self) -> SysResult {
         let first_kernel_index = (KERNEL_BASE >> (PAGE_SIZE_BITS + 18)) & 0x1ff;
         for index in first_kernel_index..512 {
@@ -392,8 +392,7 @@ impl PageTable {
         self.record_tlb_change(vpn);
     }
 
-    /// Atomically replace an existing leaf mapping without allocating page-table
-    /// pages. Used by COW after the replacement frame has been fully prepared.
+    /// 不分配页表页，原子替换已有 leaf mapping；供 COW 在 replacement frame 完全准备好后使用。
     pub fn replace_pte(
         &mut self,
         vpn: VirtPageNum,
@@ -513,9 +512,8 @@ fn flags_to_la64(flags: PTEFlags) -> usize {
         la64 |= PTE_P;
     }
     if flags.contains(PTEFlags::VALID) && prot_none {
-        // QEMU 10.0.2 masks NR/NX out while executing LDPTE. Keep the leaf
-        // software-present but hardware-invalid so PROT_NONE remains
-        // inaccessible there as well as on hardware/newer emulators.
+        // QEMU 10.0.2 执行 LDPTE 时会屏蔽 NR/NX。保持 leaf software-present 但
+        // hardware-invalid，使 PROT_NONE 在该 QEMU、真机和新 emulator 上都不可访问。
         la64 |= PTE_PROTNONE;
     }
     if flags.contains(PTEFlags::WRITE) {
@@ -589,9 +587,8 @@ impl PageTableEntry {
     }
 
     pub fn is_valid(&self) -> bool {
-        // Callers use is_valid() as the resident/software-present predicate.
-        // PROT_NONE leaves deliberately clear hardware V but must still be
-        // found by mprotect(), munmap(), and fork().
+        // 调用方以 is_valid() 判断 resident/software-present。PROT_NONE leaf 刻意清硬件 V，
+        // 但 mprotect()、munmap() 与 fork() 仍必须能找到它。
         self.bits & (PTE_V | PTE_PROTNONE) != 0
     }
 

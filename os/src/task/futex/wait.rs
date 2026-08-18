@@ -1,5 +1,16 @@
 // os/src/task/futex/wait.rs
 
+//! futex WAIT/WAKE/REQUEUE 等等待操作的线性化实现。
+//!
+//! futex 的身份不是裸用户虚拟地址：私有 futex 按地址空间区分，共享 futex 必须解析到
+//! 可跨进程一致的 backing key。等待者进入 hash queue 前后都要验证用户值，采用“读值 →
+//! 加队列锁 → 再读值 → 入队”的顺序关闭 lost wake 窗口。
+//!
+//! 一个 waiter 只能由 wake、timeout、signal 或退出清理中的一个路径完成，`WaitCompletion`
+//! 记录 single-winner 结果。完成路径必须对称移除 queue entry、deadline 和 task blocked
+//! 状态；requeue 同时涉及两个 bucket 时要使用稳定锁序。用户地址读取使用 nofault/copy
+//! helper，不能持有 futex 队列锁触发会递归进入 MM 或调度器的缺页处理。
+
 use super::queue::{FUTEX_QUEUES, FutexKey, FutexQ, futex_hash_idx};
 use crate::config::PAGE_SIZE;
 use crate::mm::{VirtAddr, check_user_readable, copy_from_user, read_user_u32_nofault};
@@ -272,6 +283,14 @@ fn trace_futex(op: &str, key: &FutexKey, val: u32, extra: usize) {
     let _ = (op, key, val, extra);
 }
 
+/// 执行无超时 futex WAIT 的“比较并入队”事务。
+///
+/// 先在全局队列锁外解析用户页，随后持有 `FUTEX_QUEUES` 重新读取 futex 字并与期望值比较；
+/// 只有仍相等时才登记 waiter、设置 interruptible 并发布 Blocked，因此 wake 不可能插入在
+/// 最终比较与入队之间。私有 futex 以地址空间身份构造 key，共享 futex 以物理帧身份构造 key。
+///
+/// 恢复后由 wake、信号、退出或伪唤醒中的唯一获胜者认领完成状态；函数清理残留队列项和
+/// interruptible 标志，并把信号中断映射为 EINTR。调用期间不得在持队列锁时触发用户缺页。
 fn futex_wait_common(
     uaddr: usize,
     expected_val: u32,
@@ -286,9 +305,8 @@ fn futex_wait_common(
     let key = futex_key(uaddr, private)?;
     let hash_idx = futex_hash_idx(&key);
 
-    // Resolve lazy/COW mappings before entering the global queue critical
-    // section.  The value is read again under FUTEX_QUEUES below so the
-    // compare-and-enqueue operation remains atomic with respect to wakeups.
+    // 进入全局队列临界区前先解析惰性/COW 映射。下方持有 FUTEX_QUEUES 时会再次读取值，
+    // 从而保证“比较并入队”相对于唤醒操作仍是原子的。
     check_user_readable(uaddr as *const u32, 1)?;
 
     {
@@ -299,9 +317,8 @@ fn futex_wait_common(
             return Err(Errno::EAGAIN);
         }
 
-        // From here until the task is woken, signal delivery must be able to
-        // interrupt this futex wait. Set this before enqueueing so a cancel
-        // signal cannot arrive in the window before the task is blocked.
+        // 从这里到任务被唤醒期间，信号投递必须能够中断 futex 等待。
+        // 在入队前设置该状态，避免取消信号落入任务真正阻塞前的竞争窗口。
         task.set_interruptible(true);
 
         queues.bucket_by_idx(hash_idx).push_back(FutexQ {
@@ -368,8 +385,8 @@ fn futex_wait_common(
     let completion = finish_futex_wait(task.tid()).unwrap_or(WaitCompletion::Pending);
     task.clear_interrupted();
 
-    // A winner normally removes the queue entry before waking the task. Keep
-    // this cleanup for a scheduler-level spurious wake.
+    // 正常情况下，获胜路径会先移除队列项再唤醒任务；这里保留清理逻辑，
+    // 用于处理调度器层面的伪唤醒。
     FUTEX_QUEUES
         .lock()
         .bucket_by_idx(hash_idx)
@@ -406,7 +423,7 @@ fn cancel_futex_wait(tid: usize) {
 
 pub fn check_futex_timeouts() {
     let (expired, next_deadlines) = {
-        // Lock order: FUTEX_QUEUES -> FUTEX_WAITS -> SCHEDULER.
+        // 固定锁顺序：FUTEX_QUEUES → FUTEX_WAITS → SCHEDULER。
         let mut queues = FUTEX_QUEUES.lock();
         let mut waits = FUTEX_WAITS.lock();
         let expired = waits.expire(get_time_us(), get_timeout_us());
@@ -424,10 +441,9 @@ pub fn check_futex_timeouts() {
     }
 }
 
-/// Claim signal interruption for a futex waiter and remove its queue entry.
+/// 为 futex 等待者认领“被信号中断”的结果，并移除其队列项。
 ///
-/// Signal delivery still owns the scheduler wakeup because it also handles
-/// non-futex interruptible waits.
+/// 调度器唤醒仍由信号投递路径负责，因为它还统一处理非 futex 的可中断等待。
 pub fn interrupt_futex_wait(tid: usize) -> bool {
     let mut queues = FUTEX_QUEUES.lock();
     if !complete_futex_wait(tid, WaitCompletion::Interrupted) {
@@ -437,7 +453,7 @@ pub fn interrupt_futex_wait(tid: usize) -> bool {
     true
 }
 
-/// Remove all futex wait state for a task that will never resume.
+/// 移除一个永远不会恢复执行的任务所拥有的全部 futex 等待状态。
 pub fn remove_futex_waiter(tid: usize) {
     let mut queues = FUTEX_QUEUES.lock();
     let removed_queue = queues.remove_tid(tid);
@@ -486,6 +502,14 @@ fn futex_deadline_us(
     }
 }
 
+/// 执行带绝对/相对期限的 futex WAIT，并协调 wake、signal 与 timeout 三类竞争者。
+///
+/// 无期限时退化为 `futex_wait_common`；有期限时先注册等待状态和 deadline 索引，再以与
+/// 普通 WAIT 相同的锁内二次取值完成原子入队。定时服务、futex wake 和信号路径都只能通过
+/// `FUTEX_WAITS` 的完成状态赢得一次，失败者不得再次唤醒或覆盖 errno。
+///
+/// 返回前统一撤销期限索引、队列项和可中断状态。已到期返回 ETIMEDOUT，值在入队前变化
+/// 返回 EAGAIN，信号获胜返回 EINTR；任何路径都不能遗留一个指向已退出任务的 waiter。
 fn futex_wait_timed_common(
     uaddr: usize,
     expected_val: u32,
@@ -526,9 +550,8 @@ fn futex_wait_timed_common(
 
         {
             let mut queues = FUTEX_QUEUES.lock();
-            // The faulting read above resolved the mapping.  Do not call
-            // copy_from_user while holding FUTEX_QUEUES: that needs the
-            // MemorySet write lock and can deadlock against another hart.
+            // 上面的缺页读取已经解析映射。持有 FUTEX_QUEUES 时不能调用 copy_from_user：
+            // 它需要 MemorySet 写锁，可能与另一硬件线程形成死锁。
             let actual_val = read_user_u32_nofault(uaddr as *const u32)?;
             if actual_val != expected_val {
                 trace_futex(
@@ -661,6 +684,12 @@ fn futex_wake_common(uaddr: usize, nr_wake: u32, bitset: u32, private: bool) -> 
     Ok(woken)
 }
 
+/// 原子唤醒一部分源 futex 等待者，并把其余等待者迁移到目标 futex key。
+///
+/// `CMP_REQUEUE` 会在队列锁内对源 futex 做最终无缺页读取，比较失败不修改任何队列。
+/// 操作始终按 `FUTEX_QUEUES → MemorySet(read) → FUTEX_WAITS` 的固定顺序取锁；迁移时同时
+/// 更新每个任务的 waiter 元数据，使之后的信号取消、超时和目标 wake 都定位到新 key。
+/// 被选中唤醒的任务先从队列移除并认领完成状态，释放锁后才进入调度器唤醒路径。
 fn futex_requeue_common(
     uaddr: usize,
     nr_wake: u32,
@@ -676,10 +705,8 @@ fn futex_requeue_common(
     let source_key = futex_key(uaddr, private)?;
     let target_key = futex_key(uaddr2, private)?;
 
-    // Resolve a lazy user page before taking the queue spin lock. The final
-    // value load still happens under FUTEX_QUEUES below, so comparison and
-    // queue mutation share one linearization interval without allowing page
-    // allocation/fault handling while the no-IRQ lock is held.
+    // 获取队列自旋锁前先解析惰性用户页。最终取值仍在下方持有 FUTEX_QUEUES 时完成，
+    // 因而比较与队列修改共享同一线性化区间，同时避免在持有禁中断锁时分配页面或处理缺页。
     if expected_val.is_some() {
         check_user_readable(uaddr as *const u32, 1)?;
         if let (true, Some(expected_val)) = (FUTEX_CMP_REQUEUE_TEST_YIELD, expected_val) {
@@ -700,10 +727,9 @@ fn futex_requeue_common(
     {
         let mut queues = FUTEX_QUEUES.lock();
         if let Some(expected_val) = expected_val {
-            // Lock order: FUTEX_QUEUES -> MemorySet(read) -> FUTEX_WAITS.
-            // The page was resolved above. This fixed-size no-fault read only
-            // translates the existing PTE; it cannot allocate or block on
-            // page-fault handling while the queue lock is held.
+            // 固定锁顺序：FUTEX_QUEUES → MemorySet（读）→ FUTEX_WAITS。
+            // 页面已在上方解析；这里的定长无缺页读取只翻译现有 PTE，
+            // 持有队列锁期间不会分配内存，也不会阻塞等待缺页处理。
             let actual_val = read_user_u32_nofault(uaddr as *const u32)?;
             if actual_val != expected_val {
                 return Err(Errno::EAGAIN);

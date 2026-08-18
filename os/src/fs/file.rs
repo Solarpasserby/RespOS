@@ -1,5 +1,19 @@
 // os/src/vfs/file.rs
 
+//! 打开的常规文件对象及 open-file 级状态。
+//!
+//! `File` 持有 inode，并在 `FileInner` 中保存当前 offset、open flags、readdir 快照、fadvise
+//! 和 writeback error cursor 等“open-file description”状态。因此 dup 和 fork 共享这些字段，
+//! 同一路径再次 open 则获得独立状态；不要把它们错误地下沉到 inode 或上移到 fd entry。
+//!
+//! buffered read/write、pread/pwrite 与 file-backed mmap 必须通过同一 PageCache 保持数据
+//! 一致。扩容前先经过 mount geometry/容量检查，写成功后再更新时间戳和 offset；`O_APPEND`
+//! 的 EOF 选择与整次写入要在同一原子协议中。writeback 错误通过每个 open-file cursor
+//! 报告，不能因另一个 fd 已观察错误而全局清除。
+//!
+//! `File` 的 Drop 不是可靠持久化边界。dirty owner 和 superblock sync 负责在最后一个 fd
+//! 消失后继续保有待写回状态。
+
 use super::vfs::{InodeOp, InodeType, LinuxDirent64, SuperBlockOp};
 use crate::config::{KERNEL_HEAP_SIZE, PAGE_SIZE};
 use crate::fs::ext4::Ext4Inode;
@@ -20,7 +34,7 @@ use alloc::vec::Vec;
 use core::any::Any;
 use spin::Mutex;
 
-// 常规文件
+/// 常规文件的 open-file 对象；`inner` 中的状态由 dup/fork 共享。
 pub struct File {
     inode: Arc<dyn InodeOp>,
     shared_page_identity: Option<(u64, u64)>,
@@ -38,19 +52,17 @@ struct FileInner {
     offset: usize,
     path: Arc<Path>,
     flags: OpenFlags,
-    /// Cached directory entries for the current directory-stream pass.
-    /// Rebuilt whenever getdents starts from offset 0.
+    /// 当前目录流遍历所缓存的目录项；getdents 每次从偏移 0 开始时都会重建。
     dirent_cache: Option<Arc<Vec<LinuxDirent64>>>,
     /// 普通文件共享 inode 上的页缓存；tmpfile 使用独立页缓存。
     page_cache: Option<Arc<PageCache>>,
-    /// Writeback errors are reported once per open-file description. dup and
-    /// fork share this cursor together with the rest of `FileInner`.
+    /// 每个打开文件描述只报告一次回写错误；dup 和 fork 与其余 `FileInner` 状态共享该游标。
     writeback_error_cursor: Option<WritebackErrorCursor>,
     write_back: bool,
-    /// Linux f_ra/FMODE_RANDOM state belongs to the open-file description,
-    /// so dup/fork share it while an independent open starts at NORMAL.
+    /// Linux 的 f_ra/FMODE_RANDOM 状态属于打开文件描述，因此 dup/fork 共享该状态，
+    /// 独立 open 则从 NORMAL 开始。
     read_ahead_pages: usize,
-    /// FMODE_NOREUSE suppresses cache promotion on subsequent accesses.
+    /// FMODE_NOREUSE 会阻止后续访问提升缓存页的热度。
     no_reuse: bool,
     tmpfile_meta: Option<TmpFileMeta>,
     atime_override: Option<TimeSpec>,
@@ -77,8 +89,8 @@ pub trait FileOp: Any + Send + Sync {
     fn write_at_offset(&self, _offset: usize, _buf: &[u8]) -> SysResult<usize> {
         Err(Errno::ESPIPE)
     }
-    /// Linux pwrite path: O_APPEND selects EOF without modifying the shared
-    /// open-file offset. Other positioned kernel writers ignore O_APPEND.
+    /// Linux pwrite 路径中，O_APPEND 选择 EOF 作为位置，但不修改共享打开文件偏移；
+    /// 其他内核定位写入者忽略 O_APPEND。
     fn pwrite_at_offset(&self, offset: usize, buf: &[u8]) -> SysResult<usize> {
         self.write_at_offset(offset, buf)
     }
@@ -102,8 +114,8 @@ pub trait FileOp: Any + Send + Sync {
             return Err(Errno::EACCES);
         }
         if shared && writable {
-            // MAP_SHARED|PROT_WRITE needs a writable open-file description;
-            // MAP_PRIVATE remains valid on a read-only descriptor.
+            // MAP_SHARED|PROT_WRITE 要求打开文件描述可写；
+            // MAP_PRIVATE 对只读描述符仍然有效。
             if !self.writable() {
                 return Err(Errno::EACCES);
             }
@@ -115,9 +127,8 @@ pub trait FileOp: Any + Send + Sync {
     }
     fn mmap_open(&self, _shared: bool, _writable: bool, _pages: usize) {}
     fn mmap_close(&self, _shared: bool, _writable: bool, _pages: usize) {}
-    /// Establish persistent backing for a writable shared-mapping page before
-    /// its PTE becomes writable. Memory-backed files cannot run out of disk
-    /// blocks, so their default implementation needs no reservation.
+    /// 在可写共享映射页的 PTE 变为可写前，为其建立持久后端。
+    /// 内存后端文件不会耗尽磁盘块，因此默认实现无需预留空间。
     fn reserve_shared_mmap_write(&self, _offset: usize, _data: &[u8]) -> SysResult {
         Ok(())
     }
@@ -129,12 +140,11 @@ pub trait FileOp: Any + Send + Sync {
     fn write_ready(&self) -> bool {
         true
     }
-    /// poll/epoll exceptional readiness is reported even when not requested.
+    /// poll/epoll 的异常就绪即使未被请求也需要报告。
     fn poll_hup(&self) -> bool {
         false
     }
-    /// Stream peer closed its write half. Unlike HUP, RDHUP is reported only
-    /// when userspace explicitly requests the Linux extension bit.
+    /// 流对端已关闭写半部。与 HUP 不同，只有用户态明确请求 Linux 扩展位时才报告 RDHUP。
     fn poll_rdhup(&self) -> bool {
         false
     }
@@ -151,7 +161,7 @@ pub trait FileOp: Any + Send + Sync {
     fn splice_supported(&self) -> bool {
         false
     }
-    /// Validate input-side state before splice starts consuming data.
+    /// splice 开始消费数据前校验输入侧状态。
     fn validate_splice_read(&self) -> SysResult {
         Ok(())
     }
@@ -176,21 +186,24 @@ pub trait FileOp: Any + Send + Sync {
     fn punch_hole(&self, _offset: usize, _len: usize) -> SysResult<usize> {
         Err(Errno::EOPNOTSUPP)
     }
-    /// Preallocate the range and extend the logical size when needed.
-    /// Backends that cannot honor allocation guarantees must reject it.
+    /// 预分配指定范围，并在需要时扩展逻辑大小；无法保证分配成功的后端必须拒绝该操作。
     fn allocate_range(&self, _offset: usize, _len: usize) -> SysResult<usize> {
         Err(Errno::EOPNOTSUPP)
     }
 }
 
 impl File {
+    /// 为可写 `MAP_SHARED` 页面在 PTE 开放写权限前建立下层持久空间。
+    ///
+    /// 文件状态锁把预留与 truncate 串行化；先检查只读挂载、写回能力和文件增长额度，再让
+    /// inode materialize 目标 filesystem block。若 ENOSPC/EIO，缺页路径会投递 SIGBUS，
+    /// 且共享页仍保持只读，不能把失败延迟到之后的 msync/fsync。
     fn reserve_shared_mmap_write(&self, offset: usize, data: &[u8]) -> SysResult {
         if data.is_empty() {
             return Ok(());
         }
-        // Keep the file state lock through the lower allocation. truncate
-        // uses the same lock for lower size change and PageCache resize, so a
-        // page reservation cannot re-extend a file between those two steps.
+        // 下层分配全过程都持有文件状态锁。truncate 用同一把锁保护下层大小变更与
+        // PageCache 缩放，因此页面预留不能在这两个步骤之间重新扩展文件。
         let inner = self.inner.lock();
         let visible_path = inner.path.abs_path();
         let path = self.storage_path(&visible_path);
@@ -214,10 +227,8 @@ impl File {
         let reserve_prefix = page_offset.checked_add(reserve_len).ok_or(Errno::EINVAL)?;
         let page_cache = inner.page_cache.clone().ok_or(Errno::EIO)?;
 
-        // lwext4 has no unwritten-extent reservation entry point. Writing the
-        // page's current bytes materializes a sparse block without changing
-        // visible contents or file size, and reports ENOSPC before userspace
-        // is allowed to dirty the shared frame.
+        // lwext4 没有未写区间预留入口。把页面当前字节写回可实体化稀疏块，
+        // 且不改变可见内容或文件大小；若空间不足，会在允许用户态弄脏共享帧前报告 ENOSPC。
         page_cache.reserve_mmap_prefix(page_idx, reserve_prefix, |reserved_prefix| {
             let new_start = reserved_prefix.max(page_offset);
             let additional = reserve_prefix.saturating_sub(new_start);
@@ -236,6 +247,12 @@ impl File {
         Ok(())
     }
 
+    /// 应用一次 Linux/POSIX 文件访问建议，并更新打开文件描述级别的预读策略。
+    ///
+    /// NORMAL/RANDOM/SEQUENTIAL/NOREUSE 修改 `FileInner`，因此 dup/fork 共享而独立 open
+    /// 不共享。WILLNEED 对范围做尽力同步预取；DONTNEED 先启动范围写回，再仅驱逐被建议范围
+    /// 完整覆盖且 clean、未映射、未 pin 的页。预取/回写错误不改变 fadvise 返回值，失败脏页
+    /// 保留给正常 fsync 错误游标。
     pub fn fadvise(&self, offset: usize, len: usize, advice: usize) -> SysResult<usize> {
         const POSIX_FADV_NORMAL: usize = 0;
         const POSIX_FADV_RANDOM: usize = 1;
@@ -287,10 +304,9 @@ impl File {
             } else {
                 offset.saturating_add(len)
             };
-            // Linux starts writeback before invalidation and does not return
-            // writeback errors from fadvise.  RespOS has no async flusher for
-            // this request, so perform the same step synchronously and leave
-            // failed pages dirty/pinned for the normal error cursor.
+            // Linux 在失效缓存前启动回写，且 fadvise 不返回回写错误。
+            // RespOS 没有处理该请求的异步刷写器，因此同步执行同一步骤；
+            // 失败页面继续保持脏且固定，由普通错误游标后续报告。
             let _ = page_cache.sync_range(&self.inode, path.as_str(), offset, end);
             page_cache.evict_clean_range(offset, len);
         }
@@ -301,9 +317,8 @@ impl File {
         alloc::string::String::from(path)
     }
 
-    /// Resolve a regular-file offset to the same physical frame used by its
-    /// buffered page cache.  Special files without a page cache return None
-    /// and let the mmap layer use its compatibility path.
+    /// 将普通文件偏移解析为其缓冲页缓存所使用的同一物理帧。
+    /// 没有页缓存的特殊文件返回 None，由 mmap 层走兼容路径。
     pub(crate) fn shared_page_frame(
         &self,
         file_offset: usize,
@@ -402,6 +417,11 @@ impl File {
     }
 
     #[track_caller]
+    /// 从文件起点读取到 EOF，且不改变调用者共享的 open-file offset。
+    ///
+    /// 依据当前 stat/PageCache 长度预留内核 Vec，并用显式偏移循环处理短读；文件并发增长时
+    /// 可以继续扩展缓冲，缩短时以实际 EOF 结束。该 helper 用于 ELF/shebang 等内核消费者，
+    /// 仍须经过普通 read_at 权限、PageCache 一致性与错误传播，不能直接解引用下层存储。
     pub fn read_all(&self) -> SysResult<Vec<u8>> {
         let inner = self.inner.lock();
         let visible_path = inner.path.abs_path();
@@ -463,8 +483,8 @@ impl File {
     }
 
     pub fn readdir_cached(&self, current_off: usize) -> SysResult<Arc<Vec<LinuxDirent64>>> {
-        // Linux getdents rejects an open directory after it has been detached
-        // by rmdir. Check before serving an existing directory-stream cache.
+        // Linux 的 getdents 会拒绝已被 rmdir 分离但仍打开的目录；
+        // 因此必须在使用现有目录流缓存前检查。
         if self
             .inode
             .as_any()
@@ -588,8 +608,8 @@ impl File {
         inner.ctime_override = Some(now);
     }
 
-    /// Write cached file data and pending data timestamps to lwext4 without
-    /// issuing the filesystem durability barrier performed by fsync below.
+    /// 将缓存文件数据和待提交的数据时间戳写入 lwext4，
+    /// 但不执行下方 fsync 所使用的文件系统持久化屏障。
     fn sync_cached_data(&self) -> SysResult<bool> {
         let (page_cache, write_back, path) = {
             let inner = self.inner.lock();
@@ -621,6 +641,15 @@ impl File {
         page_cache.check_writeback_error(cursor)
     }
 
+    /// 原子协调下层文件长度、PageCache 和所有存活共享映射的 truncate。
+    ///
+    /// 打开文件状态锁覆盖增长额度检查与提交。缩小时先把边界页范围外的脏数据写回，再改变
+    /// 下层长度、裁剪 PageCache/reservation，并使越过新 EOF 的共享 PTE 失效；增长时更新
+    /// 逻辑长度，并在跨文件系统块边界但仍处于同一 VM 页时写保护相关共享映射，使下一次
+    /// store 经 page-mkwrite 建立后端。
+    ///
+    /// 任一可失败预处理必须发生在可见长度修改前；成功后更新 ctime/mtime。并发 fsync 由
+    /// PageCache writeback exclusion 和 size generation 防止旧写回重新扩展已缩小文件。
     pub fn truncate(&self, size: usize) -> SysResult<usize> {
         let mut inner = self.inner.lock();
         if inner.path.mnt.is_readonly() {
@@ -674,6 +703,11 @@ impl File {
         Ok(0)
     }
 
+    /// 在保持文件逻辑长度不变的前提下，把指定范围变为稀疏 hole。
+    ///
+    /// 文件状态锁与 PageCache writeback exclusion 串行化 truncate/fsync。边界部分页先写回范围外
+    /// 脏字节，再由下层清零/释放 extent；随后清零或失效 PageCache 页面并同步所有 MAP_SHARED
+    /// 帧。任一预处理失败不得开始破坏性下层操作，成功后更新 mtime/ctime 与写回代次。
     pub fn punch_hole(&self, offset: usize, len: usize) -> SysResult<usize> {
         let mut inner = self.inner.lock();
         if inner.path.mnt.is_readonly() {
@@ -695,13 +729,11 @@ impl File {
             if !inner.write_back {
                 return Err(Errno::EOPNOTSUPP);
             }
-            // Page granularity is deliberate: dirty bytes outside a partial
-            // boundary block must reach lower storage before that block is
-            // zeroed in place.
+            // 这里刻意使用页粒度：原地清零部分边界块之前，该块范围外的脏字节
+            // 必须先到达下层存储。
             page_cache.sync_range(&self.inode, path.as_str(), offset, end)?;
-            // Publish older delayed mtime/ctime before the destructive extent
-            // transaction. Otherwise a later metadata flush can reload and
-            // overwrite the inode's newly reduced i_blocks value.
+            // 破坏性区间事务前先发布较早延迟的 mtime/ctime；否则后续元数据刷新可能重载并
+            // 覆盖 inode 刚刚减小的 i_blocks 值。
             self.inode.flush_data_metadata(path.as_str())?;
             page_cache.with_writeback_exclusion(|| {
                 self.inode.punch_hole(path.as_str(), offset, end - offset)?;
@@ -753,6 +785,14 @@ impl File {
         Ok(n)
     }
 
+    /// 在显式偏移处写入，不读取也不修改打开文件描述的共享游标。
+    ///
+    /// 写入前检查只读挂载、偏移溢出和文件系统增长额度。具有 PageCache 的普通文件先更新
+    /// 共享缓存页和逻辑长度，再登记 dirty owner 与 mtime/ctime；`O_SYNC`/`O_DSYNC` 会强制
+    /// 当前缓存及文件系统屏障。无 PageCache 后端直接写 inode，并同步覆盖仍存活的共享文件映射。
+    ///
+    /// 本入口不实现 `O_APPEND` 位置选择；需要 Linux pwrite+append 语义的调用者应在持有
+    /// `FileInner` 锁的路径中原子选择 EOF，避免两个写者取得同一旧长度。
     pub fn write_at_offset(&self, offset: usize, buf: &[u8]) -> SysResult<usize> {
         let (path, file_path, page_cache, write_back, flags) = {
             let inner = self.inner.lock();
@@ -816,6 +856,11 @@ impl File {
         }
     }
 
+    /// 在已持有打开文件描述状态锁时执行写入，是共享 offset 与 `O_APPEND` 的提交内核。
+    ///
+    /// 锁覆盖 EOF/offset 选择、PageCache 写入和必要的同步刷新，使 dup/fork 共享的同一
+    /// open-file description 不会交错更新游标。不得在没有该锁的路径中复刻 append 逻辑；
+    /// 显式定位且忽略 append 的内核写入应使用 `write_at_offset`。
     fn write_locked(&self, inner: &mut FileInner, offset: usize, buf: &[u8]) -> SysResult<usize> {
         if !buf.is_empty() && inner.path.mnt.is_readonly() {
             return Err(Errno::EROFS);
@@ -885,6 +930,11 @@ impl File {
         self.write_locked(&mut inner, write_offset, buf)
     }
 
+    /// 按 mount 的 noatime/nodiratime/relatime/strictatime/lazytime 策略提交一次访问时间更新。
+    ///
+    /// 先依据 inode 类型和当前时间判断是否需要更新；lazytime 只登记内存态 pending atime，
+    /// strict/relatime 需要时写入下层。时间更新失败在已有读取进展后由上层按 partial-I/O 规则
+    /// 处理，不能让缓存锁与 ext4 全局锁形成反向锁序。
     fn touch_atime_if_needed(
         &self,
         path: &Arc<Path>,
@@ -1135,9 +1185,8 @@ impl FileOp for File {
             (inner.path.mnt.fs.clone(), self.storage_path(&visible_path))
         };
         let data_result = self.sync_cached_data();
-        // Consume an error recorded by this attempt as well as an earlier
-        // close/threshold writeback. This prevents a single failure from
-        // being reported twice by the same open-file description.
+        // 同时消费本次尝试和更早的 close/阈值回写所记录的错误，
+        // 避免同一打开文件描述把一次失败报告两遍。
         let writeback_error = self.check_writeback_error();
         data_result?;
         writeback_error?;
@@ -1147,9 +1196,8 @@ impl FileOp for File {
     }
 
     fn fdatasync(&self) -> SysResult<usize> {
-        // lwext4 exposes one filesystem durability barrier.  Using it here is
-        // stronger than the minimum fdatasync contract but preserves the
-        // required data/size metadata ordering without a fake weaker path.
+        // lwext4 只暴露一种文件系统持久化屏障。这里使用它虽强于 fdatasync 的最低契约，
+        // 但能保证数据与大小元数据的必要顺序，而无需伪造较弱路径。
         self.fsync()
     }
 

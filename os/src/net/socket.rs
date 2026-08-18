@@ -3,6 +3,14 @@
 //! `Socket` 是用户态可见的套接字对象，实现了 RespOS 的 `FileOp` trait，
 //! 从而可以通过标准文件描述符接口（read/write/poll）操作。
 //! 内部根据 `SocketKind` 分派到 `TcpSocket` 或 `UdpSocket`。
+//!
+//! 本层统一保存 domain/type/protocol、nonblocking、超时、shutdown half、pending error、
+//! poll waiter 和 AF_UNIX peer 状态。fd 的 dup/fork 共享同一个 `Socket`，所以 option、
+//! readiness 与 close 生命周期不能放进单独 fd entry。
+//!
+//! 阻塞操作遵循“尝试操作 → 注册 waiter/deadline → 复检 → 睡眠 → 清理并重试”。网络
+//! polling、signal、timeout 和 peer close 都可能成为唤醒源，完成路径必须单次注销。短收发、
+//! EOF、RDHUP/HUP 和 socket error 是不同可观察状态，不能用一个布尔 closed 互相替代。
 
 use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
 use core::{
@@ -214,8 +222,8 @@ impl UnixSocket {
     fn finish_interruptible_wait(&self, deadline_us: Option<usize>) -> SysResult<bool> {
         let task = current_task().ok_or(Errno::ESRCH)?;
         if task.is_ready() {
-            // The producer won the race after we published Blocked but before
-            // this CPU switched away.  Consume the ready publication locally.
+            // 生产者在本任务公布 Blocked 之后、当前 CPU 真正切走之前赢得了竞争。
+            // 此时直接在本地消费 Ready 发布，避免留下重复的就绪队列项。
             remove_task(task.tid());
             task.set_running();
         } else {
@@ -236,6 +244,14 @@ impl UnixSocket {
         Ok(timed_out || deadline_us.is_some_and(|deadline| get_timeout_us() >= deadline))
     }
 
+    /// 从本地流式（Unix/socketpair）端点读取，并协调 PEEK、WAITALL、EOF、timeout 与信号。
+    ///
+    /// 数据队列和读 waiter 受同一 rx 锁保护；无数据时在锁内登记 waiter 并发布 Blocked，
+    /// 从而不会错过对端写入。WAITALL 只在阻塞模式等待足量字节，遇到 EOF、期限或已有数据
+    /// 的信号中断时返回 partial progress；PEEK 复制但不消费队列，也不唤醒写者。
+    ///
+    /// 对端最后引用关闭或关闭写半部后，只有缓冲数据排空才返回 EOF。所有睡眠出口都撤销
+    /// deadline 和 waiter，避免迟到写入唤醒已经进入其他系统调用的任务。
     fn read(
         &self,
         buf: &mut [u8],
@@ -286,8 +302,8 @@ impl UnixSocket {
                 }
                 return Ok(read_len);
             }
-            // A stream socket reports EOF once the last reference to the peer
-            // endpoint is closed and all bytes already sent have been drained.
+            // 对端端点的最后一个引用关闭，且已发送字节全部读完后，
+            // 流式套接字才报告 EOF。
             if peer_eof {
                 return Ok(0);
             }
@@ -341,6 +357,14 @@ impl UnixSocket {
         }
     }
 
+    /// 向本地流式端点的接收队列写入，并实现背压、半关闭和 partial write 语义。
+    ///
+    /// 对端关闭/关闭读半部立即返回 EPIPE；有空间时最多写入当前容量并唤醒一个 reader
+    /// 及 poll waiter。缓冲区满时在对端 rx 锁内登记 writer waiter 后阻塞，关闭写者睡眠前
+    /// 空间出现的竞争窗口。非阻塞模式零进展返回 EAGAIN，已有进展不会再等待。
+    ///
+    /// timeout 或信号获胜时先做一次非阻塞重试，若事件已经创造空间则优先返回实际字节数；
+    /// 否则返回对应错误。退出时必须移除对端队列中的 waiter。
     fn write(
         &self,
         buf: &[u8],
@@ -468,6 +492,11 @@ impl UnixSocket {
         Ok(())
     }
 
+    /// 把未连接的 Unix stream 端点连接到命名监听 socket。
+    ///
+    /// namespace lookup、backlog 入队和双方共享队列/凭据建立必须作为一次提交：监听端消失、
+    /// backlog 已满或本端状态不允许时不改变任何连接字段。成功后唤醒 accept waiter 和 poll
+    /// 观察者；非阻塞调用若不能立即入队返回相应错误，而不能创建半连接对象。
     fn connect_path(&self, key: &[u8]) -> SysResult {
         if self.peer_rx.lock().is_some() {
             return Err(Errno::EISCONN);
@@ -542,6 +571,12 @@ impl UnixSocket {
         }
     }
 
+    /// 从 Unix stream 监听队列取出一个完整连接，必要时可中断等待。
+    ///
+    /// 队列为空时在监听状态锁内登记 accept waiter，再发布 Blocked 并复查 backlog，关闭
+    /// connect 与睡眠之间的竞争窗口。成功 pop 后唤醒可能因 backlog 满而等待的 connector，
+    /// 并返回已经固定 peer credentials/半关闭状态的新端点。非阻塞、timeout 与信号均只在
+    /// 零进展时返回错误，退出前撤销 waiter。
     fn accept(&self, deadline_us: Option<usize>) -> SysResult<UnixSocket> {
         let listener = self.listener.lock().clone().ok_or(Errno::EINVAL)?;
         let task = current_task().ok_or(Errno::ESRCH)?;

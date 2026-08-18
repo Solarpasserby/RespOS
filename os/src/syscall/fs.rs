@@ -1,5 +1,21 @@
 // os/src/syscall/fs.rs
 
+//! 文件系统相关系统调用的 Linux ABI 边界层。
+//!
+//! 本模块把用户寄存器中的整数、指针和标志位转换为 VFS、文件对象、挂载树和
+//! PageCache 能理解的类型。路径遍历、inode 状态机和页缓存一致性分别由
+//! `namei`、具体 `InodeOp` 与 `PageCache` 负责，这里不应复制它们的内部规则。
+//!
+//! 实现或修改接口时需要同时检查四个边界：
+//!
+//! - 用户地址必须通过 MM 的 copy helper 访问，不能直接解引用；
+//! - fd table entry、open-file description、dentry 与 inode 的生命周期不能混用；
+//! - 可能部分完成的 I/O 要保留 Linux 的短读写和错误提交顺序；
+//! - 阻塞接口必须在注册 waiter 后复检条件，并正确处理 signal、timeout 与关闭唤醒。
+//!
+//! 这里的函数是 ABI 薄层，而不是文件系统策略层。若一个修复需要操作目录树、
+//! 页面写回或 pipe 状态，应优先把原子操作下沉到对应领域对象，再在此映射 errno。
+
 use super::{Errno, SysResult};
 use crate::config::PAGE_SIZE;
 use crate::fs::dev::{LoopControlInode, LoopInode, VirtBlkInode};
@@ -416,6 +432,10 @@ pub fn sys_read(fd: usize, buf: *mut u8, len: usize) -> SysResult<usize> {
     Ok(total)
 }
 
+/// 从显式非负偏移读取文件，不修改共享 open-file offset。
+///
+/// 数据通过有界内核 I/O buffer 分段 copyout；短读或 EOF 立即结束。取得数据后若后续用户页
+/// copyout/读取失败，按 partial-progress 返回已经交付的字节数；零进展才返回 errno。
 pub fn sys_pread64(fd: usize, buf: *mut u8, len: usize, offset: isize) -> SysResult<usize> {
     if offset < 0 {
         return Err(Errno::EINVAL);
@@ -464,6 +484,11 @@ pub fn sys_pread64(fd: usize, buf: *mut u8, len: usize, offset: isize) -> SysRes
     Ok(total)
 }
 
+/// 从显式非负偏移写入文件，不修改共享 open-file offset。
+///
+/// 用户缓冲区先通过内核 I/O buffer 分段读取；普通 positioned writer 忽略共享游标，
+/// 但 Linux pwrite 对带 O_APPEND 的打开文件仍原子选择 EOF。循环保留短写和 partial-progress
+/// 语义：取得字节后发生的后续错误返回已写长度，零进展错误才返回 errno。
 pub fn sys_pwrite64(fd: usize, buf: *mut u8, len: usize, offset: isize) -> SysResult<usize> {
     if offset < 0 {
         return Err(Errno::EINVAL);
@@ -534,6 +559,10 @@ pub fn sys_pwrite64(fd: usize, buf: *mut u8, len: usize, offset: isize) -> SysRe
     Ok(total)
 }
 
+/// 用内核缓冲区在两个 FileOp 间复制数据，是 sendfile/copy_file_range 的公共搬运循环。
+///
+/// 每轮先读取再完整处理可能的短写；显式/共享 offset 由调用者提供的闭包或 File 锁维护。
+/// EOF、短读和短写停止循环，已有进展后发生的错误返回累计长度，不能丢失已提交输出。
 fn copy_file_data(
     input: &alloc::sync::Arc<dyn FileOp>,
     output: &alloc::sync::Arc<dyn FileOp>,
@@ -618,6 +647,11 @@ pub fn sys_sendfile(
     ret
 }
 
+/// 在两个普通文件间复制指定范围，并协调显式 offset、共享游标与重叠检查。
+///
+/// 输入数据经内核缓冲区分块搬运；同一 inode 的重叠范围按 Linux 拒绝，跨文件系统或不支持
+/// 的类型返回相应错误。显式 offset 只在成功复制后写回，未提供时由各自 open-file description
+/// 的锁保护共享游标。已有进展后短读/短写或错误返回实际字节数。
 pub fn sys_copy_file_range(
     fd_in: usize,
     off_in: *mut i64,
@@ -802,6 +836,10 @@ enum IovecBufferPerm {
     Write,
 }
 
+/// 按 iovec 顺序写入同一 open-file description，并保持跨向量 partial-progress 语义。
+///
+/// 先校验 iovcnt 与总长度溢出，每段通过用户拷贝进入内核缓冲。共享 offset/O_APPEND 的选择
+/// 由 File 锁串行化；某段短写即停止，已有进展后的 EFAULT/EINTR 返回累计字节。
 pub fn sys_writev(fd: usize, iov: *const IoVec, iovcnt: usize) -> SysResult<usize> {
     let items = read_iovecs(iov, iovcnt)?;
     check_iovec_buffers(&items, IovecBufferPerm::Read)?;
@@ -921,6 +959,12 @@ fn write_user_offset(off: *mut i64, value: usize) -> SysResult {
     Ok(())
 }
 
+/// 在两个 `FileOp` 之间执行 splice 的有界搬运，并保持 partial-progress 语义。
+///
+/// 输入/输出显式 offset 只在对应端不是 pipe 时有效；没有显式 offset 的端点使用其共享
+/// open-file 游标。数据分块进入内核缓冲区，任一端短读、短写或 EAGAIN 都停止本轮；
+/// 已经传输字节后发生的错误返回已完成长度，而不是丢弃进展。`SPLICE_F_NONBLOCK`
+/// 会在消费输入前同时检查 pipe 两端就绪性，避免读出后无法写回造成数据丢失。
 fn splice_copy(
     input: &alloc::sync::Arc<dyn FileOp>,
     output: &alloc::sync::Arc<dyn FileOp>,
@@ -1005,6 +1049,11 @@ fn splice_copy(
     Ok(total)
 }
 
+/// 校验 splice 的 fd/offset ABI，并把实际数据搬运委托给 `splice_copy`。
+///
+/// Linux 要求至少一端是 pipe；pipe 对应的 offset 指针必须为空，普通文件 offset 则先从
+/// 用户态复制到内核临时值。只有搬运成功后才写回 offset，写回失败不会撤销已经发生的 I/O，
+/// 因而调用者必须把 offset copyout 视为提交尾部，而不能在传输循环中逐块暴露。
 pub fn sys_splice(
     fd_in: usize,
     off_in: *mut i64,
@@ -1091,6 +1140,10 @@ pub fn sys_splice(
     ret
 }
 
+/// 在两个 pipe 之间复制数据而不消费输入端。
+///
+/// 同时校验两端类型、方向、自复制和 flags；按稳定锁顺序快照输入字节并写入输出，避免两个
+/// 反向 tee 死锁。输出空间不足时遵循 NONBLOCK/partial-progress，输入 read cursor 始终不移动。
 pub fn sys_tee(fd_in: usize, fd_out: usize, len: usize, flags: usize) -> SysResult<usize> {
     if flags & !SPLICE_ALLOWED_FLAGS != 0 {
         return Err(Errno::EINVAL);
@@ -1143,6 +1196,11 @@ pub fn sys_tee(fd_in: usize, fd_out: usize, len: usize, flags: usize) -> SysResu
     Ok(total)
 }
 
+/// 把用户 iovec 中的字节复制进 pipe，并保持 iovec 顺序和 partial-progress 语义。
+///
+/// 当前实现是安全复制而非用户页 gift/pin：先校验 flags、目标 pipe 与 iovec 数量，再逐段通过
+/// 用户拷贝写入。非阻塞由 pipe 状态和 SPLICE_F_NONBLOCK 共同决定；任一段取得进展后，
+/// 后续 EAGAIN/EFAULT 只返回累计字节，不能回滚已经进入管道的数据。
 pub fn sys_vmsplice(fd: usize, iov: *const IoVec, iovcnt: usize, flags: usize) -> SysResult<usize> {
     if flags & !SPLICE_ALLOWED_FLAGS != 0 {
         return Err(Errno::EINVAL);
@@ -1273,6 +1331,14 @@ pub struct OpenHow {
     resolve: u64,
 }
 
+/// 解析版本化的 `open_how` 结构，并以 `openat2` 的严格规则打开文件。
+///
+/// `size` 小于已知结构返回 EINVAL，结构尾部或未知 flags/resolve 位非零返回 E2BIG/EINVAL；
+/// 这样未来扩展不会被旧内核静默接受。当前可表达但尚不能可靠实施的路径限制必须明确返回
+/// EINVAL/EXDEV，不能退化为普通 `openat` 后假成功。
+///
+/// 用户结构和路径在分配 fd 之前完整复制、校验；只有 `path_open` 成功后才向 fd 表发布对象，
+/// 因此所有早期失败都不消耗描述符槽位。
 pub fn sys_openat2(
     dirfd: isize,
     path: *const u8,
@@ -1801,9 +1867,8 @@ impl From<KStat> for Statx {
     }
 }
 
-/// Decode the userspace `dev_t` layout used by Linux libc. The low 32 bits are
-/// also the ext4 on-disk device encoding, so this covers high (20-bit) minors
-/// instead of silently keeping only their legacy low byte.
+/// 解码 Linux libc 使用的用户态 `dev_t` 布局。低 32 位也正是 ext4 磁盘 device 编码，
+/// 因而可覆盖 20-bit 高位 minor，而不是静默只保留 legacy 低字节。
 const fn linux_dev_major(dev: u64) -> u32 {
     (((dev & 0x0000_0000_000f_ff00) >> 8) | ((dev & 0xffff_f000_0000_0000) >> 32)) as u32
 }
@@ -2085,6 +2150,11 @@ pub fn sys_fchmodat(dirfd: isize, path: *const u8, mode: usize) -> SysResult<usi
     do_fchmodat(dirfd, path, mode, 0)
 }
 
+/// 完成 fchmodat 路径解析、flags/权限检查和 mode 提交。
+///
+/// 根据 AT_SYMLINK_NOFOLLOW 决定最终链接语义，先验证挂载可写、owner/capability 与允许的权限位，
+/// 再一次更新 inode mode。目录 setgid 等受凭据影响的位按 Linux 规则裁剪；任何 lookup 或
+/// 权限失败不得改变原 mode。
 fn do_fchmodat(dirfd: isize, path: *const u8, mode: usize, flags: usize) -> SysResult<usize> {
     const FCHMODAT_ALLOWED_FLAGS: usize = AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH;
     const S_IFMT: usize = 0o170000;
@@ -2125,6 +2195,11 @@ fn do_fchmodat(dirfd: isize, path: *const u8, mode: usize, flags: usize) -> SysR
     Ok(0)
 }
 
+/// 按 dirfd/flags 解析目标并提交 owner/group 变更。
+///
+/// 先复制路径、解析是否跟随最终 symlink，并检查调用者凭据与挂载只读状态；uid/gid 的 -1
+/// 表示保持原值。全部检查完成后才调用 inode setattr，且按 Linux 规则清除 setuid/setgid 位，
+/// EFAULT/EPERM/ENOENT 不能留下部分 owner 更新。
 pub fn sys_fchownat(
     dirfd: isize,
     path: *const u8,
@@ -2286,6 +2361,11 @@ pub fn sys_truncate(path: *const u8, length: isize) -> SysResult<usize> {
     file.truncate(length as usize)
 }
 
+/// 预分配文件范围或执行受支持的 hole-punch 操作。
+///
+/// 先校验非负范围、溢出、文件类型、写权限和只读挂载。普通预分配必须保证下层空间承诺，
+/// 默认会按需要扩展逻辑长度；PUNCH_HOLE 要求 KEEP_SIZE，并协调 dirty PageCache、下层 extent
+/// 与所有共享映射清零/失效。无法兑现空间保证的后端返回 EOPNOTSUPP，不能假成功。
 pub fn sys_fallocate(fd: usize, mode: usize, offset: isize, len: isize) -> SysResult<usize> {
     const FALLOC_FL_KEEP_SIZE: usize = 0x01;
     const FALLOC_FL_PUNCH_HOLE: usize = 0x02;
@@ -2524,6 +2604,11 @@ pub fn sys_lseek(fd: usize, offset: isize, whence: usize) -> SysResult<usize> {
     file.seek(new_offset as isize)
 }
 
+/// 按 `sync_file_range` flags 对指定文件字节范围启动或等待回写。
+///
+/// 范围按页粒度与 PageCache 相交，WAIT_BEFORE/WRITE/WAIT_AFTER 的组合决定等待顺序；当前同步
+/// 写回实现可比 Linux 更强，但不能执行完整 fsync 文件系统屏障。溢出、负 offset 或未知 flags
+/// 在任何回写前拒绝，写回错误通过该调用和 open-file error cursor 保持一次性可观察。
 pub fn sys_sync_file_range(
     fd: isize,
     offset: isize,
@@ -2594,9 +2679,8 @@ pub fn sys_ioctl(fd: usize, request: usize, arg: usize) -> SysResult<usize> {
     const FIONBIO: usize = 0x5421;
     const RTC_RD_TIME: usize = 0x8024_7009;
     const RTC_SET_TIME: usize = 0x4024_700a;
-    // Linux declares ioctl(2)'s command as unsigned int.  Some libc paths
-    // sign-extend constants whose direction bit is set when loading them into
-    // a syscall register, so normalize at the ABI boundary before dispatch.
+    // Linux 把 ioctl(2) command 声明为 unsigned int。部分 libc 路径把 direction bit 置位的
+    // 常量装入 syscall 寄存器时会符号扩展，因此在 ABI 边界先归一化再分派。
     let request = request as u32 as usize;
 
     let task = current_task().expect("[kernel] current task is None.");
@@ -2659,8 +2743,7 @@ pub fn sys_ioctl(fd: usize, request: usize, arg: usize) -> SysResult<usize> {
             Ok(0)
         }
         RTC_SET_TIME if is_rtc_file(&fd_entry.file) => {
-            // Linux performs the RTC class capability check before touching
-            // the user pointer and reports EACCES for this ioctl.
+            // Linux 在接触用户指针前执行 RTC class capability 检查，并对此 ioctl 返回 EACCES。
             if !task.has_cap(CAP_SYS_TIME) {
                 return Err(Errno::EACCES);
             }
@@ -2991,6 +3074,11 @@ pub fn sys_mkdirat(dirfd: isize, path: *const u8, mode: usize) -> SysResult<usiz
     Ok(0)
 }
 
+/// 在 dirfd 相对路径创建持久化的 FIFO、字符/块设备或 socket inode。
+///
+/// 先按 mode 解析类型并用 Linux 12-bit major/20-bit minor 布局规范化 dev_t，再进入 namei
+/// 创建事务。类型、rdev、mode、uid/gid 必须在 dentry 发布前全部提交；后端不支持的节点类型
+/// 返回明确错误，不能退化成普通文件。
 pub fn sys_mknodat(dirfd: isize, path: *const u8, mode: usize, dev: usize) -> SysResult<usize> {
     const S_IFMT: usize = 0o170000;
     const S_IFIFO: usize = 0o010000;
@@ -3069,9 +3157,8 @@ pub fn sys_linkat(
         let file = task.get_fd_entry(olddirfd as usize)?.file;
         let file = file.as_any().downcast_ref::<File>().ok_or(Errno::EINVAL)?;
         if file.tmpfile_meta().is_none() {
-            // Linking an arbitrary fd through AT_EMPTY_PATH requires
-            // CAP_DAC_READ_SEARCH on Linux.  RespOS does not model that
-            // capability yet, so only the O_TMPFILE use case is admitted.
+            // Linux 通过 AT_EMPTY_PATH link 任意 fd 需要 CAP_DAC_READ_SEARCH。RespOS 尚未建模
+            // 该 capability，因此只允许 O_TMPFILE 用例。
             return Err(Errno::EPERM);
         }
         filename_link_tmpfile(file, newdirfd, newpath.as_str())?;
@@ -3577,6 +3664,14 @@ fn ppoll_register(pollfds: &[PollFd], tid: usize) -> PollRegistration {
     registration
 }
 
+/// 在 poll/select 的一次无就绪扫描后安全阻塞，并判定唤醒原因。
+///
+/// 事件驱动的 `FileOp` 先登记所有 waiter，再发布 interruptible/Blocked，并在切换前由调用者
+/// 闭包复查 readiness，关闭事件到达与睡眠之间的竞争窗口。尚不支持 waiter 的轮询后端
+/// 不进入无限睡眠，而是在无锁安全点推进网络/定时工作并主动让出 CPU。
+///
+/// 返回值区分 Retry、Timeout 与 Signal；函数退出前撤销全部 waiter 和临时阻塞状态。
+/// 信号只在当前掩码下确实可投递时获胜，避免把被阻塞信号误报为 EINTR。
 fn block_for_poll(
     task: &Arc<crate::task::TaskControlBlock>,
     mut registration: PollRegistration,
@@ -3587,11 +3682,9 @@ fn block_for_poll(
     if !registration.event_driven {
         registration.clear();
         task.set_interruptible(false);
-        // Network FileOps currently expose readiness by polling rather than
-        // event-driven waiter registration. A daemon can therefore remain in
-        // this kernel retry loop indefinitely. Consume deferred timer work at
-        // this no-lock point so unrelated nanosleep/poll deadlines still
-        // progress while that daemon is alive.
+        // Network FileOp 当前通过 polling 而非事件驱动 waiter 注册暴露 readiness，因此 daemon
+        // 可能无限停留在内核重试循环。在这个无锁点消费 deferred timer work，使 daemon 存活时
+        // 无关 nanosleep/poll deadline 仍能推进。
         super::service_task_timers_at_safe_point();
         crate::perf::fs_yield(1);
         crate::perf::fs_syscall_yield(1);
@@ -3645,10 +3738,13 @@ fn block_for_poll(
     Ok(PollWake::Retry)
 }
 
-/// ppoll — 等待 pollfd 数组中的 fd 就绪，带超时和信号掩码。
+/// 等待 pollfd 数组中的 fd 就绪，并在等待区间原子替换信号掩码。
 ///
 /// libc 的 pause() 在部分架构上会走 ppoll(NULL, 0, NULL, mask)，因此 nfds=0
 /// 且无限超时时需要进入可中断睡眠，让 /proc/<pid>/stat 能观察到 S 状态。
+/// 每轮先把用户 pollfd 快照到内核、计算 revents，再通过 `block_for_poll` 登记 waiter；
+/// 返回用户态前无论成功、超时还是错误都恢复原信号掩码。copyout 只在本轮扫描完成后执行，
+/// 避免用户并发修改数组改变已经登记的等待集合。
 pub fn sys_ppoll(
     fds: *mut PollFd,
     nfds: usize,
@@ -3725,7 +3821,7 @@ pub fn sys_ppoll(
     result
 }
 
-/// pselect6 — 等待多个文件描述符就绪，带超时和信号掩码。
+/// 等待 fd_set 中的文件描述符就绪，并在等待区间原子替换信号掩码。
 ///
 /// 退出条件（任一满足即返回）：
 /// 1. 有 fd 可读/可写 → 返回就绪 fd 数
@@ -3733,6 +3829,9 @@ pub fn sys_ppoll(
 /// 3. 被信号中断 → 返回 EINTR
 ///
 /// sigmask 允许原子替换信号掩码；函数返回后自动恢复原掩码。
+/// 输入 fd_set 先复制为内核快照，输出集合只包含本轮实际就绪项；多个集合中的同一 fd
+/// 在返回计数中只计一次。等待采用与 ppoll 相同的 waiter 发布/复查协议，所有返回路径
+/// 都必须恢复原掩码，防止 EFAULT、EINTR 或 timeout 把临时掩码泄漏到后续系统调用。
 pub fn sys_pselect6(
     nfds: usize,
     readfds: usize,
@@ -3875,8 +3974,8 @@ pub fn sys_fsync(fd: usize) -> SysResult<usize> {
     file.fsync()
 }
 
-/// sync(2) has no error return in Linux.  Failed owners stay dirty and their
-/// errors remain visible to an open-file fsync/fdatasync cursor.
+/// Linux 的 sync(2) 没有错误返回。失败 owner 保持 dirty，其错误继续对 open-file
+/// fsync/fdatasync cursor 可见。
 pub fn sys_sync() -> SysResult<usize> {
     let _ = sync_all_filesystems();
     Ok(0)
@@ -3902,13 +4001,10 @@ pub fn sys_fdatasync(fd: usize) -> SysResult<usize> {
 
 /// 系统调用 sys-msync — 同步 mmap 映射区域与文件。
 ///
-/// Resident writable shared file pages are snapshotted while holding the
-/// address-space read lock and written through FileOp after the lock is
-/// released. MS_ASYNC therefore leaves the data in the file page cache and
-/// returns without forcing the filesystem; MS_SYNC waits for writeback of the
-/// requested file ranges.  MS_INVALIDATE needs no second invalidation pass:
-/// buffered I/O and every MAP_SHARED mapping already use the same PageCache
-/// frame identity.
+/// 持有地址空间读锁时对 resident writable shared file page 取快照，释放锁后再通过 FileOp
+/// 写入。因此 MS_ASYNC 把数据留在 file page cache 并直接返回，不强制文件系统；MS_SYNC
+/// 等待请求文件范围写回。MS_INVALIDATE 不需要第二次失效：buffered I/O 与所有 MAP_SHARED
+/// mapping 已使用同一个 PageCache frame identity。
 pub fn sys_msync(addr: usize, len: usize, flags: i32) -> SysResult<usize> {
     const MS_ASYNC: i32 = 1;
     const MS_INVALIDATE: i32 = 2;
@@ -4014,7 +4110,7 @@ pub fn sys_preadv(
 ///
 /// 与 writev 的区别：不依赖（也不修改）文件的当前偏移量，
 /// 而是从 offset 处开始写入。多个 iov 条目连续写入：
-/// offset, offset+len0, offset+len0+len1, ...
+/// `offset`、`offset + len0`、`offset + len0 + len1`……
 ///
 /// 语义细节（与 Linux pwritev 对齐）：
 /// - 中途出错且已有部分数据写入时，返回已写字节数而非 -1

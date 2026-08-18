@@ -1,5 +1,15 @@
 // os/src/syscall/time.rs
 
+//! Linux 时间、睡眠、CPU clock、interval timer 与 POSIX timer 的 syscall 边界。
+//!
+//! RespOS 区分硬件单调时间、可调整 realtime、线程/进程 accounting clock 和调度
+//! deadline。单位转换必须检查负值与溢出，不能把“读时钟精度”误认为“阻塞唤醒精度”。
+//!
+//! 睡眠和定时器路径同时涉及 task waiter、boot timer-service hart、signal 投递和
+//! copyout remainder。注册 deadline 后应在条件变化、signal、删除 timer 或任务退出时
+//! 对称注销；若接口允许重启，还要保留原请求或按契约更新剩余时间。所有状态修改在
+//! 用户结构验证完成后提交，避免无效 copyout 留下已经生效的 timer。
+
 use super::{Errno, SysResult};
 use crate::config::CLK_TCK;
 use crate::mm::{copy_from_user, copy_to_user};
@@ -128,6 +138,10 @@ impl NanosleepWaits {
             .push(tid);
     }
 
+    /// 注销指定 nanosleep waiter，并返回 timeout 是否赢得本次等待。
+    ///
+    /// 同时从按 clock/deadline 建立的索引和 tid 状态表移除，保证迟到 timer scan 不会再次唤醒。
+    /// signal/cancel 已先认领时返回 false，调用者据此选择 EINTR 或继续检查权威 deadline。
     fn finish(&mut self, tid: usize) -> bool {
         let Some(wait) = self.waits.remove(&tid) else {
             return false;
@@ -419,6 +433,11 @@ fn nanosleep_clock_us(clock_id: usize) -> SysResult<usize> {
     }
 }
 
+/// 在全局定时服务安全点认领已到期的 nanosleep waiter 并唤醒任务。
+///
+/// 按 clock id 分组读取当前时间，从 deadline 索引移除到期 tid，并在同一等待状态表中把
+/// completion 从 Pending 原子改为 TimedOut；只有成功认领者在释放锁后调用调度器唤醒。
+/// signal 或显式取消若已先完成等待，本函数不能覆盖其结果或重复唤醒。
 pub fn check_nanosleep_timeouts() {
     let mut expired = Vec::new();
     let next_deadlines = {
@@ -613,6 +632,11 @@ fn posix_timer_snapshot(timer: &PosixTimer) -> ITimerSpec {
     }
 }
 
+/// 创建一个尚未 armed 的进程级 POSIX timer，并向用户发布稳定 timerid。
+///
+/// 支持 SIGEV_SIGNAL、SIGEV_NONE 与定向线程的 SIGEV_THREAD_ID；先校验 clock、sigevent、
+/// 信号编号和目标线程归属，再分配内核对象。timerid 是用户后续管理对象的唯一句柄，
+/// 因而必须先成功 copyout，再插入全局 timer 表；EFAULT 时不能留下不可达 timer。
 pub fn sys_timer_create(
     clock_id: usize,
     sevp: *const SigEvent,
@@ -674,17 +698,15 @@ pub fn sys_timer_create(
         interval_ms: 0,
     };
 
-    // timerid is the only handle by which userspace can subsequently manage
-    // this object. Do not publish the timer until that handle is visible.
+    // timerid 是用户态后续管理该对象的唯一句柄；在句柄对用户可见前不能发布定时器。
     copy_to_user(timerid, &id as *const i32, 1)?;
     POSIX_TIMERS.lock().insert(id as usize, timer);
     Ok(0)
 }
 
-/// Remove all POSIX timers owned by a process that is completing group exit.
+/// 移除正在完成组退出的进程所拥有的全部 POSIX 定时器。
 ///
-/// Timers currently use the numeric tgid as their owner identity, so leaving
-/// one behind would also allow it to target an unrelated task after PID reuse.
+/// 定时器当前以数值 tgid 标识所有者；若退出时遗留定时器，PID 复用后它可能错误指向无关任务。
 pub fn remove_posix_timers_for_owner(owner_tgid: usize) {
     let removed = {
         let mut timers = POSIX_TIMERS.lock();
@@ -741,6 +763,11 @@ pub fn sys_timer_gettime(timerid: usize, curr_value: *mut ITimerSpec) -> SysResu
     Ok(0)
 }
 
+/// 设置 POSIX timer 的首次到期值和周期，并可返回旧配置。
+///
+/// 新 itimerspec 先 copyin、校验 clock/flags/时间范围并换算成所属时钟 deadline；old_value
+/// 在修改前快照并写回。只有用户访问全部成功后才在 timer 表锁内确认 owner 与 timerid 并
+/// 一次提交，EFAULT/EINVAL 不改变原 timer。绝对时间和相对时间使用各自时钟基准。
 pub fn sys_timer_settime(
     timerid: usize,
     flags: usize,
@@ -794,6 +821,12 @@ pub fn sys_timer_settime(
     Ok(0)
 }
 
+/// 扫描并触发到期的进程级 POSIX timer。
+///
+/// 持 timer 表锁时只更新 deadline/overrun 并快照待投递事件，释放锁后再向 ProcessState
+/// 投递信号，避免 signal 路径反向进入 timer 注册表。周期 timer 以原 deadline 为基准跳过
+/// 已错过周期，防止处理延迟造成永久漂移；一次性 timer 触发后清零 deadline。
+/// owner 已退出或 PID 已被复用的对象应由 group-exit 清理，不能把旧 timer 投递给新进程。
 pub fn check_posix_timers() {
     let mut expired = Vec::new();
     {
@@ -951,6 +984,11 @@ fn write_remaining_time(start_us: usize, total_us: usize, rem: *mut TimeSpec) ->
     Ok(())
 }
 
+/// 让当前任务睡眠到指定时钟的绝对微秒期限，并协调 signal 与 timer 唤醒。
+///
+/// 每轮先检查权威时钟，再注册 waiter、发布 Blocked 并复查期限/信号，关闭丢失唤醒窗口。
+/// 恢复后由等待状态判断 timeout 是否获胜；信号零进展返回 EINTR，并按调用者需求计算剩余时间。
+/// 所有出口注销 deadline 和 interruptible 状态。
 fn sleep_until_us(
     clock_id: usize,
     deadline_us: usize,

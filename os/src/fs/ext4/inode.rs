@@ -1,5 +1,19 @@
 // os/src/ext4/inode.rs
 
+//! lwext4 inode 的 Rust/VFS 适配层。
+//!
+//! 本模块把 C 库按路径执行的操作包装为稳定的 VFS inode identity，并维护 inode 弱缓存、
+//! metadata 快照、lazytime、xattr、特殊文件类型以及 PageCache 后端。缓存键必须包含文件系统
+//! 实例 ID 与 inode number；两块 ext4 可以拥有相同 inode number，不能因此合并对象。
+//!
+//! lwext4 的 C 状态和路径缓冲不是天然并发安全的，所有 lower 操作必须遵守 ext4 全局锁与
+//! mountpoint 路由规则。Rust `Arc` 存活只说明内存对象仍被引用，不证明目录项仍在 namespace；
+//! unlink/rmdir 后的 open inode 需要依靠稳定 identity 和 detached 状态提供 Linux 语义。
+//!
+//! metadata、dirty data 与时间戳具有不同提交时机。lazytime 强引用只在持久化边界完成后释放，
+//! 不能由最后一个 `File` 的 Drop 代替 writeback；create 则必须在 lower inode 类型、owner、mode
+//! 和 device payload 全部提交后才对 namespace 可见。
+
 use crate::config::INODE_CACHE_CAPACITY;
 use alloc::ffi::CString;
 use alloc::string::String;
@@ -22,15 +36,14 @@ use crate::timer::TimeSpec;
 lazy_static! {
     static ref EXT4_INODE_CACHE: Mutex<HashMap<(usize, u64), Weak<dyn InodeOp>>> =
         Mutex::new(HashMap::new());
-    /// Strong references keep in-memory lazy timestamps reachable until a
-    /// filesystem durability boundary has committed them to the lower inode.
+    /// 强引用保证内存中的 lazytime 时间戳在文件系统持久化边界把它们提交给 lower inode
+    /// 之前始终可达。
     static ref LAZYTIME_INODES: Mutex<HashMap<(usize, u64), Arc<dyn InodeOp>>> =
         Mutex::new(HashMap::new());
     static ref DEFERRED_INODE_DISCARDS: Mutex<Vec<(usize, &'static [u8], u32)>> =
         Mutex::new(Vec::new());
-    /// lwext4 keeps mount, block-cache, and directory traversal state in
-    /// shared C objects.  Every entry into lwext4, including superblock
-    /// operations, must be serialized by this one lock on SMP.
+    /// lwext4 把挂载、块缓存和目录遍历状态保存在共享 C 对象中。在 SMP 下，所有进入
+    /// lwext4 的调用（包括 superblock 操作）都必须由这一把锁串行化。
     pub(super) static ref EXT4_OP_LOCK: ProfiledExt4Lock = ProfiledExt4Lock::new();
 }
 
@@ -160,9 +173,8 @@ pub(super) struct ProfiledExt4Guard<'a> {
 }
 
 impl ProfiledExt4Guard<'_> {
-    /// Profile one bounded lwext4 call or call sequence inside this lock.
-    /// Keeping this explicit makes unprofiled Rust preparation/publication
-    /// visible as the remainder of the existing lock-hold measurement.
+    /// 统计锁内一次有界的 lwext4 调用或调用序列。显式划定范围后，未计入的 Rust
+    /// 准备/发布开销会保留为现有锁持有时间统计中的剩余部分。
     pub(super) fn profile_lower(&self) -> ProfiledExt4LowerGuard<'_> {
         ProfiledExt4LowerGuard {
             started: crate::perf::now_ticks(),
@@ -273,8 +285,8 @@ impl Drop for Ext4Inode {
     }
 }
 
-/// Reclaim an unlinked lower inode only after its final VFS `Arc` disappears.
-/// Drop merely queues work so it never enters lwext4 under an unrelated lock.
+/// 只有最后一个 VFS `Arc` 消失后才回收已 unlink 的 lower inode。Drop 只把工作加入
+/// 队列，避免在持有无关锁时进入 lwext4。
 pub fn reap_deferred_inodes() {
     if !DEFERRED_INODE_DISCARD_PENDING.swap(false, Ordering::AcqRel) {
         return;
@@ -382,6 +394,15 @@ impl Ext4Inode {
         }
     }
 
+    /// 在当前目录下创建并持久化一种 ext4 inode，再返回全局身份缓存中的对象。
+    ///
+    /// 普通文件/目录使用 lwext4 高层入口，FIFO、字符/块设备和 socket 必须通过 mknod
+    /// 把真实类型与 rdev 写入磁盘，不能只在 Rust 对象中记类型。整个下层命名空间操作持有
+    /// 唯一 `EXT4_OP_LOCK`；成功后先使父目录元数据代次失效，再按磁盘 dirent 的 ino/type
+    /// 获取缓存对象并初始化时间戳。
+    ///
+    /// 本函数只完成下层创建；mode/uid/gid 由 namei 的创建事务随后提交。在那一步失败时，
+    /// namei 会 unlink 本对象，因此这里不能提前把一个未经元数据提交的 dentry 发布给查找者。
     fn create_inode(
         &self,
         parent_path: &str,
@@ -493,8 +514,7 @@ impl Ext4Inode {
     }
 
     fn file_symlink(target: &str, path: &str) -> SysResult {
-        // Validate and allocate both immutable arguments before entering the
-        // global lwext4 critical section. Failure still precedes mutation.
+        // 在进入 lwext4 全局临界区前验证并分配两个不可变参数；任何失败都发生在修改之前。
         let target = CString::new(target).map_err(|_| Errno::EINVAL)?;
         let path = CString::new(path).map_err(|_| Errno::EINVAL)?;
         {
@@ -662,6 +682,11 @@ impl Ext4Inode {
         })
     }
 
+    /// 在 ext4 全局属性锁下提交一组已经预检的 mode/uid/gid/size 变更。
+    ///
+    /// 下层操作按不会暴露中间非法状态的顺序执行；任一步失败后使 Rust 元数据缓存失效，
+    /// 调用者不得继续用旧快照覆盖磁盘新值。size 变化还需由更高层协调 PageCache 与 mmap，
+    /// 因此本函数只负责 lower inode，不独立实现 truncate 事务。
     fn commit_lower_setattr(
         &self,
         _path: &str,
@@ -708,6 +733,11 @@ impl Ext4Inode {
         }
     }
 
+    /// 按显式/当前时间请求更新 inode 时间戳，并实现 lazytime 的延迟提交策略。
+    ///
+    /// atime/mtime/ctime 先与内存 pending 状态合并；lazytime 可只更新缓存并登记 dirty inode，
+    /// strict 路径则持 ext4 属性锁写入 lower inode。generation 标识每批延迟值，刷写成功时
+    /// 只能清除自己观察到的版本，不能覆盖期间产生的更新。
     fn set_times_impl(
         &self,
         path: &str,
@@ -715,8 +745,7 @@ impl Ext4Inode {
         mtime: Option<TimeSpec>,
         update_ctime: bool,
     ) -> SysResult {
-        // Preserve an earlier delayed write's mtime before a later explicit
-        // setattr supersedes some or all timestamp fields.
+        // 后续显式 setattr 覆盖部分或全部时间戳字段前，先保留早先延迟写产生的 mtime。
         self.flush_pending_times(path)?;
         let extra_mask = self.raw_metadata(path)?.timestamp_extra_mask;
         let atime =
@@ -757,15 +786,14 @@ impl Ext4Inode {
         Ok(())
     }
 
-    /// Automatic read/readdir atime updates do not change ctime. Explicit
-    /// timestamp changes continue through `InodeOp::set_times` and do.
+    /// read/readdir 自动更新 atime 时不改变 ctime；显式时间戳修改继续经由
+    /// `InodeOp::set_times`，并按其规则更新 ctime。
     pub(crate) fn touch_atime(&self, path: &str, atime: TimeSpec) -> SysResult {
         self.set_times_impl(path, Some(atime), None, false)
     }
 
-    /// Publish an automatic access timestamp without issuing lower metadata
-    /// I/O. The lazytime registry keeps the inode alive until a durability
-    /// boundary commits the pending value.
+    /// 发布自动访问时间但不立即执行 lower metadata I/O。lazytime 注册表保持 inode
+    /// 存活，直到持久化边界提交该待处理值。
     pub(crate) fn defer_atime(&self, path: &str, atime: TimeSpec) -> SysResult {
         let extra_mask = self.raw_metadata(path)?.timestamp_extra_mask;
         let atime = Self::truncate_lower_time(atime, extra_mask & Self::ATIME_EXTRA != 0);
@@ -879,6 +907,12 @@ impl Ext4Inode {
         }
     }
 
+    /// 读取不含延迟时间戳覆盖的原始 inode 元数据，并维护按 inode 身份的 stat 缓存。
+    ///
+    /// 普通文件、符号链接和目录可缓存；目录缓存还必须匹配 namespace generation，避免
+    /// create/unlink 后继续返回旧 nlink/size。缓存未命中时释放 metadata 锁，再取得全局
+    /// ext4 锁读取 C inode，保持 `metadata → EXT4_OP_LOCK` 不形成反向锁序；发布结果前再次
+    /// 检查代次，不能覆盖并发失效。
     fn raw_metadata(&self, _path: &str) -> SysResult<RawInodeMetadata> {
         let ty = self.node_type();
         let cacheable = matches!(
@@ -928,8 +962,7 @@ impl Ext4Inode {
             }
             (raw_inode, blocks)
         };
-        // Reload after lower I/O so a mutation of this directory cannot make
-        // a fresh snapshot carry the generation observed before the I/O.
+        // lower I/O 后重新加载，避免并发目录修改让新快照携带 I/O 前观察到的旧 generation。
         let mut state = self.metadata.lock();
         let namespace_generation = state.generation;
 
@@ -1032,6 +1065,12 @@ impl InodeOp for Ext4Inode {
         Ok(stat)
     }
 
+    /// 从 ext4 普通 inode 的显式偏移读取，并保证稀疏 hole 向调用者呈现零字节。
+    ///
+    /// open/seek/read/close 作为一个下层句柄事务受全局 ext4 读类锁保护；只要 open 成功，
+    /// 后续任意错误路径也必须 close。读取前清零缓冲区是必要语义，因为 lwext4 不保证覆盖
+    /// hole 对应的每个调用方字节。释放 ext4 锁后再失效可能被 atime 更新影响的 stat 缓存，
+    /// 避免 cache 锁与全局 ext4 锁形成倒序。
     fn read_at(&self, _path: &str, off: usize, buf: &mut [u8]) -> SysResult<usize> {
         self.check_type(InodeType::Regular)?;
         crate::perf::inode_read_call(1);
@@ -1054,17 +1093,15 @@ impl InodeOp for Ext4Inode {
                 };
 
                 let operation_result = seek_result.and_then(|_| {
-                    // lwext4 advances across sparse extents but does not reliably
-                    // write zeroes into every byte of the caller's buffer. POSIX hole
-                    // reads must return zero, and file-backed mmap depends on that.
+                    // lwext4 能跨过稀疏 extent，但不保证把调用方缓冲区的每个 hole 字节写零。
+                    // POSIX 要求 hole 读取返回零，file-backed mmap 也依赖这个保证。
                     buf.fill(0);
                     let _lower = guard.profile_lower();
                     file.file_read(buf).map_err(|error| ("read", error))
                 });
 
-                // Once inode_open succeeds, close the lower handle on every path.
-                // Otherwise one transient seek/read error leaks lwext4 state and can
-                // turn an isolated I/O failure into a cascade under BuildStorm.
+                // inode_open 成功后，所有返回路径都必须关闭 lower handle；否则一次临时
+                // seek/read 错误会泄漏 lwext4 状态，并在 BuildStorm 下放大为级联故障。
                 let close_result = {
                     let _lower = guard.profile_lower();
                     file.file_close().map_err(|error| ("close", error))
@@ -1079,8 +1116,8 @@ impl InodeOp for Ext4Inode {
         let read_size = match lower_result {
             Ok(read_size) => read_size,
             Err((stage, error)) => {
-                // Error-only provenance for platform-only SIGBUS failures. Keep
-                // normal reads silent and never retry or replace an EIO with data.
+                // 仅在错误路径记录平台特有 SIGBUS 的来源。正常读取保持静默，不重试，
+                // 也绝不能用数据替换 EIO。
                 println!(
                     "[ext4-read-error] stage={} ino={} off={} len={} errno={:?}",
                     stage,
@@ -1092,8 +1129,7 @@ impl InodeOp for Ext4Inode {
                 return Err(Self::map_lwext4_err(error));
             }
         };
-        // lwext4 may update atime while reading.  Invalidate only after the
-        // global ext4 lock is released to preserve the cache/EXT4 lock order.
+        // lwext4 读取时可能更新 atime。释放 ext4 全局锁后再失效缓存，以保持 cache/EXT4 锁序。
         self.invalidate_raw_metadata();
         crate::perf::inode_read_completed_bytes(read_size);
         crate::perf::inode_read_ticks(crate::perf::elapsed_since(started));
@@ -1101,6 +1137,12 @@ impl InodeOp for Ext4Inode {
         Ok(read_size)
     }
 
+    /// 把一段已确定偏移的数据写入 ext4 inode，是 PageCache 回写的下层入口。
+    ///
+    /// lwext4 seek 不能直接越过 EOF，因此稀疏写在定位前先把下层文件扩展到 offset，
+    /// 再完成 write/close。操作期间持有全局 ext4 写类锁，释放后使原始元数据缓存失效；
+    /// 成功增长还同步 PageCache 逻辑长度，但不能在此处把缓存页误标为 clean——脏版本的
+    /// 提交归 `PageCache::sync_inner` 依据 writeback id 决定。
     fn write_at(&self, _path: &str, off: usize, buf: &[u8]) -> SysResult<usize> {
         self.check_type(InodeType::Regular)?;
         let started = crate::perf::now_ticks();
@@ -1111,10 +1153,9 @@ impl InodeOp for Ext4Inode {
             let _lower = guard.profile_lower();
             file.inode_open(self.ino as u32, bindings::O_RDWR)
                 .map_err(Self::map_lwext4_err)?;
-            // lwext4's fseek rejects offsets beyond EOF and the Rust wrapper
-            // historically clamped them to the current size.  Page-cache
-            // writeback may legitimately start a dirty extent after a sparse
-            // hole, so extend the lower file before positioning the write.
+            // lwext4 的 fseek 拒绝 EOF 之后的 offset，旧 Rust wrapper 还会把它钳制到当前
+            // size。PageCache 写回可能合法地从稀疏 hole 后的 dirty extent 开始，因此先扩展
+            // lower 文件，再定位写入位置。
             if off as u64 > file.file_size() {
                 file.file_truncate(off as u64)
                     .map_err(Self::map_lwext4_err)?;
@@ -1298,6 +1339,10 @@ impl InodeOp for Ext4Inode {
         }
     }
 
+    /// 读取一个 ext4 xattr，并处理“先查询长度、再读取内容”期间的并发变化。
+    ///
+    /// 名称先校验命名空间规则；两次 lower 调用受同一属性类全局锁保护，避免长度变化导致越界。
+    /// ENODATA、ERANGE 与不支持错误保持 Linux errno，不把空 value 与不存在属性混为一谈。
     fn get_xattr(&self, name: &str) -> Result<Vec<u8>, Errno> {
         let name = CString::new(name).map_err(|_| Errno::EINVAL)?;
         let mount = self.mount_point_c;
@@ -1342,6 +1387,10 @@ impl InodeOp for Ext4Inode {
         Ok(value)
     }
 
+    /// 读取并解析 ext4 inode 的 NUL 分隔 xattr 名称列表。
+    ///
+    /// 先查询所需长度，再在同一全局属性锁域读取内容；返回值按边界验证每个名称，损坏或缺少
+    /// 终止符时返回 EIO。这里只返回名称快照，Linux 的用户缓冲区长度/ERANGE 规则由 syscall 层处理。
     fn list_xattr(&self) -> Result<Vec<String>, Errno> {
         let mount = self.mount_point_c;
         let guard = EXT4_OP_LOCK.lock_class(Ext4LockClass::Attributes);
@@ -1433,6 +1482,11 @@ impl InodeOp for Ext4Inode {
         ))
     }
 
+    /// 在一次受全局 ext4 锁保护的遍历中快照目录项，并生成稳定的 `d_off` 序列。
+    ///
+    /// 目录句柄必须在所有成功/错误路径关闭；磁盘返回的未知类型保持 DT_UNKNOWN，不能根据
+    /// 名称臆测。结果作为 open-file directory stream 的一轮缓存使用，之后的 getdents 调用
+    /// 按偏移消费；若目录被 rmdir 分离，File 层会在使用该快照前返回 ENOENT。
     fn readdir(&self, path: &str) -> SysResult<Vec<LinuxDirent64>> {
         self.check_type(InodeType::Directory)?;
         let started = crate::perf::now_ticks();
@@ -1479,10 +1533,8 @@ impl InodeOp for Ext4Inode {
                 crate::perf::ext4_readdir_dirent_type_known(1);
                 InodeType::from(dirent_ty)
             } else if name == "." || name == ".." {
-                // DT_UNKNOWN is a valid result when the filesystem does not
-                // store file types in directory entries.  Preserve it for the
-                // synthetic self/parent entries rather than constructing an
-                // alias-sensitive fallback path for `..`.
+                // 文件系统不在目录项中保存类型时，DT_UNKNOWN 是合法结果。对合成的 self/parent
+                // 项保留该值，不要为 `..` 构造会受 alias 影响的 fallback path。
                 crate::perf::ext4_readdir_dirent_type_unknown(1);
                 InodeType::Unknown
             } else {
@@ -1515,8 +1567,7 @@ impl InodeOp for Ext4Inode {
             return Err(Self::map_lwext4_err(ret));
         }
         drop(guard);
-        // Directory iteration may update atime in lwext4.  Do not retain a
-        // raw timestamp snapshot across a successful readdir operation.
+        // lwext4 遍历目录时可能更新 atime；成功 readdir 前后不能沿用同一份原始时间戳快照。
         self.invalidate_raw_metadata();
 
         crate::perf::ext4_readdir_call(1);
@@ -1592,9 +1643,8 @@ impl InodeOp for Ext4Inode {
             .downcast_ref::<Ext4Inode>()
             .ok_or(Errno::EXDEV)?;
         let child_stat = child_inode.stat(child_abs_path)?;
-        // `i_nlink == 0` detaches the inode from the namespace. Lower storage
-        // is reclaimed only after every VFS Arc (File, cwd, Dentry and
-        // transient Path) has disappeared.
+        // `i_nlink == 0` 表示 inode 已脱离 namespace。只有所有 VFS Arc（File、cwd、
+        // Dentry 和临时 Path）都消失后，才能回收 lower storage。
         let deferred = child_inode.node_type() == InodeType::Directory || child_stat.nlink <= 1;
         if child_inode.node_type() == InodeType::Directory {
             let entries = child_inode.readdir(child_abs_path)?;
@@ -1694,16 +1744,14 @@ pub(crate) fn set_dirtytime_expire_seconds(value: usize) -> SysResult<()> {
             core::hint::spin_loop();
         }
     } else {
-        // Match Linux's sysctl handler: changing the interval wakes the
-        // dirtytime worker so existing inodes are re-evaluated immediately.
+        // 对齐 Linux sysctl handler：修改 interval 时唤醒 dirtytime worker，立即重新评估已有 inode。
         NEXT_LAZYTIME_SCAN_US.store(crate::timer::get_timeout_us(), Ordering::Release);
     }
     Ok(())
 }
 
-/// Commit a bounded batch of expired lazy timestamps from the timer-service
-/// hart's idle context. The timestamp age is monotonic and starts with the
-/// first deferred update, matching Linux's `dirtied_time_when` behavior.
+/// 在 timer-service hart 的 idle context 中提交一批有界的过期 lazy 时间戳。时间戳 age
+/// 使用单调时间并从第一次延迟更新起算，对齐 Linux 的 `dirtied_time_when` 行为。
 pub(crate) fn flush_expired_lazytime_inodes_if_needed() {
     let now = crate::timer::get_timeout_us();
     if now < NEXT_LAZYTIME_SCAN_US.load(Ordering::Acquire) {
@@ -1751,8 +1799,7 @@ pub(crate) fn flush_expired_lazytime_inodes_if_needed() {
         if let Some(current) = ext4.pending_atime() {
             let current_deadline = current.dirtied_at_us.saturating_add(interval_us);
             if flush_failed {
-                // The failed generation remains pending. Avoid retrying on
-                // every scheduler tick while retaining the strong owner.
+                // 失败的 generation 保持 pending；继续持有强 owner，但不要在每个调度 tick 都重试。
             } else if now >= current_deadline && flushed >= LAZYTIME_BACKGROUND_BATCH {
                 schedule_lazytime_scan(now);
             } else {
@@ -1772,9 +1819,8 @@ pub(crate) fn flush_expired_lazytime_inodes_if_needed() {
     LAZYTIME_SCAN_RUNNING.store(false, Ordering::Release);
 }
 
-/// An inode that has lost its final dentry/file owner must not remain pinned
-/// solely by the lazytime registry. Commit its pending atime before releasing
-/// that strong owner, matching Linux's eviction durability boundary.
+/// 已失去最后一个 dentry/file owner 的 inode 不能只因 lazytime 注册表而永久 pin。
+/// 释放该强 owner 前提交 pending atime，以匹配 Linux eviction 的持久化边界。
 pub(crate) fn flush_lazytime_inode_on_evict(inode: Arc<dyn InodeOp>) {
     let Some(ext4) = inode.as_any().downcast_ref::<Ext4Inode>() else {
         return;

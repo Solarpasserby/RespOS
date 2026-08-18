@@ -1,10 +1,14 @@
 // os/src/mm.rs
 
-//! ### 内存管理模块
+//! 内存管理公共入口与用户空间安全访问接口。
 //!
-//! 实现虚拟地址空间
+//! 本模块重导出地址、frame、页表和 `MemorySet` 抽象，并负责 heap/frame 初始化顺序、
+//! 用户 C 字符串与 argv/env 提取、copyin/copyout 以及跨页可访问性检查。syscall 层必须
+//! 通过这些 helper 访问用户地址，不能把用户指针直接转换为 Rust 引用。
 //!
-//! 这部分内容繁多，建立了多层的抽象，隐含了很多深远的设计思想，需要好好消化
+//! copy helper 可能按规则处理 lazy page、COW 和普通缺页，所以调用方不能持有会被 fault
+//! 路径再次获取的 MM/FS/task 锁。pathname、exec 单字符串、参数个数和聚合字节各有独立
+//! 上限与 errno；扩大其中一个预算不能顺带放宽其他 ABI 边界。
 
 mod address;
 mod frame_allocator;
@@ -95,17 +99,17 @@ pub fn activate_kernel_space() {
     KERNEL_SPACE.lock().activate();
 }
 
-/// Root token of the immutable kernel half, published before secondary harts
-/// start. Scheduler idle contexts use it without taking KERNEL_SPACE's lock.
+/// 不可变内核半区的根页表令牌，在次级核启动前发布。
+/// 调度器 idle 上下文无需取得 KERNEL_SPACE 锁即可使用它。
 pub fn kernel_mmu_token() -> usize {
     let token = KERNEL_MMU_TOKEN.load(Ordering::Acquire);
     assert_ne!(token, 0, "kernel MMU token is not initialized");
     token
 }
 
-/// Enforce the scheduler invariant that idle code never runs on a user root.
-/// A stale user root may be reclaimed after its last task exits, so merely
-/// relying on an old saved idle TaskContext is unsafe under SMP migration.
+/// 强制保证 idle 代码绝不在用户根页表上运行这一调度不变量。
+/// 过期用户根会在最后一个任务退出后被回收，因此发生 SMP 迁移时，
+/// 仅依赖 idle TaskContext 中保存的旧值并不安全。
 #[cfg(target_arch = "loongarch64")]
 pub fn ensure_kernel_space_active() {
     let token = kernel_mmu_token();
@@ -164,9 +168,8 @@ pub fn extract_cstrings_from_user(mut ptr: *const usize) -> SysResult<Vec<String
         if count >= USER_ARG_MAX_COUNT {
             return Err(Errno::E2BIG); // 参数过多
         }
-        // exec strings have Linux's much larger MAX_ARG_STRLEN boundary and
-        // report E2BIG when either the per-string or aggregate budget is
-        // exceeded. Pathname callers retain USER_CSTR_MAX_LEN/ENAMETOOLONG.
+        // exec 字符串采用 Linux 更大的 MAX_ARG_STRLEN 上限；单串或总预算超限均报告 E2BIG。
+        // 路径名调用者仍使用 USER_CSTR_MAX_LEN/ENAMETOOLONG。
         let string = copy_cstr_from_user_bounded(str_ptr, USER_ARG_STR_MAX_LEN, Errno::E2BIG)?;
         total_bytes = total_bytes
             .checked_add(string.len() + 1)
@@ -311,12 +314,11 @@ pub fn check_user_readable<T>(src: *const T, len: usize) -> SysResult {
     check_user_buffer(src as usize, byte_len, MapPermission::READ)
 }
 
-/// Read one aligned futex word without resolving a lazy page.
+/// 在不解析惰性页面的前提下，读取一个对齐的 futex 字。
 ///
-/// The caller must first use [`check_user_readable`] outside any global
-/// spin lock. This second read only takes the address-space read lock and
-/// translates an already-present PTE, so it cannot allocate or handle a page
-/// fault while the futex queue lock is held.
+/// 调用者必须先在所有全局自旋锁之外执行 [`check_user_readable`]。
+/// 第二次读取只取得地址空间读锁并翻译已存在的 PTE，因此持有 futex 队列锁时
+/// 不会分配页面或处理缺页。
 pub fn read_user_u32_nofault(src: *const u32) -> SysResult<u32> {
     let addr = src as usize;
     if src.is_null() {

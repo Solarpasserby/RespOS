@@ -1,5 +1,22 @@
 // os/src/mm/memory_set.rs
 
+//! 用户与内核虚拟地址空间的核心状态机。
+//!
+//! `MemorySet` 同时拥有 VMA、页表、匿名/文件映射、COW、lazy fault、共享映射
+//! residency、ASID/TLB 协议以及 exec 装载结果。页表项只是这些高层状态的硬件
+//! 投影，不能仅修改 PTE 而跳过 VMA、frame 所有权和远端 TLB 失效。
+//!
+//! 维护本文件时尤其要守住以下不变量：
+//!
+//! - VMA 的区间互不重叠，拆分、合并和权限变更必须保持 backing 与 offset 连续；
+//! - 私有可写映射通过 COW 隔离，共享文件映射与 buffered I/O 使用同一 PageCache frame；
+//! - file-backed fault 必须区分 EOF、部分末页和 page-mkwrite 的 backing 分配失败；
+//! - 用户 copy helper 可以触发普通 lazy/COW fault，但不能绕过用户态栈增长条件；
+//! - 页表页和数据 frame 只有在所有相关 hart 完成失效后才可回收。
+//!
+//! 本模块处于 syscall、task、FS 与架构页表的交汇处。任何看似局部的锁序、PTE
+//! flag 或 Drop 修改，都应同时审计 fork/exec/exit、mmap/truncate 和 SMP shootdown。
+
 use super::address::PhysAddr;
 use super::address::{PhysPageNum, StepByOne, VPNRange, VirtAddr, VirtPageNum};
 use super::frame_allocator::{FrameTracker, frame_alloc};
@@ -101,6 +118,10 @@ lazy_static! {
 }
 
 #[cfg(target_arch = "loongarch64")]
+/// 分配一个当前未被存活地址空间占用的 ASID，并处理编号回绕。
+///
+/// 分配受全局 generation/bitmap 保护；空间耗尽或回绕时必须先完成全局 TLB 失效，再让旧编号
+/// 进入新 generation，防止新地址空间命中前任 PTE。失败返回 ENOMEM，不能退化为无条件 ASID 0。
 fn allocate_asid() -> SysResult<usize> {
     let retired = {
         let mut allocator = ASID_ALLOCATOR.lock();
@@ -191,8 +212,8 @@ fn read_file_exact_at(file: Arc<dyn FileOp>, offset: usize, buf: &mut [u8]) -> S
     Ok(())
 }
 
-/// Read only the ELF64 header, program-header table, and PT_INTERP string.
-/// PT_LOAD contents stay in the filesystem and are faulted in page by page.
+/// 只读取 ELF64 header、program-header table 与 PT_INTERP 字符串；PT_LOAD 内容继续留在
+/// 文件系统中，后续按页 fault-in。
 fn read_elf_metadata(file: Arc<dyn FileOp>) -> SysResult<Vec<u8>> {
     const ELF64_HEADER_SIZE: usize = 64;
     const ELF64_PROGRAM_HEADER_SIZE: usize = 56;
@@ -247,11 +268,9 @@ fn read_elf_metadata(file: Arc<dyn FileOp>) -> SysResult<Vec<u8>> {
         headers
     };
 
-    // A valid PT_INTERP may live near the end of a large ELF (Alpine's Cargo
-    // places it around 19 MiB). Do not retain the entire prefix in the kernel
-    // heap. Append only the interpreter string to the compact metadata image
-    // and redirect that program header's p_offset to the appended copy. LOAD
-    // offsets remain the real file offsets used by lazy page faults.
+    // 合法 PT_INTERP 可能位于大型 ELF 尾部（Alpine Cargo 约在 19 MiB）。不能把整个前缀
+    // 留在 kernel heap；只把 interpreter 字符串附加到紧凑 metadata image，并把该 program
+    // header 的 p_offset 指向附加副本。LOAD offset 仍保持 lazy page fault 使用的真实文件 offset。
     for (index, file_offset, len) in interp_headers {
         let relocated_offset = metadata.len();
         let relocated_end = relocated_offset
@@ -316,24 +335,25 @@ fn write_file_at(file: Arc<dyn FileOp>, offset: usize, buf: &[u8]) -> SysResult<
     }
 }
 
-/// A lock-free snapshot of one resident page from a writable shared file
-/// mapping.  The snapshot is deliberately independent from `MemorySet`, so
-/// the actual FileOp write can happen after the address-space lock is
-/// released.
+/// writable shared file mapping 中一个 resident page 的无锁快照。快照刻意与 `MemorySet`
+/// 解耦，使真正的 FileOp 写入可以在释放地址空间锁后执行。
 pub(crate) struct FileWriteback {
     pub file: Arc<dyn FileOp>,
     pub offset: usize,
     pub data: Vec<u8>,
 }
 
+/// 执行从一个或多个 MemorySet 快照出的共享文件映射回写任务。
+///
+/// 快照按稳定文件身份/页缓存归并，实际 inode I/O 在地址空间锁外完成，避免缺页、fsync 与退出
+/// 互相锁死。`sync` 决定是否追加文件系统持久化屏障；首个错误被返回，同时失败脏页仍留在
+/// PageCache 并发布给 open-file error cursor，不能因退出清理而静默丢弃。
 pub(crate) fn writeback_file_pages(writebacks: Vec<FileWriteback>, sync: bool) -> SysResult {
     let mut sync_ranges: Vec<(Arc<dyn FileOp>, usize, usize)> = Vec::new();
 
     for writeback in writebacks {
-        // A file can be truncated after the mapping was created. Never let
-        // unmapping or msync re-extend it by writing past the current EOF;
-        // accesses beyond a truncated mapping are a separate SIGBUS boundary
-        // that this kernel does not yet model.
+        // mapping 创建后文件仍可被 truncate。unmap/msync 绝不能通过写越当前 EOF 再次扩展文件；
+        // 对截断后 mapping 越界访问属于独立 SIGBUS 边界。
         let current_size = writeback.file.get_stat()?.size;
         let write_len = current_size
             .saturating_sub(writeback.offset)
@@ -374,15 +394,18 @@ pub(crate) fn writeback_file_pages(writebacks: Vec<FileWriteback>, sync: bool) -
     Ok(())
 }
 
+/// 以稳定 `(dev, ino, page_index)` 从文件 PageCache 取得 MAP_SHARED 的唯一物理帧。
+///
+/// buffered I/O 与所有地址空间的共享映射必须复用该帧，不能各自分配后再做易失的内容同步。
+/// 返回的 major 标志表示是否发生下层填充；页面 Arc/pin 会阻止全局回收在 PTE 仍引用时释放它。
 fn shared_file_frame(
     backing: &FileBacking,
     page_offset: usize,
 ) -> SysResult<(Arc<FrameTracker>, bool)> {
     let file_offset = backing.offset.checked_add(page_offset).ok_or(Errno::EIO)?;
 
-    // Regular files use their PageCache frame as the mmap frame.  Besides
-    // eliminating a duplicate physical page, this avoids accumulating one
-    // global weak-map node for every file page ever mapped by a linker.
+    // 常规文件直接以 PageCache frame 作为 mmap frame。这样既消除重复物理页，也避免 linker
+    // 每映射一个文件页就在全局 weak-map 中永久累积一个节点。
     if let Some(file) = backing.file.as_any().downcast_ref::<File>() {
         if let Some((frame, required_io)) = file.shared_page_frame(file_offset)? {
             return Ok((frame, required_io));
@@ -419,8 +442,7 @@ fn shared_file_frame(
     if let Some(existing) = pages.get(&key).and_then(|weak| weak.upgrade()) {
         return Ok((existing, false));
     }
-    // Compatibility mappings are uncommon, so an O(n) prune on insertion is
-    // preferable to letting dead Weak keys consume kernel heap indefinitely.
+    // compatibility mapping 很少，插入时执行 O(n) prune 好过让失效 Weak key 无限占用 kernel heap。
     pages.retain(|_, weak| weak.strong_count() != 0);
     pages.insert(key, Arc::downgrade(&frame));
     Ok((frame, required_io))
@@ -430,9 +452,8 @@ pub(crate) fn shared_file_page_entry_count() -> usize {
     SHARED_FILE_PAGES.lock().len()
 }
 
-/// Keep fallback file I/O coherent with resident MAP_SHARED frames. Regular
-/// PageCache files share one frame and do not enter this compatibility table;
-/// files without a PageCache still need writes mirrored into any live frame.
+/// 保持 fallback file I/O 与 resident MAP_SHARED frame 一致。常规 PageCache 文件共享同一
+/// frame，不进入 compatibility table；没有 PageCache 的文件仍需把写入镜像到所有 live frame。
 pub(crate) fn update_shared_file_pages(dev: u64, ino: u64, offset: usize, data: &[u8]) {
     let Some(end) = offset.checked_add(data.len()) else {
         return;
@@ -457,8 +478,7 @@ pub(crate) fn update_shared_file_pages(dev: u64, ino: u64, offset: usize, data: 
     }
 }
 
-/// Overlay fallback MAP_SHARED contents on a read. User stores reach the
-/// shared frame directly and may not have been written back yet.
+/// 读取时叠加 fallback MAP_SHARED 内容；用户 store 直接写入共享 frame，可能尚未 writeback。
 pub(crate) fn overlay_shared_file_pages(dev: u64, ino: u64, offset: usize, data: &mut [u8]) {
     let Some(end) = offset.checked_add(data.len()) else {
         return;
@@ -483,9 +503,8 @@ pub(crate) fn overlay_shared_file_pages(dev: u64, ino: u64, offset: usize, data:
     }
 }
 
-/// Shrinking a file invalidates the truncated portion even for mappings that
-/// keep their frames alive. If the file is grown again, those bytes must read
-/// as zero rather than exposing the previous file contents.
+/// 文件 shrink 时，即使 mapping 仍保持 frame 存活，也要失效被截断部分。再次 grow 后这些字节
+/// 必须读为零，不能暴露旧文件内容。
 pub(crate) fn truncate_shared_file_pages(dev: u64, ino: u64, new_size: usize) {
     let pages = SHARED_FILE_PAGES.lock();
     for (key, frame) in pages.iter() {
@@ -503,8 +522,8 @@ pub(crate) fn truncate_shared_file_pages(dev: u64, ino: u64, new_size: usize) {
     }
 }
 
-/// Keep compatibility MAP_SHARED frames coherent with a lower-filesystem
-/// hole punch. Regular files use PageCache::punch_hole instead.
+/// lower filesystem hole punch 后保持 compatibility MAP_SHARED frame 一致；常规文件改用
+/// `PageCache::punch_hole`。
 pub(crate) fn punch_shared_file_pages(dev: u64, ino: u64, offset: usize, len: usize) {
     let Some(end) = offset.checked_add(len) else {
         return;
@@ -527,10 +546,8 @@ pub(crate) fn punch_shared_file_pages(dev: u64, ino: u64, offset: usize, len: us
     }
 }
 
-/// Invalidate resident whole pages beyond a newly shortened EOF in every
-/// live address space. Candidate file handles are collected without holding
-/// their MemorySet lock while statting, avoiding File-lock/MemorySet-lock
-/// inversion with the page-fault path.
+/// 在每个 live 地址空间中失效新 EOF 之后的 resident 整页。收集候选 file handle 后，不持有
+/// MemorySet 锁执行 stat，避免与 page-fault 路径形成 File-lock/MemorySet-lock 反序。
 pub(crate) fn truncate_file_mappings(dev: u64, ino: u64, new_size: usize) {
     let mut seen = BTreeSet::new();
     for task in TASK_MANAGER.snapshot() {
@@ -559,9 +576,8 @@ pub(crate) fn truncate_file_mappings(dev: u64, ino: u64, new_size: usize) {
     }
 }
 
-/// Linux pagecache_isize_extended(): if extending i_size exposes another
-/// filesystem block inside an already resident VM page, write-protect that
-/// page so its next store must pass through page_mkwrite allocation.
+/// 对应 Linux `pagecache_isize_extended()`：扩展 i_size 若在已有 resident VM page 内暴露
+/// 新 filesystem block，就写保护该页，使下一次 store 必须通过 page_mkwrite 分配。
 pub(crate) fn protect_extended_file_mappings(
     dev: u64,
     ino: u64,
@@ -604,11 +620,9 @@ pub(crate) fn protect_extended_file_mappings(
     }
 }
 
-/// Invalidate fully punched resident file pages in every address space.
-/// Shared mappings and clean private pages must refault the new hole, while a
-/// writable MAP_PRIVATE page that has already completed COW remains anonymous
-/// and keeps its bytes, matching the private anonymous-page boundary observed
-/// by the Linux oracle.
+/// 在每个地址空间中失效被完整 punch 的 resident file page。shared mapping 与 clean private
+/// page 必须对新 hole 重新 fault；已完成 COW 的 writable MAP_PRIVATE page 保持匿名并保留字节，
+/// 与 Linux oracle 观察到的 private anonymous-page 边界一致。
 pub(crate) fn punch_file_mappings(dev: u64, ino: u64, offset: usize, len: usize) {
     let Some(end) = offset.checked_add(len) else {
         return;
@@ -673,6 +687,11 @@ pub enum PageFaultOutcome {
 }
 
 impl Drop for MemorySet {
+    /// 释放一个已从所有 CPU 脱离的地址空间。
+    ///
+    /// active-hart mask 非零表示仍可能有硬件使用其页表，属于严重生命周期错误。普通数据页先
+    /// 经同步 TLB/延迟回收协议释放；LoongArch 的 ASID 还必须在地址空间不再活动后退休，
+    /// 防止编号复用时旧 TLB 项命中新进程。
     fn drop(&mut self) {
         debug_assert_eq!(
             self.active_hart_mask.load(Ordering::Acquire),
@@ -743,12 +762,9 @@ pub(crate) fn mmap_file_backing(
         Ok(MmapBacking::SharedFileFrames {
             file,
             offset,
-            // Keep the whole mapped window as the writeback boundary.  A
-            // file may be enlarged with ftruncate after mmap (linkers do
-            // this for their output image), making pages beyond the mmap-time
-            // EOF valid.  writeback_file_pages still clips every snapshot to
-            // the current EOF, so this cannot re-extend a subsequently
-            // truncated file.
+            // 以整个 mapped window 作为 writeback 边界。文件可在 mmap 后通过 ftruncate 扩展
+            //（linker 会这样构造输出 image），使 mmap 时 EOF 之后的页变为合法。
+            // writeback_file_pages 仍按当前 EOF 裁剪每个快照，因此不会重新扩展随后被 truncate 的文件。
             len: map_len,
             valid_len: file_len,
             frames,
@@ -851,9 +867,8 @@ impl MemorySet {
             for vpn in victims {
                 if let Some(pte) = self.page_table.translate(vpn) {
                     let mut flags = pte.flags();
-                    // LoongArch raises PageModifyFault from its hardware D
-                    // bit, while RV uses W. Clear both representations so the
-                    // next store reaches the common page_mkwrite path.
+                    // LoongArch 由硬件 D 位触发 PageModifyFault，RV 使用 W 位。清除两种表示，
+                    // 让下一次 store 都进入公共 page_mkwrite 路径。
                     flags.remove(PTEFlags::WRITE | PTEFlags::DIRTY);
                     self.page_table.modify_pte(vpn, flags);
                 }
@@ -1238,11 +1253,10 @@ impl MemorySet {
         Ok(())
     }
 
-    /// Ensure a heap range exists and has resident writable anonymous pages.
+    /// 确保 heap range 存在，并拥有 resident writable anonymous page。
     ///
-    /// This is used by architectures that choose not to overcommit the brk
-    /// heap. It preserves Linux-visible brk semantics while avoiding later
-    /// user-mode faults for pages whose allocation was already committed.
+    /// 供选择不 overcommit brk heap 的架构使用；保持 Linux 可见的 brk 语义，同时避免已经
+    /// commit 分配的页面随后再触发 user-mode fault。
     pub fn ensure_private_writable_anonymous_range_eager(
         &mut self,
         vpn_range: VPNRange,
@@ -1286,6 +1300,11 @@ impl MemorySet {
             && left.dontfork == right.dontfork
     }
 
+    /// 完成 mmap 地址选择、边界/冲突检查和 replace 预处理，但尚不安装新 VMA。
+    ///
+    /// hint 越界或冲突时，非 FIXED 请求回退到自动选址；NOREPLACE 冲突返回 EEXIST，FIXED
+    /// 则先解除目标范围。所有加法使用 checked 运算并限制在 MMAP_MIN/MAX 之间。
+    /// 返回的 placement 是后续 `mmap_area` 唯一提交依据，自动选址游标要等映射成功后更新。
     fn prepare_mmap(&mut self, request: MmapRequest) -> SysResult<MmapPlacement> {
         let mut start = self.choose_mmap_start(request.addr, request.map_len)?;
         if request.addr.is_some()
@@ -1342,7 +1361,16 @@ impl MemorySet {
         }
     }
 
-    /// 按 mmap 语义选择地址并插入指定 backing 的用户映射。
+    /// 按 Linux `mmap` 语义选择地址，并把指定后端安装为新的用户 VMA。
+    ///
+    /// 本函数是匿名映射、文件映射和 SysV 共享内存共用的提交入口：先由
+    /// `prepare_mmap` 完成范围溢出、地址冲突、`MAP_FIXED`/`MAP_FIXED_NOREPLACE`
+    /// 检查，再按后端类型建立惰性 VMA 或预装共享页帧。预装过程中若任意 PTE
+    /// 创建失败，会撤销本次已经创建的 PTE，不能留下只有部分页面可见的映射。
+    ///
+    /// 文件共享映射在首次写入前保持只读，以便缺页路径执行 page-mkwrite 和
+    /// 后端空间预留；文件 EOF 后的整页保持 non-resident，使访问能够转换为 SIGBUS。
+    /// 成功后 VMA 必须重新排序并更新自动选址游标；调用者应持有该 `MemorySet` 的写锁。
     pub(crate) fn mmap_area(
         &mut self,
         addr: Option<usize>,
@@ -1461,9 +1489,8 @@ impl MemorySet {
                     .zip(frames.into_iter())
                     .enumerate()
                 {
-                    // Whole pages beyond EOF stay non-resident so the first
-                    // access can report SIGBUS. If the file later grows,
-                    // map_one() rechecks the live size and faults them in.
+                    // EOF 之后的整页保持 non-resident，使首次访问能报告 SIGBUS。文件后来 grow
+                    // 时，map_one() 重新检查 live size 并 fault-in。
                     if page_index * PAGE_SIZE >= valid_len {
                         continue;
                     }
@@ -1617,6 +1644,12 @@ impl MemorySet {
         Ok(())
     }
 
+    /// 调整一段完整 VMA 的长度，并在允许时原子搬迁其驻留页与映射元数据。
+    ///
+    /// 固定目标先校验目标区间和重叠规则；原地缩小会逐页解除尾部映射，原地扩展仅在后继
+    /// 空间连续可用时进行。无法原地扩展且 `maymove` 为真时，先选择/清理新范围，再移动 PTE、
+    /// data frame、文件偏移和共享映射 pin；中途失败必须恢复或保持旧映射仍可用，不能同时
+    /// 暴露两个不完整 VMA。成功后统一排序 VMA、刷新 TLB 并检查区间不重叠不变量。
     pub fn mremap_range(
         &mut self,
         old_addr: usize,
@@ -1828,7 +1861,12 @@ impl MemorySet {
         Ok(())
     }
 
-    /// 修改与给定虚拟页区间重叠的映射权限，必要时裁剪或切分原逻辑段
+    /// 修改给定区间内所有 VMA/PTE 的权限，并在边界处切分原 VMA。
+    ///
+    /// 第一遍先确认整个区间均由用户映射覆盖，并检查新增写权限是否受文件打开模式允许；
+    /// 只有预检全部成功后才进入修改阶段，避免 `mprotect` 失败时只改变前半区。
+    /// 对 COW、共享文件 page-mkwrite 和架构软件位必须保留其只读陷入条件，不能简单把
+    /// VMA 的 WRITE 位直接复制到每个现有 PTE。完成后合并兼容匿名段并发布 TLB 失效。
     pub fn remap_area_with_overlap_range(
         &mut self,
         vpn_range: VPNRange,
@@ -1880,10 +1918,9 @@ impl MemorySet {
                 middle.notify_mmap_close();
             }
 
-            // A read-only MAP_PRIVATE file page may directly reference the
-            // clean PageCache frame.  Before mprotect makes such a VMA
-            // writable, replace every resident page with a private copy so a
-            // later store cannot modify the cache or another process's map.
+            // read-only MAP_PRIVATE 文件页可直接引用 clean PageCache frame。在 mprotect 使
+            // 此 VMA writable 前，把每个 resident page 替换为 private copy，防止后续 store
+            // 修改 cache 或另一进程的 mapping。
             if !middle.shared && middle.file_backing.is_some() && !old_writable && new_writable {
                 let mapped_vpns: Vec<_> = middle.data_frames.keys().copied().collect();
                 for vpn in mapped_vpns {
@@ -2015,6 +2052,11 @@ impl MemorySet {
             .sum()
     }
 
+    /// 为完整覆盖范围设置或清除 VMA 的 mlock 状态，必要时切分边界 VMA。
+    ///
+    /// 第一遍验证所有 VPN 都属于用户映射，随后才修改元数据，避免部分区间提交。锁定时按当前
+    /// 实现预驻留所需页面并计入锁页预算；解锁不立即驱逐。VMA 切分必须保留文件偏移、共享
+    /// identity 与 fork 策略，完成后合并相容段并检查不重叠不变量。
     pub fn set_locked_range(&mut self, vpn_range: VPNRange, locked: bool) -> SysResult {
         for vpn in vpn_range {
             let area = self
@@ -2075,13 +2117,13 @@ impl MemorySet {
 
             match advice {
                 4 => {
-                    // MADV_DONTNEED is rejected for locked mappings.
+                    // locked mapping 拒绝 MADV_DONTNEED。
                     if area.locked {
                         return Err(Errno::EINVAL);
                     }
                 }
                 8 => {
-                    // MADV_FREE applies only to private anonymous mappings.
+                    // MADV_FREE 只适用于 private anonymous mapping。
                     if !Self::is_private_writable_anonymous(area) {
                         return Err(Errno::EINVAL);
                     }
@@ -2096,14 +2138,11 @@ impl MemorySet {
         }
     }
 
-    /// Apply MADV_DONTNEED to resident pages while keeping the VMA itself.
+    /// 对 resident page 应用 MADV_DONTNEED，但保留 VMA 本身。
     ///
-    /// For private anonymous mappings, Linux discards the current physical page
-    /// and faults in a zero-filled page on the next access. For private
-    /// file-backed mappings, discarding the private page exposes file contents
-    /// again on the next fault. Shared mappings are left intact here because
-    /// they need backing-object level invalidation, not just a per-process PTE
-    /// drop.
+    /// 对 private anonymous mapping，Linux 丢弃当前物理页，下次访问 fault-in 零页；对
+    /// private file-backed mapping，丢弃 private page 后，下次 fault 重新暴露文件内容。这里
+    /// 保持 shared mapping 不变，因为它需要 backing-object 级失效，不能只删除单进程 PTE。
     pub fn discard_private_pages_for_madvise(&mut self, vpn_range: VPNRange) {
         for area in self.areas.iter_mut() {
             if area.shared || !area.vpn_range.intersect_with(&vpn_range) {
@@ -2134,9 +2173,8 @@ impl MemorySet {
         self.page_table.modify_pte(vpn, flags);
     }
 
-    /// Flush this hart's cached entries for this address space after a PTE
-    /// update. LA can retain unrelated ASIDs; RV keeps its existing full
-    /// local SFENCE.VMA behavior.
+    /// PTE 更新后，flush 本 hart 对该地址空间的缓存 entry。LA 可保留无关 ASID；RV 保持现有
+    /// 本地完整 SFENCE.VMA 行为。
     #[cfg(target_arch = "riscv64")]
     fn flush_local_tlb(&self) {
         let started = crate::perf::now_ticks();
@@ -2161,14 +2199,12 @@ impl MemorySet {
         crate::perf::observe_local_sfence(crate::perf::elapsed_since(started));
     }
 
-    /// Publish a page-table modification and synchronously invalidate every
-    /// hart that may cache this address space. Callers serialize this operation
-    /// with active/residency transitions through the MemorySet write lock.
+    /// 发布页表修改，并同步失效所有可能缓存该地址空间的 hart。调用方通过 MemorySet 写锁
+    /// 把该操作与 active/residency 转换串行化。
     pub fn flush_tlb(&mut self) {
         crate::perf::tlb_flush_call(1);
-        // Freeze the batch before the local flush as well: a frame retired
-        // concurrently after this point must wait for the next generation on
-        // every hart, including this one.
+        // 本地 flush 前也要 freeze batch：此后并发 retire 的 frame 必须等待所有 hart（包括本 hart）
+        // 的下一 generation。
         #[cfg(target_arch = "loongarch64")]
         let retired = self.page_table.take_retired_data_frames();
         #[cfg(target_arch = "loongarch64")]
@@ -2199,11 +2235,9 @@ impl MemorySet {
         #[cfg(target_arch = "loongarch64")]
         {
             let current = crate::arch::smp::current_hart_id();
-            // Without frame retirement, only harts that loaded this ASID since
-            // its previous synchronous invalidation can retain stale entries.
-            // Retired data frames belong to this PageTable, so this ASID
-            // residency set is sufficient even when the batch is non-empty.
-            // Every possible stale translation is represented in this mask.
+            // 若没有 frame retirement，只有上次同步失效后加载过本 ASID 的 hart 可能保留 stale
+            // entry。retired data frame 属于本 PageTable，因此即使 batch 非空，ASID residency set
+            // 也足够；所有可能的 stale translation 都包含在此 mask 中。
             let targets = self.tlb_hart_mask.load(Ordering::Acquire);
             let remote_mask = targets & !(1 << current);
             if remote_mask != 0 {
@@ -2223,9 +2257,8 @@ impl MemorySet {
             } else {
                 crate::perf::remote_rfence_empty_request(1);
             }
-            // The write lock excludes scheduler mark/clear transitions. Every
-            // inactive resident has now acknowledged the new PTE generation;
-            // retain only harts that are still running this address space.
+            // 写锁排除 scheduler mark/clear 转换。所有 inactive resident 已确认新 PTE generation；
+            // 只保留仍在运行本地址空间的 hart。
             self.tlb_hart_mask.store(
                 self.active_hart_mask.load(Ordering::Acquire),
                 Ordering::Release,
@@ -2256,9 +2289,8 @@ impl MemorySet {
                 .fetch_and(!(1 << hart), Ordering::AcqRel);
             debug_assert_ne!(old & (1 << hart), 0, "clearing an inactive address space");
             if old == 1 << hart {
-                // __switch has already installed this CPU idle/kernel root.
-                // After the last active bit is cleared, no hart can page-walk
-                // the retired root, so its page-table frames may be reused.
+                // `__switch` 已安装本 CPU 的 idle/kernel root。最后一个 active bit 清除后，
+                // 不再有 hart 能 page-walk retired root，其页表 frame 可以复用。
                 self.page_table.release_retired_page_table_frames();
             }
         }
@@ -2286,11 +2318,9 @@ impl MemorySet {
         if !crate::arch::paging_enabled() {
             crate::arch::enable_mmu();
         }
-        // Keep root activation conservative. This also covers the one-time
-        // transition from the boot root, whose mappings are global.
+        // root activation 保持保守，同时覆盖从 global mapping 的 boot root 进行的一次性转换。
         self.flush_local_tlb_all();
-        // This full invalidation subsumes mappings installed while a new root
-        // was constructed; do not carry that historical envelope forward.
+        // 此次完整失效涵盖构造新 root 期间安装的 mapping，不再向后携带这段历史 envelope。
         self.page_table.discard_pending_tlb_range();
     }
 
@@ -2306,10 +2336,8 @@ impl MemorySet {
         }
     }
 
-    /// Retire this address space's LA ASID after its last possible user has
-    /// completed the global TLB barrier, or when a never-activated construction
-    /// is dropped. The swap makes the explicit exit hook and eventual Drop
-    /// path idempotent.
+    /// 最后一个可能用户完成全局 TLB barrier 后 retire 本地址空间的 LA ASID；从未激活的构造
+    /// 被 drop 时也执行。swap 使显式 exit hook 与最终 Drop 路径保持幂等。
     pub(crate) fn retire_asid(&self) {
         #[cfg(target_arch = "loongarch64")]
         {
@@ -2324,12 +2352,10 @@ impl MemorySet {
         self.page_table.translate(vpn)
     }
 
-    /// Snapshot resident pages from writable shared file mappings.
+    /// 从 writable shared file mapping 中取得 resident page 快照。
     ///
-    /// The current frame model does not carry hardware dirty bits, so a
-    /// resident page is conservatively written back. Only frame copying is
-    /// done while the MemorySet lock is held; FileOp I/O happens later through
-    /// `writeback_file_pages`.
+    /// 当前 frame 模型不携带硬件 dirty bit，因此保守写回 resident page。持有 MemorySet 锁时
+    /// 只复制 frame，真正 FileOp I/O 稍后通过 `writeback_file_pages` 执行。
     pub(crate) fn prepare_file_writeback(
         &self,
         range: Option<&VPNRange>,
@@ -2388,8 +2414,7 @@ impl MemorySet {
         }
     }
 
-    /// Expensive structural checks used after address-space mutations in debug
-    /// kernels. Lazy VMAs are allowed to have no PTE/data frame.
+    /// debug 内核在地址空间修改后执行的高成本结构检查；lazy VMA 允许没有 PTE/data frame。
     #[cfg(debug_assertions)]
     pub fn debug_check_invariants(&self) {
         let mut previous_end = None;
@@ -2461,9 +2486,8 @@ impl MemorySet {
             self.flush_tlb();
         }
         self.areas.clear();
-        // The exiting task may still execute on this root. Move page-table
-        // frames into the per-address-space retirement slot; the last active
-        // hart releases them after __switch installs its idle/kernel root.
+        // exiting task 可能仍在此 root 上执行。把 page-table frame 移入 per-address-space
+        // retirement slot；最后一个 active hart 在 `__switch` 安装 idle/kernel root 后释放它们。
         self.page_table.retire_owned_frames();
         if self.active_hart_mask.load(Ordering::Acquire) == 0 {
             self.page_table.release_retired_page_table_frames();
@@ -2631,19 +2655,16 @@ impl MemorySet {
 
         #[cfg(all(target_arch = "loongarch64", feature = "la_global_kernel"))]
         {
-            // This is the only point at which the immutable kernel image,
-            // direct map and boot-time MMIO mappings are all present but the
-            // final root has never been activated. Later kernel-stack leaves
-            // stay non-global until a separate update/flush protocol exists.
+            // 这是 immutable kernel image、direct map 与 boot-time MMIO mapping 均已存在，
+            // 但 final root 从未激活的唯一时点。后续 kernel-stack leaf 保持 non-global，直到
+            // 建立独立 update/flush 协议。
             let (global_pairs, skipped_huge) = memory_set.page_table.mark_existing_kernel_global();
             assert!(global_pairs != 0, "no paired LA kernel leaf was globalized");
             assert!(skipped_huge != 0, "no LA kernel huge leaf was audited");
         }
 
-        // User roots copy kernel root entries by value.  Establish the full
-        // kernel-half root topology before the first user address space is
-        // created, so later dynamic mappings such as kernel stacks only add
-        // entries below already-shared root branches.
+        // 用户 root 按值复制 kernel root entry。创建第一个用户地址空间前建立完整 kernel-half
+        // root 拓扑，使后续 kernel stack 等动态 mapping 只在已共享 root branch 下增加 entry。
         memory_set
             .page_table
             .prepare_kernel_root_branches()
@@ -2665,10 +2686,8 @@ impl MemorySet {
         Self::try_from_elf_source(elf_data, None)
     }
 
-    /// Load an ELF from a filesystem object without copying the complete file
-    /// into the fixed-size kernel heap.  Only the ELF/program headers and the
-    /// interpreter name are retained temporarily; PT_LOAD pages are populated
-    /// from the file when they fault in.
+    /// 从文件系统对象加载 ELF，但不把完整文件复制进固定大小 kernel heap。只临时保留
+    /// ELF/program header 与 interpreter name；PT_LOAD page 在 fault 时从文件填充。
     pub fn try_from_elf_file(
         file: Arc<dyn FileOp>,
     ) -> SysResult<(Self, usize, usize, usize, Vec<AuxHeader>)> {
@@ -2676,6 +2695,15 @@ impl MemorySet {
         Self::try_from_elf_source(&metadata, Some(file))
     }
 
+    /// 从已校验可访问的 ELF 元数据构造一个尚未提交给任务的用户地址空间。
+    ///
+    /// 处理主程序的 `PT_LOAD`、PIE load bias、可选 `PT_INTERP`、用户栈和 auxv。
+    /// 文件来源的 load segment 只登记惰性文件后端，实际页内容在缺页时读取；内嵌来源
+    /// 则在构造阶段复制数据。动态链接器使用独立固定偏移，最终入口指向解释器，
+    /// auxv 中仍保留主程序入口和 program-header 信息。
+    ///
+    /// 返回前不会激活新页表；任意 ELF 边界、文件长度、映射或分配错误都使临时
+    /// `MemorySet` 整体析构，因此调用者可以在成功后再原子替换旧进程映像。
     fn try_from_elf_source(
         elf_data: &[u8],
         file_backing: Option<Arc<dyn FileOp>>,
@@ -3144,6 +3172,11 @@ impl MemorySet {
         Ok(())
     }
 
+    /// 把共享 futex 用户地址归一化为跨地址空间稳定的物理身份 key。
+    ///
+    /// 地址必须位于 shared VMA 且已有可读驻留 PTE；文件映射优先使用稳定
+    /// `(dev, ino, file_page_index, offset)` 身份，匿名/SHM 映射使用共享物理帧身份。
+    /// 不同进程中的不同虚拟地址只要指向同一共享字就必须得到同一 key，私有/COW 映射明确拒绝。
     pub(crate) fn shared_futex_key(&self, vaddr: VirtAddr) -> SysResult<SharedFutexKey> {
         let vpn = vaddr.floor();
         let offset = vaddr.page_offset();
@@ -3171,10 +3204,8 @@ impl MemorySet {
         if area.shm_attach_id.is_some() {
             let frame = area.data_frames.get(&vpn).ok_or(Errno::EFAULT)?;
             return Ok(SharedFutexKey {
-                // Every shmat of the same SysV segment maps the same frame
-                // Arc, while attach_id is intentionally unique per mapping.
-                // Key by the resident frame so different virtual addresses
-                // converge on one shared futex queue.
+                // 同一 SysV segment 的每次 shmat 都映射相同 frame Arc，但 attach_id 刻意按 mapping
+                // 唯一。按 resident frame 建 key，使不同虚拟地址汇聚到同一 shared futex queue。
                 owner: usize::from(frame.ppn()) ^ 0x7368_6d66_7574_6578usize,
                 page_index: 0,
                 offset,
@@ -3189,7 +3220,15 @@ impl MemorySet {
         })
     }
 
-    /// 尝试处理用户态页错误，解决 COW 或惰性分配
+    /// 处理一次用户态页错误，并返回该错误属于 minor fault 还是 major fault。
+    ///
+    /// 处理顺序具有语义意义：先验证地址和 VMA 权限，再尝试 `MAP_GROWSDOWN` 的受限扩展，
+    /// 随后区分已存在 PTE 的 COW/page-mkwrite 与未驻留页面的匿名、文件或共享内存装入。
+    /// 可写共享文件页必须先建立持久后端，失败以错误返回给架构 trap 层，由其投递 SIGBUS；
+    /// 私有写入则复制页帧，不能污染 PageCache 中的共享内容。
+    ///
+    /// 每次成功修改 PTE 后都必须进入本地址空间的 TLB 发布协议。函数由用户 trap 和
+    /// 用户拷贝检查共同调用；只有用户 trap 提供的 `user_sp` 才允许触发栈向下增长。
     pub fn handle_page_fault(
         &mut self,
         cause: PageFaultCause,
@@ -3262,10 +3301,9 @@ impl MemorySet {
             return Ok(PageFaultOutcome::Minor);
         }
 
-        // Resolve writable shared file mappings through a page_mkwrite-like
-        // boundary: persistent backing must exist before the PTE becomes
-        // writable. ENOSPC is returned to the architecture trap layer, which
-        // delivers SIGBUS instead of delaying the failure until msync/fsync.
+        // 可写共享文件映射经由类似 page_mkwrite 的边界处理：PTE 变为可写前，
+        // 持久后端必须已经存在。ENOSPC 返回架构陷入层并投递 SIGBUS，不能把失败拖到
+        // msync 或 fsync。
         if is_store
             && pte.is_some_and(|pte| pte.is_valid() && !pte.writable())
             && self.areas[area_idx].shared
@@ -3321,11 +3359,9 @@ impl MemorySet {
             });
         }
 
-        // A shared address-space update can race with a fault that was already
-        // latched on this hart.  The handler then waits for the MemorySet
-        // writer and may observe the final, valid PTE after the remote fence
-        // has completed.  If both VMA and PTE now permit the access, refresh
-        // the local TLB and retry the faulting instruction.
+        // shared 地址空间更新可能与本 hart 已锁存的 fault 竞争。handler 等待 MemorySet writer 后，
+        // 可能在 remote fence 完成后观察到最终有效 PTE。若 VMA 与 PTE 此时都允许访问，刷新
+        // 本地 TLB 并重试 faulting instruction。
         if area_perm.contains(needed_perm)
             && pte.is_some_and(|pte| match cause {
                 PageFaultCause::Instruction => pte.executable(),
@@ -3362,9 +3398,8 @@ impl MemorySet {
         }
     }
 
-    /// Expand a MAP_GROWSDOWN VMA by one guard page when the saved user stack
-    /// pointer is inside that page, while preserving Linux's default
-    /// 256-page separation from the preceding mapping.
+    /// saved user stack pointer 位于 guard page 内时，把 MAP_GROWSDOWN VMA 向下扩展一页，
+    /// 同时保持 Linux 默认与前一 mapping 间隔 256 页。
     fn expand_grows_down(
         &mut self,
         fault_vpn: VirtPageNum,
@@ -3391,6 +3426,12 @@ impl MemorySet {
         Some(index)
     }
 
+    /// 确保一段用户页已经驻留并满足内核代访所需权限。
+    ///
+    /// 对缺页、COW 或 page-mkwrite 情形复用统一 `handle_page_fault`，而不是直接篡改 PTE；
+    /// 因而 copyin/copyout 与用户态真实访存遵守相同的文件 EOF、共享写入和错误规则。
+    /// 本入口不提供用户 SP，所以不能隐式扩展 `MAP_GROWSDOWN` 栈。任一页失败立即返回，
+    /// 已解决的较早页面可以保持驻留，但不会向用户写入部分结果。
     pub fn ensure_user_page_access(
         &mut self,
         vpn_range: VPNRange,
@@ -3572,6 +3613,12 @@ impl MapArea {
         }
     }
 
+    /// 按一个已验证的内部重叠区间把 VMA 拆成 left/middle/right，并迁移页帧所有权。
+    ///
+    /// 三段继承权限、文件后端、锁定和 fork 策略；文件映射还要按新起点调整 backing offset/len，
+    /// SysV attach identity 则保持一致。`data_frames` 通过 BTreeMap split_off 移交，不能 clone
+    /// 后让两个 VMA 同时声称拥有同一映射。空的左右段以 None 返回，由 mprotect/munmap
+    /// 调用者决定如何处理 middle。
     fn split_by_overlap(
         mut self,
         overlap_start: VirtPageNum,
@@ -3744,10 +3791,9 @@ impl MapArea {
                 }
             }
             MapType::Framed => {
-                // Lazy anonymous/file-backed VMAs can span very large sparse
-                // ranges.  Only resident framed pages have PTEs and frames to
-                // release; walking every virtual page makes process exit scale
-                // with address-space reservation rather than real memory use.
+                // lazy anonymous/file-backed VMA 可以跨越很大的 sparse range。只有 resident
+                // framed page 才有 PTE/frame 需要释放；遍历每个虚拟页会让进程退出成本随地址空间
+                // reservation 而非真实内存使用量增长。
                 let resident = self.data_frames.keys().copied().collect::<Vec<_>>();
                 for vpn in resident {
                     self.unmap_one(page_table, vpn);
@@ -3795,7 +3841,14 @@ impl MapArea {
         }
     }
 
-    /// 依据逻辑段的不同映射策略，为虚拟页分配物理页帧，并建立映射关系
+    /// 按当前 VMA 后端为单个 VPN 建立叶映射，并报告是否执行了下层文件 I/O。
+    ///
+    /// Direct 映射按固定偏移取物理页；Framed 映射区分匿名零页、ELF 固定文件前缀、
+    /// live-EOF 文件映射和 PageCache 共享帧。私有文件页取得独立帧，`MAP_SHARED` 必须复用
+    /// PageCache 的物理帧；EOF 后整页返回错误而 ELF 的 BSS 尾部按匿名零填充。
+    ///
+    /// 只有内容准备成功后才安装 PTE 并登记 `data_frames`，失败不得留下有效零页。
+    /// 返回 true 表示本次 fault 读取了下层文件，供调用者区分 major/minor fault。
     pub fn map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) -> SysResult<bool> {
         let ppn: PhysPageNum;
         let mut required_io = false;
@@ -3814,8 +3867,8 @@ impl MapArea {
                 });
                 let live_backing = if let Some(backing) = &self.file_backing {
                     if !backing.live_eof && page_offset >= backing.len {
-                        // ELF PT_LOAD BSS after the fixed file-backed prefix
-                        // is anonymous zero memory, not a dynamic EOF page.
+                        // ELF PT_LOAD 在固定 file-backed prefix 之后的 BSS 是匿名零内存，
+                        // 不是动态 EOF page。
                         None
                     } else {
                         let file_offset =
@@ -3843,9 +3896,8 @@ impl MapArea {
                     && !self.shared
                     && self.map_perm.contains(MapPermission::WRITE);
                 let frame = match &live_backing {
-                    // All clean file pages initially share their backing
-                    // frame. Writable MAP_PRIVATE installs it read-only+COW;
-                    // the first store creates the anonymous private copy.
+                    // 所有 clean file page 初始共享 backing frame。writable MAP_PRIVATE 以
+                    // read-only+COW 安装；第一次 store 创建匿名 private copy。
                     Some(backing) if !fixed_partial_file_page => {
                         let (frame, frame_required_io) = shared_file_frame(backing, page_offset)?;
                         required_io = frame_required_io;
@@ -3925,8 +3977,7 @@ impl MapArea {
         // 由调用者保证 data 合法
         ppn.get_bytes_array().copy_from_slice(data);
 
-        // The old PTE/frame remain intact until allocation and copying have
-        // succeeded. replace_pte cannot allocate, so ENOMEM never leaves a hole.
+        // 分配和复制成功前保持旧 PTE/frame 完整。replace_pte 不会分配，因此 ENOMEM 不会留下 hole。
         page_table.replace_pte(vpn, ppn, PTEFlags::from(self.map_perm))?;
         if let Some(old_frame) = self.data_frames.insert(vpn, Arc::new(frame)) {
             page_table.retire_data_frame(old_frame);
@@ -3936,14 +3987,12 @@ impl MapArea {
 
     /// 消除虚拟页与物理页帧的映射关系，自动销毁失去连接的物理页帧
     pub fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
-        // Invalidate the PTE before retiring the last frame reference. LA
-        // keeps retired frames quarantined until a completed global shootdown.
+        // retire 最后一个 frame 引用前先失效 PTE。LA 在全局 shootdown 完成前隔离 retired frame。
         page_table.try_unmap(vpn);
         match self.map_type {
             MapType::Framed => {
-                // Shared file writeback is prepared while the address-space
-                // lock is held and executed by the syscall/task-exit owner
-                // after releasing it. Never perform FileOp I/O here.
+                // 持有地址空间锁时只准备 shared file writeback；释放锁后由 syscall/task-exit owner
+                // 执行。这里绝不能执行 FileOp I/O。
                 if let Some(frame) = self.data_frames.remove(&vpn) {
                     page_table.retire_data_frame(frame);
                 }

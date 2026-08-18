@@ -1,3 +1,14 @@
+//! signal 相关系统调用的 Linux UAPI 适配层。
+//!
+//! 本模块负责 sigaction/sigprocmask、pending/wait、altstack、queueinfo 和 sigreturn
+//! 的用户结构复制；signal 的排队、选择、frame 构造与默认动作由 `crate::signal` 和
+//! task 状态共同完成。
+//!
+//! signal ABI 对架构布局、mask 大小和错误提交顺序非常敏感。sigreturn 读取的用户 frame
+//! 完全不可信，恢复 PC/SP/状态寄存器前必须经过边界校验；等待类接口 copyout 失败时不得
+//! 丢弃 pending signal。阻塞 mask 的临时替换、waiter 注册和任务睡眠必须构成单一协议，
+//! 避免 signal 已入队但任务永久睡眠，或迟到的 interrupted 标记污染下一次 syscall。
+
 use super::{Errno, SysResult};
 use crate::mm::{copy_from_user, copy_to_user};
 use crate::signal::sig_handler::SigAction;
@@ -73,6 +84,11 @@ fn restore_sig_context(
     trap_cx.set_sepc(ctx.pc);
 }
 
+/// 按 kill(2) 的 pid 选择规则向单进程、进程组或可见进程集合发送信号。
+///
+/// 先验证信号编号和发送权限，再选择稳定 ProcessState；信号 0 只探测存在性/权限而不入队。
+/// 对仍保有 pid 的 zombie 按 Linux 返回成功，即使没有存活线程可接收。进程定向信号进入
+/// 进程级 pending 队列，具体 TCB 只作为唤醒提示，线程组首领退出不能使信号丢失。
 pub fn sys_kill(pid: usize, signum: i32) -> SysResult<usize> {
     let sig = Sig::from(signum);
     if signum != 0 && !sig.is_valid() {
@@ -135,8 +151,7 @@ pub fn sys_kill(pid: usize, signum: i32) -> SysResult<usize> {
                 }
             }
         }
-        // Linux reports success for a zombie that still has a PID even though
-        // no live member can observe the signal.
+        // 对仍保有 PID 的僵尸进程，Linux 会报告成功，尽管已无存活成员能够观察该信号。
         delivered = true;
     }
     if delivered {
@@ -232,14 +247,19 @@ pub fn sys_rt_sigpending(set: *mut SigSet, sigsetsize: usize) -> SysResult<usize
         return Err(Errno::EINVAL);
     }
     let task = current_task().expect("[kernel] current task is None.");
-    // Linux exposes signals that are pending because they are blocked.  An
-    // unblocked signal is deliverable and must not be reported merely because
-    // it is still between enqueue and the next return-to-user signal check.
+    // Linux 暴露“因被阻塞而保持 pending”的信号。未阻塞信号可立即投递，
+    // 不能仅因它尚处于入队与下次返回用户态检查之间就将其报告为 pending。
     let pending = task.pending_blocked_set();
     copy_to_user(set, &pending as *const SigSet, 1)?;
     Ok(0)
 }
 
+/// 临时替换线程信号掩码并睡眠，直到一个可递送信号中断等待。
+///
+/// 新 mask 先 copyin 并移除 SIGKILL/SIGSTOP，原 mask 保存到任务专用槽位，由下一次信号帧
+/// 记录并在 sigreturn 恢复。等待使用“发布 interruptible/Blocked → 复查 pending”的顺序，
+/// 避免信号到达后仍睡眠；正常语义总以 EINTR 离开，不能提前恢复 mask 而让 handler
+/// 观察到错误屏蔽集。
 pub fn sys_rt_sigsuspend(mask: *const SigSet, sigsetsize: usize) -> SysResult<usize> {
     if sigsetsize != core::mem::size_of::<SigSet>() {
         return Err(Errno::EINVAL);
@@ -262,7 +282,7 @@ pub fn sys_rt_sigsuspend(mask: *const SigSet, sigsetsize: usize) -> SysResult<us
             break;
         }
         if prepare_current_task_blocked() {
-            // Close the arrival-before-Blocked lost-wakeup window.
+            // 关闭信号在发布 Blocked 前到达所造成的丢失唤醒窗口。
             if task.is_ready() || task.check_signal_interrupt() || task.is_interrupted() {
                 remove_task(task.tid());
                 task.set_running();
@@ -283,6 +303,11 @@ pub fn sys_rt_sigsuspend(mask: *const SigSet, sigsetsize: usize) -> SysResult<us
     Err(Errno::EINTR)
 }
 
+/// 向指定进程排队一份携带用户 siginfo 的信号。
+///
+/// 校验 signum、目标/发送权限和用户 siginfo 的 signo/code 后，实时信号按目标进程
+/// RLIMIT_SIGPENDING 原子预留额度，标准信号仍按合并语义。copyin 或额度失败不入队；
+/// 成功后由进程级投递路径选择可唤醒线程。
 pub fn sys_rt_sigqueueinfo(
     tgid: usize,
     signum: i32,
@@ -307,9 +332,8 @@ pub fn sys_rt_sigqueueinfo(
     }
     let mut linux_info = LinuxSigInfo::default();
     copy_from_user(&mut linux_info as *mut LinuxSigInfo, uinfo, 1)?;
-    // As with kill(2), signal zero performs validation and permission checks
-    // without queuing a signal.  Passing Sig(0) into the pending-set code
-    // would otherwise underflow its one-based signal index.
+    // 与 kill(2) 一样，零号信号只做参数和权限检查，不实际入队。
+    // 若把 Sig(0) 传入 pending 集合代码，其从一开始计数的信号索引会发生下溢。
     if signum == 0 {
         return Ok(0);
     }
@@ -330,6 +354,11 @@ pub fn sys_rt_sigqueueinfo(
     Ok(0)
 }
 
+/// 查询或替换一个信号的处理动作，并保持失败原子性。
+///
+/// act 先完整 copyin、校验 flags/restorer/不可捕获信号，oldact 也在修改表前完成 copyout；
+/// 任一指针错误都不改变 handler。新 mask 自动移除 SIGKILL/SIGSTOP，SA_* 语义在统一
+/// `handle_signal`/sigreturn 路径落实。
 pub fn sys_sigaction(
     signum: i32,
     act: *const u8,
@@ -351,9 +380,8 @@ pub fn sys_sigaction(
     let oldact_ptr = oldact as *mut UserSigAction;
     let task = current_task().expect("[kernel] current task is None.");
 
-    // Prepare all input before writing oldact or changing the handler table.
-    // This keeps an invalid act/oldact pointer from publishing half of the
-    // operation and matches the syscall-wide failure-atomicity rule.
+    // 写回 oldact 或修改处理器表之前，先准备好全部输入。这样无效的 act/oldact 指针
+    // 不会发布半完成操作，并满足系统调用范围的失败原子性约束。
     let prepared_action = if act.is_null() {
         None
     } else {
@@ -379,6 +407,11 @@ pub fn sys_sigaction(
     Ok(0)
 }
 
+/// 查询或原子更新当前线程的信号阻塞掩码。
+///
+/// 新掩码先完整 copyin 并按 BLOCK/UNBLOCK/SETMASK 计算，SIGKILL 与 SIGSTOP 始终清除；
+/// oldset 在状态修改前写回，任何 EFAULT 都不得提交新掩码。掩码变化后 pending 信号是否
+/// 可投递由统一返回用户态路径重新判断，不在持有 pending 锁时直接运行 handler。
 pub fn sys_sigprocmask(
     how: usize,
     set: usize,
@@ -432,6 +465,12 @@ pub fn sys_sigprocmask(
     Ok(0)
 }
 
+/// 从用户信号帧恢复寄存器、信号掩码和执行栈，完成 handler 返回。
+///
+/// 以当前用户 SP 上的 FrameFlags 区分普通帧与 RT 帧，完整 copyin 到内核临时对象后才改写
+/// TrapContext。恢复的 mask 必须再次清除不可屏蔽的 SIGKILL/SIGSTOP；同时结束 alt-stack
+/// 活动状态并清除内核记录的信号帧地址。无效标记或用户地址返回 EFAULT，不能按任意布局
+/// 解释并把攻击者数据直接装入特权返回上下文。
 pub fn sys_sigreturn() -> SysResult<usize> {
     let task = current_task().unwrap();
     let trap_cx = task.get_trap_cx();
@@ -503,8 +542,8 @@ fn take_sigtimedwait_signal(
         return Ok(None);
     };
 
-    // Validate and write the userspace result before consuming the signal.
-    // On EFAULT Linux leaves the pending signal available for a later wait.
+    // 消费信号前先校验并写入用户态结果；发生 EFAULT 时，Linux 会保留 pending 信号，
+    // 供后续等待再次取得。
     if info_ptr != 0 {
         let user_siginfo: LinuxSigInfo = siginfo.into();
         copy_to_user(
@@ -513,9 +552,8 @@ fn take_sigtimedwait_signal(
             1,
         )?;
     }
-    // Another thread may consume a process-pending signal while this thread
-    // validates userspace. Do not consume a newer same-numbered signal or
-    // report the old one twice; retry selection instead.
+    // 本线程校验用户地址期间，另一线程可能消费进程级 pending 信号。
+    // 此时不能误消费更新的同号信号，也不能重复报告旧信号，应重新选择。
     if !task.consume_pending_signal(sig, siginfo, process_scope) {
         return Ok(None);
     }
@@ -523,10 +561,15 @@ fn take_sigtimedwait_signal(
     Ok(Some(sig.raw() as usize))
 }
 
-/// sigtimedwait: 等待 set 中的某个信号，带超时
-/// 1. 读入目标信号集
-/// 2. 检查是否有已挂起的信号 → 有则立即返回
-/// 3. 阻塞等待，直到目标信号、其他可投递信号或超时唤醒
+/// 同步等待并消费集合中的一个 pending 信号，可选相对超时。
+///
+/// wanted set 通常已被线程信号掩码阻塞；本函数不能临时解屏蔽它，否则普通返回用户态路径
+/// 会抢先调用 handler。选择信号后先校验并写回 siginfo，再以 identity 精确消费对应实例，
+/// EFAULT 或并发线程抢先消费时不会误删更新的同号实时信号。
+///
+/// 需要睡眠时发布专用 sigtimedwait mask、interruptible 状态和可选 deadline，随后在 Blocked
+/// 可见后复查 wanted pending、普通可投递信号和超时，关闭丢失唤醒窗口。wanted 信号成功返回
+/// 其编号，其他可投递信号返回 EINTR，期限到达返回 EAGAIN；所有出口必须清除专用等待状态。
 pub fn sys_rt_sigtimedwait(
     set_ptr: usize,     // 等待的信号集合的指针
     info_ptr: usize,    // 收到信号后把收到的信号的详细信息放在这里
@@ -632,8 +675,8 @@ pub fn sys_rt_sigtimedwait(
             }
             super::register_task_timeout(task.tid(), deadline_ms);
 
-            // Signal/timeout can win after the checks above but before the
-            // blocked state becomes visible. Never sleep through that race.
+            // 信号或超时可能在上述检查之后、阻塞状态可见之前获胜；
+            // 绝不能在这个竞争窗口中错误睡眠。
             let wanted_pending = task.has_pending_in_set(wanted_set);
             if task.is_ready()
                 || wanted_pending

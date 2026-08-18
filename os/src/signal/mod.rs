@@ -1,3 +1,13 @@
+//! signal 选择、用户 frame 构造、默认动作与返回用户态前的投递逻辑。
+//!
+//! syscall 层只修改 action/mask 或等待 pending；真正投递发生在 trap 返回边界。本模块从
+//! pending 中选择一个未屏蔽 signal，决定 ignore/default/handler，构造对应架构的 ucontext
+//! 和 siginfo，并把用户 PC/SP 改到 handler 与 trampoline。
+//!
+//! frame 写入可能跨页并失败，提交 pending 消费与修改 trap context 的顺序必须避免“signal
+//! 丢失但 handler 未运行”。alt stack 只在启用且当前不在其上时切换；nested signal、mask、
+//! `SA_NODEFER/SA_RESETHAND/SA_ONSTACK` 和 group-directed signal 都必须保持线程/进程边界。
+
 pub mod sig_handler;
 pub mod sig_info;
 pub mod sig_stack;
@@ -31,10 +41,16 @@ fn make_sig_context(x: [usize; 32], pc: usize, mask: SigSet, info: usize) -> Sig
     }
 }
 
-// 每次 trap 返回用户态前调用，处理一个未决信号。
-//信号是异步的——进程可能在任何时刻收到信号，但处理时机必须统一。内核选在每个 trap 返回用户态之前检查信号，
-//此时 TrapContext已经准备好了，改它就能劫持返回路径。
-//如果进程没有陷入过内核（一直在用户态跑），那等下一次 trap（定时器中断、系统调用等）自然会检查。
+/// 在每次 trap 返回用户态前选择并处理至多一个可投递信号。
+///
+/// 默认动作在这里统一落实：Ignore 直接消费，Stop 必须先发布 Stopped 再通知父进程，
+/// Term/Core 进入进程组退出。用户处理器路径先按 SA_RESTART 恢复被 EINTR 打断的系统调用
+/// PC 与原始 arg0，再计算临时信号掩码、选择普通栈或 alt stack，并构造普通/SA_SIGINFO
+/// 信号帧。全部用户帧写入成功后才改写 trap context 跳转到 handler。
+///
+/// `restart_syscall_arg0` 只由架构 trap 为明确可重启且零进展的系统调用提供；带超时或已有
+/// partial progress 的调用不得传入。信号帧写入失败意味着用户栈已经不可用，按同步致命信号
+/// 终止，不能返回一个缺损上下文。一次只投递一个信号，嵌套信号留到下一次 trap 返回处理。
 pub fn handle_signal(restart_syscall_arg0: Option<usize>) {
     let task = current_task().unwrap();
 
@@ -60,10 +76,8 @@ pub fn handle_signal(restart_syscall_arg0: Option<usize>) {
                         exit_by_signal_and_run_next(sig.raw());
                     }
                     ActionType::Stop => {
-                        // Publish Stopped before the parent can observe the
-                        // wait event.  A concurrent SIGCONT must see the
-                        // stopped state and enqueue this task; the final
-                        // handoff must not overwrite that Ready transition.
+                        // 必须在父进程观察到 wait 事件前发布 Stopped。并发 SIGCONT
+                        // 应看到停止状态并将本任务入队；最终交接不能覆盖该 Ready 转换。
                         task.set_stopped();
                         task.set_wait_event(SigInfo::CLD_STOPPED, sig.raw());
                         task.notify_parent_sigchld(SigInfo::CLD_STOPPED);
@@ -78,10 +92,9 @@ pub fn handle_signal(restart_syscall_arg0: Option<usize>) {
         } else {
             let trap_cx = task.get_trap_cx();
 
-            // Restart-class syscalls are re-executed when the delivered
-            // handler has SA_RESTART. The trap path has already advanced the
-            // PC and replaced a0 with -EINTR; restore the original arg0 before
-            // building the frame. Other argument registers remain untouched.
+            // 若已投递处理器带有 SA_RESTART，可重启类系统调用会重新执行。
+            // trap 路径已经推进 PC 并把 a0 替换成 -EINTR；构造信号帧前需恢复原 arg0，
+            // 其他参数寄存器保持不变。
             if action.flags.contains(SigActionFlag::SA_RESTART) {
                 if let Some(arg0) = restart_syscall_arg0 {
                     trap_cx.set_a0(arg0);

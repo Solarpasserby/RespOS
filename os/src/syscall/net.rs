@@ -1,3 +1,14 @@
+//! socket 系统调用的用户 ABI 解码与地址结构转换层。
+//!
+//! 本模块处理 fd、sockaddr、msghdr/iovec、socket option 和用户缓冲区；TCP、UDP、
+//! AF_UNIX 的连接与收发状态机位于 `crate::net`。长度字段来自不可信用户空间，复制
+//! 嵌套结构前必须逐层检查溢出、读写权限和目标架构布局。
+//!
+//! 网络接口普遍允许短收发、非阻塞 `EAGAIN`、signal 中断和部分 message 成功。
+//! copyout 地址、peer 地址和长度字段的提交顺序属于 ABI，不能在底层操作成功后随意
+//! 回滚，也不能用返回假成功掩盖未支持的 option。涉及阻塞时，应让 socket waiter
+//! 与 poll/epoll 使用同一 readiness 状态，避免检查与睡眠之间丢失事件。
+
 use alloc::{string::String, sync::Arc, vec, vec::Vec};
 use core::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
@@ -759,6 +770,11 @@ pub fn sys_socket(domain: usize, socket_type: usize, protocol: usize) -> SysResu
     task.alloc_fd(FdEntry::new(sock, flags))
 }
 
+/// 创建一对已经互连的本地套接字，并原子向用户发布两个 fd。
+///
+/// 仅接受受支持的 domain/type/protocol 与 NONBLOCK/CLOEXEC 标志；先构造两个共享端点并
+/// 为 fd 表预留槽位，再写回用户数组。copyout 失败必须撤销两个 fd，不能泄漏只有内核可见的
+/// 端点。两个端点分别持有对端接收队列和关闭状态，使半关闭、poll 与 SO_PEERCRED 可对称观察。
 pub fn sys_socketpair(
     domain: usize,
     socket_type: usize,
@@ -1059,6 +1075,15 @@ pub fn sys_sendmmsg(fd: usize, msgvec: usize, vlen: usize, flags: usize) -> SysR
     Ok(sent)
 }
 
+/// 连续接收多条消息，并按 Linux `recvmmsg` 规则维护 partial count 与相对 timeout。
+///
+/// 每条消息先复制并校验 msghdr/iovec，接收成功后才写回该项的 payload、地址、控制信息和
+/// `msg_len`；后续项目失败时，只要已有消息成功就返回数量。`MSG_WAITFORONE` 在第一条成功后
+/// 把后续接收转为非阻塞，避免已经取得进展后再次无限等待。
+///
+/// timeout 不是独立唤醒定时器：与 Linux 可观察行为一致，只在成功收到消息后计算并写回
+/// 剩余相对时间；完全无数据时可以越过名义期限继续等到数据或信号到达。仅适用于
+/// recvmmsg 的 flags 和 timeout 指针会在第一条消息可能产生副作用前完成校验。
 pub fn sys_recvmmsg(
     fd: usize,
     msgvec: usize,
@@ -1093,7 +1118,7 @@ pub fn sys_recvmmsg(
     }
     let wait_for_one = flags & MSG_WAITFORONE != 0;
     let base_flags = flags & !MSG_WAITFORONE;
-    // Validate recvmmsg-only flags before any message or timeout writeback.
+    // 在写回任何消息或超时值前，先校验仅适用于 recvmmsg 的标志。
     parse_recv_flags(base_flags)?;
     let mut recvd = 0usize;
     for idx in 0..vlen {
@@ -1109,12 +1134,9 @@ pub fn sys_recvmmsg(
                 write_mmsghdr(msgvec, idx, &mmsg)?;
                 recvd += 1;
                 if let Some(deadline_us) = deadline_us {
-                    // Linux recvmmsg updates the relative timeout only after
-                    // a message is received.  It does not arm an independent
-                    // wakeup for this argument: a receive with no data can
-                    // remain blocked past the deadline until data or a signal
-                    // arrives.  Preserve that observable ABI, including a
-                    // zero remainder for a message arriving after deadline.
+                    // Linux 的 recvmmsg 只在收到消息后更新相对超时值，不会为该参数设置
+                    // 独立唤醒：无数据的接收可越过期限持续阻塞，直到数据或信号到达。
+                    // 保持这一可观察 ABI；若消息在期限后到达，剩余时间应写为零。
                     let remaining_us = deadline_us.saturating_sub(get_timeout_us());
                     let remaining = crate::timer::TimeSpec {
                         sec: (remaining_us / 1_000_000) as isize,
@@ -1138,6 +1160,11 @@ pub fn sys_recvmmsg(
     Ok(recvd)
 }
 
+/// 按 level/optname 解析 socket option，并把可实现状态提交到统一 Socket 对象。
+///
+/// 每种 option 严格校验 optlen 和用户指针；SO_RCVTIMEO/SO_SNDTIMEO 等影响之后的阻塞期限，
+/// SO_ERROR 等只读项不能从这里修改。当前仅为兼容而识别但没有行为差异的选项会明确读取参数，
+/// 未知组合返回 ENOPROTOOPT，不能无条件成功掩盖应用依赖。
 pub fn sys_setsockopt(
     fd: usize,
     level: usize,
@@ -1213,6 +1240,11 @@ pub fn sys_setsockopt(
     })
 }
 
+/// 查询 socket option，并按用户提供的可变 optlen 完成截断写回。
+///
+/// 先读取和校验 `*optlen`，再快照 option 值；SO_ERROR 的读取具有消费语义，SO_PEERCRED
+/// 来自连接时固定的对端凭据，不能按当前 pid 临时生成。数据 copyout 与最终长度写回均按
+/// Linux ABI 执行，未知组合返回 ENOPROTOOPT。
 pub fn sys_getsockopt(
     fd: usize,
     level: usize,

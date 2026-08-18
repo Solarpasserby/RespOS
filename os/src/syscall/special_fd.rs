@@ -1,3 +1,13 @@
+//! eventfd、epoll、signalfd、timerfd 等“以 fd 暴露内核对象”的系统调用。
+//!
+//! 这些对象既参与 fd 生命周期，又拥有独立计数器、订阅关系、定时器或 signal mask。
+//! `dup/fork` 通常共享同一 open-file object，而 close 只移除一个 fd 引用；最后一个
+//! 引用释放时才应注销全局弱引用、timer 和 waiter。
+//!
+//! epoll 需要特别维护 interest 与 ready 的区别、edge/oneshot 重装规则、嵌套对象引用
+//! 以及目标架构 `epoll_event` 的 16-byte ABI 布局。阻塞等待必须在睡眠前复检 readiness，
+//! signal/timeout 返回后清理 waiter，并且不能把 x86 的 packed 结构布局外推到 RV64/LA64。
+
 use super::time::{ITimerSpec, clock_time_ms};
 use super::{Errno, SysResult};
 use crate::config::{EPOLL_DATA_OFFSET, EPOLL_EVENT_SIZE};
@@ -62,6 +72,11 @@ impl EpollFd {
         }
     }
 
+    /// 在兴趣表锁内提交一个 ADD/DEL/MOD 操作。
+    ///
+    /// key 同时包含数值 fd 与 open-file Arc 身份，避免 fd 关闭并复用后把旧兴趣错误绑定到
+    /// 新对象。ADD 拒绝重复，DEL/MOD 要求现有项；MOD 会清除边沿历史并重新启用 one-shot。
+    /// 本函数只修改内核表，用户 `epoll_event` 的 ABI 校验已由 `sys_epoll_ctl` 完成。
     fn ctl(
         &self,
         op: usize,
@@ -113,6 +128,12 @@ impl EpollFd {
         Ok(0)
     }
 
+    /// 扫描兴趣表并生成一批尚未提交消费的 epoll 就绪事件。
+    ///
+    /// 扫描前移除 fd 表中已无同一 open-file Arc 的陈旧兴趣项。LT 条目只要条件仍真就报告；
+    /// EPOLLET 根据 `last_ready` 仅报告新出现的位；ONESHOT 由后续 `commit_ready` 禁用，
+    /// 因而用户缓冲区 copyout 失败时不能在本函数提前消费边沿或 one-shot 状态。
+    /// ERR/HUP 无论用户是否请求都必须报告，RDHUP 则只在显式订阅时加入结果。
     fn scan_ready(&self, maxevents: usize, out: &mut Vec<EpollReady>) -> usize {
         const EPOLLIN: u32 = 0x001;
         const EPOLLOUT: u32 = 0x004;
@@ -321,6 +342,11 @@ impl EventFd {
     }
 }
 
+/// eventfd/timerfd 等特殊 fd 共用的可中断事件等待协议。
+///
+/// 先登记 poll waiter，再发布 Blocked 并复查 `ready`，关闭状态变化与睡眠之间的竞争窗口；
+/// 若事件已到达则撤销队列项并保持当前任务 Running。信号获胜返回 EINTR，所有出口都注销
+/// waiter 和 interruptible 状态。闭包只能做无阻塞状态读取，不能在等待者锁内进入慢路径。
 fn wait_for_file_event(
     waiters: &PollWaiters,
     events: PollEvents,
@@ -676,6 +702,11 @@ pub fn sys_epoll_create1(flags: usize) -> SysResult<usize> {
     task.alloc_fd(FdEntry::new(Arc::new(EpollFd::new(flags)), flags))
 }
 
+/// 增删或修改 epoll 对一个 open-file description 的兴趣项。
+///
+/// 先验证 epoll fd、目标 fd、自引用和目标类型，再按目标架构自然对齐的 16 字节
+/// `epoll_event` ABI 复制 events/data；不能使用 x86 packed 12 字节布局。DEL 不读取 event 指针，
+/// ADD/MOD 只接受当前实现能够兑现的位。最终修改由 `EpollFd::ctl` 在兴趣表锁内原子提交。
 pub fn sys_epoll_ctl(epfd: usize, op: usize, fd: usize, event: *const u8) -> SysResult<usize> {
     const EPOLL_CTL_ADD: usize = 1;
     const EPOLL_CTL_DEL: usize = 2;
@@ -705,10 +736,9 @@ pub fn sys_epoll_ctl(epfd: usize, op: usize, fd: usize, event: *const u8) -> Sys
     let event = if op == EPOLL_CTL_DEL {
         None
     } else {
-        // Tokio/mio registers every source with EPOLLRDHUP. The bit is valid
-        // for stream descriptors; TCP reports it through FileOp::poll_rdhup,
-        // while stream backends without a distinct RDHUP state may still
-        // expose EOF through ordinary EPOLLIN.
+        // Tokio/mio 会为每个事件源注册 EPOLLRDHUP。该位对流式描述符有效；
+        // TCP 通过 FileOp::poll_rdhup 报告它，而没有独立 RDHUP 状态的流后端
+        // 仍可通过普通 EPOLLIN 暴露 EOF。
         const EPOLLPRI: u32 = 0x002;
         const EPOLLRDHUP: u32 = 0x2000;
         const EPOLL_SUPPORTED_EVENTS: u32 =
@@ -757,6 +787,14 @@ fn epoll_sigmask(sigmask: *const u8, sigsetsize: usize) -> SysResult<Option<SigS
     Ok(Some(mask))
 }
 
+/// 等待 epoll 兴趣项就绪，并在等待期间原子应用临时信号掩码。
+///
+/// 先扫描一次；无事件时登记所有底层 `FileOp` waiter，再发布 Blocked 并二次扫描，以关闭
+/// readiness 发生于检查和睡眠之间的窗口。底层不支持事件 waiter 时使用有界 yield 推进，
+/// timeout 和信号通过统一 task waiter 竞争唤醒。
+///
+/// 事件先写回用户缓冲区，成功后才调用 `commit_ready` 消费 EPOLLET/ONESHOT 状态；EFAULT
+/// 不得丢失事件。无论成功、超时还是 EINTR，退出前都撤销 waiter、deadline 并恢复原信号掩码。
 pub fn sys_epoll_pwait(
     epfd: usize,
     events: *mut u8,
@@ -906,6 +944,11 @@ pub fn sys_timerfd_gettime(fd: usize, curr_value: *mut ITimerSpec) -> SysResult<
     Ok(0)
 }
 
+/// 设置 timerfd 的首次到期与周期，并可原子返回旧状态。
+///
+/// 先复制/校验 itimerspec 和 flags，再快照 old value；所有用户 copyout 成功后才修改 timerfd
+/// 内部 deadline/counter。重新设置会清除旧到期计数并通知 poll waiter；绝对/相对模式按
+/// timerfd 所属 clock 换算，disarm 只清除 deadline 而不伪造可读事件。
 pub fn sys_timerfd_settime(
     fd: usize,
     flags: usize,

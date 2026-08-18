@@ -1,5 +1,18 @@
 // os/src/fs/page_cache.rs
 
+//! 常规文件页缓存、全局回收与写回状态机。
+//!
+//! 每个稳定 inode 拥有一个 `PageCache`，buffered I/O 与 file-backed mmap 从中取得同一
+//! frame。cache entry 需要跟踪 dirty、writeback、映射 pin、backing reservation 和 LRU
+//! 世代；“页在缓存中”不等于“可以立即驱逐”。
+//!
+//! 锁与 I/O 边界是本模块的核心：选择和标记待写回页时持锁，真正 lower inode I/O 在锁外
+//! 执行，完成后再提交状态。dirty 位必须在写回启动前清到正确世代，写回期间的新写入不能被
+//! 旧完成事件误清除。驱逐仅允许 clean、unmapped、unpinned 且不在 writeback 的页。
+//!
+//! `DIRTY_OWNERS` 为未持久化数据和时间戳提供强生命周期，不能依赖 inode 弱缓存或 `File::drop`。
+//! DONTNEED、truncate、fsync 和全局 reclaim 都应复用相同状态机，而不是各自直接删除 frame。
+
 use super::vfs::{InodeOp, SuperBlockOp};
 use crate::config::PAGE_CACHE_GLOBAL_MAX_PAGES;
 use crate::config::PAGE_SIZE;
@@ -19,9 +32,8 @@ lazy_static! {
     static ref PAGE_CACHE_REGISTRY: Mutex<BTreeMap<usize, Weak<PageCache>>> =
         Mutex::new(BTreeMap::new());
     static ref PAGE_CACHE_LRU: Mutex<VecDeque<LruEntry>> = Mutex::new(VecDeque::new());
-    /// Strong ownership for dirty regular-file state.  The inode cache itself
-    /// is weak, so this registry—not File::drop—keeps an inode and its cache
-    /// alive until both data and the corresponding timestamps are written.
+    /// dirty 常规文件状态的强所有权。inode cache 本身只保存弱引用，因此由这个注册表而非
+    /// `File::drop` 保持 inode 及其 cache 存活，直到数据与对应时间戳都完成写回。
     static ref DIRTY_OWNERS: Mutex<BTreeMap<usize, DirtyOwner>> = Mutex::new(BTreeMap::new());
 }
 
@@ -72,8 +84,7 @@ pub fn dirty_owner_count() -> usize {
     DIRTY_OWNERS.lock().len()
 }
 
-/// Publish the strong owner only after the page-cache mutation succeeded.
-/// Re-registering refreshes the path used for lower I/O after rename/link.
+/// 仅在页缓存修改成功后发布强 owner；rename/link 后重新注册可刷新 lower I/O 使用的路径。
 pub fn register_dirty_owner(
     cache: Arc<PageCache>,
     inode: Arc<dyn InodeOp>,
@@ -116,8 +127,8 @@ fn sync_owner(owner: &DirtyOwner, range: Option<(usize, usize)>) -> SysResult {
     };
     data_result?;
 
-    // A range operation deliberately leaves inode-wide timestamps pending;
-    // fsync/syncfs/unmount persist them only after all older dirty data.
+    // range 操作刻意保留 inode-wide 时间戳为 pending；fsync/syncfs/unmount 会在所有更早的
+    // dirty data 之后持久化它们。
     if range.is_none() {
         if let Err(error) = owner.inode.flush_data_metadata(owner.path.as_str()) {
             owner.cache.record_writeback_error(error);
@@ -181,9 +192,8 @@ pub fn sync_all_dirty_owners() -> SysResult {
     first_error.map_or(Ok(()), Err)
 }
 
-/// Run a bounded amount of writeback at the syscall safe point.  Errors stay
-/// attached to the PageCache and are reported by a later fsync/fdatasync;
-/// they do not replace an unrelated syscall's result.
+/// 在 syscall safe point 执行有界写回。错误继续附着在 PageCache 上，由后续
+/// fsync/fdatasync 报告，不能替换无关 syscall 的返回值。
 pub fn writeback_dirty_owners_if_needed() {
     if PAGE_CACHE_DIRTY_PAGE_COUNT.load(Ordering::Relaxed) < DIRTY_PAGES_PER_CACHE_HIGH_WATERMARK
         && DIRTY_OWNERS.lock().len() < DIRTY_OWNER_HIGH_WATERMARK
@@ -240,11 +250,10 @@ pub struct Page {
     frame: Arc<FrameTracker>,
     dirty: bool,
     write_version: usize,
-    /// The batch currently writing this page. Dirty may remain set when a
-    /// concurrent writer changes the page after the batch took its snapshot.
+    /// 当前正在写这个页面的 batch。batch 取得快照后若有并发 writer 修改页面，dirty 可继续保持。
     writeback: Option<usize>,
-    /// Last failed writeback attempt for diagnostics. Observable error
-    /// delivery is tracked per PageCache by `WritebackErrorState` below.
+    /// 最近一次失败的写回尝试，仅供诊断；可观察错误由下方每个 PageCache 的
+    /// `WritebackErrorState` 跟踪和投递。
     writeback_error: Option<Errno>,
     generation: usize,
     queued: bool,
@@ -288,12 +297,11 @@ pub struct PageCache {
     size_version: AtomicUsize,
     dirty_pages: AtomicUsize,
     writeback_error: Mutex<WritebackErrorState>,
-    /// Prefix of each file page for which page_mkwrite has established
-    /// persistent backing. This matters when filesystem blocks are smaller
-    /// than a VM page and ftruncate extends a resident tail page.
+    /// 每个文件页中已经由 page_mkwrite 建立持久 backing 的 prefix 长度。当文件系统 block
+    /// 小于 VM page，且 ftruncate 扩展 resident tail page 时需要该信息。
     mmap_reserved_prefixes: Mutex<BTreeMap<usize, usize>>,
-    /// Serializes lower-file writeback against lower truncate. Buffered
-    /// writers stay concurrent and are resolved by page/size generations.
+    /// 串行化 lower-file writeback 与 lower truncate；buffered writer 仍可并发，并由
+    /// page/size generation 解决竞态。
     writeback_lock: Mutex<()>,
 }
 
@@ -352,16 +360,14 @@ impl PageCache {
         Ok(Some(result))
     }
 
-    /// Start an open-file-description error cursor at the current sequence.
-    /// Errors that predate open are not reported through the new descriptor.
+    /// 从当前 sequence 创建 open-file-description 的错误游标；open 之前的错误不通过新描述符报告。
     pub fn sample_writeback_error(&self) -> WritebackErrorCursor {
         WritebackErrorCursor {
             sequence: self.writeback_error.lock().sequence,
         }
     }
 
-    /// Report the newest writeback error once to this open-file description.
-    /// Duplicated descriptors share the cursor because they share `File`.
+    /// 向该 open-file description 至多报告一次最新写回错误。dup 描述符共享 `File`，因此也共享游标。
     pub fn check_writeback_error(&self, cursor: &mut WritebackErrorCursor) -> SysResult {
         let state = self.writeback_error.lock();
         if cursor.sequence == state.sequence {
@@ -398,10 +404,8 @@ impl PageCache {
     }
 
     fn reclaim_global() {
-        // Examine each currently queued candidate at most once per pass.
-        // Entries that are temporarily pinned by mmap are requeued for a
-        // later pressure pass; bounding the scan prevents an all-pinned cache
-        // from spinning forever.
+        // 每轮至多检查当前队列中的每个候选一次。被 mmap 临时 pin 的条目重新入队，留待后续
+        // pressure pass；限制扫描次数可避免全被 pin 的 cache 永久自旋。
         let scan_limit = PAGE_CACHE_LRU.lock().len();
         let mut scanned = 0usize;
         while scanned < scan_limit
@@ -446,10 +450,8 @@ impl PageCache {
                 self.touch_page(page_idx, &page);
                 return ReclaimResult::Kept;
             }
-            // The page object itself is only owned by the cache and this
-            // local lookup.  Its frame can additionally be owned by one or
-            // more MAP_SHARED mappings; keep the cache entry in that case so
-            // a later file read cannot load a second frame for the same page.
+            // page object 本身只由 cache 与此次局部 lookup 持有，但其 frame 还可能被一个或多个
+            // MAP_SHARED mapping 持有。此时保留 cache entry，避免后续 file read 为同一页加载第二个 frame。
             if page_guard.dirty
                 || Arc::strong_count(&page) != 2
                 || Arc::strong_count(&page_guard.frame) != 1
@@ -464,6 +466,12 @@ impl PageCache {
         ReclaimResult::Removed
     }
 
+    /// 更新缓存的逻辑文件长度，并在缩小时裁剪 EOF 外页面和末页内容。
+    ///
+    /// 操作递增 size generation，使并发装入/写回识别过期快照。整页位于新 EOF 后时从 map
+    /// 移除；边界页只清零不可见尾部并裁剪持久后端 reservation，防止 truncate 后 regrow
+    /// 暴露旧数据。dirty/LRU/全局页计数必须与实际移除页同步，仍被 mmap pin 的帧由 Arc
+    /// 生命周期延后释放，但不能继续作为当前文件缓存命中。
     pub fn resize(&self, new_size: usize) {
         let mut size = self.file_size.lock();
         if new_size == *size {
@@ -482,9 +490,8 @@ impl PageCache {
             for victim in victims {
                 if let Some(page) = pages.remove(&victim) {
                     let mut page = page.lock();
-                    // A MAP_SHARED mapping may still own the frame after the
-                    // cache entry is removed.  Clear it so truncate followed
-                    // by regrowth cannot expose the old file contents.
+                    // cache entry 删除后 MAP_SHARED mapping 仍可能持有 frame。必须清零，避免
+                    // truncate 后重新扩容暴露旧文件内容。
                     page.bytes().fill(0);
                     if page.dirty {
                         self.dirty_pages.fetch_sub(1, Ordering::Relaxed);
@@ -519,10 +526,9 @@ impl PageCache {
         self.size_version.fetch_add(1, Ordering::Release);
     }
 
-    /// Publish a successful lower-filesystem hole punch into the shared page
-    /// cache. Fully covered pages are discarded; partial boundary pages stay
-    /// cache-coherent and have only the requested bytes zeroed. MAP_PRIVATE
-    /// COW frames are separate allocations and therefore remain untouched.
+    /// 把 lower filesystem 已成功完成的 hole punch 发布到共享页缓存。完整覆盖页直接丢弃；
+    /// 部分边界页保持 cache coherent，只清零请求范围。MAP_PRIVATE COW frame 是独立分配，
+    /// 因而保持不变。
     pub fn punch_hole(&self, offset: usize, len: usize) {
         if len == 0 {
             return;
@@ -567,8 +573,7 @@ impl PageCache {
         if removed_pages != 0 {
             PAGE_CACHE_PAGE_COUNT.fetch_sub(removed_pages, Ordering::Relaxed);
         }
-        // A concurrent writeback snapshot must observe that the file content,
-        // though not its logical size, crossed a destructive mutation.
+        // 并发写回快照必须观察到文件内容经历了破坏性修改，即使逻辑 size 没有改变。
         self.size_version.fetch_add(1, Ordering::Release);
     }
 
@@ -591,7 +596,16 @@ impl PageCache {
         page
     }
 
-    /// 获取页（懒加载）。I/O 成功后再插入缓存，避免失败时留下零页。
+    /// 获取缓存页，并在缺失时于 PageCache 锁外完成成批惰性装入。
+    ///
+    /// 命中直接返回；未命中时先快照文件长度代次，根据 advice 选择预读窗口，并在遇到
+    /// 已缓存页面前截断 speculative run。下层 I/O 和页帧分配均不持有 `pages` 锁，避免
+    /// 把慢速块设备操作带入全局缓存临界区。I/O 全部成功后才竞争发布候选页，失败不会
+    /// 留下看似有效的零页。
+    ///
+    /// 发布时若文件长度代次已变化，必须丢弃候选并重新装入，防止 truncate 并发后发布
+    /// 旧 EOF 内容；若另一线程抢先插入同一页，则复用获胜页面。返回值中的布尔量表示本次
+    /// 是否实际执行了下层填充，供 major/minor fault 记账使用。
     fn get_or_load_with_status(
         &self,
         page_idx: usize,
@@ -617,10 +631,8 @@ impl PageCache {
             1
         };
 
-        // Do not read through a page that another access has already
-        // published. Besides wasting lower I/O, an overlapping run allocates
-        // and clears frames that are discarded when candidates are published.
-        // The requested page was checked above; only bound speculative pages.
+        // 不要越过另一访问已发布的页面继续读取。重叠 run 不仅浪费 lower I/O，还会分配并
+        // 清零最终在发布候选时被丢弃的 frame。请求页已在上方检查，这里只限制 speculative page。
         if load_pages > 1 {
             let pages = self.pages.lock();
             if let Some(first_cached) =
@@ -630,9 +642,8 @@ impl PageCache {
             }
         }
 
-        // Read a sequential run while outside the PageCache lock.  NORMAL
-        // batches up to 64 KiB and SEQUENTIAL up to 128 KiB, letting the lower
-        // block layer preserve its multi-block request batching.
+        // 在 PageCache 锁外顺序读取一段。NORMAL 最多合并 64 KiB，SEQUENTIAL 最多 128 KiB，
+        // 使 lower block layer 能继续保留多 block request batching。
         let read_len = if lower.is_some() && page_start < file_size {
             (file_size - page_start).min(load_pages * PAGE_SIZE)
         } else {
@@ -723,12 +734,11 @@ impl PageCache {
             .map(|(page, _)| page)
     }
 
-    /// Return the physical cache page used by a shared file mapping.
+    /// 返回共享文件映射使用的物理缓存页。
     ///
-    /// Keeping the frame inside `PageCache` makes buffered I/O and
-    /// `MAP_SHARED` observe the same bytes without a second frame or a
-    /// coherence overlay.  Global reclaim detects the additional frame owner
-    /// and retains the page metadata until the mapping is gone.
+    /// frame 留在 `PageCache` 中，使 buffered I/O 与 `MAP_SHARED` 无需第二个 frame 或额外
+    /// coherence overlay 就能观察相同字节。全局回收会发现额外 frame owner，并保留页面
+    /// metadata 直到 mapping 消失。
     pub(crate) fn shared_frame_at(
         &self,
         page_idx: usize,
@@ -877,9 +887,8 @@ impl PageCache {
         Self::reclaim_global();
     }
 
-    /// Best-effort synchronous counterpart of force_page_cache_readahead().
-    /// Errors are deliberately ignored by the fadvise caller, as Linux does
-    /// not turn WILLNEED read failures into the syscall return value.
+    /// `force_page_cache_readahead()` 的 best-effort 同步版本。fadvise 调用方刻意忽略错误，
+    /// 因为 Linux 不会把 WILLNEED 的读取失败变成 syscall 返回错误。
     pub fn prefetch_range(
         &self,
         offset: usize,
@@ -905,9 +914,8 @@ impl PageCache {
         }
     }
 
-    /// Drop clean, unmapped cache pages that are fully covered by the advised
-    /// byte range. The final partial EOF page is safe to discard when the
-    /// range reaches EOF, matching Linux generic_fadvise().
+    /// 丢弃 advice 字节范围完整覆盖的 clean、unmapped cache page。范围到达 EOF 时，末尾
+    /// 部分页也可安全丢弃，以匹配 Linux `generic_fadvise()`。
     pub fn evict_clean_range(&self, offset: usize, len: usize) {
         let file_size = *self.file_size.lock();
         let range_end = if len == 0 {
@@ -971,8 +979,8 @@ impl PageCache {
         result
     }
 
-    /// Write all dirty pages intersecting [start, end).  Page granularity is
-    /// intentional: storage writeback never splits the PageCache identity.
+    /// 写回所有与 `[start, end)` 相交的脏页。刻意采用页粒度，因为存储写回不会拆分
+    /// 页缓存对象的身份边界。
     pub fn sync_range(
         &self,
         inode: &Arc<dyn InodeOp>,
@@ -987,6 +995,15 @@ impl PageCache {
         result
     }
 
+    /// 把全部或指定范围内的脏页按连续批次写回下层 inode。
+    ///
+    /// `writeback_lock` 将 truncate、hole-punch 与其他写回串行化；函数先快照候选 Arc，
+    /// 再按 `WRITEBACK_BATCH_PAGES` 合并连续脏页。每页记录 writeback id 与写版本，只有
+    /// 下层完整写入且写版本未在期间变化时才能清除 dirty，因而并发用户写不会被误认为
+    /// 已持久化。短写统一视为 EIO，并把错误保留给每个打开文件描述的错误游标。
+    ///
+    /// 若写回期间文件长度代次变化，旧批次可能越过新的 EOF；此时恢复当前下层长度并
+    /// 保留脏状态供下一次重试。调用者负责在需要 `fsync` 语义时另行执行文件系统持久化屏障。
     fn sync_inner(
         &self,
         inode: &Arc<dyn InodeOp>,
@@ -1055,9 +1072,8 @@ impl PageCache {
             }
 
             let offset = first_page_idx * PAGE_SIZE;
-            // A feature-gated one-shot fault keeps the release path free of a
-            // control surface while allowing the error/cursor protocol to be
-            // exercised deterministically in a disposable test guest.
+            // feature 控制的一次性 fault 不给 release 路径增加控制面，同时允许在一次性测试
+            // guest 中确定性验证 error/cursor 协议。
             if take_writeback_fault() {
                 Self::finish_writeback_batch(&snapshots, writeback_id, Some(Errno::EIO));
                 return Err(Errno::EIO);
@@ -1120,11 +1136,9 @@ impl PageCache {
 impl Drop for PageCache {
     fn drop(&mut self) {
         PAGE_CACHE_REGISTRY.lock().remove(&self.id);
-        // LRU entries own no page data, but leaving one entry behind for every
-        // page of every short-lived file makes the global VecDeque grow
-        // without bound. Remove this cache's entries while its id is still
-        // unambiguous. This leaves the queue proportional to live resident
-        // pages instead of cumulative file traffic.
+        // LRU entry 不拥有页面数据，但若每个短命文件的每页都残留一个 entry，全局 VecDeque
+        // 会无界增长。在 cache id 仍唯一时删除其条目，使队列规模与 live resident page
+        // 成比例，而不是与累计文件流量成比例。
         PAGE_CACHE_LRU
             .lock()
             .retain(|entry| entry.cache_id != self.id);

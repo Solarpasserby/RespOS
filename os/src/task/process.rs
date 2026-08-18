@@ -1,3 +1,14 @@
+//! 进程级身份、父子关系、生命周期与聚合资源统计。
+//!
+//! `Process` 对应 thread group，而 `TaskControlBlock` 对应可调度线程。进程从 Live 进入
+//! Zombie 后仍需保留退出码、rusage 和父子关系，直到父进程 wait 成功完成 copyout 并
+//! 将其转为 Reaped；因此全局 PID 表只保存弱引用，实际生命周期由成员和父进程 children
+//! 表共同拥有。
+//!
+//! 修改本模块时要保持 PID/TGID 稳定、parent/child 锁序、group exit 单次提交和统计聚合
+//! 的一致性。不能因最后一个线程退出就提前抹掉父进程可等待的信息，也不能让重复 wait
+//! 或并发 waiter 同时 reap 同一 zombie。
+
 use super::TaskControlBlock;
 use crate::mutex::SpinNoIrqLock;
 use crate::signal::sig_struct::SigPending;
@@ -9,14 +20,13 @@ use hashbrown::HashMap;
 use lazy_static::lazy_static;
 
 lazy_static! {
-    /// Stable process identities indexed by PID/TGID.  The table deliberately
-    /// stores weak references: live members and the parent children table are
-    /// the lifetime owners, including the Zombie-to-Reaped wait interval.
+    /// 按 PID/TGID 索引稳定的进程身份。表中刻意只保存弱引用：存活线程与父进程的
+    /// children 表才是生命周期所有者，并覆盖 Zombie 到 Reaped 的等待区间。
     pub static ref PROCESS_MANAGER: ProcessManager = ProcessManager::new();
 }
 
-/// Non-time fields reported by getrusage(2).  A snapshot is also retained by
-/// a zombie until wait4 successfully reaps it.
+/// `getrusage(2)` 返回的非时间字段快照；zombie 会一直保留它，直到 `wait4`
+/// 成功完成回收。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ResourceUsageSnapshot {
     pub maxrss_pages: usize,
@@ -91,8 +101,8 @@ impl ResourceUsageCounters {
         self.nivcsw.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Reaped-child accounting sums counters but retains the largest child
-    /// high-water RSS, matching Linux RUSAGE_CHILDREN.
+    /// 回收子进程时累加各计数器，但 RSS 高水位只保留所有子进程中的最大值，
+    /// 与 Linux 的 RUSAGE_CHILDREN 语义一致。
     fn add_child(&self, usage: ResourceUsageSnapshot) {
         self.note_maxrss_pages(usage.maxrss_pages);
         self.minflt.fetch_add(usage.minflt, Ordering::Relaxed);
@@ -104,8 +114,7 @@ impl ResourceUsageCounters {
     }
 }
 
-/// Process-wide identity which remains valid independently of which member
-/// thread currently owns the numeric TGID.
+/// 进程范围的稳定身份；无论当前由哪个成员线程持有数值 TGID，它都持续有效。
 pub struct ProcessState {
     tgid: usize,
     pgid: AtomicUsize,
@@ -250,9 +259,8 @@ impl ProcessState {
             .collect()
     }
 
-    /// Select the traditional leader while it exists, otherwise a surviving
-    /// member. Process-pending storage is independent of this wake/delivery
-    /// hint and therefore does not depend on a leader TCB remaining alive.
+    /// 传统线程组首领仍存在时优先选择它，否则选择一个存活成员。
+    /// 进程级 pending 存储独立于这个唤醒/投递提示，因此不依赖首领 TCB 继续存活。
     pub fn signal_target(&self) -> Option<Arc<TaskControlBlock>> {
         self.member(self.tgid)
             .or_else(|| self.members().into_iter().next())
@@ -262,10 +270,9 @@ impl ProcessState {
         self.process_pending.lock().add_signal(siginfo)
     }
 
-    /// Reserve one queued real-time signal against this process's shared
-    /// RLIMIT_SIGPENDING view. Linux accounts by real UID across processes;
-    /// RespOS currently has no global UID object, so the stable ProcessState is
-    /// the narrowest race-safe owner until that credential layer exists.
+    /// 按本进程共享的 RLIMIT_SIGPENDING 视图，为一个排队实时信号预留额度。
+    /// Linux 按真实 UID 跨进程记账；RespOS 尚无全局 UID 对象，因此在凭据层补齐前，
+    /// 稳定的 ProcessState 是范围最窄且无竞争的所有者。
     pub fn reserve_rt_signal(&self, limit: usize) -> bool {
         let mut count = self.queued_rt_signals.load(Ordering::Acquire);
         loop {

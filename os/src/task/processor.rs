@@ -2,9 +2,13 @@
 
 //! #### 任务调度之 CPU 状态转换
 //!
-//! - 功能：processor 可以依据调度策略切换任务上下文转而执行目标任务
+//! processor 维护每个 hart 当前任务和 idle/bootstrap context，是 scheduler 的队列状态
+//! 与架构 `__switch` 汇编之间的交接层。scheduler 选择任务后，这里负责安装 current、
+//! 切换地址空间/内核栈并进行 accounting；返回时旧任务可能已经退出，不能再依赖裸引用。
 //!
-//! - 理解：上下文切换的关键是 [`__switch`] 函数，该函数保存和恢复
+//! 上下文切换的关键是 [`__switch`]：它只保存内核续执行所需的 callee-saved 状态，用户
+//! 寄存器由 trap context 管理。持有 scheduler 或 task 自旋锁跨越 `__switch` 会把锁所有权
+//! 交给另一条执行流，除非显式采用并证明 handoff 协议，否则禁止这样做。
 
 use super::scheduler::{cleanup_dead_tasks, fetch_task};
 use super::task::TaskControlBlock;
@@ -45,10 +49,9 @@ fn account_idle_ticks(ticks: usize) {
         .fetch_add(ticks, Ordering::Relaxed);
 }
 
-/// Return aggregate idle time across all harts, matching `/proc/uptime`'s
-/// second-field convention.  The current sub-tick idle interval is accounted
-/// when `wait_for_interrupt()` returns, so a read may lag by at most one timer
-/// period per idle hart while remaining monotonic.
+/// 返回所有硬件线程的累计空闲时间，语义与 `/proc/uptime` 第二个字段一致。
+/// 当前不足一个 tick 的空闲区间会在 `wait_for_interrupt()` 返回时记账，
+/// 因而读取值保持单调，但每个空闲核最多落后一个定时周期。
 pub fn system_idle_time_us() -> usize {
     let ticks = IDLE_TICKS.iter().fold(0usize, |total, idle| {
         total.saturating_add(idle.0.load(Ordering::Relaxed))
@@ -62,9 +65,8 @@ pub fn system_idle_time_us() -> usize {
 /// 管理维护 CPU 状态
 pub struct Processor {
     current: Option<Arc<TaskControlBlock>>,
-    /// A running task that has already switched to this CPU's idle context,
-    /// but has not yet been published to the global ready queue.  Keeping the
-    /// Arc here makes the context-save → ready-publication handoff explicit.
+    /// 已切换到本 CPU idle 上下文、但尚未发布到全局就绪队列的运行任务。
+    /// 在这里保留 Arc，使“保存上下文 → 发布 Ready”的所有权交接显式可见。
     handoff: Option<TaskHandoff>,
 }
 
@@ -157,13 +159,11 @@ pub fn current_user_token() -> usize {
     token
 }
 
-/// Yield a running task through this CPU's idle context.
+/// 让运行任务经由本 CPU 的 idle 上下文主动让出处理器。
 ///
-/// A multicore scheduler must never add the still-executing task directly to a
-/// shared ready queue: another CPU could restore its saved stack before this
-/// CPU has finished `__switch`.  Instead `__switch` first saves the task and
-/// restores the per-CPU idle context; `run_tasks()` then publishes the saved
-/// task from that idle context.
+/// 多核调度器绝不能把仍在执行的任务直接加入共享就绪队列：当前 CPU 尚未完成
+/// `__switch` 时，另一 CPU 就可能恢复其栈。正确顺序是 `__switch` 先保存任务并恢复
+/// 每 CPU idle 上下文，再由 `run_tasks()` 从 idle 上下文发布已保存的任务。
 pub(crate) fn handoff_current_to_idle(
     current: Arc<TaskControlBlock>,
     switch_kind: ContextSwitchKind,
@@ -182,19 +182,24 @@ pub(crate) fn handoff_current_to_idle(
     }
 }
 
+/// 在 idle 栈上发布刚刚完成保存的换出任务，并释放其 CPU 上下文所有权。
+///
+/// 只有执行到本函数时才能证明 `__switch` 已经停止使用任务内核栈。仍需继续运行的任务
+/// 先以 Ready 状态加入全局队列，再释放 `cpu_owner`；这一顺序使其他 CPU 即使看见队列项，
+/// 也必须等所有权释放后才能恢复它。退出或收到终止请求的任务不会重新入队。
 fn publish_saved_handoff() -> Option<TaskHandoff> {
     #[cfg(target_arch = "loongarch64")]
     crate::mm::ensure_kernel_space_active();
     let handoff = current_processor().lock().take_handoff();
     if let Some(handoff) = handoff.as_ref() {
         let task = &handoff.task;
-        // __switch has restored this CPU's idle context and kernel satp before
-        // returning here, so the outgoing address space is no longer active.
+        // __switch 返回这里前已恢复本 CPU 的 idle 上下文和内核根页表，
+        // 因此换出的地址空间不再处于活动状态。
         task.clear_memory_set_current_hart_active();
         let was_running = task.is_running() && !task.termination_requested();
         if was_running {
-            // A yielding/preempted task is not visible to any other CPU until
-            // its context has reached this idle loop.
+            // 主动让出或被抢占的任务只有在上下文到达本 idle 循环后，
+            // 才能对其他 CPU 可见。
             task.set_ready();
             super::scheduler::add_task_before_owner_release(task.clone());
         }
@@ -218,28 +223,32 @@ fn account_completed_handoff(handoff: Option<&TaskHandoff>, next: Option<&Arc<Ta
     }
 }
 
-/// 运行任务
+/// 每个 CPU 永不返回的调度主循环，仅运行在该 CPU 的 idle 上下文和 idle 栈上。
 ///
-/// 该函数仅在每 CPU 的 idle context 中运行。
+/// 每轮首先提交上一任务的上下文交接并释放延迟销毁对象，再由全局调度器原子认领一个
+/// 与当前 CPU 亲和性匹配的 Ready 任务。没有任务时，采用“发布 idle → 再检查队列 →
+/// 开中断并 WFI”的顺序关闭入队与睡眠之间的丢失唤醒窗口。
+///
+/// 切入用户任务前必须发布地址空间在本硬件线程上的活动关系、设置每 CPU 内核状态并持有
+/// 一个跨 `__switch` 的 Arc；任务换出后再结束 CPU 时间记账。任何新调度路径都不得绕过
+/// idle 栈直接把仍在执行的上下文暴露给另一 CPU。
 pub fn run_tasks() -> ! {
     loop {
         #[cfg(target_arch = "loongarch64")]
         crate::mm::ensure_kernel_space_active();
-        // This executes only after the outgoing task's __switch has saved its
-        // context and stopped executing it on this CPU.
+        // 只有换出任务的 __switch 已保存上下文且不再在本 CPU 执行后，才会到达这里。
         let handoff = publish_saved_handoff();
-        // The outgoing context is now on this CPU's idle stack, so deferred
-        // TCBs can be dropped even if no user task will ever wake again.
+        // 换出上下文现已位于本 CPU 的 idle 栈，即使再无用户任务唤醒，
+        // 也可以安全释放延迟销毁的 TCB。
         cleanup_dead_tasks();
         if crate::arch::smp::is_timer_service_hart() {
             crate::fs::ext4::flush_expired_lazytime_inodes_if_needed();
             crate::net::poll_background();
         }
         let mut next_task = fetch_task();
-        // Linux charges nvcsw/nivcsw only when scheduling selects a task other
-        // than prev.  RespOS always crosses its per-CPU idle stack to publish a
-        // saved context safely; selecting the same Arc again is an internal
-        // handoff, not an observable task context switch.
+        // Linux 只在调度器选中不同于 prev 的任务时累计 nvcsw/nivcsw。
+        // RespOS 为安全发布已保存上下文，总会经过每 CPU idle 栈；再次选中同一 Arc
+        // 只是内部交接，不属于用户可观察的任务上下文切换。
         account_completed_handoff(handoff.as_ref(), next_task.as_ref());
         if next_task.is_none() {
             crate::arch::smp::enter_idle();
@@ -252,8 +261,8 @@ pub fn run_tasks() -> ! {
                 crate::arch::trap::enable_timer_interrupt();
                 #[cfg(target_arch = "loongarch64")]
                 unsafe {
-                    // LA kernel code normally runs with IE=0. Idle owns no
-                    // locks and may enable interrupts until timer/IPI wakeup.
+                    // LoongArch 内核代码通常以 IE=0 运行。idle 不持锁，
+                    // 因而可以开启中断，直到定时器或 IPI 将其唤醒。
                     crate::arch::register::crmd::set_interrupt_enabled(true);
                 }
                 let idle_started = crate::timer::get_time();
@@ -286,9 +295,8 @@ pub fn run_tasks() -> ! {
             let mut processor = current_processor().lock();
             processor.switch_to(next_task.clone());
             drop(processor);
-            // Keep one Arc on the idle stack across the switch so the exact
-            // outgoing task can close its CPU-accounting interval even when
-            // it exited and removed itself from the task manager.
+            // 切换期间在 idle 栈上保留一个 Arc，使换出的确切任务即使已经退出并从
+            // 任务管理器移除，仍能正确结束自己的 CPU 记账区间。
             let running_started = crate::timer::get_time();
             next_task.begin_cpu_run(current_cpu_id(), running_started);
             crate::perf::task_running_begin();

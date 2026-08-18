@@ -1,5 +1,19 @@
 // os/src/syscall/process.rs
 
+//! 进程、线程、调度属性与 exec/wait 类系统调用的 ABI 边界。
+//!
+//! 参数解析和用户 copy 在本模块完成，真正的任务状态转换由 `task` 子系统负责。
+//! 这里最重要的不是“能创建进程”，而是保持 clone flag 的共享矩阵、exec 提交点、
+//! zombie 到 reap 的生命周期，以及 wait/signal/SA_RESTART 的组合语义。
+//!
+//! 维护约束：
+//!
+//! - pathname、argv 单字符串、参数个数和参数总量使用不同预算与 errno；
+//! - clone 对 MM、fd、signal handler、TLS、parent/child TID 的共享和 copyout 顺序必须明确；
+//! - wait 类调用在 copyout 失败时不能误 reap，阻塞后必须重新验证目标子进程；
+//! - 权限、对象存在性和用户指针的检查顺序要由目标 ABI/probe 决定；
+//! - 调度、affinity 和 rlimit 的修改必须在失败时保持原状态。
+
 use super::time::TimeVal;
 use super::{Errno, SysResult};
 use crate::config::{CLK_TCK, PAGE_SIZE};
@@ -137,11 +151,10 @@ fn set_process_sid(task: &Arc<TaskControlBlock>, sid: usize) {
     });
 }
 
-/// Sleep in wait(2) and report whether a deliverable signal prevented sleep.
+/// 在 wait(2) 中睡眠，并报告是否因存在可投递 signal 而未能睡眠。
 fn wait_block_current(task: &Arc<TaskControlBlock>, observed_child_event: usize) -> bool {
-    // wait(2) is an interruptible sleep.  In particular, userspace timeout
-    // implementations arm ITIMER_REAL and then wait for their child; leaving
-    // this task uninterruptible makes SIGALRM unable to wake the wait.
+    // wait(2) 是可中断睡眠。用户态 timeout 实现会启动 ITIMER_REAL 后等待 child；若任务
+    // 不可中断，SIGALRM 将无法唤醒 wait。
     task.set_interruptible(true);
     task.set_waiting_for_child(true);
     debug_trace!("[quiescetrace] wait-block tid={}", task.tid());
@@ -152,12 +165,9 @@ fn wait_block_current(task: &Arc<TaskControlBlock>, observed_child_event: usize)
     }
 
     if prepare_current_task_blocked() {
-        // A signal can arrive between the first check and publishing Blocked.
-        // It then records `interrupted` before there is a blocked-queue entry
-        // to wake, so consume that race here instead of sleeping indefinitely.
-        // Only a child-event generation change is evidence that the scan
-        // above became stale.  A pre-existing event from an unrelated child
-        // must not make a pid-specific wait spin forever.
+        // signal 可在首次检查与发布 Blocked 之间到达，并在 blocked queue 尚无 entry 时记录
+        // `interrupted`。这里消费该竞态，避免永久睡眠。只有 child-event generation 变化才能
+        // 证明上方扫描已过期；无关 child 的既有事件不能让指定 pid 的 wait 永久自旋。
         if task.is_ready()
             || task.process().child_event_generation() != observed_child_event
             || task.is_interrupted()
@@ -184,7 +194,12 @@ fn wait_block_current(task: &Arc<TaskControlBlock>, observed_child_event: usize)
     interrupted
 }
 
-// 判断执行文件是否为 shell 脚本，若为 shell 脚本，则更改执行环境和参数
+/// 解析 shebang 首行，并构造解释器 exec 所需的新 argv。
+///
+/// 返回 None 同时表示“不是脚本”或 shebang 不是有效 UTF-8/缺少解释器；调用者据此继续
+/// ELF 路径或返回 ENOEXEC。只读取第一行并接受至多一个可选解释器参数；原 argv[0]
+/// 被脚本路径替代，其余用户参数保持顺序。比赛镜像中的 `/bin/sh`/BusyBox 经过已验证的
+/// 兼容路径重定向，但普通解释器路径保持原值，不能把任意脚本都强制交给 shell。
 fn shebang_args(
     script_path: &str,
     data: &[u8],
@@ -585,6 +600,11 @@ pub fn sys_sched_rr_get_interval(pid: isize, interval: *mut TimeSpec) -> SysResu
     Ok(0)
 }
 
+/// 校验并设置目标任务的 Linux 调度属性，然后按新策略重新排队 Ready 任务。
+///
+/// 用户结构的 size/flags/policy/nice/priority 先完整校验；当前实现无法兑现的 deadline/未知策略
+/// 明确拒绝。状态只在目标存在且权限允许后提交，若任务已在 ready queue，必须在 scheduler
+/// 锁下移除并按新优先级入队，不能让索引与队列分类不一致。
 pub fn sys_sched_setattr(pid: isize, attr: *const SchedAttr, flags: u32) -> SysResult<usize> {
     if attr.is_null() || flags != 0 {
         return Err(Errno::EINVAL);
@@ -858,10 +878,9 @@ pub fn sys_getpgid(pid: usize) -> SysResult<usize> {
     Ok(target.pgid())
 }
 
-/// Return the session id of the process selected by `pid`.
+/// 返回 `pid` 选择的进程 session id。
 ///
-/// A zero pid selects the caller. Linux permits querying a process in another
-/// session; existence is the only lookup condition at this ABI layer.
+/// pid 为零时选择 caller。Linux 允许查询另一 session 中的进程；此 ABI 层 lookup 只要求对象存在。
 pub fn sys_getsid(pid: usize) -> SysResult<usize> {
     let current_thread = current_task().expect("[kernel] current task is None.");
     let target = if pid == 0 {
@@ -910,6 +929,10 @@ pub fn sys_setsid() -> SysResult<usize> {
     Ok(pid)
 }
 
+/// 原子读取和可选更新某进程的资源上限。
+///
+/// new limit 先 copyin 并校验 soft ≤ hard、资源编号和权限；old limit 在修改前快照并写回，
+/// EFAULT 时不得提交新值。实际资源消费者读取同一进程级 limits 对象，线程组成员共享变更。
 pub fn sys_prlimit64(
     pid: usize,
     resource: usize,
@@ -997,6 +1020,15 @@ fn get_time_seed() -> usize {
     crate::timer::get_time_ms() ^ 0x7265_7370_6f73
 }
 
+/// 实现 Linux `clone` ABI，并在 `TaskControlBlock::clone_` 成功后提交用户可见副作用。
+///
+/// 两种目标架构的 TLS/child-tid 参数寄存器顺序不同，本入口先归一化参数并校验标志组合、
+/// 用户栈和 tid 指针，再构造子任务。`CLONE_PARENT_SETTID`、`CLONE_CHILD_SETTID`、
+/// `CLONE_CHILD_CLEARTID` 与 TLS 必须在子任务可运行前安装；任一用户地址写入失败时，
+/// 不得把半初始化 child 发布到调度器。
+///
+/// `CLONE_VFORK` 在 child 成功入队后阻塞父任务，直到 child exec 或 exit 明确唤醒；
+/// 普通 clone 则直接返回子 tid。底层资源共享/COW 和线程组所有权由 `clone_` 统一决定。
 pub fn sys_clone(
     flags: usize,
     stack: usize,
@@ -1113,10 +1145,9 @@ pub fn sys_clone(
 
     if flags.contains(CloneFlags::CLONE_VFORK) {
         new_task.set_vfork_parent(&current_task);
-        // Register the parent as blocked before publishing the child.  On SMP
-        // the child can otherwise exec and deliver its one-shot wakeup before
-        // blocking_and_run_next() inserts the parent into blocked_tasks,
-        // permanently losing the wakeup.
+        // 发布 child 前先把 parent 注册为 blocked。否则 SMP 下 child 可能在
+        // blocking_and_run_next() 把 parent 插入 blocked_tasks 前就 exec 并投递一次性唤醒，
+        // 从而永久丢失该 wakeup。
         if !prepare_current_task_blocked() {
             return Err(Errno::ESRCH);
         }
@@ -1129,6 +1160,11 @@ pub fn sys_clone(
     Ok(new_tid)
 }
 
+/// 从绝对/相对路径执行新程序，是普通 execve 的薄 ABI 入口。
+///
+/// 路径、argv/envp 分别受 pathname、单字符串、个数和 ARG_MAX 总预算约束；全部复制成功后
+/// 交给文件解析/ELF 提交路径。任何准备错误保留当前映像，成功后由 exec 提交逻辑替换地址空间
+/// 并重置线程组、fd 与信号状态。
 pub fn sys_execve(path: *const u8, args: *const usize, envp: *const usize) -> SysResult<usize> {
     let path = copy_cstr_from_user(path)?;
     let args_vec = extract_cstrings_from_user(args)?;
@@ -1209,6 +1245,11 @@ fn check_exec_permission(task: &Arc<crate::task::TaskControlBlock>, file: &Arc<F
     }
 }
 
+/// 对已通过 namei 打开的可执行 File 完成权限、格式、shebang 与 ELF 分派。
+///
+/// 先检查普通文件、mount noexec 和执行权限，再读取有限头部识别 ELF/脚本。shebang 会重新打开
+/// 解释器并重写 argv，且限制递归/格式；最终调用 Task 的 exec 提交入口。所有下层读取与新映像
+/// 构造都发生在 begin_exec 前，失败不能拆除旧进程。
 fn exec_fs_file(
     task: Arc<crate::task::TaskControlBlock>,
     file: Arc<File>,
@@ -1257,6 +1298,12 @@ fn exec_fs_file(
     Ok(0)
 }
 
+/// 实现带 dirfd、AT_EMPTY_PATH 与 AT_SYMLINK_NOFOLLOW 的 execveat。
+///
+/// flags、路径、argv/envp 在触碰当前映像前复制并校验。空路径仅在 AT_EMPTY_PATH 下从 dirfd
+/// 取得可执行对象；其余路径按 dirfd/namei 规则解析，并检查 mount noexec、文件类型和执行权限。
+/// ELF/shebang 的所有可失败读取和新 MemorySet 构造完成后，才进入 `install_exec_image`
+/// 的不可回滚提交阶段；成功不返回旧程序，失败必须保持旧映像可继续执行。
 pub fn sys_execveat(
     dirfd: isize,
     path: *const u8,
@@ -1306,11 +1353,16 @@ pub fn sys_execveat(
     exec_fs_file(task, file, args_vec, envs_vec)
 }
 
-/// 等待子任务结束
+/// 等待符合 pid/进程组过滤条件的子进程状态变化，并按 `wait4` ABI 原子回收。
 ///
-/// - 参数：
-///     - `pid` 接受查询子任务任务号，可选值 -1 表示任意子任务
-///     - `exit_code_ptr` 目标子任务的 wait status
+/// `pid` 支持指定子进程、任意子进程以及进程组选择；options 控制 stopped、continued、
+/// zombie 和 `WNOHANG`。函数在消费事件前先准备 wait status 与 rusage，并验证全部用户
+/// 输出地址；只有写回成功后才清除一次性事件或把 zombie 从父子关系和进程管理器中回收，
+/// 从而保证 EFAULT 不丢事件。
+///
+/// 没有匹配子进程返回 ECHILD；有匹配对象但暂无事件时，先发布 child-wait waiter，
+/// 再复查条件后阻塞，以关闭退出/信号与睡眠之间的竞争窗口。零进展信号中断返回 EINTR，
+/// 是否按 SA_RESTART 重启由统一信号返回路径决定。
 pub fn sys_wait4(
     pid: isize,
     exit_code_ptr: *mut i32,
@@ -1392,10 +1444,9 @@ pub fn sys_wait4(
         let wait_result = match wait_result {
             Ok(result) => result,
             Err(err) => {
-                // A SIGCHLD handler can wake wait4 after SA_NOCLDWAIT (or
-                // explicit SIG_IGN) has already removed the child. Prefer
-                // the rescan result ECHILD over reporting that SIGCHLD as an
-                // unrelated EINTR, matching Linux wait semantics.
+                // SA_NOCLDWAIT（或显式 SIG_IGN）已移除 child 后，SIGCHLD handler 仍可能唤醒
+                // wait4。优先采用重扫得到的 ECHILD，而不是把该 SIGCHLD 当无关 EINTR，匹配
+                // Linux wait 语义。
                 task.clear_interrupted();
                 return Err(err);
             }
@@ -1412,8 +1463,7 @@ pub fn sys_wait4(
                     copy_to_user(rusage, &usage as *const RUsage, 1)?;
                 }
 
-                // All user-visible output is complete. Only now commit the
-                // parent accounting and Zombie removal.
+                // 所有用户可见输出均已完成；此时才提交 parent accounting 并移除 Zombie。
                 let removed = task.op_process_children_mut(|children| {
                     children
                         .remove(&child_tid)
@@ -1443,18 +1493,15 @@ pub fn sys_wait4(
             return Ok(0);
         }
 
-        // Re-check children before this point on every loop iteration.  A
-        // SIGCHLD that accompanies an exited child is therefore consumed by
-        // the successful wait above; other interrupting signals follow the
-        // Linux wait4(2) EINTR contract.
+        // 每轮在此之前重查 child。伴随 child exit 的 SIGCHLD 会由上方成功 wait 消费；其他
+        // interrupting signal 遵守 Linux wait4(2) 的 EINTR 契约。
         if task.is_interrupted() {
             task.clear_interrupted();
             return Err(Errno::EINTR);
         }
         if wait_block_current(&task, observed_child_event) {
-            // Always rescan first. A child may either have become waitable or
-            // have been auto-reaped; an unrelated signal will fall through
-            // to the interrupted check on the next iteration.
+            // 总是先重扫：child 可能已变为 waitable，也可能被 auto-reap；无关 signal 会在下一轮
+            // 落入 interrupted 检查。
             continue;
         }
     }
@@ -1492,6 +1539,14 @@ fn wait4_event_status(code: i32, status: i32) -> i32 {
     }
 }
 
+/// 实现 `waitid` 的 idtype 过滤、事件选择和 `siginfo_t` 输出协议。
+///
+/// 与 `wait4` 共用子进程生命周期，但输出的是 CLD_* 原因和身份字段；`WNOWAIT` 只观察
+/// 事件，不消费 stopped/continued 状态，也不回收 zombie。所有 options、id 与用户缓冲区
+/// 必须在状态提交前完成校验，EFAULT 时事件仍可被后续 wait 取得。
+///
+/// `WNOHANG` 且暂时无事件时按 Linux 约定写回零 siginfo；若根本不存在匹配子进程则返回
+/// ECHILD。阻塞路径与 `wait4` 使用相同的 waiter 发布/复查顺序和信号中断规则。
 pub fn sys_waitid(
     idtype: usize,
     id: usize,
@@ -1655,6 +1710,10 @@ const PRIO_PROCESS: usize = 0;
 const PRIO_PGRP: usize = 1;
 const PRIO_USER: usize = 2;
 
+/// 按 getpriority/setpriority 的 PRIO_PROCESS/PGRP/USER 规则快照目标任务集合。
+///
+/// 结果按稳定进程/任务身份去重，并在返回空集合时给出 ESRCH。调用者在锁外读取或更新 nice，
+/// 更新后负责重新排队 Ready 任务；本函数不持进程管理器锁跨 scheduler 操作。
 fn priority_targets(which: usize, who: usize) -> SysResult<Vec<Arc<TaskControlBlock>>> {
     let current_thread = current_task().expect("[kernel] current task is None.");
     let current = process_leader(&current_thread);

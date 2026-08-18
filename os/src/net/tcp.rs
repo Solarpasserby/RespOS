@@ -8,8 +8,13 @@
 //! CONNECTED ──shutdown()──→ BUSY ──→ CLOSED
 //! ```
 //!
-//! 所有状态转换通过 `AtomicU8` 的 CAS 操作实现，确保单核环境下的并发安全。
-//! 阻塞操作使用 `block_on` 模式：poll 接口 → 尝试操作 → EAGAIN 则等待网络事件后重试。
+//! 所有高层状态转换通过 `AtomicU8` 的 CAS 操作线性化，并与 smoltcp socket set 锁内的
+//! 底层状态相互校验。原子状态不是完整互斥锁：涉及 handle、endpoint 和缓冲区的组合更新
+//! 仍须在同一个锁协议中提交，SMP 下不能仅凭一个 relaxed load 推断连接已稳定。
+//!
+//! 阻塞操作使用 `block_on` 模式：poll 接口 → 尝试操作 → `EAGAIN` 时等待网络事件后重试。
+//! connect、accept、send、recv、shutdown 各有不同的 partial progress 和 restart 语义；FIN、
+//! RST、pending `SO_ERROR` 与本地 half-close 必须分别映射到 read/write/poll 可观察结果。
 
 use core::{
     cell::UnsafeCell,
@@ -245,9 +250,8 @@ impl TcpSocket {
         }
     }
 
-    /// Whether the peer has closed its TCP write half. This remains true
-    /// while unread bytes are buffered, which is the key distinction between
-    /// RDHUP and ordinary EOF/read readiness.
+    /// 对端是否已经关闭 TCP 写半部。即使仍有未读缓冲数据，该状态也保持为真；
+    /// 这正是 RDHUP 与普通 EOF/可读就绪之间的关键区别。
     pub fn peer_write_closed(&self) -> bool {
         if !self.is_connected() {
             return false;
@@ -280,7 +284,16 @@ impl TcpSocket {
         }
     }
 
-    /// 阻塞循环：poll → 尝试操作 → 成功返回 / EAGAIN 则等待网络事件后重试。
+    /// 统一实现 TCP 阻塞操作的“尝试 → 登记 waiter → 复查 → 睡眠”循环。
+    ///
+    /// 每轮先推动 smoltcp 并执行调用者闭包；成功或非 EAGAIN 错误立即返回。需要等待时，
+    /// 必须先把任务登记到套接字 waiter，再做第二次 poll/条件检查，关闭对端事件恰好发生在
+    /// 首次检查与 Blocked 发布之间的丢失唤醒窗口。网络轮询会直接唤醒 waiter，短 deadline
+    /// 只作为所有用户任务同时睡眠时的推进兜底。
+    ///
+    /// `O_NONBLOCK` 或单次调用的非阻塞标志禁止睡眠；真实期限到达返回 EAGAIN/EWOULDBLOCK，
+    /// 可递送信号获胜返回 EINTR。退出循环前始终撤销 waiter 和临时 deadline，避免后续网络
+    /// 事件唤醒已经完成另一系统调用的任务。
     fn block_on<F, T>(
         &self,
         per_call_nonblocking: bool,
@@ -307,10 +320,8 @@ impl TcpSocket {
                     Ok(res) => break Ok(res),
                     Err(res) => {
                         if res == Errno::EAGAIN {
-                            // Publish the waiter before the final condition
-                            // check. A peer may enqueue data between the first
-                            // check and blocking; the second poll/check closes
-                            // that lost-wakeup window.
+                            // 在最终检查条件前先发布等待者。对端可能在首次检查与阻塞之间入队数据，
+                            // 第二次 poll/检查负责关闭这个丢失唤醒窗口。
                             register_tcp_waiter(task.tid());
                             poll_interfaces();
                             match f() {
@@ -328,11 +339,8 @@ impl TcpSocket {
                                 unregister_tcp_waiter(task.tid());
                                 break Err(Errno::EAGAIN);
                             }
-                            // Network progress wakes this task immediately.
-                            // Keep the existing short deadline as a fallback
-                            // for an idle listener: timer processing in the
-                            // current scheduler still relies on a periodic
-                            // runnable task while every userspace task sleeps.
+                            // 网络推进会立即唤醒本任务。仍保留现有的短期限作为空闲监听者的兜底：
+                            // 当前调度器在所有用户任务睡眠时，定时处理仍依赖周期性可运行任务。
                             let fallback_deadline = get_timeout_us().saturating_add(1000);
                             let wait_deadline = deadline_us
                                 .map(|deadline| deadline.min(fallback_deadline))
@@ -545,8 +553,7 @@ impl TcpSocket {
                 }
             });
         if result.is_err() {
-            // Blocking connect reports the failure directly; there is no
-            // asynchronous error left for SO_ERROR to consume.
+            // 阻塞式 connect 直接报告失败，不再留下供 SO_ERROR 消费的异步错误。
             self.pending_error.store(0, Ordering::Release);
         }
         result

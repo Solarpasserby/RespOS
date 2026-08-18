@@ -3,6 +3,14 @@
 //! 调度器维护按调度策略和优先级分层的就绪队列，并在时钟中断、
 //! 主动让出、阻塞或退出时选择下一个任务。
 //! 当前架构层 `__switch` 接收下一个任务的内核栈指针，因此这里会完成最后一步切换。
+//!
+//! 队列中的任务必须与 TCB 状态一致：同一任务不能重复入队，blocked/zombie 不能被普通
+//! fetch 选中，唤醒与 timeout/signal 竞争时只有一个路径能把任务重新置为 ready。实时
+//! FIFO/RR、普通优先级和 idle policy 使用不同队列，但 affinity 过滤和 SMP 唤醒规则必须
+//! 一致。
+//!
+//! `DEAD_TASKS` 延迟释放刚切出的任务，防止仍运行在其内核栈上时析构自身。清理只能发生在
+//! 已切换到另一栈之后；新增退出快路径时不得绕过这一安全点。
 
 use super::processor::{current_task, handoff_current_to_idle, ContextSwitchKind};
 use super::task::{task_exit, task_exit_by_signal, task_group_exit, TaskControlBlock};
@@ -74,9 +82,8 @@ pub fn add_task(task: Arc<TaskControlBlock>) {
     crate::arch::smp::kick_one_idle_hart_in(affinity);
 }
 
-/// Publish a task whose previous CPU still owns its saved context. The caller
-/// releases that ownership immediately afterwards and performs the one
-/// required kick only after the handoff is complete.
+/// 发布一个保存上下文仍由原 CPU 持有的任务。
+/// 调用者随后立即释放所有权，并且仅在交接完成后发送一次必要的核间唤醒。
 pub(crate) fn add_task_before_owner_release(task: Arc<TaskControlBlock>) {
     assert!(task.is_ready());
     lock_scheduler().add(task);
@@ -97,9 +104,9 @@ pub fn fetch_task() -> Option<Arc<TaskControlBlock>> {
         if task.try_claim_running_on_cpu(cpu) {
             return Some(task);
         }
-        // A waker may have published this task while the previous CPU is
-        // still saving its context.  Keep it ready but let that CPU release
-        // the owner from idle before anyone can restore it.
+        // 唤醒者可能在原 CPU 尚未保存完上下文时就发布了本任务。
+        // 保留 Ready 状态，但必须等原 CPU 在 idle 上下文中释放所有权，
+        // 其他 CPU 才能恢复该上下文。
         scheduler.add(task);
         return None;
     }
@@ -134,10 +141,12 @@ pub fn wakeup_stopped_task(task: Arc<TaskControlBlock>) {
     }
 }
 
-/// 将当前任务标记为阻塞并加入阻塞队列，但暂不切换。
+/// 将当前任务标记为阻塞并加入阻塞索引，但暂不执行上下文切换。
 ///
-/// 返回 `false` 仅表示当前任务不存在。即使就绪队列暂时为空，也必须允许
-/// 当前任务睡眠；定时器或中断可能稍后唤醒另一个任务。
+/// 等待原语应先发布自身 waiter，再调用本函数，并在切换前重新检查完成条件，
+/// 以关闭“事件发生在条件检查与 Blocked 可见之间”的丢失唤醒窗口。
+/// 返回 `false` 仅表示当前 CPU 没有用户任务；即使就绪队列暂时为空也允许阻塞，
+/// 因为定时器、中断或另一 CPU 可以稍后唤醒任务。
 pub fn prepare_current_task_blocked() -> bool {
     let Some(task) = current_task() else {
         return false;
@@ -159,9 +168,11 @@ pub fn remove_thread_group(tgid: usize) {
     lock_scheduler().remove_thread_group(tgid);
 }
 
-/// 直接调度下一个任务。
+/// 将已经变为 Blocked/Stopped/Exited 的当前任务交给 idle 上下文，等待真正唤醒后恢复。
 ///
-/// 调用者需要在调用前处理好当前任务的退出或状态变化。
+/// 调用者必须在进入前完成状态发布和等待队列登记。本函数不自行选择下一个任务，
+/// 而是通过每 CPU idle 栈完成上下文保存；若唤醒恰好在切换前发生，循环会看到 Running
+/// 并返回原系统调用，否则直到调度器重新认领本任务才会继续。
 #[unsafe(no_mangle)]
 #[inline(never)]
 pub fn switch_to_next_task() {
@@ -170,16 +181,16 @@ pub fn switch_to_next_task() {
     };
     crate::perf::blocking_switch(1);
     loop {
-        // A timer interrupt may have switched away from this blocked context.
-        // Once a real wake schedules it again, resume the syscall that blocked.
+        // 定时器中断可能已从这个阻塞上下文切走；真正的唤醒再次调度它时，
+        // 应从原先发生阻塞的系统调用处继续执行。
         if current.is_running() {
             cleanup_dead_tasks();
             return;
         }
 
-        // A blocked task can be woken by another CPU before it reaches idle.
-        // Keep its owner until this CPU has saved the context; fetch_task()
-        // will leave the newly-ready task queued until then.
+        // 阻塞任务可能在当前 CPU 进入 idle 之前就被另一 CPU 唤醒。
+        // 当前 CPU 保存完上下文前仍保留所有权；在此之前 fetch_task()
+        // 会让这个刚变为 Ready 的任务继续留在队列中。
         handoff_current_to_idle(current.clone(), ContextSwitchKind::Voluntary);
     }
 }
@@ -198,11 +209,12 @@ pub fn yield_current_task() {
     handoff_current_to_idle(task, ContextSwitchKind::Voluntary);
 }
 
-/// 时间片抢占当前任务。
+/// 在定时器安全点抢占当前任务，并经 idle 上下文重新参与调度。
 ///
 /// 时钟中断触发时先把当前任务放回所属优先级队列队尾，再选择下一个任务。
 /// 同一优先级内这会形成简单的 round-robin；不同优先级仍按 RT/nice/idle
-/// 的固定顺序调度。
+/// 的固定顺序调度。若定时器打断的是正在执行阻塞/退出交接的内核路径，不能把它
+/// 错误恢复为 Ready，此时只完成上下文保存并等待权威状态的真正唤醒。
 #[unsafe(no_mangle)]
 #[inline(never)]
 pub fn preempt_current_task() {
@@ -211,11 +223,10 @@ pub fn preempt_current_task() {
     };
     crate::perf::timer_preemption(1);
 
-    // A timer interrupt can arrive while switch_to_next_task is waiting for
-    // the first runnable task. Do not turn that blocked/stopped/exited current
-    // context back into a ready task; only dispatch work that was genuinely
-    // woken. If the current task itself was woken, fetching it below restores
-    // Running and the interrupted scheduling loop returns to its caller.
+    // switch_to_next_task 等待第一个可运行任务时也可能收到定时器中断。
+    // 不得把当前这个已阻塞、停止或退出的上下文重新标成 Ready，只调度真正被唤醒的任务。
+    // 若被唤醒的恰好是当前任务，下方取出它时会恢复 Running，
+    // 被中断的调度循环随后返回原调用者。
     let switch_kind = if task.is_running() {
         ContextSwitchKind::Involuntary
     } else {
@@ -244,9 +255,8 @@ pub fn stop_current_and_run_next() {
         return;
     };
 
-    // The signal path publishes Stopped before notifying the parent.  The
-    // parent may already have changed it to Ready with SIGCONT, so do not
-    // overwrite the concurrent wake here; just finish saving this context.
+    // 信号路径先发布 Stopped 再通知父进程。父进程可能已用 SIGCONT 将其改为 Ready，
+    // 因此这里不能覆盖并发唤醒，只需完成当前上下文的保存。
     handoff_current_to_idle(task, ContextSwitchKind::Voluntary);
     cleanup_dead_tasks();
 }
@@ -345,11 +355,10 @@ impl Scheduler {
         self.debug_assert_invariants();
     }
 
-    /// Take the highest-priority task that `cpu` is allowed to run.
+    /// 取出 `cpu` 允许运行的最高优先级任务。
     ///
-    /// An incompatible task remains in place: a CPU must be able to skip a
-    /// pinned task at the head and run lower-priority work that is eligible on
-    /// this CPU, without disturbing FIFO order for the pinned task's CPU.
+    /// 不符合亲和性的任务仍留在原位：CPU 必须能跳过队首的绑核任务，
+    /// 转而执行本 CPU 可运行的较低优先级任务，同时不破坏绑核任务所在 CPU 的 FIFO 顺序。
     pub fn fetch_for_cpu(&mut self, cpu: usize) -> Option<Arc<TaskControlBlock>> {
         let mut rt_candidates = self.rt_bitmap;
         while rt_candidates != 0 {
@@ -511,6 +520,11 @@ impl Scheduler {
     }
 
     #[cfg(debug_assertions)]
+    /// 完整核对 ready queues、blocked 索引和 task_index 的双向一致性。
+    ///
+    /// 每个 tid 必须只出现一次，队列分类要匹配任务 status/调度属性，Ready 任务不能同时在
+    /// blocked 集合。该检查只在调试门禁调用；持 SpinNoIrqLock 时避免额外的笛卡尔扫描，
+    /// 防止启动核延误唯一 timer service。
     fn assert_invariants(&self) {
         assert!(
             self.rt_queues[0].is_empty(),
@@ -560,11 +574,10 @@ impl Scheduler {
             ready_count,
             "task_index and ready queues have different sizes"
         );
-        // Every queued entry was checked against task_index above. add()
-        // rejects a duplicate tid, so equal cardinality also proves that the
-        // index has no extra entry absent from the ready queues. Avoid a
-        // second task_index × all-queues scan while holding SpinNoIrqLock:
-        // on the boot hart that can delay the sole global timeout service.
+        // 上面已经逐项核对队列与 task_index；add() 会拒绝重复 tid，
+        // 因而两边基数相等也能证明索引中不存在未进入就绪队列的多余项。
+        // 持有 SpinNoIrqLock 时不要再次做 task_index × 全队列扫描，
+        // 否则在启动核上可能延误唯一的全局超时服务。
 
         for (tid, task) in &self.blocked_tasks {
             assert_eq!(*tid, task.tid(), "blocked_tasks key/tid mismatch");

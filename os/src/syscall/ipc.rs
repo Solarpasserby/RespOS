@@ -1,3 +1,14 @@
+//! System V 共享内存系统调用及其全局对象表。
+//!
+//! shm segment 的“名字/ID 生命周期”与物理 frame、地址空间 attachment 生命周期不同：
+//! `IPC_RMID` 可先移除可查找身份，但已有 mapping 仍须存活到最后一次 detach；fork 后
+//! attachment 计数按新 MM 身份增加，exit/munmap 则必须精确清账。
+//!
+//! 全局配额、权限、metadata 更新和 segment 回收由同一锁域线性化。用户 copyout 不能
+//! 发生在持有全局表锁并可能 fault 的位置；`SHM_REMAP`、固定地址和 futex 跨 attachment
+//! 还要求 MM 映射操作与 segment 引用变化保持失败原子性。不要把“ID 已删除”等同于
+//! “frame 可以立即释放”。
+
 use super::{Errno, SysResult};
 use crate::config::PAGE_SIZE;
 use crate::mm::{FrameTracker, MapPermission, MmapBacking, VirtAddr, copy_from_user, copy_to_user};
@@ -35,8 +46,7 @@ const SHMMIN: usize = 1;
 const DEFAULT_SHMMAX: usize = usize::MAX - (1 << 24);
 const DEFAULT_SHMALL: usize = usize::MAX / PAGE_SIZE;
 const MODE_MASK: u32 = 0o777;
-// RespOS uses 4 KiB base pages on both supported architectures and does not
-// implement cache-aliasing constraints requiring a larger attach alignment.
+// RespOS 在两种支持架构上均使用 4 KiB 基础页，且没有需要更大附加对齐的缓存别名约束。
 const SHMLBA: usize = PAGE_SIZE;
 const SHM_ATTACH_TEST_YIELD: bool = option_env!("TASK_A_SYSV_SHM_ATTACH_TEST_YIELD").is_some();
 
@@ -266,11 +276,10 @@ fn shm_attach_id_in_use(attach_id: usize) -> bool {
         .any(|task| task.op_memory_set_read(|memory_set| memory_set.has_shm_attach_id(attach_id)))
 }
 
-/// Commit the implicit detach caused by exec or address-space teardown.
+/// 提交由 exec 或地址空间销毁触发的隐式分离。
 ///
-/// The caller must first make the old mappings unreachable from every task
-/// that is being released.  A forked or CLONE_VM peer may still retain the
-/// same attach id, so the owner entry is removed only after a live-MM scan.
+/// 调用者必须先使所有待释放任务都无法访问旧映射。fork 或 CLONE_VM 创建的同伴
+/// 仍可能持有相同 attach id，因此只有扫描存活 MemorySet 后才能移除所有者项。
 pub(crate) fn release_shm_attachments(attach_ids: &[usize], pid: i32) {
     if attach_ids.is_empty() {
         return;
@@ -353,6 +362,12 @@ fn lookup_shm_id(table: &ShmTable, shmid: usize, by_index: bool) -> SysResult<us
     }
 }
 
+/// 按 key 查找或创建 SysV SHM 段，并为新段一次性分配全部共享页帧。
+///
+/// 非 IPC_PRIVATE key 先执行存在性、IPC_CREAT|IPC_EXCL、请求大小和访问权限规则；创建时
+/// 校验 SHMMIN/SHMMAX、SHMMNI 与 SHMALL 总页数。id/index、页帧和 segment 元数据都在
+/// `SHM_TABLE` 锁保护下准备，只有全部分配成功才插入 key 可发现表，ENOMEM/ENOSPC 不留下
+/// 占用 id 的半成品。当前不支持 huge page 标志，必须返回 EINVAL。
 pub fn sys_shmget(key: isize, size: usize, shmflg: usize) -> SysResult<usize> {
     let mut table = SHM_TABLE.lock();
     if shmflg & SHM_HUGETLB != 0 {
@@ -423,6 +438,15 @@ pub fn sys_shmget(key: isize, size: usize, shmflg: usize) -> SysResult<usize> {
     Ok(id)
 }
 
+/// 把 SysV SHM 段的共享页帧附加到当前地址空间。
+///
+/// 地址选择遵守 SHM_RND/SHM_REMAP，对齐与权限在修改地址空间前完成。为关闭 IPC_RMID
+/// 与 attach 的竞争，先在全局表中分配稳定 attach id、增加 `pending_attaches` 并保存页帧 Arc，
+/// 然后释放表锁进入 `MemorySet::mmap_area`；因此慢速页表操作不会持有全局 SHM 锁，而段也
+/// 不会在中途被销毁。
+///
+/// 映射成功后刷新 TLB，再回到表中把 pending 转为实际附加并更新时间；失败则撤销 owner。
+/// 已标记删除的段只有在 pending attach 为零且所有映射帧引用消失后才最终回收。
 pub fn sys_shmat(shmid: usize, shmaddr: usize, shmflg: usize) -> SysResult<usize> {
     const SHMAT_KNOWN_FLAGS: usize = SHM_RDONLY | SHM_RND | SHM_REMAP | SHM_EXEC;
     if shmflg & !SHMAT_KNOWN_FLAGS != 0 {
@@ -536,6 +560,12 @@ pub fn sys_shmat(shmid: usize, shmaddr: usize, shmflg: usize) -> SysResult<usize
     result
 }
 
+/// 查询或修改 SysV SHM 段及系统级限制。
+///
+/// INFO/STAT 命令在表锁内快照元数据和 frame Arc，释放锁后计算实际 nattch/copyout；
+/// IPC_SET 先完整读取用户结构并校验 owner/权限，再提交 mode/uid/gid。IPC_RMID 只移除 key
+/// 可发现性并标记删除，已有映射继续有效；直到 pending attach 与所有 frame 映射引用都归零
+/// 才真正释放 id。SHM_LOCK/UNLOCK 当前只维护可观察状态，权限检查仍必须与 Linux 顺序一致。
 pub fn sys_shmctl(shmid: usize, cmd: usize, buf: usize) -> SysResult<usize> {
     match cmd {
         IPC_INFO => {

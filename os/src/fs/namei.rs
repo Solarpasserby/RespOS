@@ -1,5 +1,19 @@
 // os/src/fs/namei.rs
 
+//! pathname 解析、创建和 namespace 修改的 VFS 核心。
+//!
+//! namei 从进程 root/cwd 或 dirfd 建立起点，逐组件处理 `.`、`..`、symlink、mount crossing、
+//! 权限与 dentry cache。最终组件是否跟随 symlink、是否允许不存在、是否进入挂载点由调用
+//! 入口显式选择，不能在通用 walk 中猜测 syscall 意图。
+//!
+//! 目录树修改使用稳定锁序并在 lower 操作成功后更新 dentry/inode cache。create、link、
+//! rename、unlink 必须保持“namespace 可见性、metadata 提交、缓存失效”一致；失败时不得留下
+//! 半安装 dentry。open fd 持有的 inode 可以在 unlink 后继续存在，因此 pathname 查找结果与
+//! open-file identity 不能互相替代。
+//!
+//! Linux 的错误优先级可观察：路径长度、不可搜索目录、symlink 循环、目标类型和权限检查的
+//! 顺序要由对应 probe 固定。任何来自用户空间的字符串都应在进入本模块前复制到内核缓冲区。
+
 use super::Path;
 use super::dentry_cache::{insert_dentry_cache, lookup_dentry_cache, remove_dentry_cache_tree};
 use super::mount::{
@@ -272,8 +286,7 @@ fn check_open_permission(dentry: &Arc<Dentry>, flags: OpenFlags) -> SysResult {
         return Err(Errno::EISDIR);
     }
 
-    // O_PATH only acquires a path reference.  Linux does not apply the
-    // target inode's read/write permission checks to this kind of open.
+    // O_PATH 只取得路径引用；Linux 对这种打开方式不执行目标 inode 的读写权限检查。
     if flags.contains(OpenFlags::O_PATH) {
         return Ok(());
     }
@@ -416,9 +429,8 @@ fn install_created_inode(
         result => result,
     };
     if let Err(err) = configure_result {
-        // The lower create has already allocated a namespace entry.  Keep it
-        // unpublished until all metadata is committed, and roll it back on
-        // failure so callers never observe a successful-looking partial file.
+        // 下层 create 已分配命名空间项。在全部元数据提交前不能将其公开；
+        // 失败时必须回滚，避免调用者观察到看似创建成功的残缺文件。
         let _ = parent.get_inode().unlink(&child);
         return Err(err);
     }
@@ -449,6 +461,16 @@ fn install_created_symlink(
     Ok(child)
 }
 
+/// 解析并提交 `open/openat` 的最后一个路径分量。
+///
+/// 前置路径已由 `link_path_walk` 定位到父目录；本函数集中处理最后分量特有的
+/// `O_CREAT`、`O_EXCL`、`O_NOFOLLOW`、`O_DIRECTORY`、`O_TMPFILE` 和 `O_TRUNC`
+/// 组合，并在建立 `File` 前完成挂载只读、设备策略及目录/目标权限检查。
+///
+/// 创建路径受 `NAMEI_MUTATION_LOCK` 串行化，并在持锁后重新 lookup，以避免并发创建
+/// 发布两个同名 inode。下层 inode 只有在 owner/mode 等元数据全部提交后才进入 dentry
+/// cache；失败会回滚命名空间项。截断发生在成功取得打开文件描述之后，但任何错误仍会
+/// 阻止 fd 层向用户发布该 `File`。
 pub fn open_last_lookups(nd: &mut Nameidata, flags: usize, mode: usize) -> SysResult<Arc<File>> {
     let flags = normalized_open_flags(OpenFlags::from(flags));
 
@@ -661,11 +683,16 @@ pub fn filename_create(dirfd: isize, path: &str, ty: InodeType, mode: usize) -> 
     filename_create_impl(dirfd, path, ty, mode, None)
 }
 
-/// Create a special inode while preserving its device payload through namei.
+/// 创建特殊 inode，并确保设备载荷在 namei 路径中完整传递。
 pub fn filename_mknod(dirfd: isize, path: &str, ty: InodeType, mode: usize, dev: u32) -> SysResult {
     filename_create_impl(dirfd, path, ty, mode, Some(dev))
 }
 
+/// namei 所有 mkdir/mknod/mkfifo 等创建操作共用的失败原子提交函数。
+///
+/// 命名空间锁内解析父目录并二次确认目标不存在，检查挂载、search/write、umask/setgid 继承，
+/// 再调用下层创建 inode。mode/uid/gid 和特殊设备载荷全部成功写入后才发布 dentry；任何元数据
+/// 失败都 unlink 下层对象，避免返回错误却留下可见文件。
 fn filename_create_impl(
     dirfd: isize,
     path: &str,
@@ -831,6 +858,15 @@ fn glibc_default_lib_alias(path: &str) -> Option<String> {
     None
 }
 
+/// 从给定 `Path` 起点解析完整路径，并按调用者策略决定是否跟随最后的符号链接和挂载点。
+///
+/// 每一级目录都执行 search 权限检查；`.` 保持当前位置，`..` 通过 `follow_dotdot`
+/// 正确跨越 mount root。中间符号链接始终展开：绝对目标回到进程 root，相对目标从链接
+/// 所在目录继续，并把尚未解析的后缀拼回目标。递归次数和总路径长度分别受
+/// `MAX_SYMLINK_FOLLOWS` 与 `PATH_MAX` 限制。
+///
+/// 返回的 `Path` 同时携带 mount 与 dentry 身份，调用者不能只保留字符串路径，否则会
+/// 丢失 chroot、跨挂载点和 rename 后保持对象身份的语义。
 fn resolve_path_from(
     base: Arc<Path>,
     path: &str,
@@ -1010,6 +1046,12 @@ pub fn filename_unlink(dirfd: isize, path: &str, remove_dir: bool) -> SysResult 
     Ok(())
 }
 
+/// 把尚未命名的 `O_TMPFILE` inode 原子链接进目标目录。
+///
+/// 文件必须携带创建时保存的 tmpfile metadata，且尚未被链接。命名空间修改锁内解析目标父目录、
+/// 校验挂载/目录权限并二次确认名称不存在，再由原 inode 后端创建 hard link。只有下层 link、
+/// owner/mode 身份核对全部成功后才发布新 dentry，并把 tmpfile 状态标为已链接；失败时原匿名
+/// 文件仍由打开 File 持有，可重试或随最后引用关闭回收。
 pub fn filename_link_tmpfile(file: &File, newdirfd: isize, newpath: &str) -> SysResult {
     if newpath.is_empty() {
         return Err(Errno::ENOENT);
@@ -1161,9 +1203,16 @@ pub fn filename_link(
     }
 }
 
-/// 路径基于 rename 系统调用。将 oldpath 重命名为 newpath 指定的新路径。
+/// 在同一文件系统内原子地把 `oldpath` 重命名为 `newpath`。
 ///
-/// 仅处理新旧路径同在一个文件系统上的情况。
+/// 全过程由命名空间修改锁串行化；下层提交前先完成父目录权限、sticky bit、类型匹配、
+/// 非空目录、目录环和 `RENAME_NOREPLACE` 检查。替换已有目标时，先把目标移动到临时备份，
+/// 再提交主 rename；主操作失败会恢复备份，成功后的备份清理失败则不能反向向用户报告失败，
+/// 否则会形成“返回错误但命名空间已经改变”的 ABI。
+///
+/// 下层提交成功后还必须迁移原 dentry 本身并更新缓存，而不是创建新 dentry；这样已打开
+/// `File`、cwd 和后代 `Path` 才能继续观察同一对象。跨文件系统请求在进入本函数的下层
+/// rename 前应以 `EXDEV` 拒绝。
 pub fn filename_rename(
     olddirfd: isize,
     oldpath: &str,
@@ -1317,7 +1366,7 @@ pub fn link_path_walk(nd: &mut Nameidata) -> SysResult {
         while nd.depth < len {
             let name = nd.path_segments[nd.depth].as_str();
             if name == "." {
-                // do nothing
+                // 无需处理
             } else if name == ".." {
                 follow_dotdot(nd);
             } else {
