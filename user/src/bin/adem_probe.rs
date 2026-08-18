@@ -1,5 +1,6 @@
 #![no_std]
 #![no_main]
+#![allow(static_mut_refs)]
 
 // ADEM 模拟器探针：用内联汇编强制生成每条非对齐访存指令（2RI12/3R/2RI14），
 // 校验模拟后的字节结果。在 2K1000LA 真机（UAL=0）上运行：每条指令都会触发
@@ -9,12 +10,42 @@
 extern crate user_lib;
 
 use core::arch::asm;
+use user_lib::{exit, fork, waitpid};
+
+// 上下文相关测试用的静态缓冲区（fork 后即 COW 页）。
+static mut SRC: [u8; 4096] = [0; 4096];
+static mut DST: [u8; 4096] = [0; 4096];
+static mut COW_BUF: [u8; 4096] = [0; 4096];
+static mut BSS_CHECK: [u8; 4096] = [0; 4096];
 
 fn report(name: &str, ok: bool) {
     if ok {
         println!("adem: {} OK", name);
     } else {
         println!("adem: {} FAIL", name);
+    }
+}
+
+/// 非对齐 16 字节拷贝一轮（模拟 musl memcpy 主循环：4×ldptr.w + 4×st.w）。
+unsafe fn copy16_round(src: usize, dst: usize) {
+    unsafe {
+        asm!(
+            "ldptr.w $t0, {s}, 0",
+            "ldptr.w $t1, {s}, 4",
+            "ldptr.w $t2, {s}, 8",
+            "ldptr.w $t3, {s}, 12",
+            "st.w $t0, {d}, 0",
+            "st.w $t1, {d}, 4",
+            "st.w $t2, {d}, 8",
+            "st.w $t3, {d}, 12",
+            s = in(reg) src,
+            d = in(reg) dst,
+            out("$t0") _,
+            out("$t1") _,
+            out("$t2") _,
+            out("$t3") _,
+            options(nostack)
+        );
     }
 }
 
@@ -172,6 +203,74 @@ fn main() -> i32 {
             "sc.w",
             buf[3] == 0x44 && buf[4] == 0x33 && buf[5] == 0x22 && buf[6] == 0x11 && sc == 1,
         );
+    }
+
+    // ===== 上下文相关测试 =====
+    unsafe {
+        // A. 非对齐 16 字节拷贝循环（模拟 musl memcpy 主循环，不同对齐组合）
+        for i in 0..SRC.len() {
+            SRC[i] = (i as u8).wrapping_mul(7);
+        }
+        DST.fill(0);
+        let mut ok = true;
+        for round in 0..32 {
+            let off = round * 16;
+            copy16_round(SRC.as_ptr().add(off + 1) as usize, DST.as_ptr().add(off + 3) as usize);
+        }
+        for i in 0..512 {
+            if DST[i + 3] != SRC[i + 1] {
+                ok = false;
+            }
+        }
+        report("copy16-loop", ok);
+
+        // C. BSS 段应为零（exec 时清零）
+        let mut zero = true;
+        for b in BSS_CHECK.iter() {
+            if *b != 0 {
+                zero = false;
+            }
+        }
+        report("bss-zero", zero);
+
+        // B. COW：fork 后子进程对共享页做非对齐 8 字节写（模拟 git 写 malloc 缓冲），
+        //    验证子进程写入正确且父进程页隔离未受破坏。
+        for i in 0..COW_BUF.len() {
+            COW_BUF[i] = (i as u8) ^ 0x5a;
+        }
+        let pid = fork();
+        if pid == 0 {
+            asm!(
+                "st.d {v}, {p}, 0",
+                v = in(reg) 0x1122334455667788u64,
+                p = in(reg) COW_BUF.as_ptr().add(1) as usize
+            );
+            let child_ok = COW_BUF[0] == 0x5a
+                && COW_BUF[1] == 0x88
+                && COW_BUF[2] == 0x77
+                && COW_BUF[3] == 0x66
+                && COW_BUF[4] == 0x55
+                && COW_BUF[5] == 0x44
+                && COW_BUF[6] == 0x33
+                && COW_BUF[7] == 0x22
+                && COW_BUF[8] == 0x11
+                && COW_BUF[9] == (9u8 ^ 0x5a);
+            if child_ok {
+                println!("adem: cow-child OK");
+            } else {
+                println!("adem: cow-child FAIL");
+            }
+            exit(0);
+        }
+        let mut code = 0;
+        let _ = waitpid(pid as usize, &mut code);
+        let mut iso = true;
+        for i in 0..COW_BUF.len() {
+            if COW_BUF[i] != (i as u8) ^ 0x5a {
+                iso = false;
+            }
+        }
+        report("cow-isolation", iso);
     }
     println!("adem: done");
     0
