@@ -31,6 +31,13 @@ pub const RAM_BASE: usize = 0x4000_0000;
 #[cfg(not(feature = "board_jh7110"))]
 pub const RAM_BASE: usize = 0x8000_0000;
 
+/// 根文件系统在块设备上的起始偏移（512 字节块号）。
+/// QEMU virtio-blk 是整盘 ext4（offset 0）；JH7110 SD 自举时根分区（p2）从 sector 526336 起。
+#[cfg(feature = "board_jh7110")]
+pub const ROOT_DISK_BASE_BLOCK: usize = 526336;
+#[cfg(not(feature = "board_jh7110"))]
+pub const ROOT_DISK_BASE_BLOCK: usize = 0;
+
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 static PHYSICAL_MEMORY_END: AtomicUsize = AtomicUsize::new(MEMORY_END);

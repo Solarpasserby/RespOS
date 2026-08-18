@@ -12,21 +12,25 @@ pub struct Disk {
     block_id: usize,
     offset: usize,
     dev: Arc<dyn BlockDevice>,
+    /// 分区起始块号（512 字节块）；整盘使用时为 0。
+    base_block: usize,
 }
 
 impl Disk {
-    pub fn new(dev: Arc<dyn BlockDevice>) -> Self {
+    pub fn new(dev: Arc<dyn BlockDevice>, base_block: usize) -> Self {
         assert_eq!(BLOCK_SIZE, dev.block_size());
+        assert!(base_block < dev.num_blocks(), "root disk base block out of range");
         Self {
             block_id: 0,
             offset: 0,
             dev,
+            base_block,
         }
     }
 
-    /// 获取总数据大小
+    /// 获取分区总数据大小（从 base_block 到设备末尾）。
     pub fn size(&self) -> usize {
-        self.dev.num_blocks() * BLOCK_SIZE
+        (self.dev.num_blocks() - self.base_block) * BLOCK_SIZE
     }
 
     /// 获取读写位置
@@ -47,7 +51,8 @@ impl Disk {
         let start = self.offset;
         let count = buf.len().min(BLOCK_SIZE - self.offset);
 
-        self.dev.read_block(self.block_id, &mut data)?;
+        self.dev
+            .read_block(self.base_block + self.block_id, &mut data)?;
         buf[..count].copy_from_slice(&data[start..start + count]);
         self.advance(count);
         Ok(count)
@@ -60,9 +65,11 @@ impl Disk {
         let start = self.offset;
         let count = buf.len().min(BLOCK_SIZE - self.offset);
 
-        self.dev.read_block(self.block_id, &mut data)?;
+        self.dev
+            .read_block(self.base_block + self.block_id, &mut data)?;
         data[start..start + count].copy_from_slice(&buf[..count]);
-        self.dev.write_block(self.block_id, &data)?;
+        self.dev
+            .write_block(self.base_block + self.block_id, &data)?;
         self.advance(count);
         Ok(count)
     }
@@ -90,7 +97,10 @@ impl KernelDevOp for Disk {
                 let whole_blocks_len = buf.len() / BLOCK_SIZE * BLOCK_SIZE;
                 if whole_blocks_len != 0 {
                     dev.dev
-                        .read_block(dev.block_id, &mut buf[..whole_blocks_len])
+                        .read_block(
+                            dev.base_block + dev.block_id,
+                            &mut buf[..whole_blocks_len],
+                        )
                         .map_err(|_| -1)?;
                     dev.block_id += whole_blocks_len / BLOCK_SIZE;
                     total_len += whole_blocks_len;
@@ -121,7 +131,10 @@ impl KernelDevOp for Disk {
                 let whole_blocks_len = buf.len() / BLOCK_SIZE * BLOCK_SIZE;
                 if whole_blocks_len != 0 {
                     dev.dev
-                        .write_block(dev.block_id, &buf[..whole_blocks_len])
+                        .write_block(
+                            dev.base_block + dev.block_id,
+                            &buf[..whole_blocks_len],
+                        )
                         .map_err(|_| -1)?;
                     dev.block_id += whole_blocks_len / BLOCK_SIZE;
                     total_len += whole_blocks_len;
