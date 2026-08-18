@@ -1,6 +1,21 @@
 # RespOS 当前状态
 
-## 2026-08-18 VisionFive 2 (JH7110) ext4 根挂载 + 用户态已通（`port/jh7110` 分支，未提交）
+## 2026-08-18 VisionFive 2 (JH7110) SD 卡自举闭环（`port/jh7110` 分支）
+
+- **结果**：**上电直接进内核 + Alpine shell，无需 TFTP / 手敲命令**。SD 卡分为 p1 FAT32(256MiB, 引导) +
+  p2 ext4(alpine 根)；p1 放 `kernel-vf2.bin` + `boot.scr`（`fatload mmc 1:1 ...; booti ...`）。U-Boot
+  `bootcmd` 覆盖为 `'fatload mmc 1:1 0x40200000 kernel-vf2.bin; booti 0x40200000 - ${fdtcontroladdr}'` 并
+  `saveenv`（因默认 `boot_targets=mmc0 dhcp` 漏了 mmc1，distro 扫描不到 SD）。
+- **内核改动（`035a56c`）**：块设备层支持分区偏移——`Disk` 加 `base_block` 字段，读写/seek/`size()` 都加
+  偏移；`board.rs` 新增 `ROOT_DISK_BASE_BLOCK=526336`（JH7110，p2 起始扇区），QEMU 仍为 0。根盘
+  `Disk::new(dev, ROOT_DISK_BASE_BLOCK)`，辅助盘固定 0。
+- **分区/刷写**：`sfdisk` MBR（p1 start=2048 size=524288 type=c bootable；p2 start=526336 type=83）→
+  `mkfs.vfat /dev/sda1` → `dd alpine img → /dev/sda2`。真机 `fatload mmc 1:1` 读 11.4MB 内核成功、挂载 p2
+  alpine 成功（`num_blocks=122152960`）、进 `auto-detected software root image` → `/ #`。
+- **-110 更正**：开头上电仍有 2 行 `Card did not respond to voltage select! : -110`（U-Boot 早期探测的
+  **瞬时**噪声），但随后 `fatload` 成功读到卡——**64G 卡 U-Boot 也能读**，-110 无害。
+
+## 2026-08-18 VisionFive 2 (JH7110) ext4 根挂载 + 用户态已通（`port/jh7110` 分支）
 
 - **结果**：VF2 真机上 SD 卡 ext4 根（`alpine-linux-riscv64-ext4fs.img`）**挂载成功**，并已进入
   **用户态**：`[contest_launcher]` → `[testrunner]` 正常运行（testrunner 报 `cannot enter /musl/ /glibc/`
