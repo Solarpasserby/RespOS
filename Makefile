@@ -227,7 +227,7 @@ build-la-ls2k1000: prepare-la-cargo-config
 	cd os && RESPOS_USER_PROFILE_DIR=$(LA_CARGO_TARGET_DIR) \
 		RESPOS_USER_TARGET=$(LA_TARGET) \
 		RESPOS_APP_REBUILD_STAMP=$$(date +%s%N) \
-		cargo build $(LA_CARGO_BUILD_ARG) $(LA_KERNEL_DEFAULT_FEATURE_ARGS) --features board_ls2k1000
+		cargo build $(LA_CARGO_BUILD_ARG) $(LA_KERNEL_DEFAULT_FEATURE_ARGS) --features board_ls2k1000,fault_trace
 	rust-objcopy -O binary --strip-all $(LA_ELF) $(KERNEL_LA_LS2K1000)
 	@ls -l $(KERNEL_LA_LS2K1000)
 

@@ -100,26 +100,8 @@ fn run_diagnostic() -> i32 {
 fn run_software() -> i32 {
     println!("[contest_launcher] software mode: starting Alpine /bin/sh");
     ensure_qemu_dns();
-    // TEMP 诊断：busybox ash 对 PATH 搜索会先 stat() 再 exec，内嵌 app 根本不会被
-    // execve（永远 not found）。这里由 launcher 直接 fork+exec 内嵌的 ADEM 探针，
-    // 把每条非对齐指令的模拟结果打到串口，然后再正常起 shell。
-    {
-        let pid = fork();
-        if pid == 0 {
-            let argv = ["adem_probe\0".as_ptr(), core::ptr::null()];
-            let envp = [core::ptr::null()];
-            let ret = execve("adem_probe\0", &argv, &envp);
-            println!("[contest_launcher] cannot exec adem_probe: {}", ret);
-            exit(127);
-        }
-        if pid > 0 {
-            let mut code = 0;
-            let _ = waitpid(pid as usize, &mut code);
-            println!("[contest_launcher] adem_probe finished, status={:#x}", code);
-        }
-    }
     // 现场赛本地题冒烟：把嵌入的 software-smoke.sh 写到 /tmp 交给 /bin/sh 跑，
-    // 一次输出 git/vim/gcc/rustc 四组 PASS/FAIL。
+    // 一次输出 git/vim/gcc/rustc 四组 PASS/FAIL（boot 即自证）。
     {
         const SMOKE_PATH: &str = "/tmp/software-smoke.sh\0";
         let fd = open(SMOKE_PATH, O_WRONLY | O_CREATE | O_TRUNC, 0o755);
