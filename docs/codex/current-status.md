@@ -1,5 +1,20 @@
 # RespOS 当前状态
 
+## 2026-08-18 VisionFive 2 (JH7110) 软件兼容性真机验证 + SD 时钟提速（`port/jh7110` 分支）
+
+- **软件兼容性验证**：真机跑 `respos-software/software-smoke.sh`，`git_local`（init/config/add/commit/
+  status/log）、`vim_batch`（`-Nu NONE -n -es` 批替换）、`gcc_compile_run`（C 编译+运行）三项 **PASS**；
+  `rustc_compile_run` 因 rustc 二进制巨大 + SD 慢，编译 hello world 极慢（约数分钟），人工中止。核心
+  「vim + git」目标已验证通过。
+- **SD 时钟提速（`bb1cd2f`）**：初始化完成后从 div=63（~400kHz）自动探测稳定档位——逐档试读根分区
+  superblock 并**校验 magic 0xEF53 + CRC32c checksum**（与 lwext4 算法一致），停在 `div=16`（约 4 倍提速）。
+  探测从 `div=4` 起：4/8 档 superblock checksum 失败（**第二个连续块高时钟下读错**），16 档稳定。
+- **已知性能瓶颈（下一步）**：`div=8` 能读对 magic 但 checksum 错，说明「连续读」在高时钟下有竞态
+  （div=63 慢时钟下修过的 wait-BUSY/DTO 在高时钟复发），需排查 `read_single` 的 DTO/FIFO 时序；修好后可
+  回 div=8/4（~12/25MHz）。再做 4-bit 总线可再快 ~4 倍，逼近 U-Boot 的 21.6 MiB/s。
+- **环境注意**：宿主 mount `/dev/sda2`（ext4 根）前若报「结构需要清理」（EUCLEAN），先
+  `fsck.ext4 -f -y /dev/sda2`——因板子读写挂载 + 直接断电会留脏 journal（lwext4 journal 弱实现）。
+
 ## 2026-08-18 VisionFive 2 (JH7110) SD 卡自举闭环（`port/jh7110` 分支）
 
 - **结果**：**上电直接进内核 + Alpine shell，无需 TFTP / 手敲命令**。SD 卡分为 p1 FAT32(256MiB, 引导) +
