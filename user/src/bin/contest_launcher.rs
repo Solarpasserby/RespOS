@@ -96,19 +96,35 @@ fn run_diagnostic() -> i32 {
 fn run_software() -> i32 {
     println!("[contest_launcher] software mode: starting Alpine /bin/sh");
     ensure_qemu_dns();
-    let argv = ["sh\0".as_ptr(), "-i\0".as_ptr(), core::ptr::null()];
-    let envp = [
-        "HOME=/tmp\0".as_ptr(),
-        "TMPDIR=/tmp\0".as_ptr(),
-        "TERM=xterm\0".as_ptr(),
-        "LC_ALL=C\0".as_ptr(),
-        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\0".as_ptr(),
-        core::ptr::null(),
-    ];
-    let ret = execve("/bin/sh\0", &argv, &envp);
-    println!("[contest_launcher] cannot exec /bin/sh: {}", ret);
-    let _ = exit(127);
-    127
+    // 诊断版：fork 后在父进程 waitpid，/bin/sh 一旦退出就把退出码打到串口，
+    // 便于区分「shell 已退出（静默）」与「shell 存活等待输入」。
+    let pid = fork();
+    if pid == 0 {
+        let argv = ["sh\0".as_ptr(), "-i\0".as_ptr(), core::ptr::null()];
+        let envp = [
+            "HOME=/tmp\0".as_ptr(),
+            "TMPDIR=/tmp\0".as_ptr(),
+            "TERM=xterm\0".as_ptr(),
+            "LC_ALL=C\0".as_ptr(),
+            "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\0"
+                .as_ptr(),
+            core::ptr::null(),
+        ];
+        let ret = execve("/bin/sh\0", &argv, &envp);
+        println!("[contest_launcher] cannot exec /bin/sh: {}", ret);
+        exit(127);
+    }
+    if pid < 0 {
+        println!("[contest_launcher] cannot fork for /bin/sh: {}", pid);
+        return 127;
+    }
+    let mut exit_code = 0;
+    let waited = waitpid(pid as usize, &mut exit_code);
+    println!(
+        "[contest_launcher] /bin/sh exited: waitpid={} code={:#x}",
+        waited, exit_code
+    );
+    exit_code
 }
 
 fn run_bootstrap() -> i32 {
