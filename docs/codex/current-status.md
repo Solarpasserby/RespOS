@@ -26,12 +26,17 @@
   创建并插入 dentry。所以之前给 img 塞的磁盘 `/respos/profile` 会被这个挂载点**遮蔽**，`open("/respos/profile")`
   走的是辅助盘（VF2 无 device 1）而非磁盘目录——这才是「profile 找不到」的真正原因，并非目录读 bug。
   改 launcher 后已不再依赖 `/respos/profile`。
-- **后续**：Stage 6 GMAC、Stage 7 SMP hart 拓扑（hart0=S7 无 MMU）；如要 alpine 真 shell 可把兜底改
-  `Software`（`execve("/bin/sh")`，依赖 Linux ABI 在 VF2 跑通）。
-- **改动文件（均未提交，基线 `5208b78`）**：`os/src/drivers/jh7110_sd.rs`（`write_single` 时序修复）、
-  `os/src/main.rs`（诊断行）、`os/src/fs/ext4/super_block.rs`（rc 打印）、
-  `user/src/bin/contest_launcher.rs`（未知镜像→shell 兜底）、新增
-  `img/alpine-linux-riscv64-ext4fs-diagnostic.img`（含 `/respos/profile`，现已不需要）。构建：
+- **software 模式（已跑通，Linux ABI 真 shell）**：`detect_root_image_mode()` 在 `/musl/ /glibc/` 标记之后
+  加「`path_exists("/bin/sh")` → `ContestMode::Software`」。真机已实测：`auto-detected software root image`
+  → `software mode: starting Alpine /bin/sh` → busybox 提示符 `/ #`；`uname -a` 返回
+  `Linux LAPTOP 6.10.0-dev Resp0S 0.1.0 riscv64 Linux`、`cat /etc/os-release` 读到真实 Alpine 内容——
+  即**动态链接 musl 的 busybox 在 VF2 真机跑通**，证明 Linux ABI 兼容层（ELF 加载 + 动态链接 + syscall）
+  端到端工作。`/bin/sh` 是 symlink→busybox，说明 VFS symlink 解析也正常。
+  **遗留（无害）**：`run_software()` 的 `ensure_qemu_dns()` 因 alpine `/etc/resolv.conf` 为空，往卡上写了
+  `nameserver 10.0.2.3`（QEMU DNS）；VF2 无网络暂不影响，Stage 6 网络时需处理（gate 或按板配置）。
+- **后续**：Stage 6 GMAC、Stage 7 SMP hart 拓扑（hart0=S7 无 MMU）。
+- **改动文件（均未提交，基线 `5208b78` 已提交至 `40dcff7`）**：`os/src/drivers/jh7110_sd.rs`（`write_single`
+  时序修复）、`user/src/bin/contest_launcher.rs`（未知镜像→shell 兜底 + `/bin/sh`→software 检测）。构建：
   `CMAKE_POLICY_VERSION_MINIMUM=3.5 RUSTUP_TOOLCHAIN=nightly-2025-01-18 make build-vf2`；部署
   `sudo cp kernel-vf2.bin /srv/tftp/`；boot `tftpboot 0x40200000 kernel-vf2.bin; booti 0x40200000 - ${fdtcontroladdr}`。
   另：宿主 TFTP 需有线 `enp129s0` 配 `192.168.1.100/24`（WiFi 切换会丢 IP 导致 ARP retry）。
