@@ -162,6 +162,25 @@ fn main() -> i32 {
 
         buf.fill(0);
         buf[3] = 0x85;
+        asm!("ldx.bu {o}, {p}, {k}", o = out(reg) out, p = in(reg) p, k = in(reg) 0usize);
+        report("ldx.bu", out == 0x85);
+
+        buf.fill(0);
+        buf[3] = 0x85;
+        buf[4] = 0x90;
+        asm!("ldx.hu {o}, {p}, {k}", o = out(reg) out, p = in(reg) p, k = in(reg) 0usize);
+        report("ldx.hu", out == 0x9085);
+
+        buf.fill(0);
+        buf[3] = 0x85;
+        buf[4] = 0;
+        buf[5] = 0;
+        buf[6] = 0x80;
+        asm!("ldx.wu {o}, {p}, {k}", o = out(reg) out, p = in(reg) p, k = in(reg) 0usize);
+        report("ldx.wu", out == 0x8000_0085);
+
+        buf.fill(0);
+        buf[3] = 0x85;
         buf[10] = 0x80;
         asm!("ldx.d {o}, {p}, {k}", o = out(reg) out, p = in(reg) p, k = in(reg) 0usize);
         report("ldx.d", out == 0x8000_0000_0000_0085);

@@ -418,16 +418,18 @@ fn emulate_unaligned_access(cx: &mut TrapContext) -> bool {
     }
 
     // 3R：ldx/stx（opcode=inst[31:15]，rk=inst[14:10]，rj=inst[9:5]，rd=inst[4:0]），addr=rj+rk。
+    // 无符号变体 ldx.bu/hu/wu 是 0x7040/0x7048/0x7050（LLVM LoongArchInstrInfo.td 的
+    // LDX_BU/LDX_HU/LDX_WU），不是 0x7004/0x700c/0x7014。
     let opcode17 = (inst >> 15) & 0x1_ffff;
-    if (0x7000..=0x7038).contains(&opcode17) {
+    if (0x7000..=0x7050).contains(&opcode17) {
         let rk = (inst >> 10) & 0x1f;
         let rj = (inst >> 5) & 0x1f;
         let rd = inst & 0x1f;
         let addr = cx.x[rj].wrapping_add(cx.x[rk]);
         let (size, is_store) = match opcode17 {
-            0x7000 | 0x7004 => (1, false), // ldx.b / ldx.bu
-            0x7008 | 0x700c => (2, false), // ldx.h / ldx.hu
-            0x7010 | 0x7014 => (4, false), // ldx.w / ldx.wu
+            0x7000 | 0x7040 => (1, false), // ldx.b / ldx.bu
+            0x7008 | 0x7048 => (2, false), // ldx.h / ldx.hu
+            0x7010 | 0x7050 => (4, false), // ldx.w / ldx.wu
             0x7018 => (8, false),          // ldx.d
             0x7020 => (1, true),           // stx.b
             0x7028 => (2, true),           // stx.h
@@ -448,11 +450,11 @@ fn emulate_unaligned_access(cx: &mut TrapContext) -> bool {
         } else {
             let val = match opcode17 {
                 0x7000 => (read_bytes(addr, 1) as u8 as i8) as isize as usize,
-                0x7004 => read_bytes(addr, 1),
+                0x7040 => read_bytes(addr, 1),
                 0x7008 => (read_bytes(addr, 2) as u16 as i16) as isize as usize,
-                0x700c => read_bytes(addr, 2),
+                0x7048 => read_bytes(addr, 2),
                 0x7010 => (read_bytes(addr, 4) as u32 as i32) as isize as usize,
-                0x7014 => read_bytes(addr, 4),
+                0x7050 => read_bytes(addr, 4),
                 0x7018 => read_bytes(addr, 8),
                 _ => unreachable!(),
             };
