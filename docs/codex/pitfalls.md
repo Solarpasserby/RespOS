@@ -1,5 +1,23 @@
 # RespOS 已确认易错点
 
+## 控制台必须按字节输出，SBI legacy console_putchar 会破坏非 ASCII
+
+- 状态：已确认并修复
+- 适用范围：内核 `print!`/`println!`、用户态回显 `write_user_bytes`、启动 banner 里的中文与
+  `█`/制表符方块等非 ASCII 字符
+- 最后验证：2026-08-18
+- 证据：`os/src/console.rs`、`os/src/arch/rv64/sbi.rs`、`os/src/arch/rv64/config/board.rs`；
+  RV64/LA64 release 串口日志（banner 中文与 `RESPOS` 艺术字正确回显）
+- 内容：`console::Stdout::write_str` 曾按 `s.chars()` 逐个 `char` 调 `console_putchar`。RISC-V 的
+  `sbi_rt::legacy::console_putchar` 在 RustSBI-QEMU 0.2.0-alpha.2 里会把参数先截断到低 8 位、再当作
+  Unicode 标量值编码成 UTF-8，导致任何字节 ≥0x80 都被二次编码乱码；LoongArch 直接写 UART 的低字节，
+  因此两架构行为还不一致。SBI Debug Console Extension 的 `console_write_byte` 在该 bootloader 上不输出
+  （实测串口为空），不能作为替代。最终统一为“`console_putchar` 语义 = 输出一个字节”：`write_str` 改按
+  `s.bytes()` 输出；RV64 在 `mm::init` 之后切换到 direct map 直写 NS16550 UART（`0x1000_0000`，已加入
+  RV64 `MMIO` 表），此前回退 SBI legacy（仅 ASCII 安全）。
+- 后续影响：新增任何带非 ASCII 的启动/日志输出前，先在双架构 release 串口日志里核对 UTF-8 字节；
+  不要在 `write_str` 里回到 `s.chars()`，也不要假设 legacy `console_putchar` 或 DBCN 能按字节原样输出。
+
 ## x86 的 packed epoll_event 不能外推到 RV64/LA64
 
 - 状态：已确认并修复

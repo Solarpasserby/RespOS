@@ -14,6 +14,7 @@ extern crate bitflags;
 
 #[macro_use]
 mod console;
+mod banner;
 mod lang_item;
 
 pub mod arch;
@@ -90,6 +91,9 @@ fn rust_main_high() -> ! {
 
     trap::init();
     mm::init();
+    #[cfg(target_arch = "riscv64")]
+    sbi::mark_direct_uart_ready();
+    banner::print_boot_banner();
     syscall::init_realtime_from_rtc();
     net::init();
     task::add_initproc();

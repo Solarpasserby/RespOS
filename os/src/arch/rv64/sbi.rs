@@ -5,6 +5,7 @@
 //! 调用 SBI 的服务，实现一些更底层的操作，并封装成函数使用
 
 use core::arch::asm;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 const SBI_EXT_HSM: usize = 0x4853_4d;
 const SBI_HSM_HART_START: usize = 0;
@@ -12,6 +13,20 @@ const SBI_EXT_SPI: usize = 0x7350_49;
 const SBI_SPI_SEND_IPI: usize = 0;
 const SBI_EXT_RFNC: usize = 0x5246_4e43;
 const SBI_RFNC_REMOTE_SFENCE_VMA: usize = 1;
+
+// QEMU riscv virt NS16550 UART，位于 direct map 之外的低 MMIO 区。
+const UART_BASE: usize = 0x1000_0000;
+const UART_THR: usize = UART_BASE; // 偏移 0：发送保持寄存器（写）
+const UART_LSR: usize = UART_BASE + 5; // 偏移 5：线路状态寄存器
+const LSR_TX_EMPTY: u8 = 1 << 5; // 发送保持寄存器空
+
+/// `mm::init` 激活正式内核页表后置为 true；UART 已进入 direct map，可直写。
+static DIRECT_UART_READY: AtomicBool = AtomicBool::new(false);
+
+/// 由 `main::rust_main_high` 在 `mm::init()` 之后调用，切换到直写 UART 路径。
+pub fn mark_direct_uart_ready() {
+    DIRECT_UART_READY.store(true, Ordering::Release);
+}
 
 /// 以 SBI v0.2+ HSM 扩展启动一个 hart。
 ///
@@ -93,12 +108,26 @@ pub fn set_timer(time_value: usize) {
     sbi_rt::set_timer(time_value as _);
 }
 
-/// 向终端打印字符
+/// 向终端打印一个字节。
+///
+/// 正式内核页表激活（`mm::init` 完成、`mark_direct_uart_ready` 被调用）之后，QEMU
+/// virt 的 NS16550 UART 通过 direct map 可达，直接按字节写入，保证多字节 UTF-8
+/// 原样输出。此前（早期启动阶段，UART 尚未映射）回退到 SBI legacy 接口；该接口只
+/// 保证 ASCII 正确，但早期启动本就不输出非 ASCII 内容。
 pub fn console_putchar(c: usize) {
-    #[allow(deprecated)] // TODO: 被弃用的接口，但是胜在简单，之后可以试着重写
-    sbi_rt::legacy::console_putchar(c);
-    // let temp = sbi_rt::console_write(bytes) // TODO: 新接口不知道怎么用
-    // if temp.error != 0 { panic!("omg") }
+    if DIRECT_UART_READY.load(Ordering::Acquire) {
+        let base = crate::config::KERNEL_BASE;
+        unsafe {
+            let lsr = (base + UART_LSR) as *const u8;
+            let thr = (base + UART_THR) as *mut u8;
+            // 等待发送保持寄存器为空，再写入一个字节。
+            while (core::ptr::read_volatile(lsr) & LSR_TX_EMPTY) == 0 {}
+            core::ptr::write_volatile(thr, c as u8);
+        }
+    } else {
+        #[allow(deprecated)] // 早期启动阶段 UART 未映射，只能走 SBI
+        sbi_rt::legacy::console_putchar(c);
+    }
 }
 
 /// 向终端打印字符

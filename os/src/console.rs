@@ -16,11 +16,14 @@ struct Stdout;
 static CONSOLE_OUTPUT_LOCK: SpinNoIrqLock<()> = SpinNoIrqLock::new(());
 const USER_OUTPUT_ATOMIC_CHUNK: usize = 512;
 
-/// 逐字符写入串口，同时用于用户态 `print!` 和内核日志。
+/// 逐字节写入串口，同时用于用户态 `print!` 和内核日志。
+///
+/// 必须按字节写：`console_putchar` 的语义是“输出一个字节”。多字节 UTF-8 字符
+/// （中文、制表符方块 `█` 等）会按 UTF-8 编码逐字节输出，由终端重新拼回。
 impl Write for Stdout {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        for c in s.chars() {
-            console_putchar(c as usize);
+        for byte in s.bytes() {
+            console_putchar(byte as usize);
         }
         Ok(())
     }
