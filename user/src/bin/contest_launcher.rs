@@ -26,6 +26,10 @@ const PRELIMINARY_MARKERS: &[&str] = &["/musl/basic_testcode.sh\0", "/glibc/basi
 // aux 盘放 /respos/profile，靠 /etc/alpine-release 自动识别。
 const SOFTWARE_MARKER: &str = "/etc/alpine-release\0";
 
+// 现场赛软件兼容本地题冒烟脚本（repo 根 respos-software/software-smoke.sh），
+// 嵌入后由 run_software 写到 /tmp 交给 /bin/sh 执行。
+const SOFTWARE_SMOKE: &str = include_str!("../../../respos-software/software-smoke.sh");
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ContestMode {
     Auto,
@@ -112,6 +116,46 @@ fn run_software() -> i32 {
             let mut code = 0;
             let _ = waitpid(pid as usize, &mut code);
             println!("[contest_launcher] adem_probe finished, status={:#x}", code);
+        }
+    }
+    // 现场赛本地题冒烟：把嵌入的 software-smoke.sh 写到 /tmp 交给 /bin/sh 跑，
+    // 一次输出 git/vim/gcc/rustc 四组 PASS/FAIL。
+    {
+        const SMOKE_PATH: &str = "/tmp/software-smoke.sh\0";
+        let fd = open(SMOKE_PATH, O_WRONLY | O_CREATE | O_TRUNC, 0o755);
+        if fd >= 0 {
+            let _ = write(fd as usize, SOFTWARE_SMOKE.as_bytes());
+            let _ = close(fd as usize);
+            let pid = fork();
+            if pid == 0 {
+                let argv = [
+                    "sh\0".as_ptr(),
+                    SMOKE_PATH.as_ptr(),
+                    core::ptr::null(),
+                ];
+                let envp = [
+                    "HOME=/tmp\0".as_ptr(),
+                    "TMPDIR=/tmp\0".as_ptr(),
+                    "TERM=xterm\0".as_ptr(),
+                    "LC_ALL=C\0".as_ptr(),
+                    "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\0"
+                        .as_ptr(),
+                    core::ptr::null(),
+                ];
+                let ret = execve("/bin/sh\0", &argv, &envp);
+                println!("[contest_launcher] cannot exec software-smoke: {}", ret);
+                exit(127);
+            }
+            if pid > 0 {
+                let mut code = 0;
+                let _ = waitpid(pid as usize, &mut code);
+                println!(
+                    "[contest_launcher] software-smoke finished, status={:#x}",
+                    code
+                );
+            }
+        } else {
+            println!("[contest_launcher] cannot create software-smoke: {}", fd);
         }
     }
     // 诊断版：fork 后在父进程 waitpid，/bin/sh 一旦退出就把退出码打到串口，
