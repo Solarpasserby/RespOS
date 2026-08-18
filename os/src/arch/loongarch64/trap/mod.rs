@@ -173,8 +173,10 @@ fn board_trap_diag(tag: &str, cx: &TrapContext) {
     crate::arch::sbi::early_print_hex(cx.era);
     crate::arch::sbi::early_print(" badv=");
     crate::arch::sbi::early_print_hex(badv::read());
-    crate::arch::sbi::early_print(" badi=");
-    crate::arch::sbi::early_print_hex(read_badi());
+    crate::arch::sbi::early_print(" sp=");
+    crate::arch::sbi::early_print_hex(cx.get_sp());
+    crate::arch::sbi::early_print(" inst=");
+    crate::arch::sbi::early_print_hex(unsafe { core::ptr::read_volatile(cx.era as *const u32) } as usize);
     crate::arch::sbi::early_print("\n");
 }
 
@@ -319,10 +321,21 @@ fn fault_in_emulated_access(
     let mut va = addr & !(PAGE_SIZE - 1);
     task.op_memory_set_write(|memory_set| {
         while va <= end {
-            if memory_set
-                .handle_page_fault(cause, va, Some(cx.get_sp()))
-                .is_err()
-            {
+            if let Err(err) = memory_set.handle_page_fault(cause, va, Some(cx.get_sp())) {
+                #[cfg(feature = "board_ls2k1000")]
+                {
+                    use core::sync::atomic::{AtomicBool, Ordering};
+                    static PRINTED: AtomicBool = AtomicBool::new(false);
+                    if !PRINTED.swap(true, Ordering::Relaxed) {
+                        crate::arch::sbi::early_print("[trap] faultin-fail va=");
+                        crate::arch::sbi::early_print_hex(va);
+                        crate::arch::sbi::early_print(" sp=");
+                        crate::arch::sbi::early_print_hex(cx.get_sp());
+                        crate::arch::sbi::early_print(" err=");
+                        crate::arch::sbi::early_print_hex(err.as_ret() as usize);
+                        crate::arch::sbi::early_print("\n");
+                    }
+                }
                 return false;
             }
             va += PAGE_SIZE;
