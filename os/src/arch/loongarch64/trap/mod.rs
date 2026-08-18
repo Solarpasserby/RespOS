@@ -464,19 +464,24 @@ fn emulate_unaligned_access(cx: &mut TrapContext) -> bool {
         return true;
     }
 
-    // 2RI14：ll/sc/ldptr/stptr（opcode=inst[31:26]，si14=inst[25:10]）。
-    let opcode6 = (inst >> 26) & 0x3f;
-    if (0x20..=0x27).contains(&opcode6) {
+    // 2RI14：ll/sc/ldptr/stptr。操作码是 8 位（inst[31:24] = 0x20..0x27，
+    // 高 6 位 001000/001001、低 2 位是子操作码），si14=inst[23:10]。
+    let opcode8 = (inst >> 24) & 0xff;
+    if (0x20..=0x27).contains(&opcode8) {
         let v14 = ((inst >> 10) & 0x3fff) as isize;
         let si14 = if v14 & 0x2000 != 0 { v14 - 0x4000 } else { v14 };
         let rj = (inst >> 5) & 0x1f;
         let rd = inst & 0x1f;
         let addr = (cx.x[rj] as isize).wrapping_add(si14) as usize;
-        let (size, is_store) = match opcode6 {
-            0x20 | 0x24 => (4, false), // ll.w / ldptr.w
-            0x22 | 0x26 => (8, false), // ll.d / ldptr.d
-            0x21 | 0x25 => (4, true),  // sc.w / stptr.w
-            0x23 | 0x27 => (8, true),  // sc.d / stptr.d
+        let (size, is_store) = match opcode8 {
+            0x20 => (4, false), // ll.w
+            0x22 => (8, false), // ll.d
+            0x24 => (4, false), // ldptr.w
+            0x26 => (8, false), // ldptr.d
+            0x21 => (4, true),  // sc.w
+            0x23 => (8, true),  // sc.d
+            0x25 => (4, true),  // stptr.w
+            0x27 => (8, true),  // stptr.d
             _ => return false,
         };
         let cause = if is_store {
@@ -489,7 +494,7 @@ fn emulate_unaligned_access(cx: &mut TrapContext) -> bool {
         }
         if is_store {
             write_bytes(addr, cx.x[rd], size);
-            if (opcode6 == 0x21 || opcode6 == 0x23) && rd != 0 {
+            if (opcode8 == 0x21 || opcode8 == 0x23) && rd != 0 {
                 cx.x[rd] = 1; // sc 按成功返回 1
             }
         } else {
