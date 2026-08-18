@@ -32,3 +32,4 @@ judge/**
 !judge/**/
 !judge/**/*.py
 !judge/baseline/*
+respos-ls2k1000.bin
