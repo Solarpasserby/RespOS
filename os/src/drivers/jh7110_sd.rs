@@ -70,6 +70,7 @@ const FIFOTH_RX_WM_MASK: u32 = 0xfff << 16;
 // STATUS 寄存器（0x48）：FIFO 字数在 bits[29:17]
 const STATUS_FIFO_COUNT_SHIFT: u32 = 17;
 const STATUS_FIFO_COUNT_MASK: u32 = 0x1fff;
+const STATUS_BUSY: u32 = 1 << 9;
 
 // MMC 命令号
 const CMD_GO_IDLE_STATE: u32 = 0;
@@ -281,10 +282,26 @@ impl SdCard {
 
     /// 单块读。block 为 512 字节块号。
     fn read_single(&self, block: u32, buf: &mut [u8; 512]) -> DevResult {
+        // 等控制器空闲（STATUS.BUSY 清零），再清中断（同 U-Boot dwmci_send_cmd）
+        let busy_start = get_time_ms();
+        while rd(STATUS) & STATUS_BUSY != 0 {
+            if get_time_ms().saturating_sub(busy_start) > 100 {
+                return Err(DevError::Again);
+            }
+        }
+        wr(RINTSTS, 0xffff_ffff);
+
         wr(BLKSIZ, 512);
         wr(BYTCNT, 512);
-        // 数据搬移前复位 FIFO（与 U-Boot dwmci_send_cmd 一致）
+        // 数据搬移前复位 FIFO 并等复位完成
         wr(CTRL, rd(CTRL) | CTRL_FIFO_RESET);
+        let rst_start = get_time_ms();
+        while rd(CTRL) & CTRL_FIFO_RESET != 0 {
+            if get_time_ms().saturating_sub(rst_start) > 100 {
+                return Err(DevError::Again);
+            }
+        }
+
         let arg = block * (BLOCK_SIZE as u32 / 512);
         // CMD17: READ_SINGLE_BLOCK（R1 + data），读方向 bit10(RW)=0
         wr(CMDARG, arg);
@@ -322,10 +339,27 @@ impl SdCard {
             }
             if get_time_ms().saturating_sub(start) > 2000 {
                 crate::println!(
-                    "[vf2] SD read timeout, off={}, rintsts=0x{:08x}",
+                    "[vf2] SD read timeout, block={}, off={}, rintsts=0x{:08x}",
+                    block,
                     off,
                     rd(RINTSTS)
                 );
+                return Err(DevError::Again);
+            }
+        }
+        // 等数据传输结束（DTO），保证控制器空闲后再返回，避免连续读时抢跑
+        let dto_start = get_time_ms();
+        loop {
+            let st = rd(RINTSTS);
+            if st & RINT_ERR != 0 {
+                wr(RINTSTS, RINT_ERR);
+                return Err(DevError::Io);
+            }
+            if st & RINT_DTO != 0 {
+                wr(RINTSTS, RINT_DTO);
+                break;
+            }
+            if get_time_ms().saturating_sub(dto_start) > 2000 {
                 return Err(DevError::Again);
             }
         }
@@ -334,9 +368,26 @@ impl SdCard {
 
     /// 单块写。block 为 512 字节块号。
     fn write_single(&self, block: u32, buf: &[u8; 512]) -> DevResult {
+        // 等控制器空闲（STATUS.BUSY 清零）再清中断，连续写第二个块时必需
+        let busy_start = get_time_ms();
+        while rd(STATUS) & STATUS_BUSY != 0 {
+            if get_time_ms().saturating_sub(busy_start) > 100 {
+                return Err(DevError::Again);
+            }
+        }
+        wr(RINTSTS, 0xffff_ffff);
+
         wr(BLKSIZ, 512);
         wr(BYTCNT, 512);
+        // 数据搬移前复位 FIFO 并等复位完成
         wr(CTRL, rd(CTRL) | CTRL_FIFO_RESET);
+        let rst_start = get_time_ms();
+        while rd(CTRL) & CTRL_FIFO_RESET != 0 {
+            if get_time_ms().saturating_sub(rst_start) > 100 {
+                return Err(DevError::Again);
+            }
+        }
+
         let arg = block * (BLOCK_SIZE as u32 / 512);
         // CMD24: WRITE_BLOCK，写方向 bit10(RW)=1
         wr(CMDARG, arg);
