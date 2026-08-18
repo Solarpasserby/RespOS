@@ -14,6 +14,7 @@ mod path;
 mod pipe;
 mod poll;
 pub mod proc;
+pub mod ramfs;
 mod special;
 mod stdio;
 pub mod tty;

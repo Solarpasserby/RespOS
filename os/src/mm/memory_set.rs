@@ -3203,7 +3203,14 @@ impl MemorySet {
 
         let area_idx = match self.areas.iter().position(|a| a.vpn_range.contain(&vpn)) {
             Some(index) => index,
-            None => self.expand_grows_down(vpn, user_sp).ok_or(Errno::EFAULT)?,
+            None => {
+                let expanded = self.expand_grows_down(vpn, user_sp);
+                #[cfg(feature = "fault_trace")]
+                if expanded.is_none() {
+                    self.trace_dump_areas(stval, vpn);
+                }
+                expanded.ok_or(Errno::EFAULT)?
+            }
         };
 
         let area_perm = self.areas[area_idx].map_perm;
@@ -3330,7 +3337,29 @@ impl MemorySet {
             return Ok(PageFaultOutcome::Retry);
         }
 
+        #[cfg(feature = "fault_trace")]
+        self.trace_dump_areas(stval, vpn);
         Err(Errno::EFAULT)
+    }
+
+    /// 诊断：打印当前任务全部 VMA（缺页失败时定位"哪个区域该覆盖却没覆盖"）。
+    #[cfg(feature = "fault_trace")]
+    fn trace_dump_areas(&self, stval: usize, vpn: VirtPageNum) {
+        println!(
+            "[pf] fault stval={:#x} vpn={:#x} areas={}",
+            stval,
+            vpn.0,
+            self.areas.len()
+        );
+        for (i, a) in self.areas.iter().enumerate() {
+            println!(
+                "[pf]   #{:02} [{:#x}, {:#x}) perm={:?}",
+                i,
+                a.vpn_range.get_start().0 * PAGE_SIZE,
+                a.vpn_range.get_end().0 * PAGE_SIZE,
+                a.map_perm
+            );
+        }
     }
 
     /// Expand a MAP_GROWSDOWN VMA by one guard page when the saved user stack

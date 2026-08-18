@@ -1160,9 +1160,12 @@ pub fn sys_execve(path: *const u8, args: *const usize, envp: *const usize) -> Sy
             ));
             exec_fs_file(task, file, args_vec, envs_vec)
         }
-        Err(Errno::ENOENT) if !path.starts_with("/") => {
-            // 从内核中加载的应用程序
-            if let Some(data) = get_app_data_by_name(path.as_str()) {
+        Err(Errno::ENOENT) => {
+            // 从内核中加载的应用程序。用路径最后一段匹配内嵌 app 名，
+            // 这样 Alpine shell 按 PATH 搜索（/usr/local/sbin/xxx 等绝对路径）
+            // 时也能命中内嵌应用（如 adem_probe）。
+            let name = path.rsplit('/').next().unwrap_or(path.as_str());
+            if let Some(data) = get_app_data_by_name(name) {
                 if !is_elf(data) {
                     return Err(Errno::ENOEXEC);
                 }

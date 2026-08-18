@@ -18,6 +18,7 @@ user/.cargo/
 kernel-rv
 kernel-la
 kernel-vf2.bin
+respos-ls2k1000.bin
 disk.img
 disk-la.img
 testrunner_output.log

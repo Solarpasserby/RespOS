@@ -22,6 +22,13 @@ const FINAL_SCRIPTS: &[&str] = &[
     "/glibc/buildstorm_testcode.sh\0",
 ];
 const PRELIMINARY_MARKERS: &[&str] = &["/musl/basic_testcode.sh\0", "/glibc/basic_testcode.sh\0"];
+// 现场赛软件兼容镜像（Alpine，git/vim/gcc/rustc）。真机没有单独的
+// aux 盘放 /respos/profile，靠 /etc/alpine-release 自动识别。
+const SOFTWARE_MARKER: &str = "/etc/alpine-release\0";
+
+// 现场赛软件兼容本地题冒烟脚本（repo 根 respos-software/software-smoke.sh），
+// 嵌入后由 run_software 写到 /tmp 交给 /bin/sh 执行。
+const SOFTWARE_SMOKE: &str = include_str!("../../../respos-software/software-smoke.sh");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ContestMode {
@@ -93,19 +100,51 @@ fn run_diagnostic() -> i32 {
 fn run_software() -> i32 {
     println!("[contest_launcher] software mode: starting Alpine /bin/sh");
     ensure_qemu_dns();
-    let argv = ["sh\0".as_ptr(), "-i\0".as_ptr(), core::ptr::null()];
-    let envp = [
-        "HOME=/tmp\0".as_ptr(),
-        "TMPDIR=/tmp\0".as_ptr(),
-        "TERM=xterm\0".as_ptr(),
-        "LC_ALL=C\0".as_ptr(),
-        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\0".as_ptr(),
-        core::ptr::null(),
-    ];
-    let ret = execve("/bin/sh\0", &argv, &envp);
-    println!("[contest_launcher] cannot exec /bin/sh: {}", ret);
-    let _ = exit(127);
-    127
+    // 现场赛本地题冒烟脚本：嵌入后只写到 /tmp，不自动运行；
+    // 需要时在 shell 里手动执行 `sh /tmp/software-smoke.sh`。
+    {
+        const SMOKE_PATH: &str = "/tmp/software-smoke.sh\0";
+        let fd = open(SMOKE_PATH, O_WRONLY | O_CREATE | O_TRUNC, 0o755);
+        if fd >= 0 {
+            let _ = write(fd as usize, SOFTWARE_SMOKE.as_bytes());
+            let _ = close(fd as usize);
+            println!(
+                "[contest_launcher] wrote {} (run: sh /tmp/software-smoke.sh)",
+                "/tmp/software-smoke.sh"
+            );
+        } else {
+            println!("[contest_launcher] cannot create software-smoke: {}", fd);
+        }
+    }
+    // 诊断版：fork 后在父进程 waitpid，/bin/sh 一旦退出就把退出码打到串口，
+    // 便于区分「shell 已退出（静默）」与「shell 存活等待输入」。
+    let pid = fork();
+    if pid == 0 {
+        let argv = ["sh\0".as_ptr(), "-i\0".as_ptr(), core::ptr::null()];
+        let envp = [
+            "HOME=/tmp\0".as_ptr(),
+            "TMPDIR=/tmp\0".as_ptr(),
+            "TERM=xterm\0".as_ptr(),
+            "LC_ALL=C\0".as_ptr(),
+            "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\0"
+                .as_ptr(),
+            core::ptr::null(),
+        ];
+        let ret = execve("/bin/sh\0", &argv, &envp);
+        println!("[contest_launcher] cannot exec /bin/sh: {}", ret);
+        exit(127);
+    }
+    if pid < 0 {
+        println!("[contest_launcher] cannot fork for /bin/sh: {}", pid);
+        return 127;
+    }
+    let mut exit_code = 0;
+    let waited = waitpid(pid as usize, &mut exit_code);
+    println!(
+        "[contest_launcher] /bin/sh exited: waitpid={} code={:#x}",
+        waited, exit_code
+    );
+    exit_code
 }
 
 fn run_bootstrap() -> i32 {
@@ -217,8 +256,9 @@ fn detect_root_image_mode() -> ContestMode {
         println!("[contest_launcher] auto-detected preliminary-round root image");
         return ContestMode::Preliminary;
     }
-    // Software image (e.g. Alpine): has a Linux-ABI /bin/sh (busybox).
-    if path_exists("/bin/sh\0") {
+    // Prefer Alpine's explicit marker, while retaining the VF2-proven fallback
+    // for compatible root images that only expose a Linux-ABI /bin/sh.
+    if path_exists(SOFTWARE_MARKER) || path_exists("/bin/sh\0") {
         println!("[contest_launcher] auto-detected software root image");
         return ContestMode::Software;
     }

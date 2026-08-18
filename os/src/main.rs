@@ -67,14 +67,61 @@ pub fn rust_main(hart_id: usize, opaque: usize) -> ! {
 
 #[cfg(target_arch = "loongarch64")]
 #[unsafe(no_mangle)]
-pub fn rust_main() -> ! {
+pub fn rust_main(argc: usize, argv: usize) -> ! {
     clear_bss();
-    config::init_physical_memory_end();
+    config::init_physical_memory_end(argc, argv);
+
+    // Stage 2：接通 MMU。真机经 U-Boot `go` 进入时 CRMD.PG 已为 1（DMW 窗口），
+    // enable_boot_paging 会建立最小高半区过渡页表并安装内核根页表，随后跳入高半区。
+    // 跳转前用 uncached UART 打一行诊断，便于定位 enable_boot_paging / 跳转前的故障。
+    #[cfg(feature = "board_ls2k1000")]
+    {
+        sbi::early_print("RespOS 2K1000LA: enabling MMU, mem_end=");
+        sbi::early_print_hex(config::physical_memory_end());
+        sbi::early_print("\n");
+    }
 
     arch::enable_boot_paging();
     unsafe {
+        #[cfg(feature = "board_ls2k1000")]
+        arch::jump_to_high_half(rust_main_high_ls2k1000 as usize);
+        #[cfg(not(feature = "board_ls2k1000"))]
         arch::jump_to_high_half(rust_main_high as usize);
     }
+}
+
+/// 2K1000LA 高半区入口：Stage 2 验证 MMU/memory，Stage 3 验证 trap + 核心本地时钟中断，
+/// Stage 4 接上 initproc + 调度器进入用户态。
+#[cfg(all(target_arch = "loongarch64", feature = "board_ls2k1000"))]
+fn rust_main_high_ls2k1000() -> ! {
+    arch::enable_kernel_extensions();
+
+    // 跑到这里说明高半区取指/数据访问都通过了 3 级页表翻译（40-bit VA 的关键验证点）。
+    sbi::early_print("[RespOS 2K1000LA] entered high half (3-level paging OK)\n");
+
+    mm::init();
+    // mm::init 会初始化 heap + frame allocator + direct map 并 activate 内核页表。
+    sbi::early_print("[RespOS 2K1000LA] mm::init OK, free frames=");
+    sbi::early_print_hex(mm::free_frame_count());
+    sbi::early_print("\n");
+
+    // heap 已就绪，验证 alloc/println! 路径（走 uncached UART）。
+    println!("[RespOS 2K1000LA] heap OK");
+
+    // Stage 3：LIOINTC 最小初始化（真机 MMIO 走 uncached DMW0 窗口，全部屏蔽，
+    // Stage 5/6 起按需使能外部设备中断）。
+    arch::liointc::init();
+    sbi::early_print("[RespOS 2K1000LA] LIOINTC masked\n");
+
+    // Stage 4：完整启动链——trap(EENTRY) → initproc + 空闲任务 → 时钟中断 → 调度器。
+    // 真机没有 QEMU 的 virtio-net / LS7A RTC(0x100d0100)，跳过 net::init 与
+    // syscall::init_realtime_from_rtc；SMP 是 Stage 7，暂只跑 boot hart（单核）。
+    trap::init();
+    task::add_initproc();
+    task::init_per_cpu_idle_tasks();
+    trap::enable_timer_interrupt();
+    timer::set_next_ti_trigger();
+    task::run_tasks();
 }
 
 #[cfg(target_arch = "loongarch64")]
@@ -99,6 +146,8 @@ fn rust_secondary_main_high() -> ! {
 }
 
 // QEMU 走完整启动；`board_jh7110` 下 RTC/net/SMP 尚未适配，只跑到用户态。
+// LS2K1000 使用上面的独立高半区入口。
+#[cfg(any(target_arch = "riscv64", not(feature = "board_ls2k1000")))]
 fn rust_main_high() -> ! {
     #[cfg(target_arch = "loongarch64")]
     arch::enable_kernel_extensions();

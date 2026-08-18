@@ -1,5 +1,19 @@
 # RespOS 当前状态
 
+## 2026-08-18 JH7110 与 LS2K1000 双移植线整合（当前合并工作树）
+
+- **整合范围**：`port/jh7110` 与 `origin/port/ls2k1000` 均已合入 `main`。共享层按板级 feature 隔离：
+  RV64 `board_jh7110` 使用 DW8250、JH7110 SD 与根分区 offset；LA64 `board_ls2k1000` 使用真机 UART、
+  LIOINTC、AHCI 和 ADEM 模拟；默认 QEMU 仍使用原 virtio block/net 与完整 SMP 启动路径。
+- **整合修复**：补齐通用 `Disk(base_block)` 在 LA64 上的零偏移常量；ext4 同时保留 VF2 分区根与
+  LS2K1000 无盘 ramfs 降级；把 LoongArch 专用 `adem_probe` 对非 LoongArch 构建隔离为 unsupported stub；
+  launcher 同时接受 `/etc/alpine-release` 和已在 VF2 验证的 `/bin/sh` 软件镜像标记；保留工作区实际存在的
+  `sdcard-*-{pre,pub}.img` 默认路径，避免仅修改 Makefile 名称后本地 QEMU 入口失效。
+- **验证**：`make build-rv`、`make build-vf2`、`make build-la`、`make build-la-ls2k1000` 四种 release
+  构建均通过。默认 RV64/LA64 `make rv`、`make la` 均实际启动，Unicode banner、virtio-net 和双 libc
+  basic 测例正常；LA64 继续跑过 libc/Lua 与 iperf 冒烟。两次 QEMU 长测均在取得相邻回归证据后人工停止，
+  未据此申报完整初赛回归。两种真机产物只完成交叉构建，本轮未在开发板复测，真机整合状态为 `待验证`。
+
 ## 2026-08-18 VisionFive 2 (JH7110) 软件兼容性真机验证 + SD 时钟提速（`port/jh7110` 分支）
 
 - **软件兼容性验证**：真机跑 `respos-software/software-smoke.sh`，`git_local`（init/config/add/commit/
