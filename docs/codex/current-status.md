@@ -1,5 +1,41 @@
 # RespOS 当前状态
 
+## 2026-08-18 VisionFive 2 (JH7110) ext4 根挂载 + 用户态已通（`port/jh7110` 分支，未提交）
+
+- **结果**：VF2 真机上 SD 卡 ext4 根（`alpine-linux-riscv64-ext4fs.img`）**挂载成功**，并已进入
+  **用户态**：`[contest_launcher]` → `[testrunner]` 正常运行（testrunner 报 `cannot enter /musl/ /glibc/`
+  是预期，alpine img 无比赛测试目录）。诊断行 `diag s_state=1 csum stored=0xeee6c286 computed=0xeee6c286 MATCH`。
+- **根因（rc=95 ENOTSUP 的真相）**：不是读盘 bug。lwext4 `ext4_sb_verify_csum` 校验 superblock checksum
+  失败；用宿主机复算确认**读路径完全正确**，卡上 `s_state=0x0002`(ERROR_FS) 但 checksum 仍是旧值
+  `0xeee6c286`（对应 `s_state=0x0001`），即**之前一次读写挂载把 superblock 半写坏**：`write_single` 缺
+  `read_single` 的「等 `STATUS.BUSY` 清零 + FIFO 复位等完成」时序，连续写第二个块（block 3 = checksum
+  所在）时抢跑，`ext4_fs.c:114` 写的 `s_state=ERROR_FS`(block 2) 落了盘、但新 checksum(block 3) 没落。
+  修复后 `write_single` 与 `read_single` 时序对齐；卡重刷 `alpine img` 后挂载通过。
+- **关键方法（可复用）**：lwext4 的 CRC32c 是 `init=0xffff_ffff`、**无 final XOR**（`ext4_crc32.c` 的
+  `crc32()`，非标准 CRC32C 的 `^0xffffffff`）；superblock checksum 在 block 3 offset 508（sb 偏移 1020），
+  覆盖前 1020 字节。据此在宿主机精确算出「仅 offset 58 由 0x01→0x02」的 CRC `0xfa29d155`，与内核读值
+  一致，从而定位到单字节 `s_state` 字段被改写。
+- **结果（已闭环）**：交互 shell 已通。`contest_launcher` 的 `detect_root_image_mode()` 把「未知镜像」兜底
+  从 `Preliminary(testrunner)` 改成 `Diagnostic(user_shell)`（`user/src/bin/contest_launcher.rs`），这样
+  alpine 裸镜像（无 `/musl/ /glibc/ /respos/profile`）直接进内嵌 `user_shell`，**镜像保持原样**。真机
+  已实测：`ls /`、`ls /etc`、`cd /bin`+`ls`（列出 busybox 全套 `ash sh bash cat ls ...`）、`hello_world`
+  （exec+yield）、`cat /etc/os-release` 读到真实 Alpine `NAME="Alpine Linux" VERSION_ID=3.22.1`——VFS 目录
+  读取 + ext4 文件读 + 用户程序 exec 端到端全部正常。
+- **`/respos` 之谜（已解释）**：`ls /` 里的 `respos` 不是磁盘上的目录，而是内核**辅助盘挂载点**——
+  `os/src/fs/mount.rs` 在挂载辅助 ext4（device 1）时 `root_inode.create("/", "respos", Directory)` 在根下
+  创建并插入 dentry。所以之前给 img 塞的磁盘 `/respos/profile` 会被这个挂载点**遮蔽**，`open("/respos/profile")`
+  走的是辅助盘（VF2 无 device 1）而非磁盘目录——这才是「profile 找不到」的真正原因，并非目录读 bug。
+  改 launcher 后已不再依赖 `/respos/profile`。
+- **后续**：Stage 6 GMAC、Stage 7 SMP hart 拓扑（hart0=S7 无 MMU）；如要 alpine 真 shell 可把兜底改
+  `Software`（`execve("/bin/sh")`，依赖 Linux ABI 在 VF2 跑通）。
+- **改动文件（均未提交，基线 `5208b78`）**：`os/src/drivers/jh7110_sd.rs`（`write_single` 时序修复）、
+  `os/src/main.rs`（诊断行）、`os/src/fs/ext4/super_block.rs`（rc 打印）、
+  `user/src/bin/contest_launcher.rs`（未知镜像→shell 兜底）、新增
+  `img/alpine-linux-riscv64-ext4fs-diagnostic.img`（含 `/respos/profile`，现已不需要）。构建：
+  `CMAKE_POLICY_VERSION_MINIMUM=3.5 RUSTUP_TOOLCHAIN=nightly-2025-01-18 make build-vf2`；部署
+  `sudo cp kernel-vf2.bin /srv/tftp/`；boot `tftpboot 0x40200000 kernel-vf2.bin; booti 0x40200000 - ${fdtcontroladdr}`。
+  另：宿主 TFTP 需有线 `enp129s0` 配 `192.168.1.100/24`（WiFi 切换会丢 IP 导致 ARP retry）。
+
 ## 2026-08-17 VisionFive 2 (JH7110) Stage 1+2+3+5(读块) 真机通过（`port/jh7110` 分支）
 
 - **结果**：RespOS 已在 VisionFive 2 真机跑通 Stage 1（Hello）、Stage 2（正式 MMU）、Stage 3（timer

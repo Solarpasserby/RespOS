@@ -261,9 +261,17 @@ Stage 1 若暂时不用 FDT（内存硬编码），可省略 DTB、`booti 0x4020
 
 ### Stage 5：块设备
 - 把 `VirtIoBlkDev` 换掉，但**只换最底层 `BlockDevice` trait 实现**，`Disk`/ext4/VFS/page cache 不动。
-- 选型分析：比赛环境第一个真实块设备**首选 SD 卡（mmc0, dw_mmc 变体）**——TFTP 加载的启动流里 SD 卡
-  已有 ext4 根盘、供电/时钟/复位由 firmware 配置好、接口成熟；eMMC（mmc1）与 SD 同为
-  `starfive,jh7110-mmc` 驱动，只差基址与 syscon；NVMe（PCIe）工作量大得多（PCIe RC + NVMe 协议），不优先。
+- 选型分析：比赛环境第一个真实块设备**首选 SD 卡（dw_mmc 变体）**。真机实测：本板 microSD 枚举为
+  **`mmc 1`（`sdio1@16020000`，基址 `0x16020000`）**，非 mmc0；64G 卡 `-110` 不识别、16G 兼容卡正常。
+- **驱动结论（已核实）**：`starfive,jh7110-mmc` = 标准 Synopsys DesignWare MMC（dw_mmc），StarFive 仅
+  在 DDR52/UHS 加采样相位调谐胶水（`UHS_REG_EXT 0x74`，最小驱动可跳过）。寄存器表取自 U-Boot
+  `include/dwmmc.h`（本板已验证明）：CTRL 0x00 / PWREN 0x04 / CLKDIV 0x08 / CLKSRC 0x0c / CLKENA 0x10 /
+  TMOUT 0x14 / CTYPE 0x18 / BLKSIZ 0x1c / BYTCNT 0x20 / INTMASK 0x24 / CMDARG 0x28 / CMD 0x2c /
+  RESP0-3 0x30..0x3c / RINTSTS 0x44 / STATUS 0x48 / FIFOTH 0x4c / BMOD 0x80 / DATA 0x200（待与 Linux
+  0x100 核对）。CMD 位：RESP_EXP(6)/RESP_LENGTH(7)/CHECK_CRC(8)/DATA_EXP(9)/RW(10)/UPD_CLK(21)/START(31)。
+  中断：CDONE(2)/DTO(3)/RXDR(5)/RCRC(6)/DCRC(7)/RTO(8)/DRTO(9)。卡初始化走标准 SD 协议
+  CMD0/8/55/41/2/3/9/7/6；读写 CMD17/18/24/25，FIFO 轮询。时钟/复位(syscrg)与电压(sys_syscon)由
+  U-Boot 已配置，最小驱动先复用其状态、后续再自建。
 - 出口：`BlockDevice` 读到 SD 卡 ext4 superblock，`/` 挂载。
 
 ### Stage 6：网络
