@@ -22,6 +22,9 @@ const FINAL_SCRIPTS: &[&str] = &[
     "/glibc/buildstorm_testcode.sh\0",
 ];
 const PRELIMINARY_MARKERS: &[&str] = &["/musl/basic_testcode.sh\0", "/glibc/basic_testcode.sh\0"];
+// 现场赛软件兼容镜像（Alpine，git/vim/gcc/rustc）。真机没有单独的
+// aux 盘放 /respos/profile，靠 /etc/alpine-release 自动识别。
+const SOFTWARE_MARKER: &str = "/etc/alpine-release\0";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ContestMode {
@@ -216,6 +219,10 @@ fn detect_root_image_mode() -> ContestMode {
     if PRELIMINARY_MARKERS.iter().any(|path| path_exists(path)) {
         println!("[contest_launcher] auto-detected preliminary-round root image");
         return ContestMode::Preliminary;
+    }
+    if path_exists(SOFTWARE_MARKER) {
+        println!("[contest_launcher] auto-detected software-compatibility root image");
+        return ContestMode::Software;
     }
 
     println!("[contest_launcher] unknown root image; falling back to preliminary mode");
