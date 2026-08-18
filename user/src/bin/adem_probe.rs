@@ -217,12 +217,53 @@ fn main() -> i32 {
             let off = round * 16;
             copy16_round(SRC.as_ptr().add(off + 1) as usize, DST.as_ptr().add(off + 3) as usize);
         }
+        let mut mismatches = 0usize;
         for i in 0..512 {
             if DST[i + 3] != SRC[i + 1] {
+                if mismatches < 12 {
+                    println!(
+                        "adem: copy16 mismatch i={} exp={:#04x} got={:#04x}",
+                        i,
+                        SRC[i + 1],
+                        DST[i + 3]
+                    );
+                }
+                mismatches += 1;
                 ok = false;
             }
         }
+        if !ok {
+            println!("adem: copy16 total mismatches={}", mismatches);
+        }
         report("copy16-loop", ok);
+
+        // A2. 只源非对齐（仅 load 走模拟器）
+        DST.fill(0);
+        let mut ok2 = true;
+        for round in 0..32 {
+            let off = round * 16;
+            copy16_round(SRC.as_ptr().add(off + 1) as usize, DST.as_ptr().add(off) as usize);
+        }
+        for i in 0..512 {
+            if DST[i] != SRC[i + 1] {
+                ok2 = false;
+            }
+        }
+        report("copy16-src-misaligned", ok2);
+
+        // A3. 只目标非对齐（仅 store 走模拟器）
+        DST.fill(0);
+        let mut ok3 = true;
+        for round in 0..32 {
+            let off = round * 16;
+            copy16_round(SRC.as_ptr().add(off) as usize, DST.as_ptr().add(off + 1) as usize);
+        }
+        for i in 0..512 {
+            if DST[i + 1] != SRC[i] {
+                ok3 = false;
+            }
+        }
+        report("copy16-dst-misaligned", ok3);
 
         // C. BSS 段应为零（exec 时清零）
         let mut zero = true;
