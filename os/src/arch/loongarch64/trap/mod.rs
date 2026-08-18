@@ -466,10 +466,14 @@ fn emulate_unaligned_access(cx: &mut TrapContext) -> bool {
 
     // 2RI14：ll/sc/ldptr/stptr。操作码是 8 位（inst[31:24] = 0x20..0x27，
     // 高 6 位 001000/001001、低 2 位是子操作码），si14=inst[23:10]。
+    // 注意：2RI14 立即数是 simm14_lsl2 —— 按 4 字节缩放（如分支偏移），
+    // 汇编器把「偏移 4」编码成字段值 1；不乘 4 会错位 3 字节（musl memcpy
+    // 的 ldptr.w +4/+8/+12 就是这样被模拟错，进而写坏 zlib 码表、git 崩溃）。
     let opcode8 = (inst >> 24) & 0xff;
     if (0x20..=0x27).contains(&opcode8) {
         let v14 = ((inst >> 10) & 0x3fff) as isize;
-        let si14 = if v14 & 0x2000 != 0 { v14 - 0x4000 } else { v14 };
+        let si14_field = if v14 & 0x2000 != 0 { v14 - 0x4000 } else { v14 };
+        let si14 = si14_field << 2;
         let rj = (inst >> 5) & 0x1f;
         let rd = inst & 0x1f;
         let addr = (cx.x[rj] as isize).wrapping_add(si14) as usize;
