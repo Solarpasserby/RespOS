@@ -80,15 +80,15 @@ fn handle_user_page_fault(cx: &TrapContext, exception: estat::Exception) {
             task.tid(),
             task.tgid(),
             cause,
-            _cx.era,
+            cx.era,
             read_badi(),
             badv,
-            _cx.x[4],
-            _cx.x[5],
-            _cx.x[6],
-            _cx.x[7],
-            _cx.x[3],
-            _cx.x[1],
+            cx.x[4],
+            cx.x[5],
+            cx.x[6],
+            cx.x[7],
+            cx.x[3],
+            cx.x[1],
             err
         );
         let sig = if matches!(err, Errno::EIO | Errno::ENOSPC) {
