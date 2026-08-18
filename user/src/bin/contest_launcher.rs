@@ -218,8 +218,8 @@ fn detect_root_image_mode() -> ContestMode {
         return ContestMode::Preliminary;
     }
 
-    println!("[contest_launcher] unknown root image; falling back to preliminary mode");
-    ContestMode::Preliminary
+    println!("[contest_launcher] unknown root image; falling back to shell mode");
+    ContestMode::Diagnostic
 }
 
 fn run_final_script(script: &str) {
