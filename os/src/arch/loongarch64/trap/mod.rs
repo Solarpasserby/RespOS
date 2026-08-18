@@ -369,7 +369,10 @@ fn emulate_unaligned_access(cx: &mut TrapContext) -> bool {
     // 2RI12：opcode=inst[31:22]，si12=inst[21:10]，rj=inst[9:5]，rd=inst[4:0]。
     let opcode10 = (inst >> 22) & 0x3ff;
     if (0xa0..=0xaa).contains(&opcode10) {
-        let si12 = ((inst >> 10) & 0xfff) as i16 as isize;
+        // 12 位有符号立即数：必须显式符号扩展。`as i16` 对 0xFFE 只会得到 +4094，
+        // 负偏移（如 st.h $t1,$t0,-2）会被算到错误地址，偏一页打到栈 VMA 之外。
+        let v12 = ((inst >> 10) & 0xfff) as isize;
+        let si12 = if v12 & 0x800 != 0 { v12 - 0x1000 } else { v12 };
         let rj = (inst >> 5) & 0x1f;
         let rd = inst & 0x1f;
         let addr = (cx.x[rj] as isize).wrapping_add(si12) as usize;
