@@ -267,17 +267,48 @@ impl SdCard {
     pub fn new() -> DevResult<Self> {
         controller_init()?;
         crate::println!("[vf2] SD: controller reset ok (verid=0x{:08x})", rd(VERID));
-        enable_clock(63)?; // 最慢分频，求稳（若 ciu=50MHz → ≈396kHz）
+        enable_clock(63)?; // 初始化阶段用最慢分频（~400kHz，SD 规范要求）
         crate::println!("[vf2] SD: clock enabled");
         let (rca, num_blocks) = card_init()?;
+        let card = Self { rca, num_blocks, block_size: BLOCK_SIZE };
+        // 从快往慢逐档试，读根分区超级块（ROOT_DISK_BASE_BLOCK + 2）并校验 magic 0xEF53，
+        // 与挂载真实读取路径一致。ciu 具体值未精确定，div=0/1/2 会超 25MHz 导致读错。
+        // lwext4 风格 CRC32c（init 0xffff_ffff，无 final XOR），与 ext4 superblock checksum 算法一致。
+        fn crc32c(data: &[u8]) -> u32 {
+            let mut crc: u32 = 0xffff_ffff;
+            for &b in data {
+                crc ^= b as u32;
+                for _ in 0..8 {
+                    crc = (crc >> 1) ^ (0x82f6_3b78 & (0u32.wrapping_sub(crc & 1)));
+                }
+            }
+            crc
+        }
+        let super_block = (crate::config::ROOT_DISK_BASE_BLOCK + 2) as usize;
+        let mut clock_div = 63u32;
+        for div in [4u32, 8, 16, 32, 63] {
+            enable_clock(div)?;
+            let mut probe = [0u8; 1024];
+            let read_ok = card.read_block(super_block, &mut probe).is_ok();
+            let stored = u32::from_le_bytes([probe[1020], probe[1021], probe[1022], probe[1023]]);
+            let ok = read_ok
+                && probe[56] == 0x53
+                && probe[57] == 0xef
+                && crc32c(&probe[..1020]) == stored;
+            if ok {
+                clock_div = div;
+                break;
+            }
+            crate::println!("[vf2] SD: div={} superblock checksum mismatch, lowering clock", div);
+        }
         crate::println!(
-            "[vf2] SD: card identified, rca=0x{:x}, num_blocks={} ({} MiB)",
+            "[vf2] SD: card identified, rca=0x{:x}, num_blocks={} ({} MiB), clock_div={}",
             rca,
             num_blocks,
-            num_blocks * 512 / 1024 / 1024
+            num_blocks * 512 / 1024 / 1024,
+            clock_div
         );
-        let block_size = BLOCK_SIZE;
-        Ok(Self { rca, num_blocks, block_size })
+        Ok(card)
     }
 
     /// 单块读。block 为 512 字节块号。
