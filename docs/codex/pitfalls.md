@@ -13,8 +13,9 @@
   Unicode 标量值编码成 UTF-8，导致任何字节 ≥0x80 都被二次编码乱码；LoongArch 直接写 UART 的低字节，
   因此两架构行为还不一致。SBI Debug Console Extension 的 `console_write_byte` 在该 bootloader 上不输出
   （实测串口为空），不能作为替代。最终统一为“`console_putchar` 语义 = 输出一个字节”：`write_str` 改按
-  `s.bytes()` 输出；RV64 在 `mm::init` 之后切换到 direct map 直写 NS16550 UART（`0x1000_0000`，已加入
-  RV64 `MMIO` 表），此前回退 SBI legacy（仅 ASCII 安全）。
+  `s.bytes()` 输出；RV64 在 `mm::init` 之后切换到 direct map 直写 UART0（`0x1000_0000`，已加入
+  RV64 `MMIO` 表），此前回退 SBI legacy（仅 ASCII 安全）。QEMU virt 使用字节步进 NS16550；
+  `board_jh7110` 使用 `reg-shift=2`、32 位访问的 DW8250，两个布局不得混用。
 - 后续影响：新增任何带非 ASCII 的启动/日志输出前，先在双架构 release 串口日志里核对 UTF-8 字节；
   不要在 `write_str` 里回到 `s.chars()`，也不要假设 legacy `console_putchar` 或 DBCN 能按字节原样输出。
 

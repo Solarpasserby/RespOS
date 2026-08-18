@@ -14,10 +14,9 @@ const SBI_SPI_SEND_IPI: usize = 0;
 const SBI_EXT_RFNC: usize = 0x5246_4e43;
 const SBI_RFNC_REMOTE_SFENCE_VMA: usize = 1;
 
-// QEMU riscv virt NS16550 UART，位于 direct map 之外的低 MMIO 区。
+// QEMU virt 与 StarFive JH7110 的 UART0 物理基址相同，但寄存器布局不同：
+// QEMU 以字节访问、寄存器步进为 1；JH7110 DW8250 以 32 位访问、reg-shift=2。
 const UART_BASE: usize = 0x1000_0000;
-const UART_THR: usize = UART_BASE; // 偏移 0：发送保持寄存器（写）
-const UART_LSR: usize = UART_BASE + 5; // 偏移 5：线路状态寄存器
 const LSR_TX_EMPTY: u8 = 1 << 5; // 发送保持寄存器空
 
 /// `mm::init` 激活正式内核页表后置为 true；UART 已进入 direct map，可直写。
@@ -26,6 +25,32 @@ static DIRECT_UART_READY: AtomicBool = AtomicBool::new(false);
 /// 由 `main::rust_main_high` 在 `mm::init()` 之后调用，切换到直写 UART 路径。
 pub fn mark_direct_uart_ready() {
     DIRECT_UART_READY.store(true, Ordering::Release);
+}
+
+#[cfg(not(feature = "board_jh7110"))]
+unsafe fn direct_uart_putchar(c: u8) {
+    let base = crate::config::KERNEL_BASE + UART_BASE;
+    let thr = base as *mut u8;
+    let lsr = (base + 5) as *const u8;
+    unsafe {
+        while (core::ptr::read_volatile(lsr) & LSR_TX_EMPTY) == 0 {}
+        core::ptr::write_volatile(thr, c);
+    }
+}
+
+#[cfg(feature = "board_jh7110")]
+unsafe fn direct_uart_putchar(c: u8) {
+    const UART_REG_SHIFT: usize = 2;
+    const UART_THR_REG: usize = 0;
+    const UART_LSR_REG: usize = 5;
+
+    let base = crate::config::KERNEL_BASE + UART_BASE;
+    let thr = (base + (UART_THR_REG << UART_REG_SHIFT)) as *mut u32;
+    let lsr = (base + (UART_LSR_REG << UART_REG_SHIFT)) as *const u32;
+    unsafe {
+        while (core::ptr::read_volatile(lsr) & u32::from(LSR_TX_EMPTY)) == 0 {}
+        core::ptr::write_volatile(thr, u32::from(c));
+    }
 }
 
 /// 以 SBI v0.2+ HSM 扩展启动一个 hart。
@@ -110,19 +135,14 @@ pub fn set_timer(time_value: usize) {
 
 /// 向终端打印一个字节。
 ///
-/// 正式内核页表激活（`mm::init` 完成、`mark_direct_uart_ready` 被调用）之后，QEMU
-/// virt 的 NS16550 UART 通过 direct map 可达，直接按字节写入，保证多字节 UTF-8
-/// 原样输出。此前（早期启动阶段，UART 尚未映射）回退到 SBI legacy 接口；该接口只
-/// 保证 ASCII 正确，但早期启动本就不输出非 ASCII 内容。
+/// 正式内核页表激活（`mm::init` 完成、`mark_direct_uart_ready` 被调用）之后，板级
+/// UART 通过 direct map 可达，按对应寄存器布局直接写入，保证多字节 UTF-8 原样输出。
+/// 此前（早期启动阶段，UART 尚未映射）回退到 SBI legacy 接口；该接口只保证 ASCII
+/// 正确，但早期启动本就不输出非 ASCII 内容。
 pub fn console_putchar(c: usize) {
     if DIRECT_UART_READY.load(Ordering::Acquire) {
-        let base = crate::config::KERNEL_BASE;
         unsafe {
-            let lsr = (base + UART_LSR) as *const u8;
-            let thr = (base + UART_THR) as *mut u8;
-            // 等待发送保持寄存器为空，再写入一个字节。
-            while (core::ptr::read_volatile(lsr) & LSR_TX_EMPTY) == 0 {}
-            core::ptr::write_volatile(thr, c as u8);
+            direct_uart_putchar(c as u8);
         }
     } else {
         #[allow(deprecated)] // 早期启动阶段 UART 未映射，只能走 SBI

@@ -15,6 +15,10 @@ debug_traces = []
 fault_trace = []
 la_global_kernel = []
 kernel_http = []
+# Selects the StarFive JH7110 board UART register layout.  The remaining
+# VisionFive 2 platform adaptation is intentionally kept behind the same
+# feature as it is implemented.
+board_jh7110 = []
 
 [[bin]]
 name = "os"

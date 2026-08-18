@@ -1,5 +1,17 @@
 # RespOS 当前状态
 
+## 2026-08-18 RV64 UTF-8 控制台板级 UART 边界
+
+- **实现**：内核格式化输出继续按 UTF-8 字节调用 `console_putchar`。`mm::init()` 后的 RV64 direct-map
+  UART 输出按板级 feature 选择寄存器布局：默认 QEMU virt 使用字节访问、LSR `+5` 的 NS16550；
+  `board_jh7110` 使用 32 位访问、`reg-shift=2`、LSR `+0x14` 的 DW8250。早期启动仍回退 SBI legacy。
+- **验证**：当前工作树的默认 RV64 release 与 `RV_KERNEL_FEATURES=board_jh7110` release 均构建通过，
+  LA64 release 构建通过；默认 RV64 QEMU 实际启动后 `RESPOS` Unicode banner、virtio-net 初始化及
+  musl/glibc basic 测例正常。QEMU 长测在取得启动与相邻测例证据后人工停止，未据此申报完整初赛回归。
+- **边界**：`board_jh7110` 本轮只建立正确的 UART 寄存器访问边界，不代表 VisionFive 2 已可启动；
+  linker/装载地址、early page table、DDR 保留区、4 MHz timer、hart 拓扑和设备驱动仍须按独立阶段实现，
+  UART 真机输出也仍为 `待验证`。
+
 ## 2026-08-16 Git SSH 与 guest 内初步自举双架构闭合（当前工作树，基线 `993fa3e0`）
 
 - **交付链路**：新增只用于本地验证的 `mode=bootstrap`、`run-{rv,la}-bootstrap` 与临时辅助盘生成脚本。
