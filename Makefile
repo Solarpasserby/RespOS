@@ -1,6 +1,11 @@
 SHELL := /bin/bash
 .SHELLFLAGS := -o pipefail -c
 
+# lwext4 仍声明 CMake 3.4；为 CMake 4.x 显式启用 3.5 兼容策略。
+export CMAKE_POLICY_VERSION_MINIMUM ?= 3.5
+# 所有正式构建固定使用课程平台验证过的 Rust 1.86 nightly。
+override export RUSTUP_TOOLCHAIN := nightly-2025-01-18
+
 # 线上评测平台固定调用 `make all`。该入口必须保持确定性：只生成两个 QEMU 平台的
 # release 内核，以及作为第二块 virtio 块设备使用的两份自动识别辅助盘。
 # 本地运行入口与提交入口严格分离，不得修改线上提交配置。
@@ -108,7 +113,7 @@ RV_KERNEL_NO_DEFAULT_FEATURES ?= 0
 LA_KERNEL_NO_DEFAULT_FEATURES ?= 0
 
 REQUESTED_GOALS := $(if $(MAKECMDGOALS),$(MAKECMDGOALS),all)
-ifneq ($(filter all submit check-submit,$(REQUESTED_GOALS)),)
+ifneq ($(filter all submit check-submit preflight verify-clean-tree package-submit,$(REQUESTED_GOALS)),)
 ifneq ($(RV_MODE),release)
 $(error Submission entry requires RV_MODE=release)
 endif
@@ -163,6 +168,7 @@ else
 endif
 
 .PHONY: all submit check-submit validate-submit-profile build-submit-disks build-disks \
+	check-env check-repo-layout check-clean preflight verify-clean-tree package-submit \
 	build-qemu-rv64 build-jh7110 build-qemu-loongarch64 build-ls2k1000 \
 	build-rv build-vf2 build-la build-la-ls2k1000 \
 	prepare-qemu-rv64-cargo-config prepare-jh7110-cargo-config \
@@ -178,13 +184,22 @@ endif
 	run-rv-diagnostic run-la-diagnostic run-rv-software run-la-software \
 	run-rv-bootstrap run-la-bootstrap \
 	rv la run-rv-pub run-la-pub \
-	help clean
+	help clean clean-logs distclean
 
 # 线上评测入口。这里不得加入 QEMU 运行、下载或本地根镜像检查；
 # 评测平台会提供这些环境，只需要可复现的提交产物。
 all: submit
 
-submit: validate-submit-profile build-qemu-rv64 build-qemu-loongarch64 build-submit-disks
+submit: check-env validate-submit-profile build-qemu-rv64 build-qemu-loongarch64 build-submit-disks
+
+check-env:
+	@bash scripts/check_submission_env.sh
+
+check-repo-layout:
+	@bash scripts/check_repo_state.sh layout
+
+check-clean:
+	@bash scripts/check_repo_state.sh clean
 
 validate-submit-profile:
 	@mode="$$(awk '{ line=$$0; sub(/^[ \t]+/, "", line); if (line != "" && substr(line, 1, 1) != "#") { print line; exit } }' $(SUBMIT_AUX_PROFILE))"; \
@@ -523,6 +538,17 @@ check-submit: submit
 		test "$$mode" = "mode=auto" || { echo "$$image does not contain mode=auto" >&2; exit 1; }; \
 	done
 
+# 提测前门禁：当前源码结构和四个线上产物都必须通过检查。
+preflight: check-repo-layout check-submit
+
+# 只允许从已提交的干净 HEAD 导出，并在导出目录重新执行提测门禁。
+verify-clean-tree: check-clean
+	@bash scripts/verify_clean_tree.sh
+
+DIST_DIR ?= dist
+package-submit: verify-clean-tree
+	@bash scripts/package_submission.sh "$(DIST_DIR)"
+
 help:
 	@echo "四平台构建："
 	@echo "  make build-qemu-rv64          构建 QEMU RV64 内核（kernel-rv）"
@@ -532,6 +558,9 @@ help:
 	@echo "线上提交："
 	@echo "  make all                      构建两个 QEMU 内核和两份自动识别提交盘"
 	@echo "  make check-submit             重新构建并检查四个提交产物"
+	@echo "  make preflight                检查仓库结构、环境和提交产物"
+	@echo "  make verify-clean-tree        在干净的 Git 导出目录重新执行提测门禁"
+	@echo "  make package-submit           验证后生成确定性的源码包和 SHA-256"
 	@echo "本地初赛测例（内嵌 testrunner）："
 	@echo "  make prepare-pre-images"
 	@echo "  make run-rv-pre"
@@ -554,3 +583,11 @@ clean:
 	rm -f $(KERNEL_QEMU_RV64) $(KERNEL_JH7110) $(KERNEL_QEMU_LOONGARCH64) $(KERNEL_LS2K1000) \
 		$(SUBMIT_RV_DISK_IMG) $(SUBMIT_LA_DISK_IMG)
 	$(MAKE) -C os clean
+	$(MAKE) -C user clean
+
+clean-logs:
+	rm -f rv-output.txt la-output.txt rv-final-output.txt la-final-output.txt \
+		output-rv.txt output-la.txt debug-rvoutput.txt debug-laoutput.txt testrunner_output.log
+
+distclean: clean clean-logs
+	rm -f os/.cargo/config.toml user/.cargo/config.toml

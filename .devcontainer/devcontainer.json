@@ -7,9 +7,6 @@
   "workspaceFolder": "/workspaces/RespOS",
   "remoteUser": "ubuntu",
   "shutdownAction": "stopContainer",
-  "mounts": [
-    "source=/home/lorenash/Code/kernel/RespOS/img/mnt,target=/workspaces/RespOS/img/mnt,type=bind"
-  ],
   "forwardPorts": [
     1234
   ],

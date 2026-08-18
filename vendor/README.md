@@ -4,10 +4,23 @@ Vendored dependencies used by the OS crate.
   `f9e3de7b0485429104e6b06ae0795e18f68ec957`, including its `c/lwext4`
   source tree so the build does not need `git submodule update`.
 - `riscv`: copied from `https://github.com/rcore-os/riscv` at
-  `11d43cf7cccb3b62a3caaf3e07a1db7449588f9a`.
-- `smoltcp`: vendored under `vendor/smoltcp` and referenced as a path
-  dependency. It is used with `default-features = false` and the feature set
-  required by the in-kernel loopback TCP/UDP stack.
+  `11d43cf7cccb3b62a3caaf3e07a1db7449588f9a`. The ISC text declared in that
+  revision's README is preserved as `riscv/LICENSE-ISC`.
+- `smoltcp`: copied from `https://github.com/smoltcp-rs/smoltcp` at
+  `ce420118efff83b47767389500ef1562f5074b55`. It is used with
+  `default-features = false` and the feature set required by the in-kernel
+  loopback TCP/UDP stack.
+- `respos_buddy_allocator`: a RespOS-owned crate split out inside this
+  repository. It is not an external upstream snapshot.
 
 These crates are referenced with `path` dependencies from `os/Cargo.toml` to
 avoid network access during contest grading builds.
+
+License inventory:
+
+| Directory | License | License file |
+| --- | --- | --- |
+| `lwext4_rust` | GPL-2.0 | `lwext4_rust/LICENSE.GPLv2` |
+| `riscv` | ISC | `riscv/LICENSE-ISC` |
+| `smoltcp` | 0BSD | `smoltcp/LICENSE-0BSD.txt` |
+| `respos_buddy_allocator` | MIT | `respos_buddy_allocator/LICENSE-MIT` |

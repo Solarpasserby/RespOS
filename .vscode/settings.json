@@ -1,30 +1,25 @@
 {
     // Rust-Analyzer
-    // RespOS intentionally keeps the kernel and user runtime as separate
-    // Cargo projects; the repository root is not a Cargo workspace.
+    // RespOS 有两个独立的 Cargo 项目，仓库根目录不是 Cargo workspace。
     "rust-analyzer.linkedProjects": [
         "${workspaceFolder}/os/Cargo.toml",
         "${workspaceFolder}/user/Cargo.toml"
     ],
     "rust-analyzer.cargo.target": "riscv64gc-unknown-none-elf",
-    // Use rust-analyzer shipped with the image's Rust 1.89 toolchain. The
-    // VS Code extension's standalone server requires Rust 1.94 or newer.
-    "rust-analyzer.server.path": "/root/.rustup/toolchains/nightly-2025-05-20-x86_64-unknown-linux-gnu/bin/rust-analyzer",
+    // 使用与线上构建基线相同工具链内置的 rust-analyzer。
+    "rust-analyzer.server.path": "/root/.rustup/toolchains/nightly-2025-01-18-x86_64-unknown-linux-gnu/bin/rust-analyzer",
     "rust-analyzer.cargo.cfgs": [
         "rust_analyzer"
     ],
-    // lwext4's build script recreates a CMake directory inside vendor/.
-    // Do not let background IDE work race a foreground make build there.
+    // lwext4 构建脚本会在 vendor/ 中重建 CMake 目录，避免 IDE 后台构建与 make 竞争。
     "rust-analyzer.cargo.targetDir": true,
     "rust-analyzer.cargo.buildScripts.enable": false,
     "rust-analyzer.procMacro.enable": false,
-    // "rust-analyzer.cargo.features": "all",
-    // "rust-analyzer.cargo.target": "loongarch64-unknown-none",
+    // 如需分析 LoongArch，可临时把 cargo.target 改为 loongarch64-unknown-none。
     "rust-analyzer.cargo.allTargets": false,
     "rust-analyzer.check.allTargets": false,
     "rust-analyzer.checkOnSave": false,
-    // The standalone analyzer currently emits internal inference errors on
-    // this no_std cross-target crate. Rustc diagnostics come from make.
+    // 当前分析器对 no_std 交叉目标仍可能产生内部推断错误，Rustc 诊断以 make 为准。
     "rust-analyzer.diagnostics.enable": false,
     "[rust]": {
         "editor.defaultFormatter": "rust-lang.rust-analyzer",

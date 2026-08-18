@@ -1,5 +1,24 @@
 # RespOS 当前状态
 
+## 2026-08-18 P0-P1 提测仓库门禁（当前工作树）
+
+- **固定基线**：新增根级 `rust-toolchain.toml`，顶层 Make 固定
+  `nightly-2025-01-18`（rustc 1.86 nightly），并统一导出 lwext4 在 CMake 4.x 下所需的
+  `CMAKE_POLICY_VERSION_MINIMUM=3.5`。Dev Container 与 VS Code analyzer 同步到该基线，移除了
+  Dev Container 中绑定某台宿主机绝对路径的镜像挂载。
+- **提测门禁**：新增 `check-env`、`check-repo-layout`、`check-clean`、`preflight`、
+  `verify-clean-tree` 和 `package-submit`。最终入口要求工作区干净，从 `git archive HEAD` 临时导出后
+  重新构建并检查 `kernel-rv`、`kernel-la`、`disk.img`、`disk-la.img`，再生成确定性 gzip 源码包及
+  SHA-256。当前变更尚未提交，因此干净 HEAD 复验和最终打包需在提交后执行。
+- **仓库整理**：`.gitignore` 按本地资源、Cargo 生成项、顶层产物、日志、judge 输出和发布包分类去重；
+  `clean` 同时清理 os/user，新增 `clean-logs` 与 `distclean`。README 明确本地 `img/testsuit/examples`
+  不参与构建，并记录最终提测流程。
+- **依赖合规**：`vendor/README.md` 补齐 smoltcp 精确提交和四个本地 crate 的许可证清单；从 riscv
+  精确上游版本 README 提取并保存缺失的 ISC 正文为 `vendor/riscv/LICENSE-ISC`。
+- **验证**：`make preflight` 在 Rust 1.86 下通过，双架构 QEMU release 内核和两份 `mode=auto` ext4
+  辅助盘均通过类型与内容检查；`make build-jh7110 build-ls2k1000` 通过。脚本 `bash -n`、
+  Dev Container JSON 解析及 `git diff --check` 通过。真机运行状态未因本轮仓库结构整理而重新验证。
+
 ## 2026-08-18 辅助盘资源布局收敛（当前工作树）
 
 - **源码布局**：删除仓库根目录下六个重复的 `respos*` 资源目录，运行模式统一放入

@@ -1,26 +1,36 @@
-.codex
+# 本地代理与编辑器状态
+.agents/
+.cargo-home/
+.claude/
+.codex/
+review/
+CLAUDE.md
 
+# 本地镜像、上游测例与参考源码；它们不参与提交构建
 img/
 testsuit/
 examples/
-.cargo-home/
-examples/
-testsuit/
-review/
-.claude/
-CLAUDE.md
-.claude/
-# Local learning notes are intentionally not part of the RespOS knowledge sync.
+
+# 本地学习笔记不参与 RespOS 项目知识同步
 docs/C组学习指南-文件系统与文件ABI.md
+
+# Cargo 生成配置与构建目录
 os/src/link_app.S
 os/.cargo/
 user/.cargo/
+os/target/
+user/target/
+target/
+
+# 顶层构建产物
 kernel-rv
 kernel-la
 kernel-vf2.bin
 respos-ls2k1000.bin
 disk.img
 disk-la.img
+
+# 本地运行日志
 testrunner_output.log
 rv-output.txt
 la-output.txt
@@ -30,9 +40,11 @@ output-rv.txt
 output-la.txt
 debug-laoutput.txt
 debug-rvoutput.txt
-judge/**
-!judge/**/
-!judge/**/*.py
-!judge/baseline/*
-respos-ls2k1000.bin
-kernel-vf2.bin
+
+# 评测脚本生成目录
+judge/__pycache__/
+judge/local-compare/
+judge/local-report/
+
+# 最终源码包
+dist/

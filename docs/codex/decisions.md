@@ -1240,3 +1240,19 @@ parent、最后只 handoff”的提交顺序；handoff 不重写状态，以保�
   共享 open-file-description；writev 分段下发则会让 libc 拆分的正文/换行互相穿插。
 - 后续影响：OFD record lock 需建立独立 owner 类型；优化锁等待可改变轮询为事件唤醒，但不能提前释放
   owner。新增 pipe vectored/splice 快路径必须说明并测试其 `PIPE_BUF` 原子契约。
+
+## 提测产物只能从固定工具链和干净 Git 导出生成
+
+- 状态：已采用
+- 适用范围：线上 `make all`、提测复验、源码包发布
+- 最后验证：2026-08-18
+- 证据：`rust-toolchain.toml`、顶层 `Makefile`、`scripts/check_submission_env.sh`、
+  `scripts/check_repo_state.sh`、`scripts/verify_clean_tree.sh`、`scripts/package_submission.sh`
+- 决策：正式构建固定使用 `nightly-2025-01-18`（rustc 1.86 nightly）和
+  `CMAKE_POLICY_VERSION_MINIMUM=3.5`；`preflight` 验证源码结构、环境及线上四产物。最终源码包必须在
+  工作区干净时由 `git archive HEAD` 生成，并先在另一个临时导出目录重新执行完整门禁。
+- 原因：本地较新 nightly、CMake 4.x、生成的 Cargo 配置和大镜像曾使“当前目录能构建”无法等价于
+  “课程平台从源码能构建”。绑定已提交 HEAD 并复验导出树，可把本机残留与漏提交文件排除在证据外。
+- 后续影响：最终提测先提交预期变更，再执行 `make package-submit`；不要把本地镜像、参考 testsuit、
+  target、日志或生成的 `.cargo/config.toml` 纳入 Git。若课程平台工具链变化，必须同步修改工具链文件、
+  环境检查和验证记录。

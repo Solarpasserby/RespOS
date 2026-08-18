@@ -25,6 +25,12 @@ RespOS 以 Linux 用户态兼容为主要目标，内核提供接近 Linux ABI �
 
 ## 构建与运行准备
 
+仓库根目录的 `rust-toolchain.toml` 将 Rust 固定为线上基线
+`nightly-2025-01-18`（rustc 1.86 nightly），并声明双架构目标与 LLVM 工具。
+提交构建还需要 CMake、e2fsprogs，以及
+`riscv64-linux-musl-gcc`、`loongarch64-linux-musl-gcc` 两套交叉编译器。
+Dev Container 已包含这套环境；直接克隆时需先安装对应工具。
+
 ```bash
 make all                      # 线上评测入口：构建双架构 QEMU 内核和自动识别辅助盘
 make build-qemu-rv64          # 构建 QEMU RV64 内核
@@ -32,8 +38,12 @@ make build-jh7110             # 构建 JH7110/VisionFive 2 真机镜像
 make build-qemu-loongarch64   # 构建 QEMU LoongArch64 内核
 make build-ls2k1000           # 构建 LS2K1000 真机镜像
 make check-submit             # 检查提交产物
+make preflight                # 检查源码结构、构建环境和提交产物
+make verify-clean-tree        # 从干净的 Git HEAD 导出并完整复验
+make package-submit           # 复验后生成源码包及 SHA-256
 make help                     # 查看全部入口及默认资源配置
 make clean                    # 清理构建产物
+make distclean                # 额外清理日志与生成的 Cargo 配置
 ```
 
 四个平台统一使用 `build-<平台名>` 形式。旧命令 `build-rv`、`build-vf2`、`build-la`、
@@ -50,6 +60,10 @@ make clean                    # 清理构建产物
 `mode=auto` 的小型 ext4 辅助盘；平台提供大型官方根镜像并按比赛 QEMU 参数启动。
 `contest_launcher` 会优先检查 CAgent/BuildStorm 决赛脚本，再检查初赛 basic 脚本，从而让同一份
 提交同时适配决赛评分和后续初赛复测。
+
+最终提测前应在已提交且工作区干净的状态执行 `make package-submit`。该命令先把 `HEAD` 导出到临时
+目录并重新运行 `preflight`，成功后在 `dist/` 生成带提交短哈希的确定性源码包和 `.sha256` 校验文件。
+本地镜像、测例参考源码、编译产物与日志均不会进入该包。
 
 第一次本地运行前可下载官方初赛和决赛镜像：
 
@@ -108,11 +122,12 @@ RespOS/
 │   │   └── bin/          # testrunner、shell 工具与各类测试入口程序
 │   ├── build.rs          # 用户程序打包与 LTP 清单生成逻辑
 │   └── oscomp_ltp_list.txt
-├── img/                  # 本地测试镜像
+├── img/                  # 本地测试镜像（Git 忽略，不参与构建）
 ├── judge/                # LTP 日志解析、报告生成与 baseline 对比工具
 ├── docs/                 # 设计记录、调试文档与比赛文档
 ├── scripts/              # 镜像下载、报告生成和辅助检查脚本
-├── testsuit/             # 本地测例源码或资料
+├── testsuit/             # 可选上游测例参考（Git 忽略，不参与构建）
+├── examples/             # 可选本地参考源码（Git 忽略，不参与构建）
 ├── vendor/               # 第三方依赖源码
 └── .devcontainer/        # Dev Container 开发环境配置
 ```
@@ -120,3 +135,6 @@ RespOS/
 ## 许可证
 
 [GNU General Public License v2.0](LICENSE)
+
+仓库内第三方与内部分拆 crate 的来源、精确版本和许可证文件见
+[`vendor/README.md`](vendor/README.md)。

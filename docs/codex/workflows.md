@@ -164,10 +164,10 @@ destructor、robust/pshared futex、线程资源复用，以及 spawn file actio
 ### 课程平台 Rust 兼容基线
 
 课程平台在 2026-08-13 的日志表明其内核编译器为
-`rustc 1.86.0-nightly (2025-01-17)`。提交前，若本地安装了对应 toolchain，应使用：
+`rustc 1.86.0-nightly (2025-01-17)`。仓库根目录的 `rust-toolchain.toml` 已将默认工具链固定为：
 
 ```bash
-RUSTUP_TOOLCHAIN=nightly-2025-01-18 make all
+make all
 ```
 
 `os/Cargo.toml` 和 `user/Cargo.toml` 声明 `rust-version = "1.85"`。不要使用在该平台
@@ -177,15 +177,14 @@ RUSTUP_TOOLCHAIN=nightly-2025-01-18 make all
 ### 本地构建需要为 vendored lwext4 兼容 CMake 4.x
 
 `vendor/lwext4_rust/c/lwext4/CMakeLists.txt` 声明 `cmake_minimum_required(VERSION 3.4)`；CMake
-4.0 起移除了对 `< 3.5` 的兼容，会直接拒绝该最小版本。宿主机 CMake ≥ 4.0（实测 4.4.2）时，任何会
-触发 lwext4 C 编译的构建目标（`make build-rv` / `build-la` / `build-vf2` /
-`build-la-ls2k1000` / `all`）都必须带上
-`CMAKE_POLICY_VERSION_MINIMUM=3.5`：
+4.0 起移除了对 `< 3.5` 的兼容，会直接拒绝该最小版本。顶层 `Makefile` 已统一导出
+`CMAKE_POLICY_VERSION_MINIMUM=3.5`，因此所有四平台构建入口可直接执行：
 
 ```bash
-CMAKE_POLICY_VERSION_MINIMUM=3.5 RUSTUP_TOOLCHAIN=nightly-2025-01-18 make build-rv
-CMAKE_POLICY_VERSION_MINIMUM=3.5 RUSTUP_TOOLCHAIN=nightly-2025-01-18 make build-vf2
-CMAKE_POLICY_VERSION_MINIMUM=3.5 RUSTUP_TOOLCHAIN=nightly-2025-01-18 make build-la-ls2k1000
+make build-qemu-rv64
+make build-jh7110
+make build-qemu-loongarch64
+make build-ls2k1000
 ```
 
 该变量只改变 CMake 的兼容策略下限，不改 vendored 源码或官方镜像。缺失时的报错形态是 CMake 在
@@ -221,9 +220,10 @@ make build-qemu-rv64      # QEMU RV64：kernel-rv
 make build-jh7110         # JH7110/VisionFive 2：kernel-vf2.bin
 make build-qemu-loongarch64 # QEMU LoongArch64：kernel-la
 make build-ls2k1000       # LS2K1000：respos-ls2k1000.bin
-make MODE=debug all       # 双架构 debug
-make MODE=release-debug all
 make check-submit         # 构建并检查四个提交产物和 auto profile
+make preflight            # 检查仓库结构、工具链和四个提交产物
+make verify-clean-tree    # 从干净 HEAD 导出后重新执行 preflight
+make package-submit       # 复验后生成确定性源码包及 SHA-256
 ```
 
 四个平台统一使用 `build-<平台名>` 入口，并分别准备对应 Cargo config。旧的 `build-rv`、

@@ -7,7 +7,7 @@ COPY codex-priority /usr/local/bin/codex-priority
 RUN set -eux; \
     test -d /root/.cargo; \
     test -d /root/.rustup; \
-    rustup component add rust-analyzer --toolchain nightly-2025-05-20; \
+    rustup component add rust-analyzer --toolchain nightly-2025-01-18; \
     chmod o+x /root; \
     chmod a+x /opt/kendryte-toolchain/bin/riscv64-unknown-elf-*; \
     rm -rf /home/ubuntu/.cargo /home/ubuntu/.rustup; \
@@ -26,7 +26,7 @@ RUN set -eux; \
 
 ENV CARGO_HOME=/workspaces/RespOS/.cargo-home
 ENV RUSTUP_HOME=/root/.rustup
-ENV RUSTUP_TOOLCHAIN=nightly-2025-05-20
+ENV RUSTUP_TOOLCHAIN=nightly-2025-01-18
 ENV PATH=/home/ubuntu/.cargo/bin:/opt/qemu-bin-10.0.2/bin:/opt/riscv64-linux-musl-cross/bin:/opt/loongarch64-linux-musl-cross/bin:/opt/gcc-13.2.0-loongarch64-linux-gnu/bin/:/opt/toolchain-loongarch64-linux-gnu-gcc8-host-x86_64-2022-07-18/bin/:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/kendryte-toolchain/bin:/opt/riscv64-lp64d--musl--bleeding-edge-2024.02-1/bin
 
 USER ubuntu
