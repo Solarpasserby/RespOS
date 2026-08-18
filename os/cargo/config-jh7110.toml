@@ -1,0 +1,21 @@
+[build]
+target = "riscv64gc-unknown-none-elf"
+
+[target.riscv64gc-unknown-none-elf]
+rustflags = [
+    "-Clink-arg=-Tsrc/linker_jh7110.ld",
+    "-Cforce-frame-pointers=yes",
+    "-Ctarget-feature=+f,+d",
+]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+debug = false
+lto = false
+panic = "abort"
+
+[profile.release-debug]
+inherits = "release"
+debug = true

@@ -21,6 +21,9 @@ pub const HIGH_MEMORY_START: usize = 0x8000_0000;
 pub const MEMORY_END: usize = 0x3_7000_0000;
 /// End of the high RAM window for the contest's supported 36 GiB maximum.
 pub const MAX_PHYSICAL_MEMORY_END: usize = 0x9_7000_0000;
+/// LoongArch QEMU and LS2K1000 currently expose the root filesystem as a
+/// whole-disk ext4 device rather than a partition offset.
+pub const ROOT_DISK_BASE_BLOCK: usize = 0;
 /// QEMU loongarch64/virt fw_cfg MMIO window.
 const FW_CFG_DATA: usize = 0x1e02_0000;
 const FW_CFG_SELECTOR: usize = FW_CFG_DATA + 8;

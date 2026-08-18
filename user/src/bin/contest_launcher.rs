@@ -217,9 +217,14 @@ fn detect_root_image_mode() -> ContestMode {
         println!("[contest_launcher] auto-detected preliminary-round root image");
         return ContestMode::Preliminary;
     }
+    // Software image (e.g. Alpine): has a Linux-ABI /bin/sh (busybox).
+    if path_exists("/bin/sh\0") {
+        println!("[contest_launcher] auto-detected software root image");
+        return ContestMode::Software;
+    }
 
-    println!("[contest_launcher] unknown root image; falling back to preliminary mode");
-    ContestMode::Preliminary
+    println!("[contest_launcher] unknown root image; falling back to shell mode");
+    ContestMode::Diagnostic
 }
 
 fn run_final_script(script: &str) {

@@ -16,6 +16,7 @@ LA_TARGET := loongarch64-unknown-none
 
 KERNEL_RV := kernel-rv
 KERNEL_LA := kernel-la
+KERNEL_VF2 := kernel-vf2.bin
 RV_ELF = os/target/$(RV_TARGET)/$(RV_CARGO_TARGET_DIR)/os
 LA_ELF = os/target/$(LA_TARGET)/$(LA_CARGO_TARGET_DIR)/os
 
@@ -158,6 +159,7 @@ endif
 
 .PHONY: all submit check-submit validate-submit-profile build-submit-disks build-disks \
 	build-rv build-la prepare-rv-cargo-config prepare-la-cargo-config \
+	prepare-jh7110-cargo-config \
 	prepare-pre-images check-rv-pre-image check-la-pre-image \
 	check-rv-final-image check-la-final-image \
 	prepare-la-software-root check-rv-software-image check-la-software-image \
@@ -168,6 +170,7 @@ endif
 	run-rv-diagnostic run-la-diagnostic run-rv-software run-la-software \
 	run-rv-bootstrap run-la-bootstrap \
 	rv la run-rv-pub run-la-pub \
+	build-vf2 \
 	help clean
 
 # Online-platform entry.  Do not add QEMU runs, downloads, or local root-image
@@ -203,6 +206,11 @@ prepare-la-cargo-config:
 	cp os/cargo/config-loongarch64.toml os/.cargo/config.toml
 	cp user/cargo/config-loongarch64.toml user/.cargo/config.toml
 
+prepare-jh7110-cargo-config:
+	mkdir -p os/.cargo user/.cargo
+	cp os/cargo/config-jh7110.toml os/.cargo/config.toml
+	cp user/cargo/config-riscv64.toml user/.cargo/config.toml
+
 build-rv: prepare-rv-cargo-config
 	$(MAKE) -C user build ARCH=riscv64 MODE=$(RV_MODE) FEATURES=$(RV_USER_FEATURES)
 	cd os && RESPOS_USER_PROFILE_DIR=$(RV_CARGO_TARGET_DIR) \
@@ -210,6 +218,15 @@ build-rv: prepare-rv-cargo-config
 		RESPOS_APP_REBUILD_STAMP=$$(date +%s%N) cargo build $(RV_CARGO_BUILD_ARG) $(RV_KERNEL_DEFAULT_FEATURE_ARGS) $(RV_KERNEL_FEATURE_ARGS)
 	rust-objcopy --set-start=0x80200000 $(RV_ELF) $(KERNEL_RV)
 	@rust-readobj -h -l $(KERNEL_RV) | awk '/Entry:/ || /VirtualAddress:/ || /PhysicalAddress:/ { print }'
+
+# VisionFive 2 (JH7110) 真机镜像：raw binary，装载地址 0x40200000（由 linker_jh7110.ld 决定）。
+build-vf2: prepare-jh7110-cargo-config
+	$(MAKE) -C user build ARCH=riscv64 MODE=$(RV_MODE) FEATURES=$(RV_USER_FEATURES)
+	cd os && RESPOS_USER_PROFILE_DIR=$(RV_CARGO_TARGET_DIR) \
+		RESPOS_USER_TARGET=$(RV_TARGET) \
+		RESPOS_APP_REBUILD_STAMP=$$(date +%s%N) cargo build $(RV_CARGO_BUILD_ARG) --features board_jh7110
+	rust-objcopy -O binary --gap-fill=0 $(RV_ELF) $(KERNEL_VF2)
+	@file $(KERNEL_VF2)
 
 build-la: prepare-la-cargo-config
 	$(MAKE) -C user build ARCH=loongarch64 MODE=$(LA_MODE) FEATURES=$(LA_USER_FEATURES)
@@ -499,5 +516,5 @@ help:
 	@echo "  make run-la-bootstrap default: 8 GiB / 4 harts"
 
 clean:
-	rm -f $(KERNEL_RV) $(KERNEL_LA) $(SUBMIT_RV_DISK_IMG) $(SUBMIT_LA_DISK_IMG)
+	rm -f $(KERNEL_RV) $(KERNEL_LA) $(KERNEL_VF2) $(SUBMIT_RV_DISK_IMG) $(SUBMIT_LA_DISK_IMG)
 	$(MAKE) -C os clean

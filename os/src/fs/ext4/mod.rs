@@ -17,7 +17,13 @@ lazy_static! {
         let device = BlockDeviceImpl::new_device(0)
             .expect("[kernel] required root virtio block device is unavailable");
         Arc::new(
-            Ext4SuperBlock::new(Disk::new(Arc::new(device)), 0, "ext4_root", "/", b"/\0")
+            Ext4SuperBlock::new(
+                Disk::new(Arc::new(device), crate::config::ROOT_DISK_BASE_BLOCK),
+                0,
+                "ext4_root",
+                "/",
+                b"/\0",
+            )
                 .expect("[kernel] failed to initialize root EXT4 filesystem"),
         )
     };
@@ -30,7 +36,7 @@ pub fn auxiliary_super_block() -> crate::syscall::SysResult<Arc<Ext4SuperBlock>>
     }
     let device = BlockDeviceImpl::new_device(1).map_err(|_| crate::syscall::Errno::ENODEV)?;
     let super_block = Arc::new(Ext4SuperBlock::new(
-        Disk::new(Arc::new(device)),
+        Disk::new(Arc::new(device), 0),
         1,
         "ext4_aux",
         "/respos/",

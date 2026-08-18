@@ -1,16 +1,109 @@
 # RespOS 当前状态
 
-## 2026-08-18 RV64 UTF-8 控制台板级 UART 边界
+## 2026-08-18 VisionFive 2 (JH7110) 软件兼容性真机验证 + SD 时钟提速（`port/jh7110` 分支）
 
-- **实现**：内核格式化输出继续按 UTF-8 字节调用 `console_putchar`。`mm::init()` 后的 RV64 direct-map
-  UART 输出按板级 feature 选择寄存器布局：默认 QEMU virt 使用字节访问、LSR `+5` 的 NS16550；
-  `board_jh7110` 使用 32 位访问、`reg-shift=2`、LSR `+0x14` 的 DW8250。早期启动仍回退 SBI legacy。
-- **验证**：当前工作树的默认 RV64 release 与 `RV_KERNEL_FEATURES=board_jh7110` release 均构建通过，
-  LA64 release 构建通过；默认 RV64 QEMU 实际启动后 `RESPOS` Unicode banner、virtio-net 初始化及
-  musl/glibc basic 测例正常。QEMU 长测在取得启动与相邻测例证据后人工停止，未据此申报完整初赛回归。
-- **边界**：`board_jh7110` 本轮只建立正确的 UART 寄存器访问边界，不代表 VisionFive 2 已可启动；
-  linker/装载地址、early page table、DDR 保留区、4 MHz timer、hart 拓扑和设备驱动仍须按独立阶段实现，
-  UART 真机输出也仍为 `待验证`。
+- **软件兼容性验证**：真机跑 `respos-software/software-smoke.sh`，`git_local`（init/config/add/commit/
+  status/log）、`vim_batch`（`-Nu NONE -n -es` 批替换）、`gcc_compile_run`（C 编译+运行）三项 **PASS**；
+  `rustc_compile_run` 因 rustc 二进制巨大 + SD 慢，编译 hello world 极慢（约数分钟），人工中止。核心
+  「vim + git」目标已验证通过。
+- **SD 时钟提速（`bb1cd2f`）**：初始化完成后从 div=63（~400kHz）自动探测稳定档位——逐档试读根分区
+  superblock 并**校验 magic 0xEF53 + CRC32c checksum**（与 lwext4 算法一致），停在 `div=16`（约 4 倍提速）。
+  探测从 `div=4` 起：4/8 档 superblock checksum 失败（**第二个连续块高时钟下读错**），16 档稳定。
+- **已知性能瓶颈（下一步）**：`div=8` 能读对 magic 但 checksum 错，说明「连续读」在高时钟下有竞态
+  （div=63 慢时钟下修过的 wait-BUSY/DTO 在高时钟复发），需排查 `read_single` 的 DTO/FIFO 时序；修好后可
+  回 div=8/4（~12/25MHz）。再做 4-bit 总线可再快 ~4 倍，逼近 U-Boot 的 21.6 MiB/s。
+- **环境注意**：宿主 mount `/dev/sda2`（ext4 根）前若报「结构需要清理」（EUCLEAN），先
+  `fsck.ext4 -f -y /dev/sda2`——因板子读写挂载 + 直接断电会留脏 journal（lwext4 journal 弱实现）。
+
+## 2026-08-18 VisionFive 2 (JH7110) SD 卡自举闭环（`port/jh7110` 分支）
+
+- **结果**：**上电直接进内核 + Alpine shell，无需 TFTP / 手敲命令**。SD 卡分为 p1 FAT32(256MiB, 引导) +
+  p2 ext4(alpine 根)；p1 放 `kernel-vf2.bin` + `boot.scr`（`fatload mmc 1:1 ...; booti ...`）。U-Boot
+  `bootcmd` 覆盖为 `'fatload mmc 1:1 0x40200000 kernel-vf2.bin; booti 0x40200000 - ${fdtcontroladdr}'` 并
+  `saveenv`（因默认 `boot_targets=mmc0 dhcp` 漏了 mmc1，distro 扫描不到 SD）。
+- **内核改动（`035a56c`）**：块设备层支持分区偏移——`Disk` 加 `base_block` 字段，读写/seek/`size()` 都加
+  偏移；`board.rs` 新增 `ROOT_DISK_BASE_BLOCK=526336`（JH7110，p2 起始扇区），QEMU 仍为 0。根盘
+  `Disk::new(dev, ROOT_DISK_BASE_BLOCK)`，辅助盘固定 0。
+- **分区/刷写**：`sfdisk` MBR（p1 start=2048 size=524288 type=c bootable；p2 start=526336 type=83）→
+  `mkfs.vfat /dev/sda1` → `dd alpine img → /dev/sda2`。真机 `fatload mmc 1:1` 读 11.4MB 内核成功、挂载 p2
+  alpine 成功（`num_blocks=122152960`）、进 `auto-detected software root image` → `/ #`。
+- **-110 更正**：开头上电仍有 2 行 `Card did not respond to voltage select! : -110`（U-Boot 早期探测的
+  **瞬时**噪声），但随后 `fatload` 成功读到卡——**64G 卡 U-Boot 也能读**，-110 无害。
+
+## 2026-08-18 VisionFive 2 (JH7110) ext4 根挂载 + 用户态已通（`port/jh7110` 分支）
+
+- **结果**：VF2 真机上 SD 卡 ext4 根（`alpine-linux-riscv64-ext4fs.img`）**挂载成功**，并已进入
+  **用户态**：`[contest_launcher]` → `[testrunner]` 正常运行（testrunner 报 `cannot enter /musl/ /glibc/`
+  是预期，alpine img 无比赛测试目录）。诊断行 `diag s_state=1 csum stored=0xeee6c286 computed=0xeee6c286 MATCH`。
+- **根因（rc=95 ENOTSUP 的真相）**：不是读盘 bug。lwext4 `ext4_sb_verify_csum` 校验 superblock checksum
+  失败；用宿主机复算确认**读路径完全正确**，卡上 `s_state=0x0002`(ERROR_FS) 但 checksum 仍是旧值
+  `0xeee6c286`（对应 `s_state=0x0001`），即**之前一次读写挂载把 superblock 半写坏**：`write_single` 缺
+  `read_single` 的「等 `STATUS.BUSY` 清零 + FIFO 复位等完成」时序，连续写第二个块（block 3 = checksum
+  所在）时抢跑，`ext4_fs.c:114` 写的 `s_state=ERROR_FS`(block 2) 落了盘、但新 checksum(block 3) 没落。
+  修复后 `write_single` 与 `read_single` 时序对齐；卡重刷 `alpine img` 后挂载通过。
+- **关键方法（可复用）**：lwext4 的 CRC32c 是 `init=0xffff_ffff`、**无 final XOR**（`ext4_crc32.c` 的
+  `crc32()`，非标准 CRC32C 的 `^0xffffffff`）；superblock checksum 在 block 3 offset 508（sb 偏移 1020），
+  覆盖前 1020 字节。据此在宿主机精确算出「仅 offset 58 由 0x01→0x02」的 CRC `0xfa29d155`，与内核读值
+  一致，从而定位到单字节 `s_state` 字段被改写。
+- **结果（已闭环）**：交互 shell 已通。`contest_launcher` 的 `detect_root_image_mode()` 把「未知镜像」兜底
+  从 `Preliminary(testrunner)` 改成 `Diagnostic(user_shell)`（`user/src/bin/contest_launcher.rs`），这样
+  alpine 裸镜像（无 `/musl/ /glibc/ /respos/profile`）直接进内嵌 `user_shell`，**镜像保持原样**。真机
+  已实测：`ls /`、`ls /etc`、`cd /bin`+`ls`（列出 busybox 全套 `ash sh bash cat ls ...`）、`hello_world`
+  （exec+yield）、`cat /etc/os-release` 读到真实 Alpine `NAME="Alpine Linux" VERSION_ID=3.22.1`——VFS 目录
+  读取 + ext4 文件读 + 用户程序 exec 端到端全部正常。
+- **`/respos` 之谜（已解释）**：`ls /` 里的 `respos` 不是磁盘上的目录，而是内核**辅助盘挂载点**——
+  `os/src/fs/mount.rs` 在挂载辅助 ext4（device 1）时 `root_inode.create("/", "respos", Directory)` 在根下
+  创建并插入 dentry。所以之前给 img 塞的磁盘 `/respos/profile` 会被这个挂载点**遮蔽**，`open("/respos/profile")`
+  走的是辅助盘（VF2 无 device 1）而非磁盘目录——这才是「profile 找不到」的真正原因，并非目录读 bug。
+  改 launcher 后已不再依赖 `/respos/profile`。
+- **software 模式（已跑通，Linux ABI 真 shell）**：`detect_root_image_mode()` 在 `/musl/ /glibc/` 标记之后
+  加「`path_exists("/bin/sh")` → `ContestMode::Software`」。真机已实测：`auto-detected software root image`
+  → `software mode: starting Alpine /bin/sh` → busybox 提示符 `/ #`；`uname -a` 返回
+  `Linux LAPTOP 6.10.0-dev Resp0S 0.1.0 riscv64 Linux`、`cat /etc/os-release` 读到真实 Alpine 内容——
+  即**动态链接 musl 的 busybox 在 VF2 真机跑通**，证明 Linux ABI 兼容层（ELF 加载 + 动态链接 + syscall）
+  端到端工作。`/bin/sh` 是 symlink→busybox，说明 VFS symlink 解析也正常。
+  **遗留（无害）**：`run_software()` 的 `ensure_qemu_dns()` 因 alpine `/etc/resolv.conf` 为空，往卡上写了
+  `nameserver 10.0.2.3`（QEMU DNS）；VF2 无网络暂不影响，Stage 6 网络时需处理（gate 或按板配置）。
+- **后续**：Stage 6 GMAC、Stage 7 SMP hart 拓扑（hart0=S7 无 MMU）。
+- **改动文件（均未提交，基线 `5208b78` 已提交至 `40dcff7`）**：`os/src/drivers/jh7110_sd.rs`（`write_single`
+  时序修复）、`user/src/bin/contest_launcher.rs`（未知镜像→shell 兜底 + `/bin/sh`→software 检测）。构建：
+  `CMAKE_POLICY_VERSION_MINIMUM=3.5 RUSTUP_TOOLCHAIN=nightly-2025-01-18 make build-vf2`；部署
+  `sudo cp kernel-vf2.bin /srv/tftp/`；boot `tftpboot 0x40200000 kernel-vf2.bin; booti 0x40200000 - ${fdtcontroladdr}`。
+  另：宿主 TFTP 需有线 `enp129s0` 配 `192.168.1.100/24`（WiFi 切换会丢 IP 导致 ARP retry）。
+
+## 2026-08-17 VisionFive 2 (JH7110) Stage 1+2+3+5(读块) 真机通过（`port/jh7110` 分支）
+
+- **结果**：RespOS 已在 VisionFive 2 真机跑通 Stage 1（Hello）、Stage 2（正式 MMU）、Stage 3（timer
+  中断 + trap）、Stage 5 的** SD 卡读块**。Stage 2 输出 `physical_memory_end = 0x140000000`、
+  `mm::init ok, free_frames ≈ 977400`；Stage 3 `timer tick` 每秒 +1000 ms；Stage 5 输出
+  `SD card init ok`（rca 动态）+ `read block 0 ok, tail=55aa`（读到 MBR magic）。
+- **SD 卡驱动（`os/src/drivers/jh7110_sd.rs`，dw_mmc，目标 sdio1@0x16020000）**：控制器复位 + 时钟
+  （UPD_CLK 轮询 CMD.START）+ FIFOTH（MSIZE=2/深度/2 水位）+ 卡初始化（CMD0/8/55/41/2/3/9/7/16）+
+  单块读（CMD17 + STATUS 读 FIFO 字数一次读多字）。**踩坑**：① CMD bit10 RW 语义反了（1=写，读应为 0，
+  否则出现 TXDR 而非 RXDR）；② UPD_CLK 不置 RINTSTS.CD、要轮询 CMD.START；③ MMIO 表漏 SDIO 窗口
+  `0x16010000..0x16050000` 会 StorePageFault；④ `j` 被压缩成 c.jal 破坏 Image 头（改硬编码 4 字节）。
+- **待做（Stage 5 收尾）**：CSD 容量解析（`num_blocks`）、写块（CMD24/25 + flush）、4-bit/高速，
+  然后接 `Disk`/ext4/VFS（`BlockDeviceImpl` 换 `SdCard`），恢复 `rust_main_high` 完整用户态。
+- **启动链路（已闭环，两条加载路径均验证）**：TFTP（`tftpboot 0x40200000 kernel-vf2.bin; booti ...`）与
+  SD 卡（`fatload mmc 1:3 0x40200000 kernel-vf2.bin; fatload mmc 1:3 0x46000000 jh7110-...v1.3b.dtb; booti 0x40200000 - 0x46000000`）
+  均可。SD 卡用卡上 v1.3b DTB 时 `dtb=0x46000000`；TFTP 用 control FDT 时 `dtb=0xfffc56a0`。
+  Image 头（magic `0x05435352` @0x38、`text_offset 0x200000`）→ `_start` → 完整 4 GiB DDR + MMIO
+  的 early page table → `rust_main` → FDT 内存发现 → `trap::init` + `mm::init`。
+  **SD 卡插槽注意**：本板 microSD 枚举为 `mmc 1`（`sdio1@16020000: 1 (SD)`），非 `mmc 0`；且 64G
+  卡会 `-110` 电压协商失败（U-Boot 自带 SD 驱动，fatload 需 16G 兼容卡）；但 RespOS 自己的 `jh7110_sd` 驱动能正常读写这张 64G 卡（`num_blocks=122152960`）。
+- **环境**：板 v1.3B（`PCB revision 0xb2`）4 GiB DRAM；OpenSBI v1.2（`aclint-mtimer @ 4000000Hz`、
+  `Boot HART 1`）；U-Boot 2021.10 SDK 5.15。`booti` 正确传 `a0=hart_id=1`、`a1=dtb=0xfffc56a0`。
+- **隔离落地**：`board_jh7110` feature + 独立文件；QEMU `make build-rv` 基线不变。构建命令
+  `CMAKE_POLICY_VERSION_MINIMUM=3.5 RUSTUP_TOOLCHAIN=nightly-2025-01-18`（lwext4 CMake 3.4 vs 宿主
+  CMake 4.x，见 workflows.md）。
+- **踩坑记录**：① 本板 U-Boot `booti` 校验 RISC-V Image magic；Stage 1 用 `go` 绕过，Stage 2 手写
+  64-byte Image 头改用 `booti`。② `j _start_kernel` 被汇编成 2 字节 `c.jal` 导致 Image 头错位 2 字节，
+  改为硬编码 4 字节 `jal x0,+64`（`0x0400006f`）修复。③ 早期页表必须覆盖**完整 4 GiB DDR**（含 RAM 顶部
+  control FDT），只映射首 1 GiB 会读不到 DTB。
+- **待验证/未做**：Stage 4（用户态 task/fork/exec/syscall/signal）、Stage 5（块设备 SD/eMMC/NVMe，
+  用户态根盘依赖它）、真机侧 U-Boot SD 卡识别（`-110`，fatload 暂被 TFTP 绕过；RespOS 驱动不受影响）、goldfish RTC / virtio-net 在 JH7110
+  的 gate 处理、SMP hart 拓扑（hart0=S7 无 MMU）。详见
+  [porting-visionfive2.md](../porting-visionfive2.md)。
 
 ## 2026-08-16 Git SSH 与 guest 内初步自举双架构闭合（当前工作树，基线 `993fa3e0`）
 

@@ -2559,7 +2559,7 @@ impl MemorySet {
         // 其余 RAM 用 Sv39 1 GiB 叶页，避免 8 GiB direct map 消耗数千页页表。
         let memory_end = physical_memory_end();
         #[cfg(target_arch = "riscv64")]
-        let first_gigabyte_end = 0xc000_0000usize.min(memory_end);
+        let first_gigabyte_end = (crate::config::RAM_BASE + (1 << 30)).min(memory_end);
         #[cfg(target_arch = "loongarch64")]
         let first_gigabyte_end = crate::config::LOW_MEMORY_END;
         memory_set.push_empty_map_area(

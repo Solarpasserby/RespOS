@@ -1,7 +1,12 @@
 // os/src/driver.rs
 
+// board_jh7110 下块设备换成 jh7110_sd，virtio-blk 相关 import/构造变死代码。
+#![cfg_attr(feature = "board_jh7110", allow(unused_imports, dead_code))]
+
 mod device;
 mod disk;
+#[cfg(all(target_arch = "riscv64", feature = "board_jh7110"))]
+pub mod jh7110_sd;
 mod virtio;
 
 pub use device::*;
@@ -20,7 +25,9 @@ use {
     virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader},
 };
 
-#[cfg(target_arch = "riscv64")]
+#[cfg(all(target_arch = "riscv64", feature = "board_jh7110"))]
+pub type BlockDeviceImpl = jh7110_sd::SdCard;
+#[cfg(all(target_arch = "riscv64", not(feature = "board_jh7110")))]
 pub type BlockDeviceImpl = VirtIoBlkDev<VirtIoHalImpl, MmioTransport<'static>>;
 #[cfg(target_arch = "loongarch64")]
 pub type BlockDeviceImpl = VirtIoBlkDev<VirtIoHalImpl, PciTransport>;
@@ -31,7 +38,18 @@ pub type NetDeviceImpl = VirtIoNetDev<VirtIoHalImpl, MmioTransport<'static>>;
 pub type NetDeviceImpl = VirtIoNetDev<VirtIoHalImpl, PciTransport>;
 
 impl BlockDeviceImpl {
-    #[cfg(target_arch = "riscv64")]
+    #[cfg(all(target_arch = "riscv64", feature = "board_jh7110"))]
+    pub fn new_device(index: usize) -> DevResult<Self> {
+        // JH7110 只有一张 SD 卡（mmc1），没有辅助盘；index=1 会让辅助盘挂载路径
+        // 重复初始化同一张卡，并在根盘上凭空创建 /respos 挂载点。这里对非 0 直接报错，
+        // 使 `auxiliary_super_block()` 返回 ENODEV 而跳过辅助盘。
+        if index != 0 {
+            return Err(DevError::Unsupported);
+        }
+        jh7110_sd::SdCard::new()
+    }
+
+    #[cfg(all(target_arch = "riscv64", not(feature = "board_jh7110")))]
     pub fn new_device(index: usize) -> DevResult<Self> {
         let &(virtio0, virtio0_size) = VIRTIO_MMIO.get(index).ok_or(DevError::InvalidParam)?;
         let header = NonNull::new((virtio0 + KERNEL_BASE) as *mut VirtIOHeader).unwrap();

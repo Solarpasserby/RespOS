@@ -45,8 +45,24 @@ pub fn rust_main(hart_id: usize, opaque: usize) -> ! {
     }
     clear_bss();
     arch::smp::init_current_hart(hart_id);
-    config::init_physical_memory_end(opaque);
-    rust_main_high()
+    #[cfg(feature = "board_jh7110")]
+    {
+        println!(
+            "[vf2] Hello RespOS on VisionFive 2 (hart_id={}, dtb={:#x})",
+            hart_id, opaque
+        );
+        config::init_physical_memory_end(opaque);
+        println!(
+            "[vf2] physical_memory_end = {:#x}",
+            config::physical_memory_end()
+        );
+        rust_main_high()
+    }
+    #[cfg(not(feature = "board_jh7110"))]
+    {
+        config::init_physical_memory_end(opaque);
+        rust_main_high()
+    }
 }
 
 #[cfg(target_arch = "loongarch64")]
@@ -82,6 +98,7 @@ fn rust_secondary_main_high() -> ! {
     task::run_tasks();
 }
 
+// QEMU 走完整启动；`board_jh7110` 下 RTC/net/SMP 尚未适配，只跑到用户态。
 fn rust_main_high() -> ! {
     #[cfg(target_arch = "loongarch64")]
     arch::enable_kernel_extensions();
@@ -94,14 +111,16 @@ fn rust_main_high() -> ! {
     #[cfg(target_arch = "riscv64")]
     sbi::mark_direct_uart_ready();
     banner::print_boot_banner();
-    syscall::init_realtime_from_rtc();
-    net::init();
+    #[cfg(not(all(target_arch = "riscv64", feature = "board_jh7110")))]
+    syscall::init_realtime_from_rtc(); // QEMU goldfish RTC，JH7110 无
+    #[cfg(not(all(target_arch = "riscv64", feature = "board_jh7110")))]
+    net::init(); // virtio-net，JH7110 无
     task::add_initproc();
     #[cfg(any(target_arch = "riscv64", target_arch = "loongarch64"))]
     {
         task::init_per_cpu_idle_tasks();
     }
-    #[cfg(target_arch = "riscv64")]
+    #[cfg(all(target_arch = "riscv64", not(feature = "board_jh7110")))]
     {
         let boot_hart = arch::smp::boot_hart();
         arch::smp::publish_boot_ready(boot_hart);

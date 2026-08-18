@@ -3,6 +3,32 @@
 这里只收录能解释当前代码形态或避免重复踩坑的决策。日期是当前证据最后核验时间，不一定是
 最初提出时间。
 
+## 板级/架构差异必须隔离，QEMU RV64 是永久回归基线
+
+- 状态：已采用（JH7110 Stage 1 已按此落地）
+- 适用范围：任何涉及 RV64/LA64/板级（QEMU virt、VisionFive 2/JH7110、LA 真机）的改动，
+  以及所有共享代码（`os/src/{mm,task,fs,syscall,net,drivers,signal}`）、`Makefile`、`os/Cargo.toml`
+- 最后验证：2026-08-17
+- 证据：`os/src/arch/mod.rs` 的 `#[cfg(target_arch)]` 选择；`board_jh7110` feature 及
+  `os/src/linker_jh7110.ld`、`os/src/arch/rv64/entry/entry_jh7110.asm`、`os/cargo/config-jh7110.toml`、
+  `os/src/arch/rv64/config/board.rs` 的 `#[cfg(feature="board_jh7110")]`
+- 决策：RespOS 是双架构（RV64 + LA64）且 RV64 侧另有多板级（QEMU virt / JH7110）的内核。
+  **QEMU RV64 是永久回归基线，任何移植/重构不得破坏它。** 差异必须落到正确层级并显式隔离：
+  - 架构差异 → 共享代码里的 `#[cfg(target_arch = "riscv64" / "loongarch64")]` 分支，或
+    `os/src/arch/{rv64,loongarch64}/**` + 各自的 `linker_*.ld`；
+  - 板级差异 → 独立 Cargo feature（如 `board_jh7110`）+ **独立文件**（`linker_*.ld`、
+    `entry_*.asm`、`cargo/config-*.toml`、`config/board_*.rs`），不写死进共享代码或另一块板的文件。
+  - 明确禁止：为配合 LA/其他板移植而改动 `os/src/linker_riscv.ld`、`os/cargo/config-riscv64.toml`、
+    `os/src/arch/rv64/**` 或 `Makefile` 的 `build-rv`/`rust-objcopy --set-start=0x80200000` 等 RV64 专属路径。
+- 原因：JH7110 与 QEMU virt 同属 `target_arch="riscv64"`（同一 Sv39、trap、上下文切换、SBI ABI），
+  差异只是内存映射与外设；直接改 QEMU 常量会同时破坏比赛回归基线和队友的 LA 移植。隔离使每条路线
+  可独立构建、独立回退、独立验证。
+- 后续影响：任何改动先归类为「架构通用 / RV64 专属 / LA64 专属 / 板级专属」再落点。验收必须
+  `make build-rv` 成功且 QEMU 启动行为与改动前一致，最终 diff 中 `arch/rv64/**`、`linker_riscv.ld`、
+  `config-riscv64.toml` 为零改动；LA 真机、JH7110 真机各自走独立 feature + 独立构建目标
+  （`make build-la` / `make build-vf2`）。新增真实硬件驱动（UART/中断控制器/SDIO/GMAC/时钟复位）
+  一律 `#[cfg(feature = "board_xxx")]` 或独立模块包裹，QEMU 路径保持不变。
+
 ## SSH/self-build 验证使用临时辅助盘注入凭据和冻结依赖
 
 - 状态：已采用
