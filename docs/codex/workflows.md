@@ -24,11 +24,11 @@ git clone --branch final-2026 --depth 1 \
 
 ### 可选 `/respos` 辅助镜像
 
-顶层 `Makefile` 的 `make all` 从 `respos/` 生成 16 MiB ext4 `disk.img` 和 `disk-la.img`；
-提交产物名称和 profile 不接受命令行覆盖。文件存在时，RV64 将其连接到 `virtio-mmio-bus.1`，LoongArch
-将其添加为第二个 `virtio-blk-pci`。文件不存在时不添加 x1。
-`build-disks` 每次都完整重建两个小镜像，因此 `respos/` 中辅助文件的新增、修改和删除都会反映到产物，
-不会因 Make 只观察 `profile` 而沿用陈旧内容。
+顶层 `Makefile` 的 `make all` 使用 `auxfs/profiles/auto.profile` 生成 16 MiB ext4
+`disk.img` 和 `disk-la.img`；提交产物名称和 profile 不接受命令行覆盖。文件存在时，RV64 将其连接到
+`virtio-mmio-bus.1`，LoongArch 将其添加为第二个 `virtio-blk-pci`。文件不存在时不添加 x1。
+`scripts/build_aux_disk.sh` 每次都在 `/tmp` 组装选定 profile 和可选 payload，再原子重建目标镜像；
+仓库中的 `auxfs/` 是辅助盘源资源，guest 内挂载点仍固定为 `/respos`。
 
 辅助镜像必须是 ext4，其根目录将在 guest 中显示为 `/respos`。最小 profile 例子：
 
@@ -38,7 +38,7 @@ mode=auto
 
 线上提交使用 `mode=auto`，由 launcher 检查官方根盘中的测试脚本自动适配初赛复测或决赛；本地
 强制初赛/决赛分别使用 `mode=preliminary`/`mode=final`。本地显式诊断可使用
-`respos-diagnostic/profile` 的 `mode=diagnostic` 进入内嵌 `user_shell`；该目录不参与默认
+`auxfs/profiles/diagnostic.profile` 的 `mode=diagnostic` 进入内嵌 `user_shell`；该 profile 不参与默认
 `make all` 生成的提交镜像。profile 最多读取 512 bytes，忽略空行和以 `#` 开头的行；缺失、空白
 或无法识别时也进入自动检测。自动检测先检查 CAgent/BuildStorm 决赛脚本，再检查 musl/glibc basic
 初赛脚本；决赛标志优先，两类标志都没有时告警并回退 preliminary。final launcher
@@ -99,7 +99,7 @@ make run-la-software
 # guest 出现 /> 后输入同一命令
 ```
 
-两目标均使用 release、4 GiB/2 hart、`-snapshot`、`respos-software/profile` 的 software mode；launcher
+两目标均使用 release、4 GiB/2 hart、`-snapshot`、`auxfs/profiles/software.profile` 的 software mode；launcher
 直接进入 Alpine `/bin/sh -i` 并设置 PATH/HOME/TERM/LC_ALL。输出默认
 写入 `/tmp/respos-{rv,la}-software.log`。辅助盘中的脚本依次验证 Git 本地仓库闭环、Vim 批处理编辑、
 GCC 和 rustc 单文件编译/运行，并以 `SOFTWARE_COMPAT ALL PASS` 与 shell child exit 0 为成功条件。
@@ -231,7 +231,7 @@ make check-submit         # 构建并检查四个提交产物和 auto profile
 Cargo config 到 `os/.cargo/config.toml` 和
 `user/.cargo/config.toml`，先构建用户程序，再通过 `os/build.rs` 嵌入内核。
 Makefile 使用 `.NOTPARALLEL`，因为两个架构共享可变 Cargo config。`make all` 固定读取
-`respos/profile`，并在构建前验证第一个有效配置项为 `mode=auto`；命令行不能把线上提交入口
+`auxfs/profiles/auto.profile`，并在构建前验证第一个有效配置项为 `mode=auto`；命令行不能把线上提交入口
 静默改成 preliminary/diagnostic。平台提供大型官方根镜像，仓库只生成第二块小型 ext4 辅助盘。
 
 - 后续影响：不要并行执行四个平台的构建命令；共享 config 文件可能相互覆盖。
@@ -329,7 +329,7 @@ make run-la-final LA_FINAL_MEM=12G LA_FINAL_SMP=12  # 本机内存不足时的�
 - 状态：RV64/LA64 已验证
 - 适用范围：远端 Git SSH、真实编译工具链与初步自举门禁
 - 最后验证：2026-08-16
-- 证据：`respos-bootstrap/`、`scripts/build_bootstrap_disk.sh`、双架构日志见
+- 证据：`auxfs/payloads/bootstrap/`、`scripts/build_bootstrap_disk.sh`、双架构日志见
   [current-status.md](./current-status.md)
 - 内容：先在 GitHub 仓库配置只读 Deploy Key，并把对应私钥保存为仅本轮使用的宿主临时文件。不要把
   key 放进仓库。宿主内存约 15 GiB 时两架构必须顺序运行，固定单个 QEMU、8 GiB/4 hart：
@@ -443,12 +443,12 @@ curl -s http://127.0.0.1:8080/ -o /tmp/respos-http.html -w '%{http_code}\n'
 # 预期输出 200；页面含 /proc 同源的 uptime/memory/tasks/CPU/PageCache 实时状态
 ```
 
-快速诊断也可用最小镜像 + 诊断辅助盘直接起 QEMU（`-snapshot`，`respos-diagnostic/profile`
+快速诊断也可用最小镜像 + 诊断辅助盘直接起 QEMU（`-snapshot`，`auxfs/profiles/diagnostic.profile`
 为 `mode=diagnostic`）：
 
 ```bash
 make build-rv RV_KERNEL_FEATURES=kernel_http
-truncate -s 16M /tmp/respos-http.img && mkfs.ext4 -q -F -d respos-diagnostic /tmp/respos-http.img
+bash scripts/build_aux_disk.sh /tmp/respos-http.img 16M auxfs/profiles/diagnostic.profile
 qemu-system-riscv64 -machine virt -kernel os/target/riscv64gc-unknown-none-elf/release/os \
   -m 512M -nographic -snapshot -smp 2 -bios default \
   -drive file=img/sdcard-rv.img,if=none,format=raw,id=x0 \
@@ -1794,9 +1794,8 @@ timeout 130s env \
 LA64 的可复现短窗口可先生成不参与提交的 diagnostic 辅助盘：
 
 ```bash
-make build-disks AUX_FS_DIR=respos-diagnostic \
-  RV_DISK_IMG=/tmp/respos-rv-diagnostic.img \
-  LA_DISK_IMG=/tmp/respos-la-diagnostic.img
+bash scripts/build_aux_disk.sh /tmp/respos-la-diagnostic.img 16M \
+  auxfs/profiles/diagnostic.profile
 make la LA_FS_IMG=img/sdcard-la-pub.img \
   LA_DISK_IMG=/tmp/respos-la-diagnostic.img \
   LA_USER_FEATURES= LA_KERNEL_FEATURES=perf_counters

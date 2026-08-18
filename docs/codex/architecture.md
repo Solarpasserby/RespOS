@@ -792,7 +792,7 @@ FdTable slot (FdEntry: descriptor flags)
 - 适用范围：anonymous pipe、named FIFO、write/writev、并发 producer
 - 最后验证：2026-08-16
 - 证据：`os/src/fs/pipe.rs`、`os/src/syscall/fs.rs::sys_writev()`、
-  `respos-software/software-posix.sh`
+  `auxfs/payloads/software/software-posix.sh`
 - 内容：总长度不超过 4096-byte `PIPE_BUF` 的 write 在 buffer 空间不足时不发布部分字节，而是整体阻塞或
   对 nonblocking fd 返回 `EAGAIN`；小 writev 先把所有 iovec 拷入单个 kernel record，再调用同一 pipe
   write 提交。nonblocking pipe 不使用通用的整页 `write_ready()` admission，而由 pipe write 按本次
@@ -805,7 +805,7 @@ FdTable slot (FdEntry: descriptor flags)
 - 状态：已实现并由 guest GCC 生命周期 probe 双架构验证
 - 适用范围：flock、fcntl `F_SETLK`、dup/fork/close/exit
 - 最后验证：2026-08-16
-- 证据：`os/src/syscall/fs.rs`、`os/src/task/task.rs`、`respos-software/software-posix.sh`
+- 证据：`os/src/syscall/fs.rs`、`os/src/task/task.rs`、`auxfs/payloads/software/software-posix.sh`
 - 内容：flock entry 绑定 open-file-description 的 weak `FileOp` owner；dup/fork 共享该 owner，任一 fd close
   不释放锁，最后一个强引用死亡后冲突扫描惰性回收 entry。POSIX record lock 以 TGID 为 owner，同一进程
   任意相关 fd close 释放该 inode 上的锁，process-group exit 统一删除该 TGID 在所有 inode 上的 entry。
@@ -1106,7 +1106,7 @@ FdTable slot (FdEntry: descriptor flags)
 - 适用范围：TCP/UDP socket、loopback benchmark、QEMU virtio-net 静态 IPv4
 - 最后验证：2026-08-16
 - 证据：`os/src/net/mod.rs`、`os/src/net/listen.rs`、`os/src/net/socket.rs`、
-  `os/src/syscall/net.rs`、`respos-software/software-network.sh`；双架构软件网络与 socket-connect 日志见
+  `os/src/syscall/net.rs`、`auxfs/payloads/software/software-network.sh`；双架构软件网络与 socket-connect 日志见
   [current-status.md](./current-status.md)
 - 内容：socket syscall 经 FileOp socket 对象进入 TCP/UDP 实现，全局 `SocketSet` 同时由 IP-medium
   loopback 和 Ethernet-medium virtio-net interface 驱动。TCP connect 按显式本地地址或目的地址选择

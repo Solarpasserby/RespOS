@@ -87,6 +87,7 @@ make run-la-software
 ```text
 RespOS/
 ├── Makefile              # 四平台构建与 QEMU 运行入口
+├── auxfs/                # 辅助盘 profile 与 software/bootstrap payload
 ├── bootloader/           # RISC-V 启动镜像与引导相关文件
 ├── os/                   # 内核源码
 │   ├── src/

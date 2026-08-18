@@ -1,5 +1,21 @@
 # RespOS 当前状态
 
+## 2026-08-18 辅助盘资源布局收敛（当前工作树）
+
+- **源码布局**：删除仓库根目录下六个重复的 `respos*` 资源目录，运行模式统一放入
+  `auxfs/profiles/*.profile`，实际需要随盘分发的软件兼容和自举资源分别放入
+  `auxfs/payloads/software/` 与 `auxfs/payloads/bootstrap/`。源码目录不再冒充 guest 挂载结构。
+- **统一制盘**：新增 `scripts/build_aux_disk.sh`，从一个 profile 和零个或多个 payload 目录在
+  `/tmp` 组装 staging tree，再原子生成 ext4 镜像。提交盘、初赛、决赛、诊断和软件模式共用该入口；
+  `build_bootstrap_disk.sh` 只负责在临时 payload 中注入私钥、SSH client 和 Rust target。
+- **运行时兼容**：辅助盘根目录仍挂载为 guest `/respos`，`/respos/profile`、软件脚本及 bootstrap
+  脚本路径均未改变；本次只调整仓库组织和宿主制盘流程。
+- **验证**：六种 profile 均已生成测试 ext4 镜像并由 `debugfs` 核对 mode；software/bootstrap
+  payload 文件存在，bootstrap 动态私钥 mode 为 `0600`。`make build-submit-disks` 生成的两份提交盘
+  均为 `mode=auto`；四平台 release 构建顺序通过；RV64 diagnostic QEMU 实际进入
+  `[contest_launcher] diagnostic mode` 与 `Rust user shell`；最终 `make check-submit` 通过。
+  宿主 Linux libc 组合矩阵全部通过，`git diff --check` 无错误。
+
 ## 2026-08-18 四平台可插拔平台层重构（当前工作树）
 
 - **平台边界**：新增 `os/src/platform/`，静态提供 QEMU RV64、JH7110、QEMU LoongArch64、LS2K1000
@@ -41,7 +57,7 @@
 
 ## 2026-08-18 VisionFive 2 (JH7110) 软件兼容性真机验证 + SD 时钟提速（`port/jh7110` 分支）
 
-- **软件兼容性验证**：真机跑 `respos-software/software-smoke.sh`，`git_local`（init/config/add/commit/
+- **软件兼容性验证**：真机跑 `auxfs/payloads/software/software-smoke.sh`，`git_local`（init/config/add/commit/
   status/log）、`vim_batch`（`-Nu NONE -n -es` 批替换）、`gcc_compile_run`（C 编译+运行）三项 **PASS**；
   `rustc_compile_run` 因 rustc 二进制巨大 + SD 慢，编译 hello world 极慢（约数分钟），人工中止。核心
   「vim + git」目标已验证通过。
@@ -192,7 +208,7 @@
 - **诊断服务隔离**：内核 HTTP server 改由 `kernel_http` feature 控制；普通 preliminary/final/software
   构建只启用 virtio-net，不占用 80 端口。`make run-{rv,la}-diagnostic` 自动传入该 feature；HTTP
   listener 注册失败会回收已加入 SocketSet 的 handle。
-- **可复现软件门禁**：新增 `respos-software/software-network.sh`。两张 Alpine 镜像的
+- **可复现软件门禁**：新增 `auxfs/payloads/software/software-network.sh`。两张 Alpine 镜像的
   `/etc/resolv.conf` 为空，launcher 在 software/final 模式且未发现既有 `nameserver` 时安装 QEMU DNS
   `10.0.2.3` fallback；RV64 guest 已确认直接 `nslookup` 成功。脚本随后验证 UDP DNS、
   公网 HTTP、GitHub HTTPS `ls-remote` 和浅克隆。RV64/LA64 release、4 GiB/2 hart 均输出四项
@@ -210,7 +226,7 @@
 
 ## 2026-08-16 pthread 与 `posix_spawn()` libc 组合矩阵（当前工作树，基线 `4fb2b7e8`）
 
-- **同源契约探针**：新增 `respos-software/libc-combination.c`，以同一份严格 C11 源码在宿主 Linux 和
+- **同源契约探针**：新增 `auxfs/payloads/software/libc-combination.c`，以同一份严格 C11 源码在宿主 Linux 和
   Alpine guest 验证六组 libc 组合路径：线程 create/join、mutex/condition/rwlock/once、TLS destructor；
   detached thread 完成与 32 轮 detached 加 32 轮 joinable 资源压力；robust mutex
   owner-death/consistent/relock；匿名
@@ -237,7 +253,7 @@
 
 ## 2026-08-16 软件 POSIX 矩阵、命名 FIFO、pipe 原子性与锁生命周期（当前工作树，基线 `21c02eb2`）
 
-- **真实工具矩阵**：新增 `respos-software/software-posix.sh`，使用 Alpine 自带
+- **真实工具矩阵**：新增 `auxfs/payloads/software/software-posix.sh`，使用 Alpine 自带
   `find/xargs -P2/sha256sum/sort` 验证并发 pipeline，使用 blocking named FIFO 验证双 writer 数据完整性，
   使用 `tar | gzip` 验证归档、硬链接与符号链接保持，使用 util-linux `flock` 验证跨进程竞争/退出释放，
   使用 guest GCC 现场编译 C probe 验证 nonblocking pipe 小 writev 的空间判断，以及 flock/record-lock
@@ -270,7 +286,7 @@
 
 ## 2026-08-16 扩展软件兼容矩阵与大 ELF `PT_INTERP` 闭合（当前工作树，基线 `21c02eb2`）
 
-- **扩展矩阵**：新增 `respos-software/software-extended.sh`，覆盖 64 文件 Git 分支/合并、
+- **扩展矩阵**：新增 `auxfs/payloads/software/software-extended.sh`，覆盖 64 文件 Git 分支/合并、
   `gc/repack/fsck`，Vim 被 `SIGKILL` 后的 swap 恢复，GNU Make `-j2` 编译静态库，以及 Cargo
   offline workspace 的 release 并行构建与增量重编译。Makefile 软件镜像预检同步要求
   `make/ar/cargo`，避免缺包被误报为内核失败。
@@ -296,7 +312,7 @@
 
 ## 2026-08-16 Alpine 交互 shell、console line discipline 与全屏 Vim（当前工作树）
 
-- **启动入口**：`respos-software/profile` 改为 `mode=software`；`contest_launcher` 直接
+- **启动入口**：`auxfs/profiles/software.profile` 改为 `mode=software`；`contest_launcher` 直接
   `execve("/bin/sh", ["sh", "-i"], envp)`，固定 `HOME=/tmp`、`TMPDIR=/tmp`、`TERM=xterm`、
   `LC_ALL=C` 与 Alpine PATH。软件镜像不再先进入无环境的内嵌诊断 shell。
 - **共享 line discipline**：stdio stdin 与 `/dev/tty` 统一进入 `os/src/fs/tty.rs` 的 console 输入状态机。

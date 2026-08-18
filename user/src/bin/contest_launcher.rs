@@ -26,9 +26,9 @@ const PRELIMINARY_MARKERS: &[&str] = &["/musl/basic_testcode.sh\0", "/glibc/basi
 // aux 盘放 /respos/profile，靠 /etc/alpine-release 自动识别。
 const SOFTWARE_MARKER: &str = "/etc/alpine-release\0";
 
-// 现场赛软件兼容本地题冒烟脚本（repo 根 respos-software/software-smoke.sh），
+// 现场赛软件兼容本地题冒烟脚本（auxfs/payloads/software/software-smoke.sh），
 // 嵌入后由 run_software 写到 /tmp 交给 /bin/sh 执行。
-const SOFTWARE_SMOKE: &str = include_str!("../../../respos-software/software-smoke.sh");
+const SOFTWARE_SMOKE: &str = include_str!("../../../auxfs/payloads/software/software-smoke.sh");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ContestMode {

@@ -49,7 +49,7 @@
 - 状态：已确认；测试夹具已修正
 - 适用范围：pthread detach/resource-reclaim probe、musl/glibc 差异归因
 - 最后验证：2026-08-16
-- 证据：`respos-software/libc-combination.c`、宿主 Linux 与 RV64 Alpine 首轮对照
+- 证据：`auxfs/payloads/software/libc-combination.c`、宿主 Linux 与 RV64 Alpine 首轮对照
 - 内容：对 detached thread 再调用 `pthread_join()` 属于不可依赖的误用，libc 不保证统一返回
   `EINVAL`；RV64 Alpine 首版夹具在此前四线程组通过后因此段错误，但移除该断言、保持线程明确存活并
   用 condition 验证其完成后，双架构完整矩阵及各 8 轮压力均通过。
@@ -353,7 +353,8 @@
 ## 辅助盘 profile 不会随平台根镜像变化，线上阶段不能固定为 final
 
 - 状态：已确认；通过 `mode=auto` 与根盘标志检测修复
-- 适用范围：`respos/profile`、`disk*.img`、`contest_launcher`、初赛复测与决赛评分
+- 适用范围：`auxfs/profiles/auto.profile`、guest `/respos/profile`、`disk*.img`、
+  `contest_launcher`、初赛复测与决赛评分
 - 最后验证：2026-08-13
 - 证据：x0/x1 挂载关系；RV64/LA64 四份官方镜像的脚本检查；同一 auto 辅助盘的双架构四镜像启动；
   RV64 决赛不挂载 x1 的启动日志

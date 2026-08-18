@@ -36,7 +36,7 @@
 - 状态：已采用
 - 适用范围：Git SSH 兼容门禁、guest 内初步自举、RV64/LA64 本地验证
 - 最后验证：2026-08-16
-- 证据：`respos-bootstrap/`、`scripts/build_bootstrap_disk.sh`、
+- 证据：`auxfs/payloads/bootstrap/`、`scripts/build_bootstrap_disk.sh`、
   `scripts/get_bootstrap_{ssh,rust_std}.sh`、双架构日志见 [current-status.md](./current-status.md)
 - 决策：仓库只保存 GitHub host key 和无秘密的执行脚本。调用者通过 `BOOTSTRAP_SSH_KEY` 显式传入只读
   Deploy Key；构建器把它以 0600 权限复制到一次性 `/tmp` ext4 辅助盘，QEMU 始终使用 `-snapshot`。
@@ -236,7 +236,7 @@
 - 状态：已采用
 - 适用范围：顶层构建、线上提交、初赛复测、决赛本地回归
 - 最后验证：2026-08-13
-- 证据：课程平台实际 `make all` 日志、顶层 `Makefile`、`respos/profile`、
+- 证据：课程平台实际 `make all` 日志、顶层 `Makefile`、`auxfs/profiles/auto.profile`、
   `user/src/bin/{contest_launcher,testrunner}.rs`；
   `RUSTUP_TOOLCHAIN=nightly-2025-01-18 make check-submit`；双架构初赛/决赛 auto 启动日志
 - 内容：`make all` 只顺序构建 `kernel-rv`、`kernel-la` 和包含 `mode=auto` 的

@@ -65,6 +65,7 @@
 | `img/` | 比赛测试镜像 | 运行会修改镜像内容，必要时从 `.xz` 恢复 |
 | `judge/` | LTP 日志解析、Linux baseline 对比 | 不要用 QEMU 退出码替代日志分析 |
 | `scripts/` | 镜像下载、LTP 报告等辅助流程 | `scripts/get_img.sh` 保留下载压缩包 |
+| `auxfs/` | 辅助盘的运行 profile 与 software/bootstrap payload | 源码布局与 guest `/respos` 挂载点分离；统一由制盘脚本组装 |
 | `docs/codex/` | Codex 接手摘要、状态和验证工作流 | 只保留经核验的项目知识 |
 | `docs/cagent/` | CAgent 题目执行计划和协作材料 | 队友按当前阶段文档执行，不放镜像或产物 |
 

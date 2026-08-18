@@ -25,7 +25,10 @@ LA_ELF = os/target/$(LA_TARGET)/$(LA_CARGO_TARGET_DIR)/os
 
 # 线上提交产物名称和 auto 配置固定不变，禁止通过命令行覆盖把 `make all`
 # 静默变成本地初赛或诊断构建。
-override SUBMIT_AUX_FS_DIR := respos
+override AUXFS_PROFILE_DIR := auxfs/profiles
+override AUXFS_PAYLOAD_DIR := auxfs/payloads
+override AUX_DISK_BUILDER := scripts/build_aux_disk.sh
+override SUBMIT_AUX_PROFILE := $(AUXFS_PROFILE_DIR)/auto.profile
 override SUBMIT_RV_DISK_IMG := disk.img
 override SUBMIT_LA_DISK_IMG := disk-la.img
 override SUBMIT_AUX_FS_SIZE := 16M
@@ -184,17 +187,15 @@ all: submit
 submit: validate-submit-profile build-qemu-rv64 build-qemu-loongarch64 build-submit-disks
 
 validate-submit-profile:
-	@mode="$$(awk '{ line=$$0; sub(/^[ \t]+/, "", line); if (line != "" && substr(line, 1, 1) != "#") { print line; exit } }' $(SUBMIT_AUX_FS_DIR)/profile)"; \
+	@mode="$$(awk '{ line=$$0; sub(/^[ \t]+/, "", line); if (line != "" && substr(line, 1, 1) != "#") { print line; exit } }' $(SUBMIT_AUX_PROFILE))"; \
 		test "$$mode" = "mode=auto" || { \
 			echo "submission profile must start with mode=auto, got '$$mode'" >&2; \
 			exit 1; \
 		}
 
 build-submit-disks: validate-submit-profile
-	truncate -s $(SUBMIT_AUX_FS_SIZE) $(SUBMIT_RV_DISK_IMG)
-	mkfs.ext4 -q -F -d $(SUBMIT_AUX_FS_DIR) $(SUBMIT_RV_DISK_IMG)
-	truncate -s $(SUBMIT_AUX_FS_SIZE) $(SUBMIT_LA_DISK_IMG)
-	mkfs.ext4 -q -F -d $(SUBMIT_AUX_FS_DIR) $(SUBMIT_LA_DISK_IMG)
+	@bash $(AUX_DISK_BUILDER) $(SUBMIT_RV_DISK_IMG) $(SUBMIT_AUX_FS_SIZE) $(SUBMIT_AUX_PROFILE)
+	@bash $(AUX_DISK_BUILDER) $(SUBMIT_LA_DISK_IMG) $(SUBMIT_AUX_FS_SIZE) $(SUBMIT_AUX_PROFILE)
 
 # 兼容旧文档的目标名。它现在始终表示固定的自动识别提交盘，
 # 不再接受调用方选择的本地运行配置。
@@ -348,14 +349,12 @@ check-la-software-image: prepare-la-software-root
 	}
 
 build-rv-local-disk:
-	@test -r $(AUX_FS_DIR)/profile || { echo "missing $(AUX_FS_DIR)/profile" >&2; exit 1; }
-	truncate -s $(LOCAL_AUX_FS_SIZE) $(RV_DISK_IMG)
-	mkfs.ext4 -q -F -d $(AUX_FS_DIR) $(RV_DISK_IMG)
+	@bash $(AUX_DISK_BUILDER) $(RV_DISK_IMG) $(LOCAL_AUX_FS_SIZE) \
+		$(AUX_PROFILE) $(AUX_PAYLOAD_DIRS)
 
 build-la-local-disk:
-	@test -r $(AUX_FS_DIR)/profile || { echo "missing $(AUX_FS_DIR)/profile" >&2; exit 1; }
-	truncate -s $(LOCAL_AUX_FS_SIZE) $(LA_DISK_IMG)
-	mkfs.ext4 -q -F -d $(AUX_FS_DIR) $(LA_DISK_IMG)
+	@bash $(AUX_DISK_BUILDER) $(LA_DISK_IMG) $(LOCAL_AUX_FS_SIZE) \
+		$(AUX_PROFILE) $(AUX_PAYLOAD_DIRS)
 
 build-rv-bootstrap-disk:
 	@test -n "$(BOOTSTRAP_SSH_KEY)" || { echo "set BOOTSTRAP_SSH_KEY to a temporary read-only SSH key" >&2; exit 1; }
@@ -412,7 +411,7 @@ run-la-qemu:
 # 由 testrunner 输出初赛评测分组标记。
 run-rv-pre: RV_FS_IMG = $(RV_PRE_FS_IMG)
 run-rv-pre: RV_DISK_IMG = $(RV_PRE_DISK_IMG)
-run-rv-pre: AUX_FS_DIR = respos-preliminary
+run-rv-pre: AUX_PROFILE = $(AUXFS_PROFILE_DIR)/preliminary.profile
 run-rv-pre: MEM = $(PRE_MEM)
 run-rv-pre: SMP = $(PRE_SMP)
 run-rv-pre: RV_OUTPUT = $(RV_PRE_OUTPUT)
@@ -420,7 +419,7 @@ run-rv-pre: build-qemu-rv64 check-rv-pre-image build-rv-local-disk run-rv-qemu
 
 run-la-pre: LA_FS_IMG = $(LA_PRE_FS_IMG)
 run-la-pre: LA_DISK_IMG = $(LA_PRE_DISK_IMG)
-run-la-pre: AUX_FS_DIR = respos-preliminary
+run-la-pre: AUX_PROFILE = $(AUXFS_PROFILE_DIR)/preliminary.profile
 run-la-pre: LA_MEM = $(PRE_MEM)
 run-la-pre: LA_SMP = $(PRE_SMP)
 run-la-pre: LA_OUTPUT = $(LA_PRE_OUTPUT)
@@ -429,7 +428,7 @@ run-la-pre: build-qemu-loongarch64 check-la-pre-image build-la-local-disk run-la
 # 决赛：contest_launcher 跳过 testrunner，依次执行公开根镜像中的两份官方 glibc 脚本。
 run-rv-final: RV_FS_IMG = $(RV_FINAL_FS_IMG)
 run-rv-final: RV_DISK_IMG = $(RV_FINAL_DISK_IMG)
-run-rv-final: AUX_FS_DIR = respos-final
+run-rv-final: AUX_PROFILE = $(AUXFS_PROFILE_DIR)/final.profile
 run-rv-final: MEM = $(RV_FINAL_MEM)
 run-rv-final: SMP = $(RV_FINAL_SMP)
 run-rv-final: RV_OUTPUT = $(RV_FINAL_OUTPUT)
@@ -437,7 +436,7 @@ run-rv-final: build-qemu-rv64 check-rv-final-image build-rv-local-disk run-rv-qe
 
 run-la-final: LA_FS_IMG = $(LA_FINAL_FS_IMG)
 run-la-final: LA_DISK_IMG = $(LA_FINAL_DISK_IMG)
-run-la-final: AUX_FS_DIR = respos-final
+run-la-final: AUX_PROFILE = $(AUXFS_PROFILE_DIR)/final.profile
 run-la-final: LA_MEM = $(LA_FINAL_MEM)
 run-la-final: LA_SMP = $(LA_FINAL_SMP)
 run-la-final: LA_OUTPUT = $(LA_FINAL_OUTPUT)
@@ -446,7 +445,7 @@ run-la-final: build-qemu-loongarch64 check-la-final-image build-la-local-disk ru
 # 诊断：使用决赛根镜像，但进入内嵌用户 shell，以便手工运行单个官方脚本或内嵌探针。
 run-rv-diagnostic: RV_FS_IMG = $(RV_FINAL_FS_IMG)
 run-rv-diagnostic: RV_DISK_IMG = $(RV_DIAGNOSTIC_DISK_IMG)
-run-rv-diagnostic: AUX_FS_DIR = respos-diagnostic
+run-rv-diagnostic: AUX_PROFILE = $(AUXFS_PROFILE_DIR)/diagnostic.profile
 run-rv-diagnostic: MEM = $(RV_DIAGNOSTIC_MEM)
 run-rv-diagnostic: SMP = $(RV_DIAGNOSTIC_SMP)
 run-rv-diagnostic: RV_OUTPUT = $(RV_DIAGNOSTIC_OUTPUT)
@@ -455,7 +454,7 @@ run-rv-diagnostic: build-qemu-rv64 check-rv-final-image build-rv-local-disk run-
 
 run-la-diagnostic: LA_FS_IMG = $(LA_FINAL_FS_IMG)
 run-la-diagnostic: LA_DISK_IMG = $(LA_DIAGNOSTIC_DISK_IMG)
-run-la-diagnostic: AUX_FS_DIR = respos-diagnostic
+run-la-diagnostic: AUX_PROFILE = $(AUXFS_PROFILE_DIR)/diagnostic.profile
 run-la-diagnostic: LA_MEM = $(LA_DIAGNOSTIC_MEM)
 run-la-diagnostic: LA_SMP = $(LA_DIAGNOSTIC_SMP)
 run-la-diagnostic: LA_OUTPUT = $(LA_DIAGNOSTIC_OUTPUT)
@@ -466,7 +465,8 @@ run-la-diagnostic: build-qemu-loongarch64 check-la-final-image build-la-local-di
 # 通过交互式 Alpine shell 提供可复现的冒烟脚本。
 run-rv-software: RV_FS_IMG = $(RV_SOFTWARE_FS_IMG)
 run-rv-software: RV_DISK_IMG = $(RV_SOFTWARE_DISK_IMG)
-run-rv-software: AUX_FS_DIR = respos-software
+run-rv-software: AUX_PROFILE = $(AUXFS_PROFILE_DIR)/software.profile
+run-rv-software: AUX_PAYLOAD_DIRS = $(AUXFS_PAYLOAD_DIR)/software
 run-rv-software: MEM = $(RV_SOFTWARE_MEM)
 run-rv-software: SMP = $(RV_SOFTWARE_SMP)
 run-rv-software: RV_OUTPUT = $(RV_SOFTWARE_OUTPUT)
@@ -474,7 +474,8 @@ run-rv-software: build-qemu-rv64 check-rv-software-image build-rv-local-disk run
 
 run-la-software: LA_FS_IMG = $(LA_SOFTWARE_FS_IMG)
 run-la-software: LA_DISK_IMG = $(LA_SOFTWARE_DISK_IMG)
-run-la-software: AUX_FS_DIR = respos-software
+run-la-software: AUX_PROFILE = $(AUXFS_PROFILE_DIR)/software.profile
+run-la-software: AUX_PAYLOAD_DIRS = $(AUXFS_PAYLOAD_DIR)/software
 run-la-software: LA_MEM = $(LA_SOFTWARE_MEM)
 run-la-software: LA_SMP = $(LA_SOFTWARE_SMP)
 run-la-software: LA_OUTPUT = $(LA_SOFTWARE_OUTPUT)
