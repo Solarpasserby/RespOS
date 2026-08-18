@@ -26,13 +26,18 @@ RespOS 以 Linux 用户态兼容为主要目标，内核提供接近 Linux ABI �
 ## 构建与运行准备
 
 ```bash
-make all          # 线上评测入口：构建双架构内核和自动识别辅助盘
-make build-rv     # 仅构建 RISC-V 内核
-make build-la     # 仅构建 LoongArch 内核
-make check-submit # 检查提交产物
-make help         # 查看明确的本地初赛/决赛/诊断入口
-make clean        # 清理构建产物
+make all                      # 线上评测入口：构建双架构 QEMU 内核和自动识别辅助盘
+make build-qemu-rv64          # 构建 QEMU RV64 内核
+make build-jh7110             # 构建 JH7110/VisionFive 2 真机镜像
+make build-qemu-loongarch64   # 构建 QEMU LoongArch64 内核
+make build-ls2k1000           # 构建 LS2K1000 真机镜像
+make check-submit             # 检查提交产物
+make help                     # 查看全部入口及默认资源配置
+make clean                    # 清理构建产物
 ```
+
+四个平台统一使用 `build-<平台名>` 形式。旧命令 `build-rv`、`build-vf2`、`build-la`、
+`build-la-ls2k1000` 仍作为兼容别名保留。
 
 构建完成后，仓库根目录会生成：
 
@@ -81,11 +86,12 @@ make run-la-software
 
 ```text
 RespOS/
-├── Makefile              # 顶层构建与 QEMU 运行入口，生成 kernel-rv / kernel-la
+├── Makefile              # 四平台构建与 QEMU 运行入口
 ├── bootloader/           # RISC-V 启动镜像与引导相关文件
 ├── os/                   # 内核源码
 │   ├── src/
 │   │   ├── arch/         # RISC-V / LoongArch 架构适配、启动、陷入与上下文切换
+│   │   ├── platform/     # QEMU RV64、JH7110、QEMU LA64、LS2K1000 平台实现
 │   │   ├── drivers/      # virtio-blk、virtio-net 等设备驱动
 │   │   ├── fs/           # VFS、ext4、procfs、devfs、dentry 与 mount tree
 │   │   ├── mm/           # 物理页、地址空间、COW、lazy allocation 与 mmap

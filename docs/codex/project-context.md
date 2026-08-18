@@ -53,13 +53,14 @@
 | --- | --- | --- |
 | `os/src/main.rs` | 启动和初始化顺序 | trap → MM → net → initproc → timer → scheduler |
 | `os/src/arch/` | RV64/LA64 启动、页表、trap、上下文切换、时钟 | 公共 API 由 `arch/mod.rs` 重导出 |
+| `os/src/platform/` | QEMU RV64、JH7110、QEMU LA64、LS2K1000 的板级实现 | 唯一的 `board_*` feature 选择点；拥有入口、MMIO、设备、启动/关机策略 |
 | `os/src/mm/` | 地址、frame/heap、`MemorySet`、VMA、COW/lazy/file mmap、用户拷贝 | 地址空间语义应集中在这里 |
 | `os/src/task/` | TCB、线程组、scheduler、futex、退出回收 | 状态转换和 single-winner 语义是重点 |
 | `os/src/fs/` | VFS、ext4、mount、namei、fd、page cache、pipe、proc/dev | 区分 fd、open file、path、dentry、inode |
 | `os/src/syscall/` | Linux ABI 参数解析与各领域入口 | 保持薄层，避免在 syscall 中复制领域状态机 |
 | `os/src/signal/` | signal state、handler、siginfo、alt stack | trap context 有架构差异 |
 | `os/src/net/` | smoltcp socket、TCP/UDP、loopback/Ethernet、listen table | loopback 与 virtio-net 共享 SocketSet；当前真实接口是 QEMU 静态 IPv4 |
-| `os/src/drivers/` | virtio block/net 和设备/DMA 抽象 | RV 使用 MMIO，LA 使用 PCI；真实网卡当前采用 10ms polling |
+| `os/src/drivers/` | 通用设备/DMA 抽象与 virtio 实现 | 平台通过统一块设备工厂选择 virtio、SD 或 AHCI；真实网卡当前采用 10ms polling |
 | `user/` | no_std 用户库、系统调用封装、工具、probe、testrunner | `user/build.rs` 生成 LTP 清单 |
 | `img/` | 比赛测试镜像 | 运行会修改镜像内容，必要时从 `.xz` 恢复 |
 | `judge/` | LTP 日志解析、Linux baseline 对比 | 不要用 QEMU 退出码替代日志分析 |

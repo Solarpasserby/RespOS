@@ -55,16 +55,21 @@
 
 ```text
 架构入口 / linker
-  → rust_main：清 BSS；LA 建立早期分页并跳转高半区
+  → rust_main：清 BSS；platform::early_init；LA 建立早期分页并跳转高半区
   → rust_main_high
-  → trap::init
-  → mm::init
-  → net::init
+  → platform::init_kernel：按平台保持 trap/MM/中断顺序并初始化可用 RTC/net
   → task::add_initproc
+  → platform::start_secondary_cpus
   → 开启并设置下一次时钟中断
+  → platform::release_secondary_cpus
   → task::run_tasks
   → initproc / testrunner / 比赛镜像程序
 ```
+
+`os/src/platform/mod.rs` 是唯一的板级 feature 选择点，静态选择 `qemu_rv64`、`jh7110`、
+`qemu_loongarch64` 或 `ls2k1000`。每个实现拥有入口汇编、固定内存/MMIO、直接控制台、块设备工厂、
+根盘策略、可选服务、SMP、panic 诊断和关机行为；`arch/` 保留 ISA/MMU/trap/CSR 机制，通过平台能力
+常量与 hook 使用机器策略。公共启动、VFS 和 syscall 不直接判断 `board_*` feature。
 
 ### 双 virtio ext4 根与辅助文件系统
 
@@ -74,7 +79,8 @@
 - 证据：`os/src/drivers/mod.rs`、`os/src/arch/loongarch64/pci.rs`、
   `os/src/fs/{ext4,mount.rs}`、`user/src/bin/{initproc,contest_launcher}.rs`；RV64 x0-only、合法 x1 ext4 和非 ext4 x1
   QEMU 启动；LoongArch x0+x1 启动到首个 `basic-musl` 测例
-- 内容：设备 index 0 是必需的官方根盘，lwext4 mountpoint 为 `/`；index 1 是可选
+- 内容：设备 index 0 默认是必需的官方根盘，lwext4 mountpoint 为 `/`；只有显式声明
+  `ALLOW_MISSING_ROOT` 的平台（当前为 LS2K1000 分阶段移植）可以降级到空 ramfs。index 1 是可选
   辅助盘，合法 ext4 时以独立 superblock/inode identity 挂载到 `/respos`。辅助盘不存在、
   virtio 初始化失败或 ext4 挂载失败都只禁用辅助挂载，不得影响 x0 启动。
   lwext4 的 C 层挂载表是全局的，路径必须按最长 mountpoint 前缀选择实例；Rust inode

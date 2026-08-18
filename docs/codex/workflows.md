@@ -178,12 +178,14 @@ RUSTUP_TOOLCHAIN=nightly-2025-01-18 make all
 
 `vendor/lwext4_rust/c/lwext4/CMakeLists.txt` 声明 `cmake_minimum_required(VERSION 3.4)`；CMake
 4.0 起移除了对 `< 3.5` 的兼容，会直接拒绝该最小版本。宿主机 CMake ≥ 4.0（实测 4.4.2）时，任何会
-触发 lwext4 C 编译的构建目标（`make build-rv` / `build-la` / `build-vf2` / `all`）都必须带上
+触发 lwext4 C 编译的构建目标（`make build-rv` / `build-la` / `build-vf2` /
+`build-la-ls2k1000` / `all`）都必须带上
 `CMAKE_POLICY_VERSION_MINIMUM=3.5`：
 
 ```bash
 CMAKE_POLICY_VERSION_MINIMUM=3.5 RUSTUP_TOOLCHAIN=nightly-2025-01-18 make build-rv
 CMAKE_POLICY_VERSION_MINIMUM=3.5 RUSTUP_TOOLCHAIN=nightly-2025-01-18 make build-vf2
+CMAKE_POLICY_VERSION_MINIMUM=3.5 RUSTUP_TOOLCHAIN=nightly-2025-01-18 make build-la-ls2k1000
 ```
 
 该变量只改变 CMake 的兼容策略下限，不改 vendored 源码或官方镜像。缺失时的报错形态是 CMake 在
@@ -205,30 +207,34 @@ bash docs/决赛文档/build.sh
 - 后续影响：不要直接编辑 `chapters/` 下的生成文件；如果新增 Markdown 章节，按两位数字前缀
   命名，脚本会按文件名顺序整合。
 
-### 顶层双架构入口
+### 顶层四平台入口
 
 - 状态：已确认
 - 适用范围：提交前构建
-- 最后验证：2026-08-01
+- 最后验证：2026-08-18
 - 证据：`Makefile`
 - 内容：
 
 ```bash
 make all                  # 线上评测入口：生成 kernel-rv/kernel-la/disk.img/disk-la.img
-make build-rv             # 只构建 RV release
-make build-la             # 只构建 LA release
+make build-qemu-rv64      # QEMU RV64：kernel-rv
+make build-jh7110         # JH7110/VisionFive 2：kernel-vf2.bin
+make build-qemu-loongarch64 # QEMU LoongArch64：kernel-la
+make build-ls2k1000       # LS2K1000：respos-ls2k1000.bin
 make MODE=debug all       # 双架构 debug
 make MODE=release-debug all
 make check-submit         # 构建并检查四个提交产物和 auto profile
 ```
 
-顶层构建会复制架构对应的 Cargo config 到 `os/.cargo/config.toml` 和
+四个平台统一使用 `build-<平台名>` 入口，并分别准备对应 Cargo config。旧的 `build-rv`、
+`build-vf2`、`build-la`、`build-la-ls2k1000` 仅作为兼容别名保留。顶层构建会复制平台对应的
+Cargo config 到 `os/.cargo/config.toml` 和
 `user/.cargo/config.toml`，先构建用户程序，再通过 `os/build.rs` 嵌入内核。
 Makefile 使用 `.NOTPARALLEL`，因为两个架构共享可变 Cargo config。`make all` 固定读取
 `respos/profile`，并在构建前验证第一个有效配置项为 `mode=auto`；命令行不能把线上提交入口
 静默改成 preliminary/diagnostic。平台提供大型官方根镜像，仓库只生成第二块小型 ext4 辅助盘。
 
-- 后续影响：不要并行执行 RV/LA 构建命令；共享 config 文件可能相互覆盖。
+- 后续影响：不要并行执行四个平台的构建命令；共享 config 文件可能相互覆盖。
 
 ### 子目录快速检查
 

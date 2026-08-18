@@ -284,7 +284,7 @@ impl SdCard {
             }
             crc
         }
-        let super_block = (crate::config::ROOT_DISK_BASE_BLOCK + 2) as usize;
+        let super_block = (crate::platform::ROOT_DISK_BASE_BLOCK + 2) as usize;
         let mut clock_div = 63u32;
         for div in [4u32, 8, 16, 32, 63] {
             enable_clock(div)?;

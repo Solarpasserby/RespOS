@@ -1,42 +1,9 @@
-// 板级时钟/内存常量。默认 QEMU virt；`board_jh7110` feature 切换到 VisionFive 2。
-//
-// 目前三类时间使用同一硬件尺度；保留拆分命名是为了和 LoongArch 的
-// bench-facing wall clock / timeout / accounting 设计保持一致。
-#[cfg(feature = "board_jh7110")]
-pub const HARDWARE_CLOCK_FREQ: usize = 4_000_000; // aclint-mtimer @ 4000000Hz
-#[cfg(not(feature = "board_jh7110"))]
-pub const HARDWARE_CLOCK_FREQ: usize = 10_000_000;
-pub const USER_CLOCK_FREQ: usize = HARDWARE_CLOCK_FREQ;
-pub const ACCOUNTING_CLOCK_FREQ: usize = HARDWARE_CLOCK_FREQ;
-
-#[cfg(feature = "board_jh7110")]
-pub const MEMORY_START: usize = 0x4020_0000;
-#[cfg(not(feature = "board_jh7110"))]
-pub const MEMORY_START: usize = 0x8020_0000;
-
-#[cfg(feature = "board_jh7110")]
-pub const MEMORY_END: usize = 0x8000_0000;
-#[cfg(not(feature = "board_jh7110"))]
-pub const MEMORY_END: usize = 0x9000_0000;
-
-/// End of the supported RAM window（QEMU 16 GiB / VisionFive 2 4 GiB）。
-#[cfg(feature = "board_jh7110")]
-pub const MAX_PHYSICAL_MEMORY_END: usize = 0x1_4000_0000;
-#[cfg(not(feature = "board_jh7110"))]
-pub const MAX_PHYSICAL_MEMORY_END: usize = 0x4_8000_0000;
-
-/// RAM 物理基址（direct map 首个 GiB 的起点 = RAM_BASE + 1 GiB 之前保留细粒度映射）。
-#[cfg(feature = "board_jh7110")]
-pub const RAM_BASE: usize = 0x4000_0000;
-#[cfg(not(feature = "board_jh7110"))]
-pub const RAM_BASE: usize = 0x8000_0000;
-
-/// 根文件系统在块设备上的起始偏移（512 字节块号）。
-/// QEMU virtio-blk 是整盘 ext4（offset 0）；JH7110 SD 自举时根分区（p2）从 sector 526336 起。
-#[cfg(feature = "board_jh7110")]
-pub const ROOT_DISK_BASE_BLOCK: usize = 526336;
-#[cfg(not(feature = "board_jh7110"))]
-pub const ROOT_DISK_BASE_BLOCK: usize = 0;
+// Dynamic RV64 memory discovery is shared. Fixed machine constants are
+// supplied by the compile-time selected platform implementation.
+pub use crate::platform::{
+    ACCOUNTING_CLOCK_FREQ, HARDWARE_CLOCK_FREQ, MAX_PHYSICAL_MEMORY_END, MEMORY_END, MEMORY_START,
+    MMIO, RAM_BASE, USER_CLOCK_FREQ,
+};
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -180,25 +147,3 @@ unsafe fn fdt_memory_end(fdt_pa: usize) -> Option<usize> {
     }
     None
 }
-
-pub const VIRTIO_MMIO: &[(usize, usize)] = &[
-    (0x1000_1000, 0x00_1000), // virtio-mmio-bus.0
-    (0x1000_2000, 0x00_1000), // virtio-mmio-bus.1
-];
-
-#[cfg(feature = "board_jh7110")]
-pub const MMIO: &[(usize, usize)] = &[
-    (0x1000_0000, 0x00_1000), // UART0
-    (0x0200_0000, 0x00_1000), // CLINT (aclint-mtimer @ 4000000Hz)
-    (0x0c00_0000, 0x400_0000), // PLIC (64 MiB)
-    (0x1601_0000, 0x4_0000), // SDIO0/SDIO1/GMAC0/GMAC1 (0x16010000..0x16050000)
-];
-#[cfg(not(feature = "board_jh7110"))]
-pub const MMIO: &[(usize, usize)] = &[
-    (0x0010_1000, 0x00_1000), // QEMU goldfish RTC
-    (0x1000_0000, 0x00_1000), // NS16550 UART，控制台直写
-    // QEMU riscv virt exposes up to 8 virtio-mmio slots at 0x10001000 +
-    // n*0x1000. Map the whole window so block, net and any future device are
-    // all reachable through the kernel direct map.
-    (0x1000_1000, 0x00_8000), // virtio-mmio-bus.0..7
-];

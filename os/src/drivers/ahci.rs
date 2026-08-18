@@ -54,14 +54,9 @@ impl AhciBlockDevice {
         let base = UNCACHE_BASE | AHCI_BASE;
         // 诊断用 early_print（无锁、uncached、Stage 1 已验证），避免 println! 的
         // console 自旋锁/格式化在 AHCI 初始化早期引入额外变量。
-        #[cfg(feature = "board_ls2k1000")]
         crate::arch::sbi::early_print("[kernel] AHCI: probing...\n");
 
         let mut driver = unsafe { AhciDriver::try_new(base) }.ok_or(DevError::BadState)?;
-        #[cfg(not(feature = "board_ls2k1000"))]
-        let _ = &mut driver; // QEMU LA 下 driver 只读，避免 unused_mut
-
-        #[cfg(feature = "board_ls2k1000")]
         {
             crate::arch::sbi::early_print("[kernel] AHCI: try_new returned, capacity=");
             crate::arch::sbi::early_print_hex(driver.capacity() as usize);
@@ -80,13 +75,6 @@ impl AhciBlockDevice {
                 crate::arch::sbi::early_print("[kernel] AHCI: read block2 failed\n");
             }
         }
-        #[cfg(not(feature = "board_ls2k1000"))]
-        println!(
-            "[kernel] AHCI disk: {} blocks x {} bytes",
-            driver.capacity(),
-            driver.block_size()
-        );
-
         Ok(Self {
             inner: Mutex::new(driver),
         })

@@ -16,9 +16,12 @@ extern crate bitflags;
 mod console;
 mod banner;
 mod lang_item;
+mod platform;
 
 pub mod arch;
 
+// Keep the architecture facade at the crate root: kernel subsystems import
+// `crate::{config,sbi,timer,trap}` without depending on an ISA module path.
 use arch::{config, sbi, timer, trap};
 
 pub mod drivers;
@@ -45,83 +48,20 @@ pub fn rust_main(hart_id: usize, opaque: usize) -> ! {
     }
     clear_bss();
     arch::smp::init_current_hart(hart_id);
-    #[cfg(feature = "board_jh7110")]
-    {
-        println!(
-            "[vf2] Hello RespOS on VisionFive 2 (hart_id={}, dtb={:#x})",
-            hart_id, opaque
-        );
-        config::init_physical_memory_end(opaque);
-        println!(
-            "[vf2] physical_memory_end = {:#x}",
-            config::physical_memory_end()
-        );
-        rust_main_high()
-    }
-    #[cfg(not(feature = "board_jh7110"))]
-    {
-        config::init_physical_memory_end(opaque);
-        rust_main_high()
-    }
+    platform::early_init(hart_id, opaque);
+    rust_main_high()
 }
 
 #[cfg(target_arch = "loongarch64")]
 #[unsafe(no_mangle)]
 pub fn rust_main(argc: usize, argv: usize) -> ! {
     clear_bss();
-    config::init_physical_memory_end(argc, argv);
-
-    // Stage 2：接通 MMU。真机经 U-Boot `go` 进入时 CRMD.PG 已为 1（DMW 窗口），
-    // enable_boot_paging 会建立最小高半区过渡页表并安装内核根页表，随后跳入高半区。
-    // 跳转前用 uncached UART 打一行诊断，便于定位 enable_boot_paging / 跳转前的故障。
-    #[cfg(feature = "board_ls2k1000")]
-    {
-        sbi::early_print("RespOS 2K1000LA: enabling MMU, mem_end=");
-        sbi::early_print_hex(config::physical_memory_end());
-        sbi::early_print("\n");
-    }
+    platform::early_init(argc, argv);
 
     arch::enable_boot_paging();
     unsafe {
-        #[cfg(feature = "board_ls2k1000")]
-        arch::jump_to_high_half(rust_main_high_ls2k1000 as usize);
-        #[cfg(not(feature = "board_ls2k1000"))]
         arch::jump_to_high_half(rust_main_high as usize);
     }
-}
-
-/// 2K1000LA 高半区入口：Stage 2 验证 MMU/memory，Stage 3 验证 trap + 核心本地时钟中断，
-/// Stage 4 接上 initproc + 调度器进入用户态。
-#[cfg(all(target_arch = "loongarch64", feature = "board_ls2k1000"))]
-fn rust_main_high_ls2k1000() -> ! {
-    arch::enable_kernel_extensions();
-
-    // 跑到这里说明高半区取指/数据访问都通过了 3 级页表翻译（40-bit VA 的关键验证点）。
-    sbi::early_print("[RespOS 2K1000LA] entered high half (3-level paging OK)\n");
-
-    mm::init();
-    // mm::init 会初始化 heap + frame allocator + direct map 并 activate 内核页表。
-    sbi::early_print("[RespOS 2K1000LA] mm::init OK, free frames=");
-    sbi::early_print_hex(mm::free_frame_count());
-    sbi::early_print("\n");
-
-    // heap 已就绪，验证 alloc/println! 路径（走 uncached UART）。
-    println!("[RespOS 2K1000LA] heap OK");
-
-    // Stage 3：LIOINTC 最小初始化（真机 MMIO 走 uncached DMW0 窗口，全部屏蔽，
-    // Stage 5/6 起按需使能外部设备中断）。
-    arch::liointc::init();
-    sbi::early_print("[RespOS 2K1000LA] LIOINTC masked\n");
-
-    // Stage 4：完整启动链——trap(EENTRY) → initproc + 空闲任务 → 时钟中断 → 调度器。
-    // 真机没有 QEMU 的 virtio-net / LS7A RTC(0x100d0100)，跳过 net::init 与
-    // syscall::init_realtime_from_rtc；SMP 是 Stage 7，暂只跑 boot hart（单核）。
-    trap::init();
-    task::add_initproc();
-    task::init_per_cpu_idle_tasks();
-    trap::enable_timer_interrupt();
-    timer::set_next_ti_trigger();
-    task::run_tasks();
 }
 
 #[cfg(target_arch = "loongarch64")]
@@ -145,45 +85,16 @@ fn rust_secondary_main_high() -> ! {
     task::run_tasks();
 }
 
-// QEMU 走完整启动；`board_jh7110` 下 RTC/net/SMP 尚未适配，只跑到用户态。
-// LS2K1000 使用上面的独立高半区入口。
-#[cfg(any(target_arch = "riscv64", not(feature = "board_ls2k1000")))]
+/// Shared high-half lifecycle. Machine-specific ordering and optional services
+/// are selected by `platform`; the scheduler handoff remains common.
 fn rust_main_high() -> ! {
-    #[cfg(target_arch = "loongarch64")]
-    arch::enable_kernel_extensions();
-
-    #[cfg(target_arch = "loongarch64")]
-    timer::init_clock_freq();
-
-    trap::init();
-    mm::init();
-    #[cfg(target_arch = "riscv64")]
-    sbi::mark_direct_uart_ready();
-    banner::print_boot_banner();
-    #[cfg(not(all(target_arch = "riscv64", feature = "board_jh7110")))]
-    syscall::init_realtime_from_rtc(); // QEMU goldfish RTC，JH7110 无
-    #[cfg(not(all(target_arch = "riscv64", feature = "board_jh7110")))]
-    net::init(); // virtio-net，JH7110 无
+    platform::init_kernel();
     task::add_initproc();
-    #[cfg(any(target_arch = "riscv64", target_arch = "loongarch64"))]
-    {
-        task::init_per_cpu_idle_tasks();
-    }
-    #[cfg(all(target_arch = "riscv64", not(feature = "board_jh7110")))]
-    {
-        let boot_hart = arch::smp::boot_hart();
-        arch::smp::publish_boot_ready(boot_hart);
-        arch::smp::start_secondary_harts(boot_hart);
-    }
-    #[cfg(target_arch = "loongarch64")]
-    {
-        arch::smp::publish_boot_ready();
-        arch::smp::start_secondary_harts();
-    }
+    task::init_per_cpu_idle_tasks();
+    platform::start_secondary_cpus();
     trap::enable_timer_interrupt();
     timer::set_next_ti_trigger();
-    #[cfg(target_arch = "loongarch64")]
-    arch::smp::release_secondary_harts();
+    platform::release_secondary_cpus();
 
     #[cfg(feature = "verbose_boot")]
     loader::list_apps();

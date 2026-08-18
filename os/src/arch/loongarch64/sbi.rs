@@ -25,17 +25,14 @@ const ACPI_GED_RESET_VALUE: u8 = 0x42;
 
 #[inline]
 fn mmio_addr(addr: usize) -> usize {
-    #[cfg(feature = "board_ls2k1000")]
-    {
+    if crate::platform::UNCACHED_MMIO {
         // 2K1000LA 真机 MMIO 必须走 uncached DMW0 窗口（VSEG=0x8000），缓存直映
         // 对真机外设无效（见 keypoints 坑 2）。该窗口在 disable_low_direct_map 后
         // 仍然有效，所以这里无条件走 uncached 窗口；早期（未分页）理论上不存在，
         // 真机经 U-Boot go 时 PG 恒为 1。
         const UNCACHE_BASE: usize = 0x8000_0000_0000_0000;
         UNCACHE_BASE | (addr & ((1usize << 48) - 1))
-    }
-    #[cfg(not(feature = "board_ls2k1000"))]
-    {
+    } else {
         if super::paging_enabled() && !super::low_direct_map_enabled() {
             addr + crate::config::KERNEL_BASE
         } else {
@@ -60,7 +57,6 @@ pub fn console_putchar(c: usize) {
 /// 2K1000LA 真机 MMIO 必须走 uncached DMW 窗口（VSEG=0x8000），否则缓存写不达设备。
 /// UART_BASE 由板级配置决定：QEMU virt 0x1fe0_01e0 / 2K1000LA 0x1fe2_0000
 /// （byte stride，THR@0 / LSR@5）。
-#[cfg(feature = "board_ls2k1000")]
 pub fn early_putchar(c: u8) {
     // 2K1000LA uncached 直映窗口基址（StarryOS addrspace 的 UNCACHE_BASE）。
     const UNCACHE_BASE: usize = 0x8000_0000_0000_0000;
@@ -74,7 +70,6 @@ pub fn early_putchar(c: u8) {
 }
 
 /// 逐字节输出字符串（Stage-1 启动诊断用，不解释 UTF-8）。
-#[cfg(feature = "board_ls2k1000")]
 pub fn early_print(s: &str) {
     for &b in s.as_bytes() {
         early_putchar(b);
@@ -82,7 +77,6 @@ pub fn early_print(s: &str) {
 }
 
 /// 以十六进制输出一个 usize（Stage-2 诊断用，打印 DDR 末址等）。
-#[cfg(feature = "board_ls2k1000")]
 pub fn early_print_hex(v: usize) {
     early_print("0x");
     for shift in (0..64).step_by(4).rev() {

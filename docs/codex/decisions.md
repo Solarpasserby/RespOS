@@ -3,21 +3,23 @@
 这里只收录能解释当前代码形态或避免重复踩坑的决策。日期是当前证据最后核验时间，不一定是
 最初提出时间。
 
-## 板级/架构差异必须隔离，QEMU RV64 是永久回归基线
+## 板级差异通过 platform 实现隔离，QEMU RV64 是永久回归基线
 
-- 状态：已采用（JH7110 Stage 1 已按此落地）
+- 状态：已采用（四个平台已接入统一选择层）
 - 适用范围：任何涉及 RV64/LA64/板级（QEMU virt、VisionFive 2/JH7110、LA 真机）的改动，
   以及所有共享代码（`os/src/{mm,task,fs,syscall,net,drivers,signal}`）、`Makefile`、`os/Cargo.toml`
-- 最后验证：2026-08-17
-- 证据：`os/src/arch/mod.rs` 的 `#[cfg(target_arch)]` 选择；`board_jh7110` feature 及
-  `os/src/linker_jh7110.ld`、`os/src/arch/rv64/entry/entry_jh7110.asm`、`os/cargo/config-jh7110.toml`、
-  `os/src/arch/rv64/config/board.rs` 的 `#[cfg(feature="board_jh7110")]`
+- 最后验证：2026-08-18
+- 证据：`os/src/platform/{mod,qemu_rv64,jh7110,qemu_loongarch64,ls2k1000}.rs`；四个 `make build-*`
+  目标以及 RV64/LA64 QEMU basic musl+glibc 冒烟
 - 决策：RespOS 是双架构（RV64 + LA64）且 RV64 侧另有多板级（QEMU virt / JH7110）的内核。
   **QEMU RV64 是永久回归基线，任何移植/重构不得破坏它。** 差异必须落到正确层级并显式隔离：
   - 架构差异 → 共享代码里的 `#[cfg(target_arch = "riscv64" / "loongarch64")]` 分支，或
     `os/src/arch/{rv64,loongarch64}/**` + 各自的 `linker_*.ld`；
-  - 板级差异 → 独立 Cargo feature（如 `board_jh7110`）+ **独立文件**（`linker_*.ld`、
-    `entry_*.asm`、`cargo/config-*.toml`、`config/board_*.rs`），不写死进共享代码或另一块板的文件。
+  - 板级差异 → 独立 Cargo feature + `os/src/platform/<machine>.rs`；feature 只在
+    `platform/mod.rs` 选择一次。平台实现拥有入口、固定内存/MMIO、块设备、可选服务、SMP、panic 与
+    关机策略，公共启动/VFS/syscall 不直接判断具体板卡；
+  - 真机编译器约束 → 独立 Cargo config。LS2K1000 的 LA264 `-ual` 不得影响默认 LA QEMU；
+  - feature 必须与目标架构匹配且两块真机 feature 互斥，非法组合在编译期报错。
   - 明确禁止：为配合 LA/其他板移植而改动 `os/src/linker_riscv.ld`、`os/cargo/config-riscv64.toml`、
     `os/src/arch/rv64/**` 或 `Makefile` 的 `build-rv`/`rust-objcopy --set-start=0x80200000` 等 RV64 专属路径。
 - 原因：JH7110 与 QEMU virt 同属 `target_arch="riscv64"`（同一 Sv39、trap、上下文切换、SBI ABI），

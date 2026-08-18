@@ -1,5 +1,30 @@
 # RespOS 当前状态
 
+## 2026-08-18 四平台可插拔平台层重构（当前工作树）
+
+- **平台边界**：新增 `os/src/platform/`，静态提供 QEMU RV64、JH7110、QEMU LoongArch64、LS2K1000
+  四种实现。`board_jh7110` / `board_ls2k1000` 的实际 `cfg` 选择集中到 `platform/mod.rs`，并增加
+  目标架构约束及 feature 互斥检查。入口汇编、固定内存/MMIO、直接 UART、块设备工厂、根盘策略、
+  可选 RTC/net、SMP、panic 诊断和关机策略不再散布在公共启动/VFS/syscall 中。
+- **语义修复**：四个平台共用一条 `rust_main_high` 调度器交接链，但各平台保留原 trap/MM/中断顺序。
+  根盘缺失只有显式允许的 LS2K1000 可降级 ramfs，默认 QEMU 恢复必需根盘 fail-fast。删除 LA 的
+  `VirtIo/Ahci` 包装枚举，改由平台块设备工厂返回该平台的具体驱动。
+- **构建隔离**：新增 `os/cargo/config-ls2k1000.toml` 与 `user/cargo/config-ls2k1000.toml`；LA264
+  的 `-Ctarget-feature=-ual` 只用于 LS2K1000，不再泄漏到默认 LA QEMU。两种真机构建目标都支持现有
+  no-default/附加 feature 参数。顶层 Makefile 统一提供 `build-qemu-rv64`、`build-jh7110`、
+  `build-qemu-loongarch64`、`build-ls2k1000` 四个同构入口，旧名称保留为兼容别名。
+- **验证**：`make build-qemu-rv64 build-jh7110 build-qemu-loongarch64 build-ls2k1000`
+  四种 release 构建顺序通过；四个旧别名也通过 Make dry-run。`make help` 会用中文列出平台、
+  产物和默认资源配置。
+  `make rv` 与 `make la` 实际启动，Unicode banner、virtio-net、根盘/辅助盘以及 musl/glibc basic
+  全部通过；LA 还继续跑过 libcbench 并进入 busybox。两次长测在取得冒烟证据后人工停止，不申报完整
+  初赛回归。JH7110 与 LS2K1000 只完成交叉构建，本轮真机状态仍为 `待验证`。
+- **RV64 决赛回归**：2026-08-18 在当前重构工作树执行 `make run-rv-pub`，16 GiB/8 hart 均正常上线；
+  CAgent 10/10 全部通过，`cagent_testcode.sh` 退出码 0；BuildStorm toolchain/minibuild 通过，正式
+  `arceos-helloworld` 多核编译 `ok=true`，耗时 `724.03s`、产物 `1,681,000 bytes`，
+  `buildstorm_testcode.sh` 退出码 0。launcher 完成全部脚本后主动关机，完整日志为本地
+  `rv-final-output.txt`（不纳入版本库）。
+
 ## 2026-08-18 JH7110 与 LS2K1000 双移植线整合（当前合并工作树）
 
 - **整合范围**：`port/jh7110` 与 `origin/port/ls2k1000` 均已合入 `main`。共享层按板级 feature 隔离：

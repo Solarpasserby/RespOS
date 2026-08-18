@@ -6,11 +6,7 @@
 
 pub mod config;
 mod entry;
-#[cfg(feature = "board_ls2k1000")]
-pub mod fdt;
 pub mod interrupt;
-#[cfg(feature = "board_ls2k1000")]
-pub mod liointc;
 pub mod mm;
 // LoongArch virt 机器上的块设备经 PCI 暴露。
 pub mod pci;
@@ -34,7 +30,6 @@ static LOW_DIRECT_MAP_ACTIVE: AtomicBool = AtomicBool::new(true);
 /// 2K1000LA 真机经 U-Boot `go` 进入时 CRMD.PG 已为 1（分页模式，靠 DMW 窗口），
 /// `paging_enabled()` 恒真，无法用于判断内核页表是否已安装。boot paging 用此标志
 /// 保证幂等（首次进入必建表，mm::init 第二次调用直接返回）。
-#[cfg(feature = "board_ls2k1000")]
 static BOOT_PAGING_DONE: AtomicBool = AtomicBool::new(false);
 
 const LOONGARCH_CPUCFG1: usize = 1;
@@ -228,14 +223,14 @@ unsafe fn configure_mmu() {
 
 /// 建立一个最小的高地址恒等偏移映射，使高地址内核堆在正式内核页表构造前可用。
 pub fn enable_boot_paging() {
-    #[cfg(feature = "board_ls2k1000")]
-    if BOOT_PAGING_DONE.swap(true, Ordering::AcqRel) {
+    if crate::platform::FIRMWARE_PAGING_ACTIVE
+        && BOOT_PAGING_DONE.swap(true, Ordering::AcqRel)
+    {
         // 2K1000LA 真机经 U-Boot `go` 进入时 CRMD.PG 已为 1，paging_enabled() 恒真，
         // 不能作为“内核页表是否已安装”的判断，改由 BOOT_PAGING_DONE 保证幂等。
         return;
     }
-    #[cfg(not(feature = "board_ls2k1000"))]
-    if paging_enabled() {
+    if !crate::platform::FIRMWARE_PAGING_ACTIVE && paging_enabled() {
         return;
     }
     unsafe {
@@ -306,14 +301,16 @@ pub fn enable_boot_paging() {
 
         // 2K1000LA 经 U-Boot 进入时 PG 已为 1，U-Boot 的 TLB 里可能残留旧翻译；
         // 安装内核根页表后先冲刷 TLB，再保证分页与 MAT 配置正确。
-        #[cfg(feature = "board_ls2k1000")]
-        register::mmu::flush_tlb();
+        if crate::platform::FIRMWARE_PAGING_ACTIVE {
+            register::mmu::flush_tlb();
+        }
         register::crmd::enable_paging();
         // QEMU：开启分页后立即关 DMW1，低地址直映由 DMW0 兜底，代码继续跑在物理
         // 地址直到 jump_to_high_half。2K1000LA 相反：当前执行流在 0x9000 cached 窗口，
         // 必须保留 DMW1 直到跳入高半区（随后由 disable_low_direct_map 关闭）。
-        #[cfg(not(feature = "board_ls2k1000"))]
-        register::mmu::write_dmw1(0);
+        if !crate::platform::PRESERVE_UNCACHED_DMW0 {
+            register::mmu::write_dmw1(0);
+        }
     }
 }
 
@@ -331,8 +328,9 @@ pub fn enable_secondary_boot_paging() {
         register::crmd::enable_paging();
         // 与 enable_boot_paging 相同的 DMW 策略；2K1000LA 次核同样运行在 0x9000
         // 窗口，跳入高半区前不能关 DMW1（SMP 在 Stage 7，此路径尚未真机验证）。
-        #[cfg(not(feature = "board_ls2k1000"))]
-        register::mmu::write_dmw1(0);
+        if !crate::platform::PRESERVE_UNCACHED_DMW0 {
+            register::mmu::write_dmw1(0);
+        }
     }
 }
 
@@ -346,10 +344,11 @@ pub fn disable_low_direct_map() {
         // QEMU：低地址直映走 DMW0，关闭它让后续访问全部走页表。
         // 2K1000LA：低地址直映走 DMW1（0x9000 cached 窗口）；DMW0（0x8000 uncached）
         // 是真机 MMIO 访问窗口，必须保留，否则 UART/外设写不达（见 keypoints 坑 2）。
-        #[cfg(feature = "board_ls2k1000")]
-        register::mmu::write_dmw1(0);
-        #[cfg(not(feature = "board_ls2k1000"))]
-        register::mmu::write_dmw0(0);
+        if crate::platform::PRESERVE_UNCACHED_DMW0 {
+            register::mmu::write_dmw1(0);
+        } else {
+            register::mmu::write_dmw0(0);
+        }
         register::mmu::flush_tlb();
     }
     LOW_DIRECT_MAP_ACTIVE.store(false, Ordering::Relaxed);

@@ -231,12 +231,7 @@ pub fn sys_reboot(magic1: usize, magic2: usize, command: usize) -> SysResult<usi
     if command == LINUX_REBOOT_CMD_RESTART {
         sbi::restart();
     }
-    // VF2 上 OpenSBI 的 PMIC 关机（i2c 读 0x36）失败、板子无法断电且刷 i2c 报错；
-    // 改用冷重启，让 quit/poweroff 干净重启而非卡在 PMIC 读取。
-    #[cfg(feature = "board_jh7110")]
-    sbi::restart();
-    #[cfg(not(feature = "board_jh7110"))]
-    sbi::shutdown(false);
+    crate::platform::poweroff();
 }
 
 pub fn sys_sysinfo(buf: *mut SysInfo) -> SysResult<usize> {

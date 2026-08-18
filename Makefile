@@ -1,10 +1,9 @@
 SHELL := /bin/bash
 .SHELLFLAGS := -o pipefail -c
 
-# The contest platform invokes `make all`.  Keep that path deterministic:
-# release kernels for both architectures plus the two auto-detect auxiliary
-# disks consumed as the second virtio block device.  Local run targets are
-# deliberately separate and never change the submission profile.
+# 线上评测平台固定调用 `make all`。该入口必须保持确定性：只生成两个 QEMU 平台的
+# release 内核，以及作为第二块 virtio 块设备使用的两份自动识别辅助盘。
+# 本地运行入口与提交入口严格分离，不得修改线上提交配置。
 .NOTPARALLEL:
 
 MODE ?= release
@@ -14,23 +13,25 @@ LA_MODE ?= $(MODE)
 RV_TARGET := riscv64gc-unknown-none-elf
 LA_TARGET := loongarch64-unknown-none
 
-KERNEL_RV := kernel-rv
-KERNEL_LA := kernel-la
-KERNEL_VF2 := kernel-vf2.bin
-KERNEL_LA_LS2K1000 := respos-ls2k1000.bin
+KERNEL_QEMU_RV64 := kernel-rv
+KERNEL_JH7110 := kernel-vf2.bin
+KERNEL_QEMU_LOONGARCH64 := kernel-la
+KERNEL_LS2K1000 := respos-ls2k1000.bin
+# 兼容既有运行脚本与提交产物名称；新平台构建规则使用上面的完整平台名。
+KERNEL_RV := $(KERNEL_QEMU_RV64)
+KERNEL_LA := $(KERNEL_QEMU_LOONGARCH64)
 RV_ELF = os/target/$(RV_TARGET)/$(RV_CARGO_TARGET_DIR)/os
 LA_ELF = os/target/$(LA_TARGET)/$(LA_CARGO_TARGET_DIR)/os
 
-# Submission artifacts.  These names and the auto profile are intentionally
-# fixed: command-line overrides must not silently turn `make all` into a local
-# preliminary or diagnostic build.
+# 线上提交产物名称和 auto 配置固定不变，禁止通过命令行覆盖把 `make all`
+# 静默变成本地初赛或诊断构建。
 override SUBMIT_AUX_FS_DIR := respos
 override SUBMIT_RV_DISK_IMG := disk.img
 override SUBMIT_LA_DISK_IMG := disk-la.img
 override SUBMIT_AUX_FS_SIZE := 16M
 
-# Local root images.  Preliminary images are restored under unambiguous names
-# from the retained official archives; final images are the public large disks.
+# 本地根文件系统镜像。初赛镜像从保留的官方压缩包恢复到含义明确的文件名，
+# 决赛镜像使用公开的大容量磁盘镜像。
 RV_PRE_ARCHIVE ?= img/sdcard-rv.img.xz
 LA_PRE_ARCHIVE ?= img/sdcard-la.img.xz
 RV_PRE_FS_IMG ?= img/sdcard-rv-pre.img
@@ -57,8 +58,8 @@ BOOTSTRAP_SSH_KEY ?=
 LA_BOOTSTRAP_SSH_PACKAGE ?= /tmp/openssh-client_10.2p1-3_loong64.deb
 LA_BOOTSTRAP_RUST_STD_ARCHIVE ?= /tmp/rust-std-nightly-loongarch64-unknown-none-2026-05-28.tar.xz
 
-# Local resource profiles.  The final defaults mirror the latest contest
-# parameters recorded for RespOS; the platform itself supplies its QEMU args.
+# 本地资源配置。决赛默认值与 RespOS 最近记录的比赛参数一致；
+# 各 QEMU 平台规则负责补齐自己的设备参数。
 PRE_MEM ?= 4G
 PRE_SMP ?= 1
 RV_FINAL_MEM ?= 16G
@@ -94,8 +95,8 @@ LA_BOOTSTRAP_OUTPUT ?= /tmp/respos-la-bootstrap.log
 QEMU_RV ?= qemu-system-riscv64
 QEMU_LA ?= qemu-system-loongarch64
 
-# User features are empty by default.  The legacy `eval` feature no longer
-# selects the launcher; /respos/profile selects explicit or automatic policy.
+# 用户态 feature 默认留空。旧 `eval` feature 不再选择启动器；
+# `/respos/profile` 负责选择明确策略或自动识别策略。
 RV_USER_FEATURES ?=
 LA_USER_FEATURES ?=
 RV_KERNEL_FEATURES ?=
@@ -159,8 +160,11 @@ else
 endif
 
 .PHONY: all submit check-submit validate-submit-profile build-submit-disks build-disks \
-	build-rv build-la build-la-ls2k1000 prepare-rv-cargo-config prepare-la-cargo-config \
-	prepare-jh7110-cargo-config \
+	build-qemu-rv64 build-jh7110 build-qemu-loongarch64 build-ls2k1000 \
+	build-rv build-vf2 build-la build-la-ls2k1000 \
+	prepare-qemu-rv64-cargo-config prepare-jh7110-cargo-config \
+	prepare-qemu-loongarch64-cargo-config prepare-ls2k1000-cargo-config \
+	prepare-rv-cargo-config prepare-la-cargo-config \
 	prepare-pre-images check-rv-pre-image check-la-pre-image \
 	check-rv-final-image check-la-final-image \
 	prepare-la-software-root check-rv-software-image check-la-software-image \
@@ -171,14 +175,13 @@ endif
 	run-rv-diagnostic run-la-diagnostic run-rv-software run-la-software \
 	run-rv-bootstrap run-la-bootstrap \
 	rv la run-rv-pub run-la-pub \
-	build-vf2 \
 	help clean
 
-# Online-platform entry.  Do not add QEMU runs, downloads, or local root-image
-# checks here: the evaluator provides those and only needs reproducible outputs.
+# 线上评测入口。这里不得加入 QEMU 运行、下载或本地根镜像检查；
+# 评测平台会提供这些环境，只需要可复现的提交产物。
 all: submit
 
-submit: validate-submit-profile build-rv build-la build-submit-disks
+submit: validate-submit-profile build-qemu-rv64 build-qemu-loongarch64 build-submit-disks
 
 validate-submit-profile:
 	@mode="$$(awk '{ line=$$0; sub(/^[ \t]+/, "", line); if (line != "" && substr(line, 1, 1) != "#") { print line; exit } }' $(SUBMIT_AUX_FS_DIR)/profile)"; \
@@ -193,60 +196,77 @@ build-submit-disks: validate-submit-profile
 	truncate -s $(SUBMIT_AUX_FS_SIZE) $(SUBMIT_LA_DISK_IMG)
 	mkfs.ext4 -q -F -d $(SUBMIT_AUX_FS_DIR) $(SUBMIT_LA_DISK_IMG)
 
-# Compatibility name used by older documentation.  It now always means the
-# fixed auto-detect submission disks, never a caller-selected local profile.
+# 兼容旧文档的目标名。它现在始终表示固定的自动识别提交盘，
+# 不再接受调用方选择的本地运行配置。
 build-disks: build-submit-disks
 
-prepare-rv-cargo-config:
+prepare-qemu-rv64-cargo-config:
 	mkdir -p os/.cargo user/.cargo
 	cp os/cargo/config-riscv64.toml os/.cargo/config.toml
 	cp user/cargo/config-riscv64.toml user/.cargo/config.toml
-
-prepare-la-cargo-config:
-	mkdir -p os/.cargo user/.cargo
-	cp os/cargo/config-loongarch64.toml os/.cargo/config.toml
-	cp user/cargo/config-loongarch64.toml user/.cargo/config.toml
 
 prepare-jh7110-cargo-config:
 	mkdir -p os/.cargo user/.cargo
 	cp os/cargo/config-jh7110.toml os/.cargo/config.toml
 	cp user/cargo/config-riscv64.toml user/.cargo/config.toml
 
-build-rv: prepare-rv-cargo-config
+prepare-qemu-loongarch64-cargo-config:
+	mkdir -p os/.cargo user/.cargo
+	cp os/cargo/config-loongarch64.toml os/.cargo/config.toml
+	cp user/cargo/config-loongarch64.toml user/.cargo/config.toml
+
+prepare-ls2k1000-cargo-config:
+	mkdir -p os/.cargo user/.cargo
+	cp os/cargo/config-ls2k1000.toml os/.cargo/config.toml
+	cp user/cargo/config-ls2k1000.toml user/.cargo/config.toml
+
+# 四个平台采用同构入口：准备平台 Cargo 配置、构建同架构用户程序、构建内核、转换平台产物。
+# QEMU RV64：输出带固定入口地址的 ELF，供 QEMU `-kernel` 直接加载。
+build-qemu-rv64: prepare-qemu-rv64-cargo-config
 	$(MAKE) -C user build ARCH=riscv64 MODE=$(RV_MODE) FEATURES=$(RV_USER_FEATURES)
 	cd os && RESPOS_USER_PROFILE_DIR=$(RV_CARGO_TARGET_DIR) \
 		RESPOS_USER_TARGET=$(RV_TARGET) \
 		RESPOS_APP_REBUILD_STAMP=$$(date +%s%N) cargo build $(RV_CARGO_BUILD_ARG) $(RV_KERNEL_DEFAULT_FEATURE_ARGS) $(RV_KERNEL_FEATURE_ARGS)
-	rust-objcopy --set-start=0x80200000 $(RV_ELF) $(KERNEL_RV)
-	@rust-readobj -h -l $(KERNEL_RV) | awk '/Entry:/ || /VirtualAddress:/ || /PhysicalAddress:/ { print }'
+	rust-objcopy --set-start=0x80200000 $(RV_ELF) $(KERNEL_QEMU_RV64)
+	@rust-readobj -h -l $(KERNEL_QEMU_RV64) | awk '/Entry:/ || /VirtualAddress:/ || /PhysicalAddress:/ { print }'
 
-# VisionFive 2 (JH7110) 真机镜像：raw binary，装载地址 0x40200000（由 linker_jh7110.ld 决定）。
-build-vf2: prepare-jh7110-cargo-config
+# JH7110（VisionFive 2）：输出 raw binary；装载地址 0x40200000 由 linker_jh7110.ld 决定。
+build-jh7110: prepare-jh7110-cargo-config
 	$(MAKE) -C user build ARCH=riscv64 MODE=$(RV_MODE) FEATURES=$(RV_USER_FEATURES)
 	cd os && RESPOS_USER_PROFILE_DIR=$(RV_CARGO_TARGET_DIR) \
 		RESPOS_USER_TARGET=$(RV_TARGET) \
-		RESPOS_APP_REBUILD_STAMP=$$(date +%s%N) cargo build $(RV_CARGO_BUILD_ARG) --features board_jh7110
-	rust-objcopy -O binary --gap-fill=0 $(RV_ELF) $(KERNEL_VF2)
-	@file $(KERNEL_VF2)
+		RESPOS_APP_REBUILD_STAMP=$$(date +%s%N) cargo build $(RV_CARGO_BUILD_ARG) \
+		$(RV_KERNEL_DEFAULT_FEATURE_ARGS) --features "board_jh7110 $(RV_KERNEL_FEATURES)"
+	rust-objcopy -O binary --gap-fill=0 $(RV_ELF) $(KERNEL_JH7110)
+	@file $(KERNEL_JH7110)
 
-build-la: prepare-la-cargo-config
+# QEMU LoongArch64：保留内核 ELF，供 QEMU `-kernel` 直接加载。
+build-qemu-loongarch64: prepare-qemu-loongarch64-cargo-config
 	$(MAKE) -C user build ARCH=loongarch64 MODE=$(LA_MODE) FEATURES=$(LA_USER_FEATURES)
 	cd os && RESPOS_USER_PROFILE_DIR=$(LA_CARGO_TARGET_DIR) \
 		RESPOS_USER_TARGET=$(LA_TARGET) \
 		RESPOS_APP_REBUILD_STAMP=$$(date +%s%N) cargo build $(LA_CARGO_BUILD_ARG) $(LA_KERNEL_DEFAULT_FEATURE_ARGS) $(LA_KERNEL_FEATURE_ARGS)
-	cp $(LA_ELF) $(KERNEL_LA)
-	@rust-readobj -h -l $(KERNEL_LA) | awk '/Entry:/ || /VirtualAddress:/ || /PhysicalAddress:/ { print }'
+	cp $(LA_ELF) $(KERNEL_QEMU_LOONGARCH64)
+	@rust-readobj -h -l $(KERNEL_QEMU_LOONGARCH64) | awk '/Entry:/ || /VirtualAddress:/ || /PhysicalAddress:/ { print }'
 
-# LoongArch64 → 龙芯 2K1000LA 真机（Stage 1）。生成供 U-Boot TFTP + `go` 的 raw binary。
-# 与 `build-la` 互斥（共享同一 Cargo target 目录），不得并行运行。
-build-la-ls2k1000: prepare-la-cargo-config
+# LS2K1000：输出供 U-Boot TFTP + `go` 使用的 raw binary。
+build-ls2k1000: prepare-ls2k1000-cargo-config
 	$(MAKE) -C user build ARCH=loongarch64 MODE=$(LA_MODE) FEATURES=$(LA_USER_FEATURES)
 	cd os && RESPOS_USER_PROFILE_DIR=$(LA_CARGO_TARGET_DIR) \
 		RESPOS_USER_TARGET=$(LA_TARGET) \
 		RESPOS_APP_REBUILD_STAMP=$$(date +%s%N) \
-		cargo build $(LA_CARGO_BUILD_ARG) $(LA_KERNEL_DEFAULT_FEATURE_ARGS) --features board_ls2k1000,fault_trace
-	rust-objcopy -O binary --strip-all $(LA_ELF) $(KERNEL_LA_LS2K1000)
-	@ls -l $(KERNEL_LA_LS2K1000)
+		cargo build $(LA_CARGO_BUILD_ARG) $(LA_KERNEL_DEFAULT_FEATURE_ARGS) \
+		--features "board_ls2k1000 fault_trace $(LA_KERNEL_FEATURES)"
+	rust-objcopy -O binary --strip-all $(LA_ELF) $(KERNEL_LS2K1000)
+	@file $(KERNEL_LS2K1000)
+
+# 兼容旧命令；新脚本和文档应使用上面的完整平台名。
+prepare-rv-cargo-config: prepare-qemu-rv64-cargo-config
+prepare-la-cargo-config: prepare-qemu-loongarch64-cargo-config
+build-rv: build-qemu-rv64
+build-vf2: build-jh7110
+build-la: build-qemu-loongarch64
+build-la-ls2k1000: build-ls2k1000
 
 $(RV_PRE_FS_IMG): $(RV_PRE_ARCHIVE)
 	@mkdir -p $(@D)
@@ -388,15 +408,15 @@ run-la-qemu:
 		-drive file=$(LA_DISK_IMG),if=none,format=raw,id=x1 \
 		-device virtio-blk-pci,drive=x1 |& tee $(LA_OUTPUT)
 
-# Preliminary: contest_launcher reads mode=preliminary and execs the embedded
-# testrunner, which emits the preliminary judge group markers.
+# 初赛：contest_launcher 读取 mode=preliminary，执行内嵌 testrunner，
+# 由 testrunner 输出初赛评测分组标记。
 run-rv-pre: RV_FS_IMG = $(RV_PRE_FS_IMG)
 run-rv-pre: RV_DISK_IMG = $(RV_PRE_DISK_IMG)
 run-rv-pre: AUX_FS_DIR = respos-preliminary
 run-rv-pre: MEM = $(PRE_MEM)
 run-rv-pre: SMP = $(PRE_SMP)
 run-rv-pre: RV_OUTPUT = $(RV_PRE_OUTPUT)
-run-rv-pre: build-rv check-rv-pre-image build-rv-local-disk run-rv-qemu
+run-rv-pre: build-qemu-rv64 check-rv-pre-image build-rv-local-disk run-rv-qemu
 
 run-la-pre: LA_FS_IMG = $(LA_PRE_FS_IMG)
 run-la-pre: LA_DISK_IMG = $(LA_PRE_DISK_IMG)
@@ -404,17 +424,16 @@ run-la-pre: AUX_FS_DIR = respos-preliminary
 run-la-pre: LA_MEM = $(PRE_MEM)
 run-la-pre: LA_SMP = $(PRE_SMP)
 run-la-pre: LA_OUTPUT = $(LA_PRE_OUTPUT)
-run-la-pre: build-la check-la-pre-image build-la-local-disk run-la-qemu
+run-la-pre: build-qemu-loongarch64 check-la-pre-image build-la-local-disk run-la-qemu
 
-# Final: contest_launcher bypasses testrunner and serially runs the two official
-# glibc scripts from the public root image.
+# 决赛：contest_launcher 跳过 testrunner，依次执行公开根镜像中的两份官方 glibc 脚本。
 run-rv-final: RV_FS_IMG = $(RV_FINAL_FS_IMG)
 run-rv-final: RV_DISK_IMG = $(RV_FINAL_DISK_IMG)
 run-rv-final: AUX_FS_DIR = respos-final
 run-rv-final: MEM = $(RV_FINAL_MEM)
 run-rv-final: SMP = $(RV_FINAL_SMP)
 run-rv-final: RV_OUTPUT = $(RV_FINAL_OUTPUT)
-run-rv-final: build-rv check-rv-final-image build-rv-local-disk run-rv-qemu
+run-rv-final: build-qemu-rv64 check-rv-final-image build-rv-local-disk run-rv-qemu
 
 run-la-final: LA_FS_IMG = $(LA_FINAL_FS_IMG)
 run-la-final: LA_DISK_IMG = $(LA_FINAL_DISK_IMG)
@@ -422,10 +441,9 @@ run-la-final: AUX_FS_DIR = respos-final
 run-la-final: LA_MEM = $(LA_FINAL_MEM)
 run-la-final: LA_SMP = $(LA_FINAL_SMP)
 run-la-final: LA_OUTPUT = $(LA_FINAL_OUTPUT)
-run-la-final: build-la check-la-final-image build-la-local-disk run-la-qemu
+run-la-final: build-qemu-loongarch64 check-la-final-image build-la-local-disk run-la-qemu
 
-# Diagnostic: use the final root image but enter the embedded user shell so a
-# single official script or an embedded probe can be run manually.
+# 诊断：使用决赛根镜像，但进入内嵌用户 shell，以便手工运行单个官方脚本或内嵌探针。
 run-rv-diagnostic: RV_FS_IMG = $(RV_FINAL_FS_IMG)
 run-rv-diagnostic: RV_DISK_IMG = $(RV_DIAGNOSTIC_DISK_IMG)
 run-rv-diagnostic: AUX_FS_DIR = respos-diagnostic
@@ -433,7 +451,7 @@ run-rv-diagnostic: MEM = $(RV_DIAGNOSTIC_MEM)
 run-rv-diagnostic: SMP = $(RV_DIAGNOSTIC_SMP)
 run-rv-diagnostic: RV_OUTPUT = $(RV_DIAGNOSTIC_OUTPUT)
 run-rv-diagnostic: RV_KERNEL_FEATURE_ARGS = --features "$(RV_DIAGNOSTIC_KERNEL_FEATURES)"
-run-rv-diagnostic: build-rv check-rv-final-image build-rv-local-disk run-rv-qemu
+run-rv-diagnostic: build-qemu-rv64 check-rv-final-image build-rv-local-disk run-rv-qemu
 
 run-la-diagnostic: LA_FS_IMG = $(LA_FINAL_FS_IMG)
 run-la-diagnostic: LA_DISK_IMG = $(LA_DIAGNOSTIC_DISK_IMG)
@@ -442,17 +460,17 @@ run-la-diagnostic: LA_MEM = $(LA_DIAGNOSTIC_MEM)
 run-la-diagnostic: LA_SMP = $(LA_DIAGNOSTIC_SMP)
 run-la-diagnostic: LA_OUTPUT = $(LA_DIAGNOSTIC_OUTPUT)
 run-la-diagnostic: LA_KERNEL_FEATURE_ARGS = --features "$(LA_DIAGNOSTIC_KERNEL_FEATURES)"
-run-la-diagnostic: build-la check-la-final-image build-la-local-disk run-la-qemu
+run-la-diagnostic: build-qemu-loongarch64 check-la-final-image build-la-local-disk run-la-qemu
 
-# Software compatibility: mount the archived Alpine root under -snapshot and
-# expose a deterministic smoke script through an interactive Alpine shell.
+# 软件兼容性：以 `-snapshot` 挂载归档的 Alpine 根镜像，
+# 通过交互式 Alpine shell 提供可复现的冒烟脚本。
 run-rv-software: RV_FS_IMG = $(RV_SOFTWARE_FS_IMG)
 run-rv-software: RV_DISK_IMG = $(RV_SOFTWARE_DISK_IMG)
 run-rv-software: AUX_FS_DIR = respos-software
 run-rv-software: MEM = $(RV_SOFTWARE_MEM)
 run-rv-software: SMP = $(RV_SOFTWARE_SMP)
 run-rv-software: RV_OUTPUT = $(RV_SOFTWARE_OUTPUT)
-run-rv-software: build-rv check-rv-software-image build-rv-local-disk run-rv-qemu
+run-rv-software: build-qemu-rv64 check-rv-software-image build-rv-local-disk run-rv-qemu
 
 run-la-software: LA_FS_IMG = $(LA_SOFTWARE_FS_IMG)
 run-la-software: LA_DISK_IMG = $(LA_SOFTWARE_DISK_IMG)
@@ -460,27 +478,25 @@ run-la-software: AUX_FS_DIR = respos-software
 run-la-software: LA_MEM = $(LA_SOFTWARE_MEM)
 run-la-software: LA_SMP = $(LA_SOFTWARE_SMP)
 run-la-software: LA_OUTPUT = $(LA_SOFTWARE_OUTPUT)
-run-la-software: build-la check-la-software-image build-la-local-disk run-la-qemu
+run-la-software: build-qemu-loongarch64 check-la-software-image build-la-local-disk run-la-qemu
 
-# Bootstrap: clone RespOS through Git-over-SSH into the final root image and
-# build the matching architecture. The private key only enters a /tmp runtime
-# auxiliary image and is never copied into the repository or archived images.
+# 自举：通过 Git-over-SSH 把 RespOS 克隆到决赛根镜像，并构建对应架构。
+# 私钥只进入 `/tmp` 下的临时辅助盘，不会复制到仓库或归档镜像。
 run-rv-bootstrap: RV_FS_IMG = $(RV_FINAL_FS_IMG)
 run-rv-bootstrap: RV_DISK_IMG = $(RV_BOOTSTRAP_DISK_IMG)
 run-rv-bootstrap: MEM = $(RV_BOOTSTRAP_MEM)
 run-rv-bootstrap: SMP = $(RV_BOOTSTRAP_SMP)
 run-rv-bootstrap: RV_OUTPUT = $(RV_BOOTSTRAP_OUTPUT)
-run-rv-bootstrap: build-rv check-rv-final-image build-rv-bootstrap-disk run-rv-qemu
+run-rv-bootstrap: build-qemu-rv64 check-rv-final-image build-rv-bootstrap-disk run-rv-qemu
 
 run-la-bootstrap: LA_FS_IMG = $(LA_FINAL_FS_IMG)
 run-la-bootstrap: LA_DISK_IMG = $(LA_BOOTSTRAP_DISK_IMG)
 run-la-bootstrap: LA_MEM = $(LA_BOOTSTRAP_MEM)
 run-la-bootstrap: LA_SMP = $(LA_BOOTSTRAP_SMP)
 run-la-bootstrap: LA_OUTPUT = $(LA_BOOTSTRAP_OUTPUT)
-run-la-bootstrap: build-la check-la-final-image build-la-bootstrap-disk run-la-qemu
+run-la-bootstrap: build-qemu-loongarch64 check-la-final-image build-la-bootstrap-disk run-la-qemu
 
-# Backward-compatible aliases.  New scripts and documentation should use the
-# explicit names above.
+# 兼容旧运行命令；新脚本和文档应使用上面的明确名称。
 rv:
 	@echo "make rv is an alias for make run-rv-pre"
 	@$(MAKE) run-rv-pre
@@ -507,26 +523,33 @@ check-submit: submit
 	done
 
 help:
-	@echo "Online submission:"
-	@echo "  make all              build kernels and auto-detect submission disks"
-	@echo "  make check-submit     rebuild and validate all four submission artifacts"
-	@echo "Local preliminary suite (embedded testrunner):"
+	@echo "四平台构建："
+	@echo "  make build-qemu-rv64          构建 QEMU RV64 内核（kernel-rv）"
+	@echo "  make build-jh7110             构建 JH7110/VisionFive 2 镜像（kernel-vf2.bin）"
+	@echo "  make build-qemu-loongarch64   构建 QEMU LoongArch64 内核（kernel-la）"
+	@echo "  make build-ls2k1000           构建 LS2K1000 镜像（respos-ls2k1000.bin）"
+	@echo "线上提交："
+	@echo "  make all                      构建两个 QEMU 内核和两份自动识别提交盘"
+	@echo "  make check-submit             重新构建并检查四个提交产物"
+	@echo "本地初赛测例（内嵌 testrunner）："
 	@echo "  make prepare-pre-images"
 	@echo "  make run-rv-pre"
 	@echo "  make run-la-pre"
-	@echo "Local final scoring scripts:"
-	@echo "  make run-rv-final     default: 16 GiB / 8 harts"
-	@echo "  make run-la-final     default: 36 GiB / 12 harts"
-	@echo "Interactive diagnostics:"
+	@echo "本地决赛评分脚本："
+	@echo "  make run-rv-final             默认 16 GiB / 8 hart"
+	@echo "  make run-la-final             默认 36 GiB / 12 hart"
+	@echo "交互式诊断："
 	@echo "  make run-rv-diagnostic"
 	@echo "  make run-la-diagnostic"
-	@echo "Alpine software compatibility:"
-	@echo "  make run-rv-software  default: 4 GiB / 2 harts"
-	@echo "  make run-la-software  default: 4 GiB / 2 harts; repairs only a /tmp copy"
-	@echo "Git-over-SSH clone and self-build (requires BOOTSTRAP_SSH_KEY):"
-	@echo "  make run-rv-bootstrap default: 8 GiB / 4 harts"
-	@echo "  make run-la-bootstrap default: 8 GiB / 4 harts"
+	@echo "Alpine 软件兼容性："
+	@echo "  make run-rv-software          默认 4 GiB / 2 hart"
+	@echo "  make run-la-software          默认 4 GiB / 2 hart；只修复 /tmp 下的副本"
+	@echo "Git-over-SSH 克隆与自举构建（需要 BOOTSTRAP_SSH_KEY）："
+	@echo "  make run-rv-bootstrap         默认 8 GiB / 4 hart"
+	@echo "  make run-la-bootstrap         默认 8 GiB / 4 hart"
+	@echo "兼容旧名：build-rv、build-vf2、build-la、build-la-ls2k1000"
 
 clean:
-	rm -f $(KERNEL_RV) $(KERNEL_LA) $(KERNEL_VF2) $(SUBMIT_RV_DISK_IMG) $(SUBMIT_LA_DISK_IMG)
+	rm -f $(KERNEL_QEMU_RV64) $(KERNEL_JH7110) $(KERNEL_QEMU_LOONGARCH64) $(KERNEL_LS2K1000) \
+		$(SUBMIT_RV_DISK_IMG) $(SUBMIT_LA_DISK_IMG)
 	$(MAKE) -C os clean

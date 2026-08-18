@@ -50,12 +50,10 @@ pub fn find_virtio_net_transport() -> DevResult<PciTransport> {
 /// BARs are assigned to *every* virtio device in bus order — not just the
 /// requested type — so that block and net discovery both derive the same
 /// deterministic, non-overlapping BAR layout regardless of which is run first.
-#[allow(unreachable_code)] // board_ls2k1000 下早退，后续 PCI 枚举不参与编译可达性
 fn find_virtio_transport(device_type: DeviceType, index: usize) -> DevResult<PciTransport> {
     // 2K1000LA 真机没有 virtio-PCI 设备，且 QEMU virt 的 PCI ECAM 基址 0x20000000
     // 在真机上未映射；直接返回无设备，避免读未映射 ECAM 触发内核页错误。
-    #[cfg(feature = "board_ls2k1000")]
-    {
+    if !crate::platform::HAS_VIRTIO_PCI {
         let _ = (device_type, index);
         return Err(DevError::BadState);
     }

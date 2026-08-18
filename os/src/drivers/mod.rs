@@ -1,141 +1,28 @@
 // os/src/driver.rs
 
-// board_jh7110 下块设备换成 jh7110_sd，virtio-blk 相关 import/构造变死代码。
-#![cfg_attr(feature = "board_jh7110", allow(unused_imports, dead_code))]
-
-#[cfg(target_arch = "loongarch64")]
-mod ahci;
 mod device;
 mod disk;
-#[cfg(all(target_arch = "riscv64", feature = "board_jh7110"))]
-pub mod jh7110_sd;
 mod virtio;
 
 pub use device::*;
 pub use disk::Disk;
-pub use virtio::VirtIoHalImpl;
 #[cfg(feature = "perf_counters")]
 pub(crate) use virtio::reset_bounce_perf;
 pub(crate) use virtio::snapshot_bounce_perf;
-use virtio::*;
+pub use virtio::{VirtIoBlkDev, VirtIoHalImpl, VirtIoNetDev};
 #[cfg(target_arch = "loongarch64")]
 use virtio_drivers::transport::pci::PciTransport;
 #[cfg(target_arch = "riscv64")]
 use {
-    crate::arch::config::{KERNEL_BASE, VIRTIO_MMIO},
+    crate::arch::config::KERNEL_BASE,
     core::ptr::NonNull,
     virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader},
 };
-
-#[cfg(all(target_arch = "riscv64", feature = "board_jh7110"))]
-pub type BlockDeviceImpl = jh7110_sd::SdCard;
-#[cfg(all(target_arch = "riscv64", not(feature = "board_jh7110")))]
-pub type BlockDeviceImpl = VirtIoBlkDev<VirtIoHalImpl, MmioTransport<'static>>;
-/// LoongArch 块设备：QEMU 走 virtio-PCI，2K1000LA 真机走 AHCI（SATA）。
-#[cfg(target_arch = "loongarch64")]
-pub enum BlockDeviceImpl {
-    VirtIo(VirtIoBlkDev<VirtIoHalImpl, PciTransport>),
-    Ahci(ahci::AhciBlockDevice),
-}
-
-#[cfg(target_arch = "loongarch64")]
-impl Device for BlockDeviceImpl {
-    fn device_name(&self) -> &str {
-        match self {
-            BlockDeviceImpl::VirtIo(d) => d.device_name(),
-            BlockDeviceImpl::Ahci(d) => d.device_name(),
-        }
-    }
-
-    fn device_type(&self) -> DeviceType {
-        match self {
-            BlockDeviceImpl::VirtIo(d) => d.device_type(),
-            BlockDeviceImpl::Ahci(d) => d.device_type(),
-        }
-    }
-}
-
-#[cfg(target_arch = "loongarch64")]
-impl BlockDevice for BlockDeviceImpl {
-    fn num_blocks(&self) -> usize {
-        match self {
-            BlockDeviceImpl::VirtIo(d) => d.num_blocks(),
-            BlockDeviceImpl::Ahci(d) => d.num_blocks(),
-        }
-    }
-
-    fn block_size(&self) -> usize {
-        match self {
-            BlockDeviceImpl::VirtIo(d) => d.block_size(),
-            BlockDeviceImpl::Ahci(d) => d.block_size(),
-        }
-    }
-
-    fn read_block(&self, block_id: usize, buf: &mut [u8]) -> DevResult {
-        match self {
-            BlockDeviceImpl::VirtIo(d) => d.read_block(block_id, buf),
-            BlockDeviceImpl::Ahci(d) => d.read_block(block_id, buf),
-        }
-    }
-
-    fn write_block(&self, block_id: usize, buf: &[u8]) -> DevResult {
-        match self {
-            BlockDeviceImpl::VirtIo(d) => d.write_block(block_id, buf),
-            BlockDeviceImpl::Ahci(d) => d.write_block(block_id, buf),
-        }
-    }
-
-    fn flush(&self) -> DevResult {
-        match self {
-            BlockDeviceImpl::VirtIo(d) => d.flush(),
-            BlockDeviceImpl::Ahci(d) => d.flush(),
-        }
-    }
-}
 
 #[cfg(target_arch = "riscv64")]
 pub type NetDeviceImpl = VirtIoNetDev<VirtIoHalImpl, MmioTransport<'static>>;
 #[cfg(target_arch = "loongarch64")]
 pub type NetDeviceImpl = VirtIoNetDev<VirtIoHalImpl, PciTransport>;
-
-impl BlockDeviceImpl {
-    #[cfg(all(target_arch = "riscv64", feature = "board_jh7110"))]
-    pub fn new_device(index: usize) -> DevResult<Self> {
-        // JH7110 只有一张 SD 卡（mmc1），没有辅助盘；index=1 会让辅助盘挂载路径
-        // 重复初始化同一张卡，并在根盘上凭空创建 /respos 挂载点。这里对非 0 直接报错，
-        // 使 `auxiliary_super_block()` 返回 ENODEV 而跳过辅助盘。
-        if index != 0 {
-            return Err(DevError::Unsupported);
-        }
-        jh7110_sd::SdCard::new()
-    }
-
-    #[cfg(all(target_arch = "riscv64", not(feature = "board_jh7110")))]
-    pub fn new_device(index: usize) -> DevResult<Self> {
-        let &(virtio0, virtio0_size) = VIRTIO_MMIO.get(index).ok_or(DevError::InvalidParam)?;
-        let header = NonNull::new((virtio0 + KERNEL_BASE) as *mut VirtIOHeader).unwrap();
-        let transport =
-            unsafe { MmioTransport::new(header, virtio0_size).map_err(|_| DevError::BadState)? };
-        VirtIoBlkDev::new(transport)
-    }
-
-    #[cfg(target_arch = "loongarch64")]
-    pub fn new_device(index: usize) -> DevResult<Self> {
-        #[cfg(feature = "board_ls2k1000")]
-        {
-            // 真机只有一块 AHCI 盘，无 aux 盘。
-            if index != 0 {
-                return Err(DevError::InvalidParam);
-            }
-            ahci::AhciBlockDevice::new().map(BlockDeviceImpl::Ahci)
-        }
-        #[cfg(not(feature = "board_ls2k1000"))]
-        {
-            let transport = crate::arch::pci::find_virtio_blk_transport(index)?;
-            VirtIoBlkDev::new(transport).map(BlockDeviceImpl::VirtIo)
-        }
-    }
-}
 
 impl NetDeviceImpl {
     #[cfg(target_arch = "riscv64")]

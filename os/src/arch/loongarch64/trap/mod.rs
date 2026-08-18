@@ -156,33 +156,6 @@ fn read_badi() -> usize {
     bits
 }
 
-/// 真机 trap 诊断：无锁直写 uncached UART，避免 panic 路径的 console 锁死锁与
-/// 预编译 core fmt（+ual 非对齐代码）在 trap 上下文里的二次异常。只打印一次。
-#[cfg(feature = "board_ls2k1000")]
-fn board_trap_diag(tag: &str, cx: &TrapContext) {
-    use core::sync::atomic::{AtomicBool, Ordering};
-    static TRAP_DIAG_PRINTED: AtomicBool = AtomicBool::new(false);
-    if TRAP_DIAG_PRINTED.swap(true, Ordering::Relaxed) {
-        return;
-    }
-    crate::arch::sbi::early_print("[trap] ");
-    crate::arch::sbi::early_print(tag);
-    crate::arch::sbi::early_print(" est=");
-    crate::arch::sbi::early_print_hex(estat::read());
-    crate::arch::sbi::early_print(" era=");
-    crate::arch::sbi::early_print_hex(cx.era);
-    crate::arch::sbi::early_print(" badv=");
-    crate::arch::sbi::early_print_hex(badv::read());
-    crate::arch::sbi::early_print(" sp=");
-    crate::arch::sbi::early_print_hex(cx.get_sp());
-    crate::arch::sbi::early_print(" inst=");
-    crate::arch::sbi::early_print_hex(unsafe { core::ptr::read_volatile(cx.era as *const u32) } as usize);
-    crate::arch::sbi::early_print("\n");
-}
-
-#[cfg(not(feature = "board_ls2k1000"))]
-fn board_trap_diag(_tag: &str, _cx: &TrapContext) {}
-
 /// 异常处理入口
 #[unsafe(no_mangle)]
 pub fn trap_handler(cx: &mut TrapContext) {
@@ -264,7 +237,7 @@ pub fn trap_handler(cx: &mut TrapContext) {
             estat::Exception::AddressError | estat::Exception::AddressNotAligned,
         ) => {
             if !emulate_unaligned_access(cx) {
-                board_trap_diag("user-adem-unemulated", cx);
+                crate::platform::report_trap("user-adem-unemulated", cx);
                 let badv = badv::read();
                 let tid = current_task().map(|task| task.tid()).unwrap_or(usize::MAX);
                 println!(
@@ -280,7 +253,7 @@ pub fn trap_handler(cx: &mut TrapContext) {
             }
         }
         estat::Trap::Interrupt(interrupt) => {
-            board_trap_diag("user-unsupported-interrupt", cx);
+            crate::platform::report_trap("user-unsupported-interrupt", cx);
             panic!(
                 "[kernel] Unsupported interrupt: {:?}, era = {:#x}",
                 interrupt, cx.era
@@ -288,7 +261,7 @@ pub fn trap_handler(cx: &mut TrapContext) {
         }
         cause => {
             let badv = badv::read();
-            board_trap_diag("user-unsupported-trap", cx);
+            crate::platform::report_trap("user-unsupported-trap", cx);
             panic!(
                 "Unsupported trap: cause = {:?}, era = {:#x}, badv = {:#x}!",
                 cause, cx.era, badv
@@ -322,20 +295,7 @@ fn fault_in_emulated_access(
     task.op_memory_set_write(|memory_set| {
         while va <= end {
             if let Err(err) = memory_set.handle_page_fault(cause, va, Some(cx.get_sp())) {
-                #[cfg(feature = "board_ls2k1000")]
-                {
-                    use core::sync::atomic::{AtomicBool, Ordering};
-                    static PRINTED: AtomicBool = AtomicBool::new(false);
-                    if !PRINTED.swap(true, Ordering::Relaxed) {
-                        crate::arch::sbi::early_print("[trap] faultin-fail va=");
-                        crate::arch::sbi::early_print_hex(va);
-                        crate::arch::sbi::early_print(" sp=");
-                        crate::arch::sbi::early_print_hex(cx.get_sp());
-                        crate::arch::sbi::early_print(" err=");
-                        crate::arch::sbi::early_print_hex(err.as_ret() as usize);
-                        crate::arch::sbi::early_print("\n");
-                    }
-                }
+                crate::platform::report_fault_in_failure(va, cx.get_sp(), err.as_ret());
                 return false;
             }
             va += PAGE_SIZE;
@@ -528,13 +488,13 @@ pub fn trap_from_kernel(cx: &mut TrapContext) {
             cx.era += 4; // LoongArch break 指令为 4 字节
         }
         estat::Trap::Exception(estat::Exception::IllegalInstruction) => {
-            board_trap_diag("kernel-illegal-instr", cx);
+            crate::platform::report_trap("kernel-illegal-instr", cx);
             panic!("[kernel] IllegalInstruction at 0x{:x}", cx.era);
         }
         estat::Trap::Exception(estat::Exception::AddressNotAligned) => {
             // LA264 UAL=0，lwext4 C 库等代码的非对齐访存走这里逐字节模拟。
             if !emulate_unaligned_access(cx) {
-                board_trap_diag("kernel-adem-unemulated", cx);
+                crate::platform::report_trap("kernel-adem-unemulated", cx);
                 panic!(
                     "[kernel] AddressNotAligned not emulated: era = {:#x}, badv = {:#x}, inst = {:#x}",
                     cx.era,
@@ -544,7 +504,7 @@ pub fn trap_from_kernel(cx: &mut TrapContext) {
             }
         }
         estat::Trap::Exception(exception) if is_page_fault(exception) => {
-            board_trap_diag("kernel-page-fault", cx);
+            crate::platform::report_trap("kernel-page-fault", cx);
             panic!(
                 "[kernel] page fault in kernel, era = {:#x}, badaddr = {:#x}, cause = {:?}",
                 cx.era,
@@ -553,7 +513,7 @@ pub fn trap_from_kernel(cx: &mut TrapContext) {
             );
         }
         estat::Trap::Exception(estat::Exception::Syscall) => {
-            board_trap_diag("kernel-syscall", cx);
+            crate::platform::report_trap("kernel-syscall", cx);
             panic!("[kernel] Syscall from kernel!");
         }
         estat::Trap::Interrupt(estat::Interrupt::Timer) => {
@@ -571,7 +531,7 @@ pub fn trap_from_kernel(cx: &mut TrapContext) {
             crate::timer::rearm_task_timer_request();
         }
         cause => {
-            board_trap_diag("kernel-unsupported-trap", cx);
+            crate::platform::report_trap("kernel-unsupported-trap", cx);
             panic!(
                 "[kernel] Unsupported trap in kernel: cause = {:?}, era = {:#x}, badv = {:#x}!",
                 cause,

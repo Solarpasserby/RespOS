@@ -11,6 +11,3 @@ pub use driver::*;
 pub use fs::*;
 pub use mm::*;
 pub use syscall::*;
-
-// 兼容 RV64 命名：共享代码使用 VIRTIO_MMIO
-pub use board::MMIO as VIRTIO_MMIO;
