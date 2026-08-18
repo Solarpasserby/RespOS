@@ -156,6 +156,31 @@ fn read_badi() -> usize {
     bits
 }
 
+/// 真机 trap 诊断：无锁直写 uncached UART，避免 panic 路径的 console 锁死锁与
+/// 预编译 core fmt（+ual 非对齐代码）在 trap 上下文里的二次异常。只打印一次。
+#[cfg(feature = "board_ls2k1000")]
+fn board_trap_diag(tag: &str, cx: &TrapContext) {
+    use core::sync::atomic::{AtomicBool, Ordering};
+    static TRAP_DIAG_PRINTED: AtomicBool = AtomicBool::new(false);
+    if TRAP_DIAG_PRINTED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    crate::arch::sbi::early_print("[trap] ");
+    crate::arch::sbi::early_print(tag);
+    crate::arch::sbi::early_print(" est=");
+    crate::arch::sbi::early_print_hex(estat::read());
+    crate::arch::sbi::early_print(" era=");
+    crate::arch::sbi::early_print_hex(cx.era);
+    crate::arch::sbi::early_print(" badv=");
+    crate::arch::sbi::early_print_hex(badv::read());
+    crate::arch::sbi::early_print(" badi=");
+    crate::arch::sbi::early_print_hex(read_badi());
+    crate::arch::sbi::early_print("\n");
+}
+
+#[cfg(not(feature = "board_ls2k1000"))]
+fn board_trap_diag(_tag: &str, _cx: &TrapContext) {}
+
 /// 异常处理入口
 #[unsafe(no_mangle)]
 pub fn trap_handler(cx: &mut TrapContext) {
@@ -237,6 +262,7 @@ pub fn trap_handler(cx: &mut TrapContext) {
             estat::Exception::AddressError | estat::Exception::AddressNotAligned,
         ) => {
             if !emulate_unaligned_access(cx) {
+                board_trap_diag("user-adem-unemulated", cx);
                 let badv = badv::read();
                 let tid = current_task().map(|task| task.tid()).unwrap_or(usize::MAX);
                 println!(
@@ -252,6 +278,7 @@ pub fn trap_handler(cx: &mut TrapContext) {
             }
         }
         estat::Trap::Interrupt(interrupt) => {
+            board_trap_diag("user-unsupported-interrupt", cx);
             panic!(
                 "[kernel] Unsupported interrupt: {:?}, era = {:#x}",
                 interrupt, cx.era
@@ -259,6 +286,7 @@ pub fn trap_handler(cx: &mut TrapContext) {
         }
         cause => {
             let badv = badv::read();
+            board_trap_diag("user-unsupported-trap", cx);
             panic!(
                 "Unsupported trap: cause = {:?}, era = {:#x}, badv = {:#x}!",
                 cause, cx.era, badv
@@ -271,18 +299,12 @@ pub fn trap_handler(cx: &mut TrapContext) {
     }
 }
 
-/// 内核态非对齐访存（ADEM）模拟。LA264 UAL=0，lwext4 C 库等按 +ual 编译的代码会在
-/// 真机触发 ADEM；这里逐字节模拟 ld/st，成功后把 ERA 推进到下一条指令。
-/// 返回 false 表示不是可模拟的指令（交给上层 panic）。
+/// 内核/用户态非对齐访存（ADEM）模拟。LA264 UAL=0，lwext4 C 库、预编译 core/alloc
+/// 等按 +ual 编译的代码会在真机触发 ADEM；这里逐字节模拟 ld/st，成功后把 ERA 推进
+/// 到下一条指令。覆盖 2RI12（ld/st）、3R（ldx/stx）、2RI14（ll/sc/ldptr/stptr）三组
+/// 整数访存指令。返回 false 表示不是可模拟的指令（交给上层）。
 fn emulate_unaligned_access(cx: &mut TrapContext) -> bool {
-    // LoongArch 2RI12 访存指令：opcode=inst[31:22], si12=inst[21:10], rj=inst[9:5], rd=inst[4:0]。
     let inst = unsafe { core::ptr::read_volatile(cx.era as *const u32) } as usize;
-    let opcode = (inst >> 22) & 0x3ff;
-    let si12 = ((inst >> 10) & 0xfff) as i16 as isize;
-    let rj = (inst >> 5) & 0x1f;
-    let rd = inst & 0x1f;
-
-    let addr = (cx.x[rj] as isize).wrapping_add(si12) as usize;
 
     let read_bytes = |addr: usize, n: usize| -> usize {
         let mut v = 0usize;
@@ -299,33 +321,138 @@ fn emulate_unaligned_access(cx: &mut TrapContext) -> bool {
         }
     };
 
-    let loaded = match opcode {
-        0xa0 => Some((read_bytes(addr, 1) as u8 as i8) as isize as usize), // ld.b
-        0xa1 => Some((read_bytes(addr, 2) as u16 as i16) as isize as usize), // ld.h
-        0xa2 => Some((read_bytes(addr, 4) as u32 as i32) as isize as usize), // ld.w
-        0xa3 => Some(read_bytes(addr, 8)),                                   // ld.d
-        0xa8 => Some(read_bytes(addr, 1)),                                   // ld.bu
-        0xa9 => Some(read_bytes(addr, 2)),                                   // ld.hu
-        0xaa => Some(read_bytes(addr, 4)),                                   // ld.wu
-        _ => None,
-    };
-    if let Some(val) = loaded {
-        if rd != 0 {
-            cx.x[rd] = val;
+    // 2RI12：opcode=inst[31:22]，si12=inst[21:10]，rj=inst[9:5]，rd=inst[4:0]。
+    let opcode10 = (inst >> 22) & 0x3ff;
+    if (0xa0..=0xaa).contains(&opcode10) {
+        let si12 = ((inst >> 10) & 0xfff) as i16 as isize;
+        let rj = (inst >> 5) & 0x1f;
+        let rd = inst & 0x1f;
+        let addr = (cx.x[rj] as isize).wrapping_add(si12) as usize;
+
+        let loaded = match opcode10 {
+            0xa0 => Some((read_bytes(addr, 1) as u8 as i8) as isize as usize), // ld.b
+            0xa1 => Some((read_bytes(addr, 2) as u16 as i16) as isize as usize), // ld.h
+            0xa2 => Some((read_bytes(addr, 4) as u32 as i32) as isize as usize), // ld.w
+            0xa3 => Some(read_bytes(addr, 8)),                                   // ld.d
+            0xa8 => Some(read_bytes(addr, 1)),                                   // ld.bu
+            0xa9 => Some(read_bytes(addr, 2)),                                   // ld.hu
+            0xaa => Some(read_bytes(addr, 4)),                                   // ld.wu
+            _ => None,
+        };
+        if let Some(val) = loaded {
+            if rd != 0 {
+                cx.x[rd] = val;
+            }
+            cx.era += 4;
+            return true;
+        }
+
+        match opcode10 {
+            0xa4 => write_bytes(addr, cx.x[rd], 1), // st.b
+            0xa5 => write_bytes(addr, cx.x[rd], 2), // st.h
+            0xa6 => write_bytes(addr, cx.x[rd], 4), // st.w
+            0xa7 => write_bytes(addr, cx.x[rd], 8), // st.d
+            _ => return false,
         }
         cx.era += 4;
         return true;
     }
 
-    match opcode {
-        0xa4 => write_bytes(addr, cx.x[rd], 1), // st.b
-        0xa5 => write_bytes(addr, cx.x[rd], 2), // st.h
-        0xa6 => write_bytes(addr, cx.x[rd], 4), // st.w
-        0xa7 => write_bytes(addr, cx.x[rd], 8), // st.d
-        _ => return false,
+    // 3R：ldx/stx（opcode=inst[31:15]，rk=inst[14:10]，rj=inst[9:5]，rd=inst[4:0]），addr=rj+rk。
+    let opcode17 = (inst >> 15) & 0x1_ffff;
+    if (0x7000..=0x7038).contains(&opcode17) {
+        let rk = (inst >> 10) & 0x1f;
+        let rj = (inst >> 5) & 0x1f;
+        let rd = inst & 0x1f;
+        let addr = cx.x[rj].wrapping_add(cx.x[rk]);
+        let loaded = match opcode17 {
+            0x7000 => Some((read_bytes(addr, 1) as u8 as i8) as isize as usize), // ldx.b
+            0x7004 => Some(read_bytes(addr, 1)),                                  // ldx.bu
+            0x7008 => Some((read_bytes(addr, 2) as u16 as i16) as isize as usize), // ldx.h
+            0x700c => Some(read_bytes(addr, 2)),                                  // ldx.hu
+            0x7010 => Some((read_bytes(addr, 4) as u32 as i32) as isize as usize), // ldx.w
+            0x7014 => Some(read_bytes(addr, 4)),                                  // ldx.wu
+            0x7018 => Some(read_bytes(addr, 8)),                                  // ldx.d
+            _ => None,
+        };
+        if let Some(val) = loaded {
+            if rd != 0 {
+                cx.x[rd] = val;
+            }
+            cx.era += 4;
+            return true;
+        }
+        match opcode17 {
+            0x7020 => write_bytes(addr, cx.x[rd], 1), // stx.b
+            0x7028 => write_bytes(addr, cx.x[rd], 2), // stx.h
+            0x7030 => write_bytes(addr, cx.x[rd], 4), // stx.w
+            0x7038 => write_bytes(addr, cx.x[rd], 8), // stx.d
+            _ => return false,
+        }
+        cx.era += 4;
+        return true;
     }
-    cx.era += 4;
-    true
+
+    // 2RI14：ll/sc/ldptr/stptr（opcode=inst[31:26]，si14=inst[25:10]）。
+    let opcode6 = (inst >> 26) & 0x3f;
+    if (0x20..=0x27).contains(&opcode6) {
+        let v14 = ((inst >> 10) & 0x3fff) as isize;
+        let si14 = if v14 & 0x2000 != 0 { v14 - 0x4000 } else { v14 };
+        let rj = (inst >> 5) & 0x1f;
+        let rd = inst & 0x1f;
+        let addr = (cx.x[rj] as isize).wrapping_add(si14) as usize;
+        match opcode6 {
+            0x20 => {
+                // ll.w：读 4 字节（不跟踪保留位）
+                let v = (read_bytes(addr, 4) as u32 as i32) as isize as usize;
+                if rd != 0 {
+                    cx.x[rd] = v;
+                }
+            }
+            0x22 => {
+                // ll.d
+                let v = read_bytes(addr, 8);
+                if rd != 0 {
+                    cx.x[rd] = v;
+                }
+            }
+            0x24 => {
+                // ldptr.w
+                let v = (read_bytes(addr, 4) as u32 as i32) as isize as usize;
+                if rd != 0 {
+                    cx.x[rd] = v;
+                }
+            }
+            0x26 => {
+                // ldptr.d
+                let v = read_bytes(addr, 8);
+                if rd != 0 {
+                    cx.x[rd] = v;
+                }
+            }
+            0x21 => {
+                // sc.w：无条件写入并按成功返回 1
+                write_bytes(addr, cx.x[rd], 4);
+                if rd != 0 {
+                    cx.x[rd] = 1;
+                }
+            }
+            0x23 => {
+                // sc.d
+                write_bytes(addr, cx.x[rd], 8);
+                if rd != 0 {
+                    cx.x[rd] = 1;
+                }
+            }
+            0x25 => write_bytes(addr, cx.x[rd], 4), // stptr.w
+            0x27 => write_bytes(addr, cx.x[rd], 8), // stptr.d
+            _ => return false,
+        }
+        cx.era += 4;
+        return true;
+    }
+
+    false
 }
 
 #[unsafe(no_mangle)]
@@ -336,11 +463,13 @@ pub fn trap_from_kernel(cx: &mut TrapContext) {
             cx.era += 4; // LoongArch break 指令为 4 字节
         }
         estat::Trap::Exception(estat::Exception::IllegalInstruction) => {
+            board_trap_diag("kernel-illegal-instr", cx);
             panic!("[kernel] IllegalInstruction at 0x{:x}", cx.era);
         }
         estat::Trap::Exception(estat::Exception::AddressNotAligned) => {
             // LA264 UAL=0，lwext4 C 库等代码的非对齐访存走这里逐字节模拟。
             if !emulate_unaligned_access(cx) {
+                board_trap_diag("kernel-adem-unemulated", cx);
                 panic!(
                     "[kernel] AddressNotAligned not emulated: era = {:#x}, badv = {:#x}, inst = {:#x}",
                     cx.era,
@@ -350,6 +479,7 @@ pub fn trap_from_kernel(cx: &mut TrapContext) {
             }
         }
         estat::Trap::Exception(exception) if is_page_fault(exception) => {
+            board_trap_diag("kernel-page-fault", cx);
             panic!(
                 "[kernel] page fault in kernel, era = {:#x}, badaddr = {:#x}, cause = {:?}",
                 cx.era,
@@ -358,6 +488,7 @@ pub fn trap_from_kernel(cx: &mut TrapContext) {
             );
         }
         estat::Trap::Exception(estat::Exception::Syscall) => {
+            board_trap_diag("kernel-syscall", cx);
             panic!("[kernel] Syscall from kernel!");
         }
         estat::Trap::Interrupt(estat::Interrupt::Timer) => {
@@ -375,6 +506,7 @@ pub fn trap_from_kernel(cx: &mut TrapContext) {
             crate::timer::rearm_task_timer_request();
         }
         cause => {
+            board_trap_diag("kernel-unsupported-trap", cx);
             panic!(
                 "[kernel] Unsupported trap in kernel: cause = {:?}, era = {:#x}, badv = {:#x}!",
                 cause,
