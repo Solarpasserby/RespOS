@@ -39,7 +39,13 @@ pub type NetDeviceImpl = VirtIoNetDev<VirtIoHalImpl, PciTransport>;
 
 impl BlockDeviceImpl {
     #[cfg(all(target_arch = "riscv64", feature = "board_jh7110"))]
-    pub fn new_device(_index: usize) -> DevResult<Self> {
+    pub fn new_device(index: usize) -> DevResult<Self> {
+        // JH7110 只有一张 SD 卡（mmc1），没有辅助盘；index=1 会让辅助盘挂载路径
+        // 重复初始化同一张卡，并在根盘上凭空创建 /respos 挂载点。这里对非 0 直接报错，
+        // 使 `auxiliary_super_block()` 返回 ENODEV 而跳过辅助盘。
+        if index != 0 {
+            return Err(DevError::Unsupported);
+        }
         jh7110_sd::SdCard::new()
     }
 
