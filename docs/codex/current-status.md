@@ -1,5 +1,19 @@
 # RespOS 当前状态
 
+## 2026-08-18 演示视频手动流程（待彩排）
+
+- **手册**：新增 [现场演示视频操作手册](../现场手册/06-演示视频操作手册.md)，按 RV64
+  `run-rv-diagnostic` 交互环境组织 `git clone → git log → Vim 修改 README → guest 内编译 RespOS`
+  的逐镜头命令、预期输出、结束方式和故障备用方案。
+- **远端前置**：2026-08-18 实际执行 `git ls-remote`，GitHub `main` 为 `8ad76b82`；本地当前 HEAD 为
+  `15336713`，尚领先远端两个提交。若要展示当前本地版本，必须先审查并正常推送，再核对 guest clone
+  的 40 位哈希；不得在视频中把旧远端版本称为当前 HEAD。
+- **工具链前置**：当前正式构建固定 `nightly-2025-01-18`，决赛 RV64 根镜像只预装
+  `nightly-2026-05-28`。历史 bootstrap 通过结果早于本次固定工具链调整。正式录制应在同一次
+  `-snapshot` QEMU 会话预装精确 nightly 与 RV bare-metal target，并对最终远端提交完整彩排。
+- **状态**：文档命令、Make 入口、镜像内 Git/Vim/Cargo/rustc、CA 文件、DNS 配置和 RV target 路径已
+  静态核对；当前 HEAD 的完整手动录制链尚未实际运行，保持 `待验证`。
+
 ## 2026-08-18 P0-P1 提测仓库门禁（当前工作树）
 
 - **固定基线**：新增根级 `rust-toolchain.toml`，顶层 Make 固定
