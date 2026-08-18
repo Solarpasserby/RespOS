@@ -299,6 +299,38 @@ pub fn trap_handler(cx: &mut TrapContext) {
     }
 }
 
+/// 模拟访存前先让目标页可见（懒分配栈/COW 等）。否则逐字节读写会在内核态触发
+/// PIS 直接 panic（现场赛 exec 后 musl 对懒分配栈页的非对齐 store 就死在这里）。
+/// 只处理用户地址；内核地址（直接映射/内核堆）恒已映射，跳过。
+fn fault_in_emulated_access(
+    cx: &TrapContext,
+    addr: usize,
+    len: usize,
+    cause: PageFaultCause,
+) -> bool {
+    use crate::config::{KERNEL_BASE, PAGE_SIZE};
+    if addr >= KERNEL_BASE {
+        return true;
+    }
+    let Some(task) = current_task() else {
+        return true;
+    };
+    let end = addr.saturating_add(len.saturating_sub(1));
+    let mut va = addr & !(PAGE_SIZE - 1);
+    task.op_memory_set_write(|memory_set| {
+        while va <= end {
+            if memory_set
+                .handle_page_fault(cause, va, Some(cx.get_sp()))
+                .is_err()
+            {
+                return false;
+            }
+            va += PAGE_SIZE;
+        }
+        true
+    })
+}
+
 /// 内核/用户态非对齐访存（ADEM）模拟。LA264 UAL=0，lwext4 C 库、预编译 core/alloc
 /// 等按 +ual 编译的代码会在真机触发 ADEM；这里逐字节模拟 ld/st，成功后把 ERA 推进
 /// 到下一条指令。覆盖 2RI12（ld/st）、3R（ldx/stx）、2RI14（ll/sc/ldptr/stptr）三组
@@ -329,30 +361,41 @@ fn emulate_unaligned_access(cx: &mut TrapContext) -> bool {
         let rd = inst & 0x1f;
         let addr = (cx.x[rj] as isize).wrapping_add(si12) as usize;
 
-        let loaded = match opcode10 {
-            0xa0 => Some((read_bytes(addr, 1) as u8 as i8) as isize as usize), // ld.b
-            0xa1 => Some((read_bytes(addr, 2) as u16 as i16) as isize as usize), // ld.h
-            0xa2 => Some((read_bytes(addr, 4) as u32 as i32) as isize as usize), // ld.w
-            0xa3 => Some(read_bytes(addr, 8)),                                   // ld.d
-            0xa8 => Some(read_bytes(addr, 1)),                                   // ld.bu
-            0xa9 => Some(read_bytes(addr, 2)),                                   // ld.hu
-            0xaa => Some(read_bytes(addr, 4)),                                   // ld.wu
-            _ => None,
+        let (size, is_store) = match opcode10 {
+            0xa0 | 0xa8 => (1, false), // ld.b / ld.bu
+            0xa1 | 0xa9 => (2, false), // ld.h / ld.hu
+            0xa2 | 0xaa => (4, false), // ld.w / ld.wu
+            0xa3 => (8, false),        // ld.d
+            0xa4 => (1, true),         // st.b
+            0xa5 => (2, true),         // st.h
+            0xa6 => (4, true),         // st.w
+            0xa7 => (8, true),         // st.d
+            _ => return false,
         };
-        if let Some(val) = loaded {
+        let cause = if is_store {
+            PageFaultCause::Store
+        } else {
+            PageFaultCause::Load
+        };
+        if !fault_in_emulated_access(cx, addr, size, cause) {
+            return false;
+        }
+        if is_store {
+            write_bytes(addr, cx.x[rd], size);
+        } else {
+            let val = match opcode10 {
+                0xa0 => (read_bytes(addr, 1) as u8 as i8) as isize as usize,
+                0xa1 => (read_bytes(addr, 2) as u16 as i16) as isize as usize,
+                0xa2 => (read_bytes(addr, 4) as u32 as i32) as isize as usize,
+                0xa3 => read_bytes(addr, 8),
+                0xa8 => read_bytes(addr, 1),
+                0xa9 => read_bytes(addr, 2),
+                0xaa => read_bytes(addr, 4),
+                _ => unreachable!(),
+            };
             if rd != 0 {
                 cx.x[rd] = val;
             }
-            cx.era += 4;
-            return true;
-        }
-
-        match opcode10 {
-            0xa4 => write_bytes(addr, cx.x[rd], 1), // st.b
-            0xa5 => write_bytes(addr, cx.x[rd], 2), // st.h
-            0xa6 => write_bytes(addr, cx.x[rd], 4), // st.w
-            0xa7 => write_bytes(addr, cx.x[rd], 8), // st.d
-            _ => return false,
         }
         cx.era += 4;
         return true;
@@ -365,29 +408,41 @@ fn emulate_unaligned_access(cx: &mut TrapContext) -> bool {
         let rj = (inst >> 5) & 0x1f;
         let rd = inst & 0x1f;
         let addr = cx.x[rj].wrapping_add(cx.x[rk]);
-        let loaded = match opcode17 {
-            0x7000 => Some((read_bytes(addr, 1) as u8 as i8) as isize as usize), // ldx.b
-            0x7004 => Some(read_bytes(addr, 1)),                                  // ldx.bu
-            0x7008 => Some((read_bytes(addr, 2) as u16 as i16) as isize as usize), // ldx.h
-            0x700c => Some(read_bytes(addr, 2)),                                  // ldx.hu
-            0x7010 => Some((read_bytes(addr, 4) as u32 as i32) as isize as usize), // ldx.w
-            0x7014 => Some(read_bytes(addr, 4)),                                  // ldx.wu
-            0x7018 => Some(read_bytes(addr, 8)),                                  // ldx.d
-            _ => None,
+        let (size, is_store) = match opcode17 {
+            0x7000 | 0x7004 => (1, false), // ldx.b / ldx.bu
+            0x7008 | 0x700c => (2, false), // ldx.h / ldx.hu
+            0x7010 | 0x7014 => (4, false), // ldx.w / ldx.wu
+            0x7018 => (8, false),          // ldx.d
+            0x7020 => (1, true),           // stx.b
+            0x7028 => (2, true),           // stx.h
+            0x7030 => (4, true),           // stx.w
+            0x7038 => (8, true),           // stx.d
+            _ => return false,
         };
-        if let Some(val) = loaded {
+        let cause = if is_store {
+            PageFaultCause::Store
+        } else {
+            PageFaultCause::Load
+        };
+        if !fault_in_emulated_access(cx, addr, size, cause) {
+            return false;
+        }
+        if is_store {
+            write_bytes(addr, cx.x[rd], size);
+        } else {
+            let val = match opcode17 {
+                0x7000 => (read_bytes(addr, 1) as u8 as i8) as isize as usize,
+                0x7004 => read_bytes(addr, 1),
+                0x7008 => (read_bytes(addr, 2) as u16 as i16) as isize as usize,
+                0x700c => read_bytes(addr, 2),
+                0x7010 => (read_bytes(addr, 4) as u32 as i32) as isize as usize,
+                0x7014 => read_bytes(addr, 4),
+                0x7018 => read_bytes(addr, 8),
+                _ => unreachable!(),
+            };
             if rd != 0 {
                 cx.x[rd] = val;
             }
-            cx.era += 4;
-            return true;
-        }
-        match opcode17 {
-            0x7020 => write_bytes(addr, cx.x[rd], 1), // stx.b
-            0x7028 => write_bytes(addr, cx.x[rd], 2), // stx.h
-            0x7030 => write_bytes(addr, cx.x[rd], 4), // stx.w
-            0x7038 => write_bytes(addr, cx.x[rd], 8), // stx.d
-            _ => return false,
         }
         cx.era += 4;
         return true;
@@ -401,52 +456,35 @@ fn emulate_unaligned_access(cx: &mut TrapContext) -> bool {
         let rj = (inst >> 5) & 0x1f;
         let rd = inst & 0x1f;
         let addr = (cx.x[rj] as isize).wrapping_add(si14) as usize;
-        match opcode6 {
-            0x20 => {
-                // ll.w：读 4 字节（不跟踪保留位）
-                let v = (read_bytes(addr, 4) as u32 as i32) as isize as usize;
-                if rd != 0 {
-                    cx.x[rd] = v;
-                }
-            }
-            0x22 => {
-                // ll.d
-                let v = read_bytes(addr, 8);
-                if rd != 0 {
-                    cx.x[rd] = v;
-                }
-            }
-            0x24 => {
-                // ldptr.w
-                let v = (read_bytes(addr, 4) as u32 as i32) as isize as usize;
-                if rd != 0 {
-                    cx.x[rd] = v;
-                }
-            }
-            0x26 => {
-                // ldptr.d
-                let v = read_bytes(addr, 8);
-                if rd != 0 {
-                    cx.x[rd] = v;
-                }
-            }
-            0x21 => {
-                // sc.w：无条件写入并按成功返回 1
-                write_bytes(addr, cx.x[rd], 4);
-                if rd != 0 {
-                    cx.x[rd] = 1;
-                }
-            }
-            0x23 => {
-                // sc.d
-                write_bytes(addr, cx.x[rd], 8);
-                if rd != 0 {
-                    cx.x[rd] = 1;
-                }
-            }
-            0x25 => write_bytes(addr, cx.x[rd], 4), // stptr.w
-            0x27 => write_bytes(addr, cx.x[rd], 8), // stptr.d
+        let (size, is_store) = match opcode6 {
+            0x20 | 0x24 => (4, false), // ll.w / ldptr.w
+            0x22 | 0x26 => (8, false), // ll.d / ldptr.d
+            0x21 | 0x25 => (4, true),  // sc.w / stptr.w
+            0x23 | 0x27 => (8, true),  // sc.d / stptr.d
             _ => return false,
+        };
+        let cause = if is_store {
+            PageFaultCause::Store
+        } else {
+            PageFaultCause::Load
+        };
+        if !fault_in_emulated_access(cx, addr, size, cause) {
+            return false;
+        }
+        if is_store {
+            write_bytes(addr, cx.x[rd], size);
+            if (opcode6 == 0x21 || opcode6 == 0x23) && rd != 0 {
+                cx.x[rd] = 1; // sc 按成功返回 1
+            }
+        } else {
+            let val = if size == 4 {
+                (read_bytes(addr, 4) as u32 as i32) as isize as usize
+            } else {
+                read_bytes(addr, 8)
+            };
+            if rd != 0 {
+                cx.x[rd] = val;
+            }
         }
         cx.era += 4;
         return true;
