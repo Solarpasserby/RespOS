@@ -60,7 +60,7 @@
   Image 头（magic `0x05435352` @0x38、`text_offset 0x200000`）→ `_start` → 完整 4 GiB DDR + MMIO
   的 early page table → `rust_main` → FDT 内存发现 → `trap::init` + `mm::init`。
   **SD 卡插槽注意**：本板 microSD 枚举为 `mmc 1`（`sdio1@16020000: 1 (SD)`），非 `mmc 0`；且 64G
-  卡会 `-110` 电压协商失败，需用兼容卡（实测 16G 普通卡正常）。
+  卡会 `-110` 电压协商失败（U-Boot 自带 SD 驱动，fatload 需 16G 兼容卡）；但 RespOS 自己的 `jh7110_sd` 驱动能正常读写这张 64G 卡（`num_blocks=122152960`）。
 - **环境**：板 v1.3B（`PCB revision 0xb2`）4 GiB DRAM；OpenSBI v1.2（`aclint-mtimer @ 4000000Hz`、
   `Boot HART 1`）；U-Boot 2021.10 SDK 5.15。`booti` 正确传 `a0=hart_id=1`、`a1=dtb=0xfffc56a0`。
 - **隔离落地**：`board_jh7110` feature + 独立文件；QEMU `make build-rv` 基线不变。构建命令
@@ -71,7 +71,7 @@
   改为硬编码 4 字节 `jal x0,+64`（`0x0400006f`）修复。③ 早期页表必须覆盖**完整 4 GiB DDR**（含 RAM 顶部
   control FDT），只映射首 1 GiB 会读不到 DTB。
 - **待验证/未做**：Stage 4（用户态 task/fork/exec/syscall/signal）、Stage 5（块设备 SD/eMMC/NVMe，
-  用户态根盘依赖它）、真机侧 SD 卡识别（`-110`，暂被 TFTP 绕过）、goldfish RTC / virtio-net 在 JH7110
+  用户态根盘依赖它）、真机侧 U-Boot SD 卡识别（`-110`，fatload 暂被 TFTP 绕过；RespOS 驱动不受影响）、goldfish RTC / virtio-net 在 JH7110
   的 gate 处理、SMP hart 拓扑（hart0=S7 无 MMU）。详见
   [porting-visionfive2.md](../porting-visionfive2.md)。
 
