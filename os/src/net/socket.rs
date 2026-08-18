@@ -1279,14 +1279,6 @@ impl FileOp for Socket {
         }
     }
 
-    fn poll_rdhup(&self) -> bool {
-        match &self.inner {
-            SocketInner::Tcp(tcp) => tcp.peer_write_closed(),
-            SocketInner::Unix(unix) => unix.poll_rdhup(),
-            SocketInner::Udp(_) => false,
-        }
-    }
-
     fn poll_error(&self) -> bool {
         match &self.inner {
             SocketInner::Tcp(tcp) => tcp.has_pending_error(),

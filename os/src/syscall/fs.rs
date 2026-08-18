@@ -1860,13 +1860,6 @@ enum UtimensPermission {
     Arbitrary,
 }
 
-#[derive(Copy, Clone, Eq, PartialEq)]
-enum UtimensPermission {
-    Noop,
-    CurrentTime,
-    Arbitrary,
-}
-
 /// 将用户传入的 times[2] 解析为需要写入 inode 的 atime/mtime。
 ///
 /// 返回值中的 None 表示该时间戳保持不变；Some 表示需要写入。
