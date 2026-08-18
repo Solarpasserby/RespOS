@@ -100,42 +100,18 @@ fn run_diagnostic() -> i32 {
 fn run_software() -> i32 {
     println!("[contest_launcher] software mode: starting Alpine /bin/sh");
     ensure_qemu_dns();
-    // 现场赛本地题冒烟：把嵌入的 software-smoke.sh 写到 /tmp 交给 /bin/sh 跑，
-    // 一次输出 git/vim/gcc/rustc 四组 PASS/FAIL（boot 即自证）。
+    // 现场赛本地题冒烟脚本：嵌入后只写到 /tmp，不自动运行；
+    // 需要时在 shell 里手动执行 `sh /tmp/software-smoke.sh`。
     {
         const SMOKE_PATH: &str = "/tmp/software-smoke.sh\0";
         let fd = open(SMOKE_PATH, O_WRONLY | O_CREATE | O_TRUNC, 0o755);
         if fd >= 0 {
             let _ = write(fd as usize, SOFTWARE_SMOKE.as_bytes());
             let _ = close(fd as usize);
-            let pid = fork();
-            if pid == 0 {
-                let argv = [
-                    "sh\0".as_ptr(),
-                    SMOKE_PATH.as_ptr(),
-                    core::ptr::null(),
-                ];
-                let envp = [
-                    "HOME=/tmp\0".as_ptr(),
-                    "TMPDIR=/tmp\0".as_ptr(),
-                    "TERM=xterm\0".as_ptr(),
-                    "LC_ALL=C\0".as_ptr(),
-                    "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\0"
-                        .as_ptr(),
-                    core::ptr::null(),
-                ];
-                let ret = execve("/bin/sh\0", &argv, &envp);
-                println!("[contest_launcher] cannot exec software-smoke: {}", ret);
-                exit(127);
-            }
-            if pid > 0 {
-                let mut code = 0;
-                let _ = waitpid(pid as usize, &mut code);
-                println!(
-                    "[contest_launcher] software-smoke finished, status={:#x}",
-                    code
-                );
-            }
+            println!(
+                "[contest_launcher] wrote {} (run: sh /tmp/software-smoke.sh)",
+                "/tmp/software-smoke.sh"
+            );
         } else {
             println!("[contest_launcher] cannot create software-smoke: {}", fd);
         }
