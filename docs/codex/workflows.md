@@ -3,6 +3,12 @@
 命令以当前仓库脚本为准。运行测试前先读 [current-status.md](./current-status.md) 和
 [pitfalls.md](./pitfalls.md)。
 
+现场拿到此前未运行的软件时，先按
+[新软件兼容工作流](../现场手册/09-新软件兼容工作流.md) 固定输入、ELF/依赖和首个失败。遇到官方
+自定义语义或全新 syscall 时，使用[全新系统调用实现工作流](../现场手册/10-全新系统调用实现工作流.md)
+建立 ABI 契约、公共实现和双架构验证，再从本文件选择对应构建、镜像与专项命令；不要从完整回归的
+最后一条错误反推根因。
+
 ## 队友接手入口
 
 题目一当前阶段的执行计划、三人责任边界和每日审查格式见
@@ -162,6 +168,10 @@ destructor、robust/pshared futex、线程资源复用，以及 spawn file actio
 ## 构建
 
 ### 课程平台 Rust 兼容基线
+
+不熟悉 `rustc`、rustup、Cargo、target、component、lockfile、feature 或 vendor 时，先阅读
+[Rust 工具链与外部依赖管理](../现场手册/11-Rust工具链与外部依赖管理.md)。该手册同时记录本地
+`offline/cargo/` 候选依赖快照的范围和纯 vendor 复验命令；离线目录不属于提交产物。
 
 课程平台在 2026-08-13 的日志表明其内核编译器为
 `rustc 1.86.0-nightly (2025-01-17)`。仓库根目录的 `rust-toolchain.toml` 已将默认工具链固定为：
