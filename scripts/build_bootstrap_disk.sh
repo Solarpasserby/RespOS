@@ -14,12 +14,16 @@ SSH_CLIENT_DEB="${4:-}"
 RUST_TARGET_ARCHIVE="${5:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-PROFILE="${REPO_ROOT}/auxfs/profiles/bootstrap.profile"
+PROFILE="${BOOTSTRAP_PROFILE:-${REPO_ROOT}/auxfs/profiles/bootstrap.profile}"
 STATIC_PAYLOAD_DIR="${REPO_ROOT}/auxfs/payloads/bootstrap"
 AUX_DISK_BUILDER="${SCRIPT_DIR}/build_aux_disk.sh"
 
 if [[ ! -r "${SSH_PRIVATE_KEY}" ]]; then
     echo "SSH private key is not readable: ${SSH_PRIVATE_KEY}" >&2
+    exit 1
+fi
+if [[ ! -r "${PROFILE}" ]]; then
+    echo "Bootstrap profile is not readable: ${PROFILE}" >&2
     exit 1
 fi
 DYNAMIC_PAYLOAD_DIR="$(mktemp -d /tmp/respos-bootstrap-payload-XXXXXX)"

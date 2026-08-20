@@ -60,6 +60,8 @@ RV_SOFTWARE_DISK_IMG ?= /tmp/respos-rv-software.img
 LA_SOFTWARE_DISK_IMG ?= /tmp/respos-la-software.img
 RV_BOOTSTRAP_DISK_IMG ?= /tmp/respos-rv-bootstrap.img
 LA_BOOTSTRAP_DISK_IMG ?= /tmp/respos-la-bootstrap.img
+RV_SSH_SHELL_DISK_IMG ?= /tmp/respos-rv-ssh-shell.img
+LA_SSH_SHELL_DISK_IMG ?= /tmp/respos-la-ssh-shell.img
 LOCAL_AUX_FS_SIZE ?= 16M
 BOOTSTRAP_AUX_FS_SIZE ?= 64M
 BOOTSTRAP_SSH_KEY ?=
@@ -99,6 +101,8 @@ RV_SOFTWARE_OUTPUT ?= /tmp/respos-rv-software.log
 LA_SOFTWARE_OUTPUT ?= /tmp/respos-la-software.log
 RV_BOOTSTRAP_OUTPUT ?= /tmp/respos-rv-bootstrap.log
 LA_BOOTSTRAP_OUTPUT ?= /tmp/respos-la-bootstrap.log
+RV_SSH_SHELL_OUTPUT ?= /tmp/respos-rv-ssh-shell.log
+LA_SSH_SHELL_OUTPUT ?= /tmp/respos-la-ssh-shell.log
 
 QEMU_RV ?= qemu-system-riscv64
 QEMU_LA ?= qemu-system-loongarch64
@@ -179,10 +183,10 @@ endif
 	prepare-la-software-root check-rv-software-image check-la-software-image \
 	build-rv-local-disk build-la-local-disk run-rv-qemu run-la-qemu \
 	build-rv-bootstrap-disk prepare-la-bootstrap-ssh prepare-la-bootstrap-rust-std \
-	build-la-bootstrap-disk \
+	build-la-bootstrap-disk build-rv-ssh-shell-disk build-la-ssh-shell-disk \
 	run-rv-pre run-la-pre run-rv-final run-la-final \
 	run-rv-diagnostic run-la-diagnostic run-rv-software run-la-software \
-	run-rv-bootstrap run-la-bootstrap \
+	run-rv-bootstrap run-la-bootstrap run-rv-ssh-shell run-la-ssh-shell \
 	rv la run-rv-pub run-la-pub \
 	help clean clean-logs distclean
 
@@ -385,6 +389,17 @@ build-la-bootstrap-disk: prepare-la-bootstrap-ssh prepare-la-bootstrap-rust-std
 	@test -n "$(BOOTSTRAP_SSH_KEY)" || { echo "set BOOTSTRAP_SSH_KEY to a temporary read-only SSH key" >&2; exit 1; }
 	@bash scripts/build_bootstrap_disk.sh $(LA_BOOTSTRAP_DISK_IMG) $(BOOTSTRAP_AUX_FS_SIZE) $(BOOTSTRAP_SSH_KEY) $(LA_BOOTSTRAP_SSH_PACKAGE) $(LA_BOOTSTRAP_RUST_STD_ARCHIVE)
 
+# 手动 SSH 验证终端：复用 bootstrap 的密钥注入，但以 software 模式进入交互式 /bin/sh。
+build-rv-ssh-shell-disk:
+	@test -n "$(BOOTSTRAP_SSH_KEY)" || { echo "set BOOTSTRAP_SSH_KEY to a temporary read-only SSH key" >&2; exit 1; }
+	@BOOTSTRAP_PROFILE=$(AUXFS_PROFILE_DIR)/software.profile \
+		bash scripts/build_bootstrap_disk.sh $(RV_SSH_SHELL_DISK_IMG) $(BOOTSTRAP_AUX_FS_SIZE) $(BOOTSTRAP_SSH_KEY)
+
+build-la-ssh-shell-disk: prepare-la-bootstrap-ssh
+	@test -n "$(BOOTSTRAP_SSH_KEY)" || { echo "set BOOTSTRAP_SSH_KEY to a temporary read-only SSH key" >&2; exit 1; }
+	@BOOTSTRAP_PROFILE=$(AUXFS_PROFILE_DIR)/software.profile \
+		bash scripts/build_bootstrap_disk.sh $(LA_SSH_SHELL_DISK_IMG) $(BOOTSTRAP_AUX_FS_SIZE) $(BOOTSTRAP_SSH_KEY) $(LA_BOOTSTRAP_SSH_PACKAGE)
+
 run-rv-qemu:
 	@test -r $(RV_FS_IMG) || { echo "missing root image $(RV_FS_IMG)" >&2; exit 1; }
 	@test -r $(RV_DISK_IMG) || { echo "missing auxiliary image $(RV_DISK_IMG)" >&2; exit 1; }
@@ -512,6 +527,21 @@ run-la-bootstrap: LA_SMP = $(LA_BOOTSTRAP_SMP)
 run-la-bootstrap: LA_OUTPUT = $(LA_BOOTSTRAP_OUTPUT)
 run-la-bootstrap: build-qemu-loongarch64 check-la-final-image build-la-bootstrap-disk run-la-qemu
 
+# 交互式 Git-over-SSH 验证。进入 guest 后运行：sh /respos/ssh-clone.sh
+run-rv-ssh-shell: RV_FS_IMG = $(RV_FINAL_FS_IMG)
+run-rv-ssh-shell: RV_DISK_IMG = $(RV_SSH_SHELL_DISK_IMG)
+run-rv-ssh-shell: MEM = $(RV_SOFTWARE_MEM)
+run-rv-ssh-shell: SMP = $(RV_SOFTWARE_SMP)
+run-rv-ssh-shell: RV_OUTPUT = $(RV_SSH_SHELL_OUTPUT)
+run-rv-ssh-shell: build-qemu-rv64 check-rv-final-image build-rv-ssh-shell-disk run-rv-qemu
+
+run-la-ssh-shell: LA_FS_IMG = $(LA_FINAL_FS_IMG)
+run-la-ssh-shell: LA_DISK_IMG = $(LA_SSH_SHELL_DISK_IMG)
+run-la-ssh-shell: LA_MEM = $(LA_SOFTWARE_MEM)
+run-la-ssh-shell: LA_SMP = $(LA_SOFTWARE_SMP)
+run-la-ssh-shell: LA_OUTPUT = $(LA_SSH_SHELL_OUTPUT)
+run-la-ssh-shell: build-qemu-loongarch64 check-la-final-image build-la-ssh-shell-disk run-la-qemu
+
 # 兼容旧运行命令；新脚本和文档应使用上面的明确名称。
 rv:
 	@echo "make rv is an alias for make run-rv-pre"
@@ -577,6 +607,9 @@ help:
 	@echo "Git-over-SSH 克隆与自举构建（需要 BOOTSTRAP_SSH_KEY）："
 	@echo "  make run-rv-bootstrap         默认 8 GiB / 4 hart"
 	@echo "  make run-la-bootstrap         默认 8 GiB / 4 hart"
+	@echo "交互式 Git-over-SSH 验证（进入后运行 sh /respos/ssh-clone.sh）："
+	@echo "  make run-rv-ssh-shell BOOTSTRAP_SSH_KEY=/tmp/respos-bootstrap-key/id_ed25519"
+	@echo "  make run-la-ssh-shell BOOTSTRAP_SSH_KEY=/tmp/respos-bootstrap-key/id_ed25519"
 	@echo "兼容旧名：build-rv、build-vf2、build-la、build-la-ls2k1000"
 
 clean:

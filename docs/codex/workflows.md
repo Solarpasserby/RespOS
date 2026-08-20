@@ -374,6 +374,26 @@ rm -rf /tmp/respos-bootstrap-key
   重建 Rust/GCC/CMake/toolchain 的完全自举。更换远端、branch、nightly 或公开依赖时需同步更新脚本、
   固定 hash 与证据。
 
+只需手工验证 SSH clone 时，可以用交互入口。它仍把临时私钥放在独立辅助盘中，但以交互式 `/bin/sh`
+启动，不会自动执行完整自举：
+
+```bash
+make run-rv-ssh-shell \
+  BOOTSTRAP_SSH_KEY=/tmp/respos-bootstrap-key/id_ed25519
+```
+
+进入 guest 后执行：
+
+```sh
+sh /respos/ssh-clone.sh
+```
+
+脚本固定使用辅助盘中的私钥和 `known_hosts`，禁用交互认证和额外 identity，先运行 `git ls-remote`，
+再把 `main` 浅克隆到 `/tmp/RespOS`，最后输出 `RESPOS_SSH_CLONE PASS` 与 checkout hash。重复验证时应传入
+新的目标目录，例如 `sh /respos/ssh-clone.sh /tmp/RespOS-2`；脚本不会删除已有目录。远端和分支可分别
+通过 guest 环境变量 `RESPOS_GIT_REMOTE`、`RESPOS_GIT_BRANCH` 覆盖。LA64 对应入口为
+`make run-la-ssh-shell`，Make 会把固定哈希的 OpenSSH client 一并注入辅助盘。
+
 iozone 专项可用编译时诊断开关：
 
 ```bash
